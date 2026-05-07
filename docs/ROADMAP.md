@@ -20,7 +20,7 @@ implemented vs. stubbed.
 | 12 | VMS frontend: Live view grid with AI overlays        | done     |
 | 13 | VMS frontend: Alerts page                            | done     |
 | 14 | VMS frontend: System health page                     | done     |
-| 15 | README + Dahua WAN end-to-end example                | pending  |
+| 15 | README + Dahua WAN end-to-end example                | done     |
 
 ## Architectural decisions (locked at start of build)
 
