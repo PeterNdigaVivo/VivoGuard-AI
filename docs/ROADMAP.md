@@ -13,7 +13,7 @@ implemented vs. stubbed.
 | 5  | Stream manager (FFmpeg + Redis frame buffer)         | done     |
 | 6  | AI inference worker (YOLOv8 + detectors + zones)     | done     |
 | 7  | Alert engine + notification pipeline                 | done     |
-| 8  | Detection config API (toggles + zone drawing)        | pending  |
+| 8  | Detection config API (toggles + zone drawing)        | done     |
 | 9  | AI Training Studio backend                           | pending  |
 | 10 | AI Training Studio frontend                          | pending  |
 | 11 | VMS frontend: Camera management page                 | pending  |
