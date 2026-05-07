@@ -1,0 +1,28 @@
+# Pinned in later steps. Listed here so the package surface is documented.
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+psycopg[binary]
+redis
+celery[redis]
+boto3
+minio
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+cryptography
+httpx
+onvif-zeep-async
+opencv-python-headless
+numpy
+pillow
+ultralytics            # YOLOv8
+torch
+torchvision
+ffmpeg-python
+twilio
+aiosmtplib
+websockets

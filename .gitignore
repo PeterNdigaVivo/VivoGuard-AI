@@ -1,0 +1,56 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / Frontend ---
+node_modules/
+dist/
+build/
+.next/
+.vite/
+*.local
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Editor / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Runtime data (mounted volumes) ---
+data/recordings/*
+data/models/*
+data/datasets/*
+data/thumbnails/*
+!data/recordings/.gitkeep
+!data/models/.gitkeep
+!data/datasets/.gitkeep
+!data/thumbnails/.gitkeep
+
+# --- Vendor proprietary SDK blobs (must NOT be committed) ---
+vendor_sdk/*
+!vendor_sdk/.gitkeep
+!vendor_sdk/README.md
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Alembic versions are committed; ignore the cache only ---
+backend/alembic/__pycache__/
+
+# --- TLS material ---
+deploy/ssl/*.crt
+deploy/ssl/*.key
+deploy/ssl/*.pem
+!deploy/ssl/.gitkeep
