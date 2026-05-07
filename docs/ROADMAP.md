@@ -11,7 +11,7 @@ implemented vs. stubbed.
 | 3  | DB models (SQLAlchemy) + Alembic migrations          | done     |
 | 4  | Camera connection engine (RTSP / ISAPI / ONVIF/ WAN) | done     |
 | 5  | Stream manager (FFmpeg + Redis frame buffer)         | done     |
-| 6  | AI inference worker (YOLOv8 + detectors + zones)     | pending  |
+| 6  | AI inference worker (YOLOv8 + detectors + zones)     | done     |
 | 7  | Alert engine + notification pipeline                 | pending  |
 | 8  | Detection config API (toggles + zone drawing)        | pending  |
 | 9  | AI Training Studio backend                           | pending  |
