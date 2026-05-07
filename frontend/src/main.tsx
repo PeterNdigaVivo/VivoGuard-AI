@@ -1,13 +1,11 @@
-// Real bootstrap (router, auth context, theme) lands in step 11.
-// This stub keeps `vite build` runnable from step 1.
+// Bootstrap — mount <App /> and pull in the Tailwind stylesheet.
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import App from './App'
+import './styles/index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <div style={{ padding: 24, fontFamily: 'sans-serif' }}>
-      <h1>VivoGuard AI</h1>
-      <p>Frontend scaffold — real UI lands in steps 10–14.</p>
-    </div>
+    <App />
   </React.StrictMode>,
 )

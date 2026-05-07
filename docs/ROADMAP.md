@@ -15,11 +15,11 @@ implemented vs. stubbed.
 | 7  | Alert engine + notification pipeline                 | done     |
 | 8  | Detection config API (toggles + zone drawing)        | done     |
 | 9  | AI Training Studio backend                           | done     |
-| 10 | AI Training Studio frontend                          | pending  |
-| 11 | VMS frontend: Camera management page                 | pending  |
-| 12 | VMS frontend: Live view grid with AI overlays        | pending  |
-| 13 | VMS frontend: Alerts page                            | pending  |
-| 14 | VMS frontend: System health page                     | pending  |
+| 10 | AI Training Studio frontend                          | done     |
+| 11 | VMS frontend: Camera management page                 | done     |
+| 12 | VMS frontend: Live view grid with AI overlays        | done     |
+| 13 | VMS frontend: Alerts page                            | done     |
+| 14 | VMS frontend: System health page                     | done     |
 | 15 | README + Dahua WAN end-to-end example                | pending  |
 
 ## Architectural decisions (locked at start of build)
