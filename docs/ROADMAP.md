@@ -14,7 +14,7 @@ implemented vs. stubbed.
 | 6  | AI inference worker (YOLOv8 + detectors + zones)     | done     |
 | 7  | Alert engine + notification pipeline                 | done     |
 | 8  | Detection config API (toggles + zone drawing)        | done     |
-| 9  | AI Training Studio backend                           | pending  |
+| 9  | AI Training Studio backend                           | done     |
 | 10 | AI Training Studio frontend                          | pending  |
 | 11 | VMS frontend: Camera management page                 | pending  |
 | 12 | VMS frontend: Live view grid with AI overlays        | pending  |
