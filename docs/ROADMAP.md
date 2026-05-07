@@ -10,7 +10,7 @@ implemented vs. stubbed.
 | 2  | Docker Compose + Nginx config                        | done     |
 | 3  | DB models (SQLAlchemy) + Alembic migrations          | done     |
 | 4  | Camera connection engine (RTSP / ISAPI / ONVIF/ WAN) | done     |
-| 5  | Stream manager (FFmpeg + Redis frame buffer)         | pending  |
+| 5  | Stream manager (FFmpeg + Redis frame buffer)         | done     |
 | 6  | AI inference worker (YOLOv8 + detectors + zones)     | pending  |
 | 7  | Alert engine + notification pipeline                 | pending  |
 | 8  | Detection config API (toggles + zone drawing)        | pending  |
