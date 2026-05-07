@@ -30,8 +30,18 @@ async def lifespan(app: FastAPI):
             import logging
             logging.getLogger(__name__).warning("bootstrap admin skipped: %s", e)
 
+    # Spawn the alert engine notifier loop as a background asyncio task.
+    import asyncio
+    from app.alerts.engine import run_engine_forever
+    engine_task = asyncio.create_task(run_engine_forever())
+
     yield
-    # Shutdown hooks (none needed yet — stream manager runs in its own service).
+
+    engine_task.cancel()
+    try:
+        await engine_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 app = FastAPI(

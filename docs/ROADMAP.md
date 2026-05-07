@@ -12,7 +12,7 @@ implemented vs. stubbed.
 | 4  | Camera connection engine (RTSP / ISAPI / ONVIF/ WAN) | done     |
 | 5  | Stream manager (FFmpeg + Redis frame buffer)         | done     |
 | 6  | AI inference worker (YOLOv8 + detectors + zones)     | done     |
-| 7  | Alert engine + notification pipeline                 | pending  |
+| 7  | Alert engine + notification pipeline                 | done     |
 | 8  | Detection config API (toggles + zone drawing)        | pending  |
 | 9  | AI Training Studio backend                           | pending  |
 | 10 | AI Training Studio frontend                          | pending  |
