@@ -7,7 +7,7 @@ implemented vs. stubbed.
 | #  | Deliverable                                          | Status   |
 |----|------------------------------------------------------|----------|
 | 1  | Project folder structure                             | done     |
-| 2  | Docker Compose + Nginx config                        | pending  |
+| 2  | Docker Compose + Nginx config                        | done     |
 | 3  | DB models (SQLAlchemy) + Alembic migrations          | pending  |
 | 4  | Camera connection engine (RTSP / ISAPI / ONVIF/ WAN) | pending  |
 | 5  | Stream manager (FFmpeg + Redis frame buffer)         | pending  |
