@@ -1,0 +1,212 @@
+"""/cameras endpoints — add, list, update, delete, test, discover, snapshot."""
+from __future__ import annotations
+import base64
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.connectors.base import ConnectionTestResult
+from app.connectors.dahua_http import DahuaHTTP
+from app.connectors.discovery import discover_onvif
+from app.connectors.hikvision_isapi import HikvisionISAPI
+from app.connectors.rtsp import grab_thumbnail, probe_rtsp
+from app.database import get_db
+from app.deps import get_current_user, require_role
+from app.models import Camera, User
+from app.schemas.camera import (
+    CameraCreate, CameraOut, CameraUpdate, ONVIFDiscoverEntry,
+    TestConnectionIn, TestConnectionOut,
+)
+from app.utils.crypto import encrypt
+from app.utils.network import build_rtsp_url
+
+router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+
+# ---------- helpers ---------------------------------------------------
+
+def _camera_rtsp_url(cam: Camera, *, subtype: int = 0, password_plain: str | None = None) -> str:
+    """Resolve the RTSP URL for a camera using its current settings.
+    `password_plain` lets the caller pass the unencrypted password to avoid
+    decrypting twice in the same request path."""
+    return build_rtsp_url(
+        brand=cam.brand,
+        host=cam.host,
+        port=cam.rtsp_port,
+        username=cam.username,
+        password=password_plain,
+        channel=cam.channel_number,
+        subtype=subtype,
+        override=cam.rtsp_url_override,
+    )
+
+
+# ---------- list / get ------------------------------------------------
+
+@router.get("", response_model=list[CameraOut])
+def list_cameras(db: Session = Depends(get_db), _u: User = Depends(get_current_user)):
+    return db.query(Camera).order_by(Camera.id).all()
+
+
+@router.get("/{camera_id}", response_model=CameraOut)
+def get_camera(camera_id: int, db: Session = Depends(get_db),
+               _u: User = Depends(get_current_user)):
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    return cam
+
+
+# ---------- create / update / delete ----------------------------------
+
+@router.post("/add", response_model=CameraOut)
+def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
+               _u: User = Depends(require_role("admin", "operator"))):
+    cam = Camera(
+        name=payload.name,
+        site=payload.site,
+        brand=payload.brand,
+        connection_type=payload.connection_type,
+        host=payload.host,
+        public_ip=payload.public_ip,
+        sdk_port=payload.sdk_port,
+        rtsp_port=payload.rtsp_port,
+        http_port=payload.http_port,
+        username=payload.username,
+        password_encrypted=encrypt(payload.password or ""),
+        nvr_id=payload.nvr_id,
+        channel_number=payload.channel_number,
+        rtsp_url_override=payload.rtsp_url_override,
+        ddns_hostname=payload.ddns_hostname,
+        network_type=payload.network_type,
+        ai_enabled=payload.ai_enabled,
+        inference_fps=payload.inference_fps,
+        status="pending",
+    )
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    return cam
+
+
+@router.patch("/{camera_id}", response_model=CameraOut)
+def update_camera(camera_id: int, patch: CameraUpdate, db: Session = Depends(get_db),
+                  _u: User = Depends(require_role("admin", "operator"))):
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    for k, v in patch.model_dump(exclude_unset=True).items():
+        setattr(cam, k, v)
+    db.commit()
+    db.refresh(cam)
+    return cam
+
+
+@router.delete("/{camera_id}")
+def delete_camera(camera_id: int, db: Session = Depends(get_db),
+                  _u: User = Depends(require_role("admin"))):
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    db.delete(cam)
+    db.commit()
+    return {"deleted": camera_id}
+
+
+# ---------- test connection (no DB write) -----------------------------
+
+@router.post("/test-connection", response_model=TestConnectionOut)
+async def test_connection(payload: TestConnectionIn,
+                          _u: User = Depends(require_role("admin", "operator"))):
+    """Used by the Add Camera wizard's *Test Connection* button."""
+    # Build RTSP URL from inputs (override wins).
+    rtsp = build_rtsp_url(
+        brand=payload.brand,
+        host=payload.host,
+        port=payload.rtsp_port,
+        username=payload.username,
+        password=payload.password,
+        channel=payload.channel_number,
+        subtype=1,                       # use substream for the test (faster)
+        override=payload.rtsp_url_override,
+    )
+
+    # 1) Quick HTTP-side device probe to identify model (best effort).
+    device_model: str | None = None
+    detected_channels = 0
+    try:
+        if payload.brand == "dahua" and payload.username:
+            api = DahuaHTTP(payload.host, payload.http_port, payload.username, payload.password or "")
+            info = await api.device_info()
+            device_model = info.get("deviceType") or info.get("model")
+            detected_channels = await api.channel_count()
+        elif payload.brand == "hikvision" and payload.username:
+            api = HikvisionISAPI(payload.host, payload.http_port, payload.username, payload.password or "")
+            info = await api.device_info()
+            device_model = info.get("model")
+            detected_channels = await api.channel_count()
+    except Exception as e:
+        # Non-fatal — RTSP probe below is the source of truth.
+        device_model = device_model or f"<HTTP probe failed: {e}>"
+
+    # 2) RTSP probe.
+    ok, err = await probe_rtsp(rtsp, timeout=12)
+    snap_b64: Optional[str] = None
+    if ok:
+        snap_b64 = await grab_thumbnail(rtsp, timeout=15)
+
+    return TestConnectionOut(
+        ok=ok,
+        rtsp_url=rtsp,
+        snapshot_jpeg_b64=snap_b64,
+        detected_channels=detected_channels,
+        device_model=device_model,
+        error=err if not ok else None,
+    )
+
+
+# ---------- ONVIF LAN discovery --------------------------------------
+
+@router.get("/discover-onvif", response_model=list[ONVIFDiscoverEntry])
+def discover(_u: User = Depends(require_role("admin", "operator"))):
+    """Broadcast WS-Discovery on the local network. Returns up to a few
+    seconds' worth of replies."""
+    return discover_onvif(timeout=3.0)
+
+
+# ---------- snapshot / stream URL -------------------------------------
+
+@router.get("/{camera_id}/stream-url")
+def stream_url(camera_id: int, subtype: int = 0,
+               db: Session = Depends(get_db),
+               _u: User = Depends(get_current_user)):
+    from app.utils.crypto import decrypt
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    pw = decrypt(cam.password_encrypted or "")
+    return {"rtsp_url": _camera_rtsp_url(cam, subtype=subtype, password_plain=pw)}
+
+
+@router.get("/{camera_id}/snapshot")
+async def snapshot(camera_id: int, db: Session = Depends(get_db),
+                   _u: User = Depends(get_current_user)):
+    from app.utils.crypto import decrypt
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    pw = decrypt(cam.password_encrypted or "")
+    rtsp = _camera_rtsp_url(cam, subtype=1, password_plain=pw)
+    img = await grab_thumbnail(rtsp, timeout=15)
+    if not img:
+        cam.status = "offline"
+        cam.last_error = "snapshot grab failed"
+        db.commit()
+        raise HTTPException(503, "stream unavailable")
+    cam.status = "online"
+    cam.last_seen_at = datetime.now(timezone.utc)
+    cam.last_error = None
+    db.commit()
+    return {"jpeg_b64": img}
