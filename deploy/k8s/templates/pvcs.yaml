@@ -1,0 +1,14 @@
+{{- range $name, $size := dict "models" "100Gi" "datasets" "200Gi" "thumbnails" "20Gi" "recordings" "1Ti" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vivoguard-{{ $name }}
+spec:
+  # ReadWriteMany so multiple api / worker / streamer pods can share.
+  # Your CSI driver must support RWX (NFS, CephFS, EFS, FSx-Lustre, etc).
+  # If only RWO is available, set api.replicas=1 + worker.replicas=1.
+  accessModes: [ "ReadWriteMany" ]
+  resources:
+    requests: { storage: {{ $size }} }
+---
+{{- end }}

@@ -74,13 +74,13 @@ x-gpu: &gpu-reservation
 # =====================================================================
 services:
 
-  # --- API: FastAPI + WebSockets --------------------------------------
+  # --- API: slim image (~300 MB) --- No torch, no ultralytics, no opencv.
+  # Scale this independently of the worker pool.
   api:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.api
     image: vivoguard/api:latest
-    container_name: vivoguard-api
     restart: unless-stopped
     environment: *app-env
     volumes:
@@ -91,21 +91,25 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
-      minio:    { condition: service_started }
     networks: [vivoguard]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5
+    # `docker compose up --scale api=3` to run multiple replicas behind nginx.
 
-  # --- Celery worker: AI inference + training jobs --------------------
+  # --- Celery worker (~1.5 GB CPU / ~5 GB GPU) — runs YOLOv8 + training.
+  # Scale: `docker compose up --scale worker=4` for more inference capacity.
   worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    image: vivoguard/api:latest
-    container_name: vivoguard-worker
+      dockerfile: Dockerfile.worker
+      args:
+        # Set GPU=true here (or via `docker compose build --build-arg GPU=true worker`)
+        # to install CUDA-enabled torch wheels.
+        GPU: "false"
+    image: vivoguard/worker:latest
     restart: unless-stopped
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
     environment: *app-env
@@ -118,16 +122,16 @@ services:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
     networks: [vivoguard]
-    # GPU passthrough — comment out if no NVIDIA driver / nvidia-container-toolkit.
+    # GPU passthrough — uncomment once the host has nvidia-container-toolkit
+    # and you've rebuilt with `--build-arg GPU=true`.
     # <<: *gpu-reservation
 
-  # --- Streamer: FFmpeg subprocess pool -------------------------------
+  # --- Streamer: ffmpeg subprocess pool. Slim image, no torch.
   streamer:
     build:
       context: ./streamer
       dockerfile: Dockerfile
     image: vivoguard/streamer:latest
-    container_name: vivoguard-streamer
     restart: unless-stopped
     environment: *app-env
     volumes:
@@ -181,10 +185,17 @@ services:
       retries: 5
 
   # --- MinIO: S3-compatible object store ------------------------------
+  # OPTIONAL — opt in with `docker compose --profile object-store up -d`.
+  # Default deployments use the bind-mounted ./data/* directories below,
+  # which is enough for single-node installs and avoids ~250 MB of MinIO.
+  # For cloud / multi-node, point CREDENTIALS_FERNET_KEY-style envs at
+  # AWS S3 (set S3_ENDPOINT=https://s3.<region>.amazonaws.com) instead
+  # of running this container.
   minio:
     image: minio/minio:latest
     container_name: vivoguard-minio
     restart: unless-stopped
+    profiles: ["object-store"]
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY}

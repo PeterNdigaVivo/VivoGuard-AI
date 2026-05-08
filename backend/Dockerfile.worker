@@ -1,0 +1,51 @@
+# =====================================================================
+# Worker image (~1.5 GB CPU, ~5 GB GPU)
+#
+# Carries everything the AI inference + training pipeline needs:
+#   torch (CPU-only by default) + ultralytics + opencv-headless + ffmpeg.
+#
+# Build args:
+#   GPU=true    → installs CUDA-enabled torch wheels (~5 GB image)
+#   GPU=false   → installs CPU-only torch wheels      (~1.5 GB image)
+#
+# Build:
+#   docker build --build-arg GPU=false -t vivoguard/worker -f backend/Dockerfile.worker backend/
+#   docker build --build-arg GPU=true  -t vivoguard/worker-gpu ...
+# =====================================================================
+ARG GPU=false
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ffmpeg curl libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install the API-side deps first (worker re-uses app.* models, db, etc).
+COPY requirements.api.txt requirements.api.txt
+RUN pip install --upgrade pip && pip install -r requirements.api.txt
+
+# AI deps. CPU-only torch index is much smaller and avoids pulling CUDA
+# runtime libs when GPU is not available.
+COPY requirements.worker.txt requirements.worker.txt
+RUN if [ "$GPU" = "true" ]; then \
+        pip install -r requirements.worker.txt ; \
+    else \
+        pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+                    -r requirements.worker.txt ; \
+    fi
+
+COPY app    ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+
+# Default command runs the Celery worker. The streamer service overrides
+# with its own entrypoint via docker-compose.
+CMD ["celery", "-A", "app.tasks.celery_app", "worker", \
+     "--loglevel=info", "--concurrency=2"]

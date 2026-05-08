@@ -1,0 +1,44 @@
+# =====================================================================
+# Slim API image (~300 MB)
+#
+# This image hosts:
+#   - the FastAPI server (`api` service)
+#   - alembic migrations
+#   - the alert-engine background task
+#
+# It does NOT carry torch / ultralytics / opencv. Inference lives in the
+# `worker` image, so we can scale that pool independently and keep this
+# image small enough to deploy at the edge.
+#
+# Build:  docker build -t vivoguard/api -f backend/Dockerfile.api backend/
+# =====================================================================
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Only the runtime deps the API actually needs. ffmpeg lives in the worker
+# image; the API uses it on demand for one-shot probes/snapshots, so we
+# include just the binary, not the libs.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Trim requirements: API doesn't import torch/ultralytics/cv2 directly.
+# (The few worker imports it does have are guarded with try/except so a
+# missing module is invisible at runtime.)
+COPY requirements.api.txt requirements.api.txt
+RUN pip install --upgrade pip && pip install -r requirements.api.txt
+
+COPY app    ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips=*"]

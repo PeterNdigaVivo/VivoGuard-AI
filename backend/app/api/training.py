@@ -40,7 +40,6 @@ from app.schemas.training import (
     DatasetCreate, DatasetOut, DeployModelIn, ExportModelIn,
     TrainingImageOut, TrainingJobIn, TrainingJobOut,
 )
-from app.training.annotation import auto_suggest
 from app.training.dataset import save_uploaded_image
 from app.utils.crypto import decrypt
 from app.utils.network import build_rtsp_url
@@ -159,6 +158,9 @@ def auto_suggest_image(image_id: int, db: Session = Depends(get_db),
     img = db.get(TrainingImage, image_id)
     if not img:
         raise HTTPException(404, "image not found")
+    # Lazy: pulls numpy/PIL/ultralytics. The slim `api` image doesn't
+    # carry those, so this endpoint only works on the worker image.
+    from app.training.annotation import auto_suggest
     return [AnnotationIn(class_label=a["class_label"],
                          bbox_json=a["bbox_json"],
                          auto_suggested=True, verified=False)

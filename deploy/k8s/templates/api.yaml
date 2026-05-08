@@ -1,0 +1,77 @@
+{{- $component := "api" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vivoguard-api
+  labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 4 }} }
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels: { {{- include "vg.matchLabels" (dict "Release" .Release "component" $component) | nindent 6 }} }
+  template:
+    metadata:
+      labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 8 }} }
+    spec:
+      imagePullSecrets:
+        {{- range .Values.image.pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      initContainers:
+        # Run alembic migrations once before any api replica starts.
+        - name: migrate
+          image: {{ include "vg.image" (dict "Values" .Values "component" $component) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          env: {{- include "vg.appEnv" . | nindent 12 }}
+      containers:
+        - name: api
+          image: {{ include "vg.image" (dict "Values" .Values "component" $component) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ containerPort: 8000 }]
+          env: {{- include "vg.appEnv" . | nindent 12 }}
+          resources: {{- toYaml .Values.api.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 30
+          volumeMounts:
+            - { name: models,     mountPath: /data/models }
+            - { name: datasets,   mountPath: /data/datasets }
+            - { name: thumbnails, mountPath: /data/thumbnails }
+            - { name: recordings, mountPath: /data/recordings }
+      volumes:
+        - { name: models,     persistentVolumeClaim: { claimName: vivoguard-models } }
+        - { name: datasets,   persistentVolumeClaim: { claimName: vivoguard-datasets } }
+        - { name: thumbnails, persistentVolumeClaim: { claimName: vivoguard-thumbnails } }
+        - { name: recordings, persistentVolumeClaim: { claimName: vivoguard-recordings } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vivoguard-api
+  labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 4 }} }
+spec:
+  type: ClusterIP
+  ports: [{ port: 8000, targetPort: 8000, name: http }]
+  selector: { {{- include "vg.matchLabels" (dict "Release" .Release "component" $component) | nindent 4 }} }
+{{- if .Values.api.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vivoguard-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vivoguard-api
+  minReplicas: {{ .Values.api.hpa.minReplicas }}
+  maxReplicas: {{ .Values.api.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.api.hpa.targetCPUUtilizationPercentage }} }
+{{- end }}

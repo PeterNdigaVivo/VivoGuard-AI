@@ -1,0 +1,78 @@
+# =====================================================================
+# Edge appliance overlay — single-node, minimal footprint.
+#
+# What changes vs. the default compose:
+#   - SQLite instead of Postgres (no `postgres` container)
+#   - Filesystem instead of MinIO (no `minio` container)
+#   - api + worker share one container with --concurrency=1
+#     (eliminates the worker container for tiny sites)
+#
+# Result: 2 containers (app + nginx) instead of 8.
+# Disk footprint goes from ~3 GB → ~1.7 GB total.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d
+#
+# Tradeoffs:
+#   - SQLite is fine for ≤ 8 cameras and ≤ 100k detections; beyond that
+#     the alert query and training metadata get noticeably slower.
+#   - No Redis on this profile means: no live-frame WebSocket fan-out
+#     across multiple browsers (stream still works for one client per
+#     camera via the /api/cameras/{id}/snapshot endpoint).
+# =====================================================================
+name: vivoguard-edge
+
+x-edge-env: &edge-env
+  APP_ENV: production
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_ALGORITHM: HS256
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+  CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
+  USE_GPU: "false"
+  DEFAULT_MODEL: yolov8n.pt
+  # Override DB to SQLite (the backend honours DATABASE_URL when set).
+  DATABASE_URL: "sqlite:////data/edge.db"
+  # Local Redis-less in-process broker for Celery.
+  CELERY_BROKER_URL: "memory://"
+  CELERY_TASK_ALWAYS_EAGER: "true"
+  # Filesystem object store (no MinIO).
+  S3_ENDPOINT: ""
+  RECORDINGS_DIR: /data/recordings
+  MODELS_DIR: /data/models
+  DATASETS_DIR: /data/datasets
+  THUMBNAILS_DIR: /data/thumbnails
+
+services:
+  postgres: { profiles: ["disabled"] }
+  redis:    { profiles: ["disabled"] }
+  minio:    { profiles: ["disabled"] }
+  worker:   { profiles: ["disabled"] }
+  streamer: { profiles: ["disabled"] }
+
+  api:
+    image: vivoguard/worker:latest      # use the worker image so AI runs in-process
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args: { GPU: "false" }
+    environment: *edge-env
+    depends_on: !reset []
+    volumes:
+      - edge_data:/data
+    ports:
+      - "8000:8000"
+    networks: [vivoguard]
+    # Run the API and the streamer in the same container — supervised by a
+    # tiny shell. Both share the in-process Celery eager mode so AI tasks
+    # execute synchronously in the API's worker thread.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        alembic upgrade head &&
+        (python -m streamer.main &) &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+volumes:
+  edge_data:

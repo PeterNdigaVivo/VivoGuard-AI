@@ -1,0 +1,29 @@
+{{- $component := "streamer" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vivoguard-streamer
+  labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 4 }} }
+spec:
+  replicas: {{ .Values.streamer.replicas }}
+  selector:
+    matchLabels: { {{- include "vg.matchLabels" (dict "Release" .Release "component" $component) | nindent 6 }} }
+  template:
+    metadata:
+      labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 8 }} }
+    spec:
+      imagePullSecrets:
+        {{- range .Values.image.pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      containers:
+        - name: streamer
+          image: {{ include "vg.image" (dict "Values" .Values "component" $component) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "streamer.main"]
+          env: {{- include "vg.appEnv" . | nindent 12 }}
+          resources: {{- toYaml .Values.streamer.resources | nindent 12 }}
+          volumeMounts:
+            - { name: recordings, mountPath: /data/recordings }
+      volumes:
+        - { name: recordings, persistentVolumeClaim: { claimName: vivoguard-recordings } }

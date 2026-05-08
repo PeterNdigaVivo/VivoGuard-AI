@@ -1,17 +1,13 @@
 # =====================================================================
-# VivoGuard AI — standalone streamer service
+# Streamer image (~200 MB)
 #
-# Built FROM the backend image so all app.* Python modules (config,
-# database, models, stream/, utils/) are already installed. The streamer
-# only adds its own thin entrypoint and reuses the rest.
-#
-# IMPORTANT: build the backend image first so this FROM resolves:
-#   docker compose build api && docker compose build streamer
+# FROMs the slim API image so it inherits the app.* package without
+# pulling in torch/ultralytics/cv2. The streamer only needs ffmpeg
+# (already in the base) and Redis client libs.
 # =====================================================================
 FROM vivoguard/api:latest
 
 WORKDIR /app
-# Copy the streamer entrypoint package alongside backend's app/.
 COPY streamer ./streamer
 
 CMD ["python", "-m", "streamer.main"]

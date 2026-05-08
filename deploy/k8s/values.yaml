@@ -1,0 +1,122 @@
+# =====================================================================
+# VivoGuard AI Helm values.
+#
+# Three reference profiles — pick one and override on the CLI:
+#
+#   1. Single-cluster, in-cluster Postgres/Redis/MinIO (default below)
+#      helm install vg deploy/k8s -f deploy/k8s/values.yaml
+#
+#   2. Cloud (managed RDS / ElastiCache / S3)
+#      helm install vg deploy/k8s -f deploy/k8s/values.yaml \
+#           --set postgres.enabled=false --set redis.enabled=false --set minio.enabled=false \
+#           --set externalDatabase.url='postgresql+psycopg://user:pw@rds-host:5432/vg' \
+#           --set externalRedis.url='redis://elasticache-host:6379/0' \
+#           --set externalS3.endpoint='https://s3.us-east-1.amazonaws.com'
+#
+#   3. Edge / single-node — see docker-compose.edge.yml instead. K8s is
+#      overkill for a single node.
+# =====================================================================
+
+image:
+  registry: ""                 # set to your registry, e.g. ghcr.io/peterndigavivo
+  api:      { repository: vivoguard/api,      tag: latest }
+  worker:   { repository: vivoguard/worker,   tag: latest }
+  streamer: { repository: vivoguard/streamer, tag: latest }
+  frontend: { repository: vivoguard/frontend, tag: latest }
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ---- API tier (slim, multi-replica behind a Service) ------------------
+api:
+  replicas: 2                  # HA: ≥2 to survive a node loss
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests: { cpu: "100m",  memory: "256Mi" }
+    limits:   { cpu: "1",     memory: "512Mi" }
+
+# ---- Worker tier (heavy: torch + ultralytics) -------------------------
+worker:
+  replicas: 2
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  gpu:
+    enabled: false             # set true and add nodeSelector for nvidia GPUs
+    nodeSelector: { "nvidia.com/gpu.present": "true" }
+  resources:
+    requests: { cpu: "500m",  memory: "1Gi"  }
+    limits:   { cpu: "2",     memory: "4Gi"  }
+
+# ---- Streamer (one replica per N cameras; usually single replica) -----
+streamer:
+  replicas: 1
+  resources:
+    requests: { cpu: "100m",  memory: "256Mi" }
+    limits:   { cpu: "1",     memory: "1Gi"  }
+
+# ---- Frontend ---------------------------------------------------------
+frontend:
+  replicas: 2
+  resources:
+    requests: { cpu: "10m", memory: "32Mi" }
+    limits:   { cpu: "100m", memory: "128Mi" }
+
+# ---- Bundled stateful services ----------------------------------------
+postgres:
+  enabled: true
+  persistence: { size: 50Gi, storageClass: "" }
+  resources:
+    requests: { cpu: "200m", memory: "512Mi" }
+    limits:   { cpu: "2",    memory: "4Gi"   }
+
+redis:
+  enabled: true
+  persistence: { size: 5Gi, storageClass: "" }
+
+minio:
+  enabled: true
+  persistence: { size: 200Gi, storageClass: "" }
+
+# ---- External managed services (set when bundled ones are disabled) ---
+externalDatabase: { url: "" }    # SQLAlchemy URL
+externalRedis:    { url: "" }
+externalS3:
+  endpoint: ""
+  accessKey: ""
+  secretKey: ""
+  useSSL: true
+
+# ---- Ingress ----------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: vivoguard.local
+  tls:
+    enabled: false
+    secretName: vivoguard-tls
+
+# ---- Secrets (sample values — override in production) -----------------
+secrets:
+  jwtSecret:           "change-me-or-use-helm-secret"
+  fernetKey:           ""        # auto-generated if blank
+  postgresPassword:    "vivoguard"
+  s3SecretKey:         "minioadmin_dev"
+  bootstrapAdminEmail: "admin@example.com"
+  bootstrapAdminPw:    "ChangeMeNow!"
+
+# ---- Notification channels (env-only; blank = inactive) ---------------
+notifications:
+  smtp:    { host: "", port: 587, user: "", password: "", from: "alerts@vivoguard.local", tls: true }
+  twilio:  { sid: "", token: "", fromNumber: "" }
+  webhook: { url: "", authHeader: "" }
+
+# ---- Misc -------------------------------------------------------------
+inference:
+  defaultModel: yolov8n.pt
+  fpsDefault: 5

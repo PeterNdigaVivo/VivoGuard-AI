@@ -1,0 +1,63 @@
+{{- $component := "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vivoguard-worker
+  labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 4 }} }
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels: { {{- include "vg.matchLabels" (dict "Release" .Release "component" $component) | nindent 6 }} }
+  template:
+    metadata:
+      labels: { {{- include "vg.labels" (dict "Release" .Release "component" $component) | nindent 8 }} }
+    spec:
+      imagePullSecrets:
+        {{- range .Values.image.pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- if .Values.worker.gpu.enabled }}
+      nodeSelector: {{- toYaml .Values.worker.gpu.nodeSelector | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "vg.image" (dict "Values" .Values "component" $component) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+          env: {{- include "vg.appEnv" . | nindent 12 }}
+          resources:
+            requests: {{- toYaml .Values.worker.resources.requests | nindent 14 }}
+            limits:
+              {{- toYaml .Values.worker.resources.limits | nindent 14 }}
+              {{- if .Values.worker.gpu.enabled }}
+              nvidia.com/gpu: "1"
+              {{- end }}
+          volumeMounts:
+            - { name: models,     mountPath: /data/models }
+            - { name: datasets,   mountPath: /data/datasets }
+            - { name: thumbnails, mountPath: /data/thumbnails }
+            - { name: recordings, mountPath: /data/recordings }
+      volumes:
+        - { name: models,     persistentVolumeClaim: { claimName: vivoguard-models } }
+        - { name: datasets,   persistentVolumeClaim: { claimName: vivoguard-datasets } }
+        - { name: thumbnails, persistentVolumeClaim: { claimName: vivoguard-thumbnails } }
+        - { name: recordings, persistentVolumeClaim: { claimName: vivoguard-recordings } }
+{{- if .Values.worker.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vivoguard-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vivoguard-worker
+  minReplicas: {{ .Values.worker.hpa.minReplicas }}
+  maxReplicas: {{ .Values.worker.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.worker.hpa.targetCPUUtilizationPercentage }} }
+{{- end }}

@@ -1,0 +1,8 @@
+# AI-only dependencies layered on top of requirements.api.txt.
+# Heavy. Only installed in the worker image.
+numpy>=1.26
+opencv-python-headless>=4.10
+ultralytics>=8.3
+torch>=2.3
+torchvision>=0.18
+ffmpeg-python>=0.2

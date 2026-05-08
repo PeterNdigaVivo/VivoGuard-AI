@@ -33,6 +33,7 @@ a built-in AI Training Studio for custom YOLOv8 models.
 | Document                                               | Purpose                                  |
 |--------------------------------------------------------|------------------------------------------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)         | System diagram + data flow per camera    |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)             | **Three deploy methods** — edge, single-server, k8s/helm |
 | [`docs/HARDWARE_SIZING.md`](docs/HARDWARE_SIZING.md)   | Cameras vs CPU / RAM / GPU / storage     |
 | [`docs/DAHUA_WAN_EXAMPLE.md`](docs/DAHUA_WAN_EXAMPLE.md)| Step-by-step remote NVR connection      |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md)                   | What was built in which commit          |

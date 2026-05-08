@@ -1,0 +1,37 @@
+# =====================================================================
+# Cloud overlay — use managed Postgres / Redis / S3 instead of running
+# them in containers. Saves ~600 MB of images on each node and removes
+# the single-node DB/Redis as a SPOF.
+#
+# Usage (after putting external endpoints in .env):
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+#
+# Required .env keys (point at your managed services):
+#   POSTGRES_HOST=mydb.cluster-xyz.us-east-1.rds.amazonaws.com
+#   POSTGRES_PORT=5432
+#   POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+#   REDIS_HOST=mycluster.xxx.cache.amazonaws.com
+#   REDIS_PORT=6379  REDIS_PASSWORD=...
+#   S3_ENDPOINT=https://s3.us-east-1.amazonaws.com
+#   S3_ACCESS_KEY / S3_SECRET_KEY  (or use IAM role; leave blank)
+#   S3_USE_SSL=true
+# =====================================================================
+name: vivoguard
+
+services:
+  # Drop the in-cluster Postgres/Redis/MinIO. The application services
+  # talk to whatever POSTGRES_HOST / REDIS_HOST / S3_ENDPOINT resolve to.
+  postgres:
+    profiles: ["disabled"]
+  redis:
+    profiles: ["disabled"]
+  minio:
+    profiles: ["disabled"]
+
+  # API and worker no longer wait for in-cluster DB/Redis startup.
+  api:
+    depends_on: !reset []
+  worker:
+    depends_on: !reset []
+  streamer:
+    depends_on: !reset []

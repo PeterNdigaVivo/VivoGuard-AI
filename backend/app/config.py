@@ -4,7 +4,7 @@ Single source of truth for every tunable. Imported via `from app.config
 import settings` everywhere else; never read os.environ directly.
 """
 from functools import lru_cache
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = "change-me-now"
 
     # --- Postgres ---
+    # Set DATABASE_URL to override the postgres_* fields entirely (e.g.
+    # sqlite:///./edge.db on the edge appliance, or a managed RDS URL).
+    database_url_override: str = Field(default="",
+                                       validation_alias=AliasChoices("DATABASE_URL", "database_url"))
     postgres_host: str = "postgres"
     postgres_port: int = 5432
     postgres_db: str = "vivoguard"
@@ -94,7 +98,14 @@ class Settings(BaseSettings):
     # --- Derived helpers ---
     @property
     def database_url(self) -> str:
-        """SQLAlchemy URL for psycopg v3 driver."""
+        """SQLAlchemy URL.
+
+        Honours DATABASE_URL when set (any SQLAlchemy URL — sqlite, RDS,
+        managed Postgres). Otherwise composes one from POSTGRES_* fields
+        using the psycopg v3 driver.
+        """
+        if self.database_url_override:
+            return self.database_url_override
         return (
             f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
