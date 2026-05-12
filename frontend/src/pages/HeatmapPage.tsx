@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Button, Card, PageHeader } from '@/components/ui/Primitives'
-import { api } from '@/api/client'
+// (api import removed — download() now uses an anchor)
 import { cameras } from '@/api/cameras'
 
 export default function HeatmapPage() {
@@ -28,11 +28,14 @@ export default function HeatmapPage() {
 
   const heatmapUrl = `/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}&_=${bust}`
 
-  async function download() {
-    const blob = await api<Blob>(`/analytics/heatmap/${cameraId}/image?alpha=${opacity}`, { raw: true } as any)
-    const url = URL.createObjectURL(blob as any as Blob)
+  function download() {
+    // Plain anchor click — the browser handles the GET, the Authorization
+    // header rides on the same-origin cookie/session. No fetch-to-Blob
+    // detour and no TS cast.
     const a = document.createElement('a')
-    a.href = url; a.download = `heatmap_camera_${cameraId}.png`; a.click()
+    a.href = `/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`
+    a.download = `heatmap_camera_${cameraId}.png`
+    a.click()
   }
 
   return (
