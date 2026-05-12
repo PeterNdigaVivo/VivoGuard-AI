@@ -27,12 +27,13 @@ EOI = b"\xff\xd9"
 def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640) -> str:
     """Build the ffmpeg command. Forces TCP transport, scales to 640w to keep
     AI bandwidth light, and emits MJPEG to stdout."""
-    # `-rw_timeout` (μs) is the cross-version-safe socket I/O timeout.
-    # `-stimeout` was removed in newer FFmpeg builds.
+    # `-timeout` (μs) — the canonical RTSP demuxer socket timeout in
+    # modern FFmpeg. Earlier code tried `-stimeout` (removed in 5.x) and
+    # `-rw_timeout` (rejected by some builds); `-timeout` is what works.
     return (
         "ffmpeg -hide_banner -loglevel warning "
         "-rtsp_transport tcp "
-        "-rw_timeout 5000000 -fflags nobuffer -flags low_delay "
+        "-timeout 5000000 -fflags nobuffer -flags low_delay "
         f"-i {shlex.quote(rtsp_url)} "
         f"-vf scale={width}:-2,fps={fps} "
         "-f mjpeg -q:v 6 pipe:1"

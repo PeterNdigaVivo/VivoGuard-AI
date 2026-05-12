@@ -30,14 +30,14 @@ async def _run(cmd: str, timeout: float = 15.0) -> tuple[int, str, str]:
 async def probe_rtsp(url: str, timeout: float = 12.0) -> tuple[bool, str | None]:
     """Return (ok, error). `ok=True` means ffprobe could open the stream.
 
-    Uses `-rw_timeout` (microseconds) as the AVIO socket timeout — that
-    option works across FFmpeg versions. The older `-stimeout` was
-    removed in newer FFmpeg builds and would error with
-    "Option not found".
+    Uses `-timeout` (microseconds) — the canonical RTSP demuxer socket
+    timeout in modern FFmpeg. The older `-stimeout` and the AVIO
+    `-rw_timeout` were both rejected by newer builds in the field, so we
+    standardise on `-timeout`.
     """
     cmd = (
         "ffprobe -hide_banner -loglevel error -rtsp_transport tcp "
-        f"-rw_timeout 5000000 -i {shlex.quote(url)}"
+        f"-timeout 5000000 -i {shlex.quote(url)}"
     )
     code, _, err = await _run(cmd, timeout=timeout)
     if code == 0:
@@ -53,7 +53,7 @@ async def grab_thumbnail(url: str, timeout: float = 15.0) -> str | None:
         out = Path(tmp) / "thumb.jpg"
         cmd = (
             "ffmpeg -hide_banner -loglevel error -rtsp_transport tcp "
-            f"-rw_timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
+            f"-timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
             f"{shlex.quote(str(out))}"
         )
         code, _, err = await _run(cmd, timeout=timeout)
@@ -70,7 +70,7 @@ async def grab_thumbnail_verbose(url: str, timeout: float = 15.0) -> tuple[str |
         out = Path(tmp) / "thumb.jpg"
         cmd = (
             "ffmpeg -hide_banner -loglevel info -rtsp_transport tcp "
-            f"-rw_timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
+            f"-timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
             f"{shlex.quote(str(out))}"
         )
         code, _, err = await _run(cmd, timeout=timeout)
