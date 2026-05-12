@@ -83,6 +83,11 @@ try:
     app.include_router(analytics_router)
 except ImportError:
     pass
+try:
+    from app.api.stockroom import router as stockroom_router         # noqa: E402
+    app.include_router(stockroom_router)
+except ImportError:
+    pass
 
 try:
     from app.api.detection_config import router as detection_router  # noqa: E402

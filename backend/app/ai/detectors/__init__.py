@@ -24,6 +24,10 @@ from app.ai.detectors.retail_p1 import (
 from app.ai.detectors.retail_p2 import (
     AisleDwellDetector, ShutterDetector, StaffPresenceDetector,
 )
+from app.ai.detectors.retail_p3 import (
+    DemographicDetector, ShrinkageDetector, StockroomAccessDetector,
+    UniformComplianceDetector,
+)
 
 
 # Stateless — safe to share a single instance.
@@ -53,6 +57,11 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     "staff_present":      StaffPresenceDetector,
     "dwell":              AisleDwellDetector,
     "shutter":            ShutterDetector,
+    # Retail P3.
+    "uniform_compliance": UniformComplianceDetector,
+    "demographic":        DemographicDetector,
+    "shrinkage":          ShrinkageDetector,
+    "stockroom_access":   StockroomAccessDetector,
 }
 
 
