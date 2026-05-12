@@ -12,6 +12,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "allowImportingTsExtensions": false,
+    "types": ["node"],
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] }
   },
