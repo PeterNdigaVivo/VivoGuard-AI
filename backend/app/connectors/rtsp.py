@@ -48,7 +48,7 @@ async def probe_rtsp(url: str, timeout: float = 12.0) -> tuple[bool, str | None]
 
 async def grab_thumbnail(url: str, timeout: float = 15.0) -> str | None:
     """Capture a single JPEG frame and return it base64-encoded.
-    Returns None on failure."""
+    Returns None on failure. Stderr is logged for debugging."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "thumb.jpg"
         cmd = (
@@ -56,7 +56,25 @@ async def grab_thumbnail(url: str, timeout: float = 15.0) -> str | None:
             f"-rw_timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
             f"{shlex.quote(str(out))}"
         )
-        code, _, _ = await _run(cmd, timeout=timeout)
+        code, _, err = await _run(cmd, timeout=timeout)
         if code != 0 or not out.exists():
+            log.info("grab_thumbnail failed (code=%s): %s", code, err.strip()[:300])
             return None
         return base64.b64encode(out.read_bytes()).decode()
+
+
+async def grab_thumbnail_verbose(url: str, timeout: float = 15.0) -> tuple[str | None, str | None]:
+    """Like grab_thumbnail, but also returns FFmpeg stderr for the
+    /diagnose endpoint so operators can see why a stream is failing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "thumb.jpg"
+        cmd = (
+            "ffmpeg -hide_banner -loglevel info -rtsp_transport tcp "
+            f"-rw_timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
+            f"{shlex.quote(str(out))}"
+        )
+        code, _, err = await _run(cmd, timeout=timeout)
+        b64 = None
+        if code == 0 and out.exists():
+            b64 = base64.b64encode(out.read_bytes()).decode()
+        return b64, err.strip()[:4000]

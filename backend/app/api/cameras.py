@@ -11,7 +11,7 @@ from app.connectors.base import ConnectionTestResult
 from app.connectors.dahua_http import DahuaHTTP
 from app.connectors.discovery import discover_onvif
 from app.connectors.hikvision_isapi import HikvisionISAPI
-from app.connectors.rtsp import grab_thumbnail, probe_rtsp
+from app.connectors.rtsp import grab_thumbnail, grab_thumbnail_verbose, probe_rtsp
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Camera, User
@@ -199,14 +199,58 @@ async def snapshot(camera_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "camera not found")
     pw = decrypt(cam.password_encrypted or "")
     rtsp = _camera_rtsp_url(cam, subtype=1, password_plain=pw)
-    img = await grab_thumbnail(rtsp, timeout=15)
+    img, err = await grab_thumbnail_verbose(rtsp, timeout=15)
     if not img:
+        # Surface the actual FFmpeg error to the caller — "snapshot grab
+        # failed" with no detail makes diagnosis impossible.
         cam.status = "offline"
-        cam.last_error = "snapshot grab failed"
+        cam.last_error = (err or "snapshot grab failed")[:1000]
         db.commit()
-        raise HTTPException(503, "stream unavailable")
+        raise HTTPException(503, detail=cam.last_error)
     cam.status = "online"
     cam.last_seen_at = datetime.now(timezone.utc)
     cam.last_error = None
     db.commit()
     return {"jpeg_b64": img}
+
+
+# Operator-visible diagnostic: tries the substream and the mainstream and
+# reports the full FFmpeg stderr for each. Use from the UI when a camera
+# refuses to connect.
+@router.get("/{camera_id}/diagnose")
+async def diagnose(camera_id: int, db: Session = Depends(get_db),
+                   _u: User = Depends(get_current_user)):
+    from app.utils.crypto import decrypt
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    pw = decrypt(cam.password_encrypted or "")
+    results = []
+    for sub in (1, 0):    # try substream first, then main
+        rtsp = _camera_rtsp_url(cam, subtype=sub, password_plain=pw)
+        # Hide credentials in the response so we can paste safely.
+        from urllib.parse import urlsplit, urlunsplit
+        u = urlsplit(rtsp)
+        redacted_netloc = (u.hostname or "") + (f":{u.port}" if u.port else "")
+        if u.username:
+            redacted_netloc = f"{u.username}:****@{redacted_netloc}"
+        redacted = urlunsplit((u.scheme, redacted_netloc, u.path, u.query, u.fragment))
+
+        _img, err = await grab_thumbnail_verbose(rtsp, timeout=12)
+        results.append({
+            "subtype": sub,
+            "stream_label": "substream" if sub == 1 else "mainstream",
+            "rtsp_url": redacted,
+            "ok": _img is not None,
+            "ffmpeg_stderr": err,
+        })
+    return {
+        "camera_id": cam.id,
+        "name": cam.name,
+        "brand": cam.brand,
+        "connection_type": cam.connection_type,
+        "host": cam.host,
+        "rtsp_port": cam.rtsp_port,
+        "channel_number": cam.channel_number,
+        "results": results,
+    }

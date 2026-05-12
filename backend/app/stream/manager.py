@@ -28,11 +28,23 @@ class StreamManager:
         self.workers: dict[int, FFmpegWorker] = {}
         self.specs:   dict[int, CameraSpec]   = {}
 
+    @staticmethod
+    def _redact(url: str) -> str:
+        """Hide RTSP password so logs are safe to share."""
+        from urllib.parse import urlsplit, urlunsplit
+        u = urlsplit(url)
+        netloc = (u.hostname or "") + (f":{u.port}" if u.port else "")
+        if u.username:
+            netloc = f"{u.username}:****@{netloc}"
+        return urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment))
+
     def reconcile(self, desired: list[CameraSpec]) -> None:
         """Bring the live set of workers in line with `desired`.
         Workers are started/stopped/restarted as needed; URL changes
         trigger a restart (simplest correct behaviour)."""
         desired_by_id = {d.camera_id: d for d in desired}
+        log.info("reconcile: %d desired cameras, %d running workers",
+                 len(desired_by_id), len(self.workers))
 
         # Stop removed cameras.
         for cam_id in list(self.workers):
@@ -49,7 +61,8 @@ class StreamManager:
                 continue
             if cam_id in self.workers:
                 self.workers[cam_id].stop()
-            log.info("starting worker for camera %s -> %s", cam_id, spec.rtsp_url[:64])
+            log.info("starting worker camera=%s fps=%s url=%s",
+                     cam_id, spec.fps, self._redact(spec.rtsp_url))
             w = FFmpegWorker(spec.camera_id, spec.rtsp_url,
                              fps=spec.fps, width=spec.width, buffer=self.buffer)
             w.start()
