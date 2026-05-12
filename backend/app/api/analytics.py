@@ -178,6 +178,59 @@ def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_us
     return StreamingResponse(buf, media_type="image/png")
 
 
+# ---- Campaign analytics (P4) ---------------------------------------
+
+@router.get("/campaigns/{campaign_id}/lift")
+def campaign_lift_endpoint(campaign_id: int,
+                           metric_type: str = "passersby",
+                           db: Session = Depends(get_db),
+                           _u=Depends(get_current_user)):
+    """Compare same-length windows before / during / after the campaign."""
+    from app.analytics.reports import campaign_lift
+    try:
+        return campaign_lift(db, campaign_id, metric_type=metric_type)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+# ---- Exportable reports (P4) ---------------------------------------
+
+@router.get("/report.csv")
+def report_csv(since: datetime, until: datetime,
+               store_id: int | None = None,
+               db: Session = Depends(get_db),
+               _u=Depends(get_current_user)):
+    from fastapi.responses import StreamingResponse as _Stream
+    from app.analytics.reports import store_rollup, stores_csv
+    if store_id:
+        ids = [store_id]
+    else:
+        ids = [s.id for s in db.query(Store).filter(Store.is_active == True).all()]  # noqa: E712
+    rollups = [store_rollup(db, sid, since=since, until=until) for sid in ids]
+    payload = stores_csv(rollups)
+    return _Stream(iter([payload]), media_type="text/csv",
+                   headers={"Content-Disposition": 'attachment; filename="vivoguard_report.csv"'})
+
+
+@router.get("/report.pdf")
+def report_pdf(since: datetime, until: datetime,
+               store_id: int | None = None,
+               db: Session = Depends(get_db),
+               _u=Depends(get_current_user)):
+    from fastapi.responses import StreamingResponse as _Stream
+    from app.analytics.reports import store_rollup, stores_pdf
+    if store_id:
+        ids = [store_id]
+        title = f"VivoGuard — store #{store_id} report"
+    else:
+        ids = [s.id for s in db.query(Store).filter(Store.is_active == True).all()]  # noqa: E712
+        title = "VivoGuard — chain report"
+    rollups = [store_rollup(db, sid, since=since, until=until) for sid in ids]
+    pdf = stores_pdf(title, rollups)
+    return _Stream(iter([pdf]), media_type="application/pdf",
+                   headers={"Content-Disposition": 'attachment; filename="vivoguard_report.pdf"'})
+
+
 @router.get("/dashboard/multi")
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                 days: int = 7):

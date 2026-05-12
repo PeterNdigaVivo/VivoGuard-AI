@@ -10,6 +10,7 @@ const NAV = [
   { to: '/live',     label: 'Live View' },
   { to: '/alerts',   label: 'Alerts' },
   { to: '/stockroom', label: 'Stockroom Log' },
+  { to: '/campaigns', label: 'Campaigns' },
   { to: '/training', label: 'AI Training' },
   { to: '/models',   label: 'Models' },
   { to: '/system',   label: 'System' },

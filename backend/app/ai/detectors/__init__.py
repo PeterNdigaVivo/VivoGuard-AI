@@ -28,6 +28,9 @@ from app.ai.detectors.retail_p3 import (
     DemographicDetector, ShrinkageDetector, StockroomAccessDetector,
     UniformComplianceDetector,
 )
+from app.ai.detectors.retail_p4 import (
+    PassersbyDetector, WindowEngagementDetector,
+)
 
 
 # Stateless — safe to share a single instance.
@@ -62,6 +65,9 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     "demographic":        DemographicDetector,
     "shrinkage":          ShrinkageDetector,
     "stockroom_access":   StockroomAccessDetector,
+    # Retail P4.
+    "passersby":          PassersbyDetector,
+    "window_engagement":  WindowEngagementDetector,
 }
 
 
