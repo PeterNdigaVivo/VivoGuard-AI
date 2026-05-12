@@ -13,6 +13,14 @@ DETECTION_TYPES = (
     "trespass", "tripwire", "tailgating", "loitering",
     "fall", "smoke", "fire", "abandoned_object",
     "shelf", "occupancy", "heatmap", "custom",
+    # Retail extension (commit 1+).
+    "queue", "unique_visitor", "intrusion",
+    # P2 features.
+    "staff_present", "dwell", "shutter",
+    # P3 features.
+    "uniform_compliance", "demographic", "shrinkage", "stockroom_access",
+    # P4 features.
+    "passersby", "window_engagement",
 )
 
 

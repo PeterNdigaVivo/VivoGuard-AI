@@ -30,6 +30,9 @@ from app.models import Alert, Camera, DetectionEvent, Zone
 log = logging.getLogger(__name__)
 
 DEDUP_SECONDS = 30
+# When an event's extra.priority == "high" (currently: intrusion), use a
+# much shorter dedup so urgent events aren't silenced.
+DEDUP_SECONDS_HIGH = 5
 
 
 class AlertEngine:
@@ -40,11 +43,13 @@ class AlertEngine:
         # Last fire timestamps for de-dup, keyed by (camera_id, detection_type, zone_id).
         self._last: dict[tuple[int, str, int | None], float] = {}
 
-    def _should_emit(self, camera_id: int, dtype: str, zone_id: int | None) -> bool:
+    def _should_emit(self, camera_id: int, dtype: str, zone_id: int | None,
+                     priority: str = "normal") -> bool:
         key = (camera_id, dtype, zone_id)
         now = time.time()
         last = self._last.get(key, 0.0)
-        if now - last < DEDUP_SECONDS:
+        window = DEDUP_SECONDS_HIGH if priority == "high" else DEDUP_SECONDS
+        if now - last < window:
             return False
         self._last[key] = now
         return True
@@ -54,7 +59,8 @@ class AlertEngine:
         camera_id = int(payload["camera_id"])
         dtype     = str(payload["detection_type"])
         zone_id   = payload.get("zone_id")
-        if not self._should_emit(camera_id, dtype, zone_id):
+        priority  = ((payload.get("extra") or {}).get("priority")) or "normal"
+        if not self._should_emit(camera_id, dtype, zone_id, priority=priority):
             return
 
         # Hydrate camera + zone for human-friendly fields.

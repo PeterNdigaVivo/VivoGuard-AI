@@ -34,6 +34,11 @@ class DetectorContext:
     tracks: list[tuple]                     # (Track, det) pairs from IOUTracker
     zones: list[dict]                       # zone rows ({id, polygon_coords_json, detection_types_json, ...})
     config: dict                            # detection_configs keyed by type
+    # Retail extension (commit 0+). Optional so older callers keep working.
+    db: Any = None                          # SQLAlchemy session for metric writes
+    store_id: int | None = None             # cached camera.store_id
+    business_hours: dict | None = None      # cached store.business_hours_json
+    store_timezone: str = "UTC"
 
 
 class Detector:

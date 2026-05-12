@@ -12,6 +12,14 @@ const DETECTION_TYPES = [
   'trespass', 'tripwire', 'tailgating', 'loitering',
   'fall', 'smoke', 'fire', 'abandoned_object',
   'shelf', 'occupancy', 'heatmap', 'custom',
+  // Retail P1.
+  'queue', 'unique_visitor', 'intrusion',
+  // P2.
+  'staff_present', 'dwell', 'shutter',
+  // P3.
+  'uniform_compliance', 'demographic', 'shrinkage', 'stockroom_access',
+  // P4.
+  'passersby', 'window_engagement',
 ]
 
 interface Cfg {

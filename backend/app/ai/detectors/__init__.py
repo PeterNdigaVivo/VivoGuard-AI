@@ -17,6 +17,10 @@ from app.ai.detectors.stateful import (
     LPRDetector, LoiteringDetector, OccupancyDetector, TailgatingDetector,
     TrespassDetector, TripwireDetector,
 )
+from app.ai.detectors.retail_p1 import (
+    IntrusionDetector, OccupancyMetricsDetector, QueueDetector,
+    UniqueVisitorDetector,
+)
 
 
 # Stateless — safe to share a single instance.
@@ -31,12 +35,17 @@ STATELESS: dict[str, Detector] = {
 
 # Stateful — instantiated per camera in DetectorRegistry.
 STATEFUL_TYPES: dict[str, Type[Detector]] = {
-    "loitering":        LoiteringDetector,
-    "abandoned_object": AbandonedObjectDetector,
-    "tripwire":         TripwireDetector,
-    "tailgating":       TailgatingDetector,
-    "heatmap":          HeatmapDetector,
-    "lpr":              LPRDetector,
+    "loitering":          LoiteringDetector,
+    "abandoned_object":   AbandonedObjectDetector,
+    "tripwire":           TripwireDetector,
+    "tailgating":         TailgatingDetector,
+    "heatmap":            HeatmapDetector,
+    "lpr":                LPRDetector,
+    # Retail P1.
+    "queue":              QueueDetector,
+    "occupancy_metrics":  OccupancyMetricsDetector,
+    "unique_visitor":     UniqueVisitorDetector,
+    "intrusion":          IntrusionDetector,
 }
 
 

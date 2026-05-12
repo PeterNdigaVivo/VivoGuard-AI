@@ -30,7 +30,7 @@ from app.ai.tracker import IOUTracker
 from app.ai.yolov8_runner import infer
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AIModel, Camera, DetectionConfig, DetectionEvent, Zone, Alert
+from app.models import AIModel, Camera, DetectionConfig, DetectionEvent, Store, Zone, Alert
 from app.stream.frame_buffer import FrameBuffer
 
 log = logging.getLogger(__name__)
@@ -138,9 +138,22 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 continue
 
             tracks = tracker.update(raw)
+
+            # Store metadata — cached per-frame so detectors don't each hit Postgres.
+            store_id = cam.store_id
+            business_hours = None
+            store_tz = "UTC"
+            if store_id is not None:
+                store = db.get(Store, store_id)
+                if store:
+                    business_hours = store.business_hours_json
+                    store_tz = store.timezone or "UTC"
+
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
                 raw_detections=raw, tracks=tracks, zones=zones, config=cfg,
+                db=db, store_id=store_id,
+                business_hours=business_hours, store_timezone=store_tz,
             )
 
             events_emitted: list[dict] = []
