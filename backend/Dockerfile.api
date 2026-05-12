@@ -34,19 +34,19 @@ WORKDIR /app
 COPY requirements.api.txt requirements.api.txt
 RUN pip install --upgrade pip && pip install -r requirements.api.txt
 
-# Hard guard: if anything (cache, transitive, future requirements edit)
-# lets bcrypt 4.1+ in, fail the build NOW with a clear message. Login
-# would otherwise crash later with the cryptic "password cannot be
-# longer than 72 bytes" error.
+# Functional smoke test for password hashing. If bcrypt can't hash AND
+# verify a sentinel password at build time, fail the image build now —
+# rather than at the operator's first login attempt.
 RUN python - <<'PY'
 import bcrypt, sys
-v = bcrypt.__version__
-if not (v.startswith("4.0") or v == "4.0.1"):
-    sys.exit(
-        f"\n*** BUILD FAILED: bcrypt {v} installed, but passlib needs 4.0.x. ***\n"
-        f"*** Check requirements.api.txt and rebuild with --no-cache.        ***\n"
-    )
-print(f"bcrypt version OK: {v}")
+SENTINEL = b"VivoGuard smoke test \xe2\x9c\x94"
+try:
+    h = bcrypt.hashpw(SENTINEL, bcrypt.gensalt(rounds=4))
+    assert bcrypt.checkpw(SENTINEL, h), "verify mismatch"
+    assert not bcrypt.checkpw(b"wrong", h), "false positive on wrong password"
+except Exception as e:
+    sys.exit(f"\n*** BUILD FAILED: bcrypt smoke test failed ({e}). ***\n")
+print(f"bcrypt OK ({bcrypt.__version__}) — hash/verify round-trip works")
 PY
 
 COPY app    ./app

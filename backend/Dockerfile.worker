@@ -31,17 +31,18 @@ WORKDIR /app
 COPY requirements.api.txt requirements.api.txt
 RUN pip install --upgrade pip && pip install -r requirements.api.txt
 
-# Hard guard on bcrypt — see Dockerfile.api for the full reasoning.
-# Catching this in the worker build too means the failure surfaces at
-# image-build time, not at first login.
+# Functional smoke test — see Dockerfile.api. The worker imports
+# app.auth.security indirectly, so any password-hash regression breaks
+# the worker too. Catch it at build time.
 RUN python - <<'PY'
 import bcrypt, sys
-v = bcrypt.__version__
-if not v.startswith("4.0"):
-    sys.exit(
-        f"\n*** BUILD FAILED: bcrypt {v} installed, but passlib needs 4.0.x. ***\n"
-    )
-print(f"bcrypt version OK: {v}")
+SENTINEL = b"VivoGuard smoke test \xe2\x9c\x94"
+try:
+    h = bcrypt.hashpw(SENTINEL, bcrypt.gensalt(rounds=4))
+    assert bcrypt.checkpw(SENTINEL, h), "verify mismatch"
+except Exception as e:
+    sys.exit(f"\n*** BUILD FAILED: bcrypt smoke test failed ({e}). ***\n")
+print(f"bcrypt OK ({bcrypt.__version__}) — hash/verify round-trip works")
 PY
 
 # AI deps. CPU-only torch index is much smaller and avoids pulling CUDA

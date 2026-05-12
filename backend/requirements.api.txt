@@ -15,24 +15,12 @@ celery[redis]>=5.4
 boto3>=1.34
 minio>=7.2
 # --- Password hashing ---
-# Order and explicitness matter here. We had repeated reports of pip
-# installing bcrypt 5.x despite a `bcrypt==4.0.1` pin in the same file.
-# Root cause: when `passlib[bcrypt]` is declared, pip's resolver sees
-# two independent inputs for the bcrypt requirement (the extra and the
-# explicit pin) and on some builds picks the newest version satisfying
-# the loosest constraint.
-#
-# Fix: declare passlib WITHOUT the [bcrypt] extra, then pin bcrypt
-# explicitly. That leaves a single source of truth for bcrypt.
-#
-# Why we can't just take the latest: passlib 1.7.4 reads
-# `bcrypt.__about__.__version__`, which bcrypt removed in 4.1+. The
-# symptom is the login-time crash:
-#   ValueError: password cannot be longer than 72 bytes
-# (passlib falls back to a broken path when version detection fails).
-# Re-evaluate this pin if/when passlib >= 1.7.5 is released.
-passlib>=1.7,<2.0
-bcrypt>=4.0,<4.1
+# Direct bcrypt — no passlib. We previously fought passlib's
+# bcrypt.__about__ probe (broken in bcrypt 4.1+); switching to the
+# bcrypt library directly removes both the version constraint and the
+# whole class of resolver bugs that kept reinstalling bcrypt 5.x and
+# breaking login. Any modern bcrypt works.
+bcrypt>=4.0
 python-jose[cryptography]>=3.3
 python-multipart>=0.0.9
 cryptography>=42
