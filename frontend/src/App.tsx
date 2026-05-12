@@ -21,6 +21,7 @@ import SystemHealthPage    from '@/pages/SystemHealthPage'
 import StoresPage          from '@/pages/StoresPage'
 import StoreDashboardPage  from '@/pages/StoreDashboardPage'
 import MultiStorePage      from '@/pages/MultiStorePage'
+import HeatmapPage         from '@/pages/HeatmapPage'
 
 // Gate: any unauthenticated request is bounced to /login while preserving
 // the originally requested path so we can redirect back after sign-in.
@@ -46,6 +47,7 @@ export default function App() {
             <Route path="/cameras"                  element={<CamerasPage />} />
             <Route path="/cameras/add"              element={<AddCameraWizard />} />
             <Route path="/cameras/:id/detection"    element={<DetectionConfigPage />} />
+            <Route path="/cameras/:id/heatmap"      element={<HeatmapPage />} />
             <Route path="/live"                     element={<LiveViewPage />} />
             <Route path="/alerts"                   element={<AlertsPage />} />
             <Route path="/training"                 element={<TrainingStudioPage />} />

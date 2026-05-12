@@ -112,6 +112,72 @@ def store_dashboard(store_id: int, days: int = 7,
     }
 
 
+# ---- Heatmap export (P2) -------------------------------------------
+
+@router.get("/heatmap/{camera_id}")
+def heatmap_grid(camera_id: int, _u=Depends(get_current_user)):
+    """Return the latest heatmap as a 2-D array of cell counts."""
+    import json
+    import redis
+    from app.config import settings
+    r = redis.from_url(settings.redis_url)
+    raw = r.get(f"vg:heatmap:{camera_id}")
+    if not raw:
+        raise HTTPException(404, "heatmap not available — is heatmap detection enabled?")
+    return json.loads(raw)
+
+
+@router.get("/heatmap/{camera_id}/image")
+def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_user)):
+    """Render the heatmap as a PNG with a jet-style colour ramp.
+
+    The frontend overlays this on the camera snapshot (or on a manually
+    uploaded floorplan) at the operator's chosen opacity. Returns
+    `image/png` bytes.
+    """
+    import io
+    import json
+    import redis
+    from fastapi.responses import StreamingResponse
+    from app.config import settings
+
+    r = redis.from_url(settings.redis_url)
+    raw = r.get(f"vg:heatmap:{camera_id}")
+    if not raw:
+        raise HTTPException(404, "heatmap not available")
+    payload = json.loads(raw)
+    grid = payload.get("grid") or []
+    n    = payload.get("size") or len(grid) or 32
+    if not grid:
+        raise HTTPException(404, "heatmap empty")
+
+    from PIL import Image
+    max_v = max((max(row) for row in grid), default=0) or 1
+    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    px = img.load()
+    for y in range(n):
+        for x in range(n):
+            v = grid[y][x] / max_v
+            if v <= 0:
+                continue
+            # Simple "blue-cyan-yellow-red" ramp.
+            if v < 0.25:
+                rgb = (0, int(v * 4 * 255), 255)
+            elif v < 0.5:
+                rgb = (0, 255, int((1 - (v - 0.25) * 4) * 255))
+            elif v < 0.75:
+                rgb = (int((v - 0.5) * 4 * 255), 255, 0)
+            else:
+                rgb = (255, int((1 - (v - 0.75) * 4) * 255), 0)
+            px[x, y] = (*rgb, int(alpha * 255))
+    # Upscale 16× for a smoother overlay; bilinear keeps the look soft.
+    img = img.resize((n * 16, n * 16), Image.BILINEAR)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")
+
+
 @router.get("/dashboard/multi")
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                 days: int = 7):

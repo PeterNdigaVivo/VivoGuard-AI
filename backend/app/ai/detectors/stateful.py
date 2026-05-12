@@ -307,13 +307,35 @@ class FallDetector(Detector):
 
 
 class HeatmapDetector(Detector):
-    """Accumulates a coarse density grid; no events emitted (read via API)."""
+    """Accumulates a coarse density grid; no events emitted (read via API).
+
+    Every PUBLISH_INTERVAL seconds the full grid is pushed to Redis as a
+    JSON blob under `vg:heatmap:{camera_id}` so the API can render it
+    without sharing in-process state with the inference worker.
+    """
 
     detection_type = "heatmap"
     GRID = 32
+    PUBLISH_INTERVAL = 30   # seconds
 
     def __init__(self):
         self.grid: dict[int, list[list[int]]] = {}     # camera_id -> grid
+        self._last_publish: dict[int, float] = {}
+
+    def _publish(self, camera_id: int) -> None:
+        try:
+            import json, time as _t
+            import redis
+            from app.config import settings
+            r = redis.from_url(settings.redis_url)
+            payload = {
+                "grid": self.grid.get(camera_id, []),
+                "size": self.GRID,
+                "updated_at": _t.time(),
+            }
+            r.set(f"vg:heatmap:{camera_id}", json.dumps(payload), ex=24 * 3600)
+        except Exception:
+            pass
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -327,6 +349,13 @@ class HeatmapDetector(Detector):
             gx = min(self.GRID - 1, max(0, int(cx * self.GRID)))
             gy = min(self.GRID - 1, max(0, int(cy * self.GRID)))
             g[gy][gx] += 1
+
+        # Periodic Redis publish for the export endpoint.
+        import time as _t
+        now = _t.time()
+        if now - self._last_publish.get(ctx.camera_id, 0) >= self.PUBLISH_INTERVAL:
+            self._last_publish[ctx.camera_id] = now
+            self._publish(ctx.camera_id)
         return []     # heatmap doesn't generate alerts
 
 

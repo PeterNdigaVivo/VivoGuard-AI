@@ -21,6 +21,9 @@ from app.ai.detectors.retail_p1 import (
     IntrusionDetector, OccupancyMetricsDetector, QueueDetector,
     UniqueVisitorDetector,
 )
+from app.ai.detectors.retail_p2 import (
+    AisleDwellDetector, ShutterDetector, StaffPresenceDetector,
+)
 
 
 # Stateless — safe to share a single instance.
@@ -46,6 +49,10 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     "occupancy_metrics":  OccupancyMetricsDetector,
     "unique_visitor":     UniqueVisitorDetector,
     "intrusion":          IntrusionDetector,
+    # Retail P2.
+    "staff_present":      StaffPresenceDetector,
+    "dwell":              AisleDwellDetector,
+    "shutter":            ShutterDetector,
 }
 
 
