@@ -8,6 +8,11 @@ from app.models.event     import DetectionEvent
 from app.models.alert     import Alert, ALERT_STATUSES
 from app.models.ai_model  import AIModel
 from app.models.training  import Dataset, TrainingImage, Annotation, TrainingJob
+# Retail extension models (commit 0+ of the multi-store rollout).
+from app.models.store     import Store, Shift
+from app.models.metrics   import (
+    MetricSnapshot, METRIC_TYPES, VisitorTrack, StockroomAccess, Campaign,
+)
 
 __all__ = [
     "User",
@@ -18,4 +23,7 @@ __all__ = [
     "Alert", "ALERT_STATUSES",
     "AIModel",
     "Dataset", "TrainingImage", "Annotation", "TrainingJob",
+    # Retail extension.
+    "Store", "Shift",
+    "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess", "Campaign",
 ]

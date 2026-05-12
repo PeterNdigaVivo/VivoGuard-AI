@@ -18,6 +18,9 @@ import AnnotationPage      from '@/pages/AnnotationPage'
 import TrainingDashboardPage from '@/pages/TrainingDashboardPage'
 import ModelsPage          from '@/pages/ModelsPage'
 import SystemHealthPage    from '@/pages/SystemHealthPage'
+import StoresPage          from '@/pages/StoresPage'
+import StoreDashboardPage  from '@/pages/StoreDashboardPage'
+import MultiStorePage      from '@/pages/MultiStorePage'
 
 // Gate: any unauthenticated request is bounced to /login while preserving
 // the originally requested path so we can redirect back after sign-in.
@@ -37,6 +40,9 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route index element={<Navigate to="/cameras" replace />} />
+            <Route path="/chain"                    element={<MultiStorePage />} />
+            <Route path="/stores"                   element={<StoresPage />} />
+            <Route path="/stores/:id"               element={<StoreDashboardPage />} />
             <Route path="/cameras"                  element={<CamerasPage />} />
             <Route path="/cameras/add"              element={<AddCameraWizard />} />
             <Route path="/cameras/:id/detection"    element={<DetectionConfigPage />} />

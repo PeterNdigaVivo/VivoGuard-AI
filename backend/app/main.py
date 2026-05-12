@@ -72,6 +72,18 @@ app.include_router(nvr_router)
 
 # Detection config, zones, alerts, training, system, websockets routers
 # are included from steps 7–9 and 14.
+# Retail extension routers (commit 0+).
+try:
+    from app.api.stores import router as stores_router               # noqa: E402
+    app.include_router(stores_router)
+except ImportError:
+    pass
+try:
+    from app.api.analytics import router as analytics_router         # noqa: E402
+    app.include_router(analytics_router)
+except ImportError:
+    pass
+
 try:
     from app.api.detection_config import router as detection_router  # noqa: E402
     app.include_router(detection_router)

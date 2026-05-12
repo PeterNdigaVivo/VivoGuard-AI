@@ -4,6 +4,8 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
 
 const NAV = [
+  { to: '/chain',    label: 'Chain' },
+  { to: '/stores',   label: 'Stores' },
   { to: '/cameras',  label: 'Cameras' },
   { to: '/live',     label: 'Live View' },
   { to: '/alerts',   label: 'Alerts' },

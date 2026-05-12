@@ -86,6 +86,10 @@ class Camera(Base):
     ai_enabled:        Mapped[bool]  = mapped_column(Boolean, default=True)
     inference_fps:     Mapped[int]   = mapped_column(Integer, default=5)
 
+    # Multi-store retail rollout: optional formal Store FK. Cameras
+    # without a store still work via the legacy `site` text field.
+    store_id:          Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
+
     # Health.
     status:            Mapped[str]   = mapped_column(String(16), default="pending")
     last_seen_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
