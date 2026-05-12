@@ -31,6 +31,19 @@ WORKDIR /app
 COPY requirements.api.txt requirements.api.txt
 RUN pip install --upgrade pip && pip install -r requirements.api.txt
 
+# Hard guard on bcrypt — see Dockerfile.api for the full reasoning.
+# Catching this in the worker build too means the failure surfaces at
+# image-build time, not at first login.
+RUN python - <<'PY'
+import bcrypt, sys
+v = bcrypt.__version__
+if not v.startswith("4.0"):
+    sys.exit(
+        f"\n*** BUILD FAILED: bcrypt {v} installed, but passlib needs 4.0.x. ***\n"
+    )
+print(f"bcrypt version OK: {v}")
+PY
+
 # AI deps. CPU-only torch index is much smaller and avoids pulling CUDA
 # runtime libs when GPU is not available.
 COPY requirements.worker.txt requirements.worker.txt

@@ -34,6 +34,21 @@ WORKDIR /app
 COPY requirements.api.txt requirements.api.txt
 RUN pip install --upgrade pip && pip install -r requirements.api.txt
 
+# Hard guard: if anything (cache, transitive, future requirements edit)
+# lets bcrypt 4.1+ in, fail the build NOW with a clear message. Login
+# would otherwise crash later with the cryptic "password cannot be
+# longer than 72 bytes" error.
+RUN python - <<'PY'
+import bcrypt, sys
+v = bcrypt.__version__
+if not (v.startswith("4.0") or v == "4.0.1"):
+    sys.exit(
+        f"\n*** BUILD FAILED: bcrypt {v} installed, but passlib needs 4.0.x. ***\n"
+        f"*** Check requirements.api.txt and rebuild with --no-cache.        ***\n"
+    )
+print(f"bcrypt version OK: {v}")
+PY
+
 COPY app    ./app
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
