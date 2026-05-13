@@ -196,9 +196,63 @@ class ShutterDetector(Detector):
         thr = float(cfg.get("confidence_threshold", 0.5))
         if open_best >= thr or closed_best >= thr:
             return 1 if open_best >= closed_best else 0
-        # Mode 2 heuristic deferred to the inference worker because it
-        # needs raw pixel access; signalled via dim/dark_threshold dim.
+
+        # Mode 2: brightness heuristic. Works without a custom model.
+        # Sample the mean grayscale luminance of the shutter zone polygon
+        # (or the whole frame if no zone is tagged). A closed metal/glass
+        # shutter is reliably darker than the lit interior behind it.
+        #
+        # Tunables via detection_configs.extra:
+        #   dark_threshold       (default 50, range 0..255 — < threshold = closed)
+        #   bright_threshold     (default 90, > threshold = open)
+        # The dead band between them yields `None` (insufficient signal,
+        # don't change state — avoids flapping at dawn/dusk).
+        if ctx.frame_bgr is None:
+            return None
+        dark_thr   = float((cfg.get("extra") or {}).get("dark_threshold",   50))
+        bright_thr = float((cfg.get("extra") or {}).get("bright_threshold", 90))
+        lum = self._zone_luminance(
+            ctx.frame_bgr,
+            (zone or {}).get("polygon_coords_json"),
+        )
+        if lum is None:
+            return None
+        if lum <= dark_thr:
+            return 0
+        if lum >= bright_thr:
+            return 1
         return None
+
+    @staticmethod
+    def _zone_luminance(frame_bgr, polygon_norm) -> float | None:
+        """Mean grayscale luminance (0..255) inside the polygon. Returns
+        None if the polygon is invalid or pixel ops fail (e.g. cv2 missing
+        in a stripped image)."""
+        try:
+            import numpy as np
+            import cv2
+        except ImportError:
+            return None
+        if frame_bgr is None or frame_bgr.size == 0:
+            return None
+        h, w = frame_bgr.shape[:2]
+        if not polygon_norm or len(polygon_norm) < 3:
+            # No zone polygon — sample the bottom third (typical shutter
+            # location in shop entrance cameras).
+            roi = frame_bgr[int(h * 2 / 3):, :, :]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            return float(gray.mean()) if gray.size else None
+        try:
+            pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in polygon_norm], dtype=np.int32)
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask, [pts], 255)
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            pixels = gray[mask > 0]
+            if pixels.size == 0:
+                return None
+            return float(pixels.mean())
+        except Exception:
+            return None
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)

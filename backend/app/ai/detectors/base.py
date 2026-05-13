@@ -39,6 +39,10 @@ class DetectorContext:
     store_id: int | None = None             # cached camera.store_id
     business_hours: dict | None = None      # cached store.business_hours_json
     store_timezone: str = "UTC"
+    # Raw BGR ndarray for detectors that need pixel access (e.g. the
+    # ShutterDetector luminance heuristic). Inference worker sets this;
+    # if absent, pixel-mode detectors fall through.
+    frame_bgr: Any = None
 
 
 class Detector:

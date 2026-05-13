@@ -154,6 +154,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 raw_detections=raw, tracks=tracks, zones=zones, config=cfg,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
+                frame_bgr=frame,
             )
 
             events_emitted: list[dict] = []
