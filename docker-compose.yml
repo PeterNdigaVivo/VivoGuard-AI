@@ -111,7 +111,18 @@ services:
         GPU: "false"
     image: vivoguard/worker:latest
     restart: unless-stopped
-    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    # `-B` runs Celery Beat in the same process so the inference
+    # supervisor (every 30s) fires without a separate beat container.
+    # `--concurrency=8` lets up to 8 cameras run inference in parallel.
+    # Bump higher when you've sized GPU/CPU for more cameras.
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app
+      - worker
+      - -B
+      - --loglevel=info
+      - --concurrency=8
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings
