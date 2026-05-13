@@ -33,13 +33,15 @@ from app.ai.detectors.retail_p4 import (
 )
 
 
-# Stateless — safe to share a single instance.
+# Stateless — one shared instance per type, built from class refs.
+# `d` is the class; `d()` instantiates; `d.detection_type` is the class
+# attribute defined on each Detector subclass.
 STATELESS: dict[str, Detector] = {
     d.detection_type: d() for d in (
-        PersonDetector(), VehicleDetector(), AnimalDetector(), FaceDetector(),
-        WeaponDetector(), WeaponBrandishedDetector(), FireDetector(), SmokeDetector(),
-        ShelfDetector(), CustomDetector(), CrowdDetector(), OccupancyDetector(),
-        TrespassDetector(), FallDetector(),
+        PersonDetector, VehicleDetector, AnimalDetector, FaceDetector,
+        WeaponDetector, WeaponBrandishedDetector, FireDetector, SmokeDetector,
+        ShelfDetector, CustomDetector, CrowdDetector, OccupancyDetector,
+        TrespassDetector, FallDetector,
     )
 }
 
