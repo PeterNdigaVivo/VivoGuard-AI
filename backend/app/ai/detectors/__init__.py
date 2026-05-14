@@ -31,6 +31,7 @@ from app.ai.detectors.retail_p3 import (
 from app.ai.detectors.retail_p4 import (
     PassersbyDetector, WindowEngagementDetector,
 )
+from app.ai.detectors.retail_entry_exit import EntryExitDetector
 
 
 # Stateless — one shared instance per type. Written as an explicit
@@ -78,6 +79,8 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     # Retail P4.
     "passersby":          PassersbyDetector,
     "window_engagement":  WindowEngagementDetector,
+    # Lumana parity P1.
+    "entry_exit":         EntryExitDetector,
 }
 
 

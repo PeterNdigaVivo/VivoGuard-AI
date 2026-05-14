@@ -55,9 +55,16 @@ def store_dashboard(store_id: int, days: int = 7,
         raise HTTPException(404, "store not found")
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
+    # JOIN through cameras.store_id rather than filtering
+    # MetricSnapshot.store_id directly. Why: a metric row written when
+    # the camera was unattached has store_id=NULL; after the operator
+    # attaches the camera, those rows would otherwise stay invisible to
+    # the dashboard forever. Joining through cameras picks them up
+    # automatically.
     def _last(metric: str) -> float | None:
         row = (db.query(MetricSnapshot)
-                 .filter(MetricSnapshot.store_id == store_id,
+                 .join(Camera, Camera.id == MetricSnapshot.camera_id)
+                 .filter(Camera.store_id == store_id,
                          MetricSnapshot.metric_type == metric)
                  .order_by(MetricSnapshot.period_start.desc())
                  .first())
@@ -65,7 +72,17 @@ def store_dashboard(store_id: int, days: int = 7,
 
     def _avg(metric: str) -> float | None:
         v = (db.query(func.avg(MetricSnapshot.value))
-               .filter(MetricSnapshot.store_id == store_id,
+               .join(Camera, Camera.id == MetricSnapshot.camera_id)
+               .filter(Camera.store_id == store_id,
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= since)
+               .scalar())
+        return float(v) if v is not None else None
+
+    def _sum(metric: str) -> float | None:
+        v = (db.query(func.sum(MetricSnapshot.value))
+               .join(Camera, Camera.id == MetricSnapshot.camera_id)
+               .filter(Camera.store_id == store_id,
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= since)
                .scalar())
@@ -103,6 +120,11 @@ def store_dashboard(store_id: int, days: int = 7,
             "queue_wait_avg_sec":   _avg("queue_wait_seconds"),
             "staff_present_avg":    _avg("staff_present_pct"),
             "unique_visitors_today": int(unique_today),
+            # Directional entry/exit counters (Lumana parity, P1).
+            "visitors_in_window":   _sum("visitor_count_in"),
+            "visitors_out_window":  _sum("visitor_count_out"),
+            "visitors_net_window":  ((_sum("visitor_count_in") or 0)
+                                     - (_sum("visitor_count_out") or 0)),
             "passersby_avg":        _avg("passersby"),
             "stop_rate_avg":        _avg("stop_rate"),
             "dwell_seconds_avg":    _avg("dwell_seconds"),
@@ -176,6 +198,30 @@ def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_us
     img.save(buf, format="PNG")
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png")
+
+
+# ---- Backfill metric_snapshots.store_id from current camera.store_id ----
+
+@router.post("/admin/backfill-store-ids")
+def backfill_store_ids(db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    """One-shot fixer. Sets metric_snapshots.store_id = cameras.store_id
+    for every metric row currently NULL whose camera is now attached to
+    a store. The dashboard JOINs through cameras anyway, but writing it
+    down makes per-store SQL queries cheaper and helps the PDF reports.
+    Safe to re-run."""
+    from sqlalchemy import text
+    res = db.execute(text("""
+        UPDATE metric_snapshots m
+        SET store_id = c.store_id
+        FROM cameras c
+        WHERE m.camera_id = c.id
+          AND m.store_id IS NULL
+          AND c.store_id IS NOT NULL
+        RETURNING m.id
+    """))
+    n = len(res.fetchall())
+    db.commit()
+    return {"backfilled_rows": n}
 
 
 # ---- Campaign analytics (P4) ---------------------------------------

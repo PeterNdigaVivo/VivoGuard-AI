@@ -21,6 +21,8 @@ DETECTION_TYPES = (
     "uniform_compliance", "demographic", "shrinkage", "stockroom_access",
     # P4 features.
     "passersby", "window_engagement",
+    # Lumana parity.
+    "entry_exit", "fight", "shelf_change",
 )
 
 
