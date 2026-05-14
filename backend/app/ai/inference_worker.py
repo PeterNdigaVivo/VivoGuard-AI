@@ -64,6 +64,43 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
             "schedule_json": c.schedule_json,
         }
 
+    # ------------------------------------------------------------------
+    # Auto-enable detection types that the operator has implicitly opted
+    # into via zone tagging. If a zone has detection_types_json=["queue"]
+    # the QueueDetector should run for that camera even if the operator
+    # never toggled "queue" in the AI Settings page. This eliminates the
+    # most common "I configured it but nothing happens" failure mode.
+    # ------------------------------------------------------------------
+    zone_types: set[str] = set()
+    for z in zones:
+        for t in (z["detection_types_json"] or []):
+            zone_types.add(t)
+    for t in zone_types:
+        if t not in cfg:
+            cfg[t] = {
+                "enabled": True,
+                "confidence_threshold": 0.4,
+                "min_object_size": 0,
+                "detection_every_n_frames": 1,
+                "dwell_time_seconds": None,
+                "crowd_threshold": None,
+                "extra": None,
+                "schedule_json": None,
+            }
+        elif not cfg[t].get("enabled"):
+            cfg[t] = {**cfg[t], "enabled": True}
+
+    # ------------------------------------------------------------------
+    # Always-on metric detectors. These are KPIs that every operator
+    # wants for every camera (occupancy headcount, footfall heatmap)
+    # so we never gate them on a toggle. Each one defends itself against
+    # missing config inside its evaluate() too.
+    # ------------------------------------------------------------------
+    for t in ("occupancy_metrics", "heatmap"):
+        cfg[t] = {**cfg.get(t, {}), "enabled": True,
+                  "confidence_threshold": cfg.get(t, {}).get("confidence_threshold", 0.4),
+                  "detection_every_n_frames": cfg.get(t, {}).get("detection_every_n_frames", 1)}
+
     weights = settings.default_model
     if cam.ai_model_id:
         m = db.get(AIModel, cam.ai_model_id)

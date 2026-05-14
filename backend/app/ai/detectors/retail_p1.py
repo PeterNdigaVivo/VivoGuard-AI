@@ -111,39 +111,53 @@ class QueueDetector(Detector):
 # ---------------------------------------------------------------------------
 
 class OccupancyMetricsDetector(Detector):
-    """Companion to the existing OccupancyDetector — only writes
-    metrics + capacity alerts. The original OccupancyDetector keeps
-    handling per-zone crowd events; this one handles the *store-wide*
-    occupancy KPI used by the dashboard.
+    """Always-on KPI writer. Counts people in the frame each tick and
+    writes the `occupancy` metric. Not gated on operator toggles — the
+    inference worker forces this detector on for every camera.
+
+    Three earlier bugs fixed here:
+      1. It used to require `config["occupancy"].enabled=True`. Most
+         cameras don't have a row for "occupancy" so it never wrote a
+         single metric.
+      2. The aggregator was `last`, which means the value of the LAST
+         frame in the 1-minute bucket overwrites the rest. If the last
+         frame happened to be empty (very common: someone stepped out)
+         the bucket showed 0 even though the room was busy moments
+         earlier. Switched to `max` — peak occupancy in the bucket is
+         what every dashboard actually wants.
+      3. Threshold was 0.5 but YOLO's call-time conf is 0.25 and
+         alert-side detectors used 0.4. The metric saw fewer people
+         than the rest of the system. Now reads from cfg if set, else
+         defaults to 0.4.
     """
 
     detection_type = "occupancy_metrics"
 
     def __init__(self):
-        self._fired_cap = False
         self._fired_cap_at = 0.0
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
-        cfg = ctx.config.get("occupancy")    # piggybacks on the operator's existing config
-        if not cfg or not cfg.get("enabled"):
-            return []
-        thr_conf = float(cfg.get("confidence_threshold", 0.5))
+        # Always run; the inference loader sets enabled=True for us.
+        thr_conf = float(((ctx.config.get("occupancy_metrics") or {})
+                          .get("confidence_threshold")) or 0.4)
         people = [d for d in ctx.raw_detections
                   if d["cls"] in COCO_PERSON and d["conf"] >= thr_conf]
         count = len(people)
 
         if ctx.db is not None:
             from app.analytics import recorder
+            # `max` so a busy minute is captured even if the very last
+            # frame in the bucket happened to be empty.
             recorder.record(ctx.db, "occupancy", float(count),
                             camera_id=ctx.camera_id, store_id=ctx.store_id,
-                            aggregator="last")
+                            aggregator="max")
 
         # Capacity alert — once per minute when exceeded.
         out: list[DetectionEvent] = []
-        if ctx.store_id is not None and ctx.db is not None:
+        if ctx.store_id is not None and ctx.db is not None and count > 0:
             from app.models import Store
             store = ctx.db.get(Store, ctx.store_id)
-            cap = (store.capacity if store else None) if store else None
+            cap = store.capacity if store else None
             now = time.time()
             if cap and count >= cap and now - self._fired_cap_at > 60:
                 self._fired_cap_at = now
