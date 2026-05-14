@@ -33,16 +33,24 @@ from app.ai.detectors.retail_p4 import (
 )
 
 
-# Stateless — one shared instance per type, built from class refs.
-# `d` is the class; `d()` instantiates; `d.detection_type` is the class
-# attribute defined on each Detector subclass.
+# Stateless — one shared instance per type. Written as an explicit
+# literal dict so there's no class-vs-instance ambiguity (an earlier
+# comprehension form caused 'TypeError: X object is not callable').
 STATELESS: dict[str, Detector] = {
-    d.detection_type: d() for d in (
-        PersonDetector, VehicleDetector, AnimalDetector, FaceDetector,
-        WeaponDetector, WeaponBrandishedDetector, FireDetector, SmokeDetector,
-        ShelfDetector, CustomDetector, CrowdDetector, OccupancyDetector,
-        TrespassDetector, FallDetector,
-    )
+    "person":             PersonDetector(),
+    "vehicle":            VehicleDetector(),
+    "animal":             AnimalDetector(),
+    "face":               FaceDetector(),
+    "weapon":             WeaponDetector(),
+    "weapon_brandished":  WeaponBrandishedDetector(),
+    "fire":               FireDetector(),
+    "smoke":              SmokeDetector(),
+    "shelf":              ShelfDetector(),
+    "custom":             CustomDetector(),
+    "crowd":              CrowdDetector(),
+    "occupancy":          OccupancyDetector(),
+    "trespass":           TrespassDetector(),
+    "fall":               FallDetector(),
 }
 
 # Stateful — instantiated per camera in DetectorRegistry.
