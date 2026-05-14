@@ -200,6 +200,120 @@ def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_us
     return StreamingResponse(buf, media_type="image/png")
 
 
+# ---- Peak-hour staffing recommendations (P3) -----------------------
+
+@router.get("/staffing-recommendation/{store_id}")
+def staffing_recommendation(store_id: int, days: int = 14,
+                            target_ratio: float = 0.08,
+                            db: Session = Depends(get_db),
+                            _u=Depends(get_current_user)):
+    """Analyse the last N days of `occupancy` metrics for the store,
+    bucket by hour-of-day, and recommend a staff headcount per bucket
+    using `target_ratio` (staff per visitor — default 1 staff per
+    ~12 visitors). Returns up to 24 rows sorted by hour."""
+    from sqlalchemy import extract
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (db.query(
+                extract("hour", MetricSnapshot.period_start).label("hour"),
+                func.avg(MetricSnapshot.value).label("avg_occ"),
+                func.max(MetricSnapshot.value).label("peak_occ"),
+            )
+            .join(Camera, Camera.id == MetricSnapshot.camera_id)
+            .filter(Camera.store_id == store_id,
+                    MetricSnapshot.metric_type == "occupancy",
+                    MetricSnapshot.period_start >= since)
+            .group_by("hour")
+            .order_by("hour")
+            .all())
+    out = []
+    for hr, avg_occ, peak_occ in rows:
+        avg = float(avg_occ or 0)
+        peak = float(peak_occ or 0)
+        out.append({
+            "hour": int(hr),
+            "avg_occupancy":  round(avg, 1),
+            "peak_occupancy": round(peak, 1),
+            "recommended_staff": max(1, int(round(peak * target_ratio))),
+        })
+    return {"store_id": store_id, "days_analysed": days,
+            "target_staff_per_visitor": target_ratio, "by_hour": out}
+
+
+# ---- Side-by-side store comparison (P3) ----------------------------
+
+@router.get("/compare")
+def compare_stores(metric_type: str = "occupancy",
+                   days: int = 7,
+                   db: Session = Depends(get_db),
+                   _u=Depends(get_current_user)):
+    """Returns one row per active store with avg / peak / total / sample
+    count for the given metric. Powers the chain comparison chart."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (db.query(
+                Store.id, Store.name, Store.country,
+                func.avg(MetricSnapshot.value).label("avg_v"),
+                func.max(MetricSnapshot.value).label("peak_v"),
+                func.sum(MetricSnapshot.value).label("sum_v"),
+                func.count(MetricSnapshot.id).label("samples"),
+            )
+            .join(Camera, Camera.store_id == Store.id)
+            .join(MetricSnapshot, MetricSnapshot.camera_id == Camera.id)
+            .filter(MetricSnapshot.metric_type == metric_type,
+                    MetricSnapshot.period_start >= since,
+                    Store.is_active == True)  # noqa: E712
+            .group_by(Store.id, Store.name, Store.country)
+            .order_by(func.avg(MetricSnapshot.value).desc())
+            .all())
+    return {
+        "metric_type": metric_type, "days": days,
+        "stores": [
+            {"store_id": sid, "store_name": name, "country": country,
+             "avg":   float(avg_v or 0),
+             "peak":  float(peak_v or 0),
+             "total": float(sum_v or 0),
+             "samples": int(samples)}
+            for (sid, name, country, avg_v, peak_v, sum_v, samples) in rows
+        ],
+    }
+
+
+# ---- Customer journeys (P3) ----------------------------------------
+
+@router.get("/journeys/{store_id}")
+def journeys_for_store(store_id: int, days: int = 1,
+                       limit: int = 200,
+                       db: Session = Depends(get_db),
+                       _u=Depends(get_current_user)):
+    from app.models import CustomerJourney
+    from datetime import date
+    since_day = date.today() - timedelta(days=days - 1)
+    rows = (db.query(CustomerJourney)
+              .filter(CustomerJourney.store_id == store_id,
+                      CustomerJourney.day >= since_day)
+              .order_by(CustomerJourney.started_at.desc())
+              .limit(limit).all())
+    from collections import Counter
+    seq_counter: Counter = Counter()
+    for j in rows:
+        seq = tuple((z.get("zone_name") or f"z{z.get('zone_id')}")
+                    for z in (j.zone_sequence_json or []))
+        if len(seq) >= 2:
+            seq_counter[seq] += 1
+    top_paths = [{"path": list(seq), "count": cnt}
+                 for seq, cnt in seq_counter.most_common(10)]
+    return {
+        "store_id": store_id,
+        "journey_count": len(rows),
+        "top_paths": top_paths,
+        "journeys": [
+            {"id": j.id, "started_at": j.started_at.isoformat(),
+             "ended_at": j.ended_at.isoformat() if j.ended_at else None,
+             "zones": j.zone_sequence_json}
+            for j in rows[:50]
+        ],
+    }
+
+
 # ---- Backfill metric_snapshots.store_id from current camera.store_id ----
 
 @router.post("/admin/backfill-store-ids")

@@ -24,6 +24,8 @@ import MultiStorePage      from '@/pages/MultiStorePage'
 import HeatmapPage         from '@/pages/HeatmapPage'
 import StockroomLogPage    from '@/pages/StockroomLogPage'
 import CampaignsPage       from '@/pages/CampaignsPage'
+import SearchPage          from '@/pages/SearchPage'
+import ComparePage         from '@/pages/ComparePage'
 
 // Gate: any unauthenticated request is bounced to /login while preserving
 // the originally requested path so we can redirect back after sign-in.
@@ -52,6 +54,8 @@ export default function App() {
             <Route path="/cameras/:id/heatmap"      element={<HeatmapPage />} />
             <Route path="/stockroom"                element={<StockroomLogPage />} />
             <Route path="/campaigns"                element={<CampaignsPage />} />
+            <Route path="/search"                   element={<SearchPage />} />
+            <Route path="/compare"                  element={<ComparePage />} />
             <Route path="/live"                     element={<LiveViewPage />} />
             <Route path="/alerts"                   element={<AlertsPage />} />
             <Route path="/training"                 element={<TrainingStudioPage />} />

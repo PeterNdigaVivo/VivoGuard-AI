@@ -67,6 +67,13 @@ def confirm(alert_id: int, db: Session = Depends(get_db),
     a.status = "confirmed"
     a.assigned_to = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
+    # Continuous-learning feedback: confirmed alerts become positive
+    # training examples for the next retrain of that detection type.
+    try:
+        from app.training.feedback_loop import absorb_confirmed
+        absorb_confirmed(db, a.id)
+    except Exception:
+        pass
     db.commit()
     return AlertActionOut(id=a.id, status=a.status)
 
@@ -80,5 +87,10 @@ def dismiss(alert_id: int, db: Session = Depends(get_db),
     a.status = "dismissed"
     a.assigned_to = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
+    try:
+        from app.training.feedback_loop import mark_dismissed
+        mark_dismissed(db, a.id)
+    except Exception:
+        pass
     db.commit()
     return AlertActionOut(id=a.id, status=a.status)

@@ -96,7 +96,7 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     # so we never gate them on a toggle. Each one defends itself against
     # missing config inside its evaluate() too.
     # ------------------------------------------------------------------
-    for t in ("occupancy_metrics", "heatmap"):
+    for t in ("occupancy_metrics", "heatmap", "customer_journey"):
         cfg[t] = {**cfg.get(t, {}), "enabled": True,
                   "confidence_threshold": cfg.get(t, {}).get("confidence_threshold", 0.4),
                   "detection_every_n_frames": cfg.get(t, {}).get("detection_every_n_frames", 1)}
