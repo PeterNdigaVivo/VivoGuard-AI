@@ -25,6 +25,7 @@ celery_app = Celery(
         "app.tasks.inference",
         "app.tasks.training",
         "app.tasks.maintenance",
+        "app.tasks.reports",
     ],
 )
 celery_app.conf.update(
@@ -40,6 +41,10 @@ celery_app.conf.update(
         "refresh-ddns-every-5min": {
             "task": "maintenance.refresh_ddns",
             "schedule": 300.0,
+        },
+        "scheduled-reports-dispatcher": {
+            "task": "reports.dispatch_due",
+            "schedule": 300.0,    # 5 min — granular enough for daily/weekly
         },
     },
 )

@@ -88,6 +88,16 @@ try:
     app.include_router(stockroom_router)
 except ImportError:
     pass
+try:
+    from app.api.search import router as search_router               # noqa: E402
+    app.include_router(search_router)
+except ImportError:
+    pass
+try:
+    from app.api.scheduled_reports import router as sched_router     # noqa: E402
+    app.include_router(sched_router)
+except ImportError:
+    pass
 
 try:
     from app.api.detection_config import router as detection_router  # noqa: E402

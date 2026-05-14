@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
+    # WhatsApp via Twilio Business API.
+    twilio_whatsapp_from: str = ""       # e.g. "whatsapp:+14155238886"
+    whatsapp_to: str = ""                # comma-separated "whatsapp:+254..."
+    whatsapp_priority_only: bool = True  # only high-priority alerts by default
     webhook_url: str = ""
     webhook_auth_header: str = ""
 

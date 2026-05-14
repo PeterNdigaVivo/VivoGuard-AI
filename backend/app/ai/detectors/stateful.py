@@ -373,8 +373,41 @@ class LPRDetector(Detector):
     def __init__(self):
         self._fired: set[int] = set()
 
-    def recognise(self, frame, bbox_px) -> str:                 # noqa: ARG002
-        return ""    # plug your OCR here
+    _reader = None    # cached EasyOCR reader (lazy-loaded on first call)
+
+    def recognise(self, frame_bgr, bbox_px) -> str:
+        """Crop the vehicle bbox and run OCR. Returns the highest-confidence
+        plate-shaped string (>= 4 chars, mostly A-Z0-9), or '' if none.
+
+        Uses EasyOCR if installed (`pip install easyocr`). If not present,
+        returns '' silently — the event still fires with the bbox so
+        operators can wire their preferred OCR later by subclassing.
+        """
+        if frame_bgr is None or bbox_px is None:
+            return ""
+        try:
+            if LPRDetector._reader is None:
+                import easyocr
+                LPRDetector._reader = easyocr.Reader(["en"], gpu=False)
+            import numpy as np
+            x1, y1, x2, y2 = [int(v) for v in bbox_px]
+            x1, y1 = max(0, x1), max(0, y1)
+            crop = frame_bgr[y1:y2, x1:x2]
+            if crop.size == 0:
+                return ""
+            results = LPRDetector._reader.readtext(crop, detail=1, paragraph=False)
+            # Pick the highest-confidence string that looks plate-ish.
+            best = ""
+            best_conf = 0.0
+            for _box, text, conf in results:
+                cleaned = "".join(ch for ch in text.upper() if ch.isalnum())
+                if len(cleaned) >= 4 and conf > best_conf:
+                    best, best_conf = cleaned, conf
+            return best
+        except ImportError:
+            return ""
+        except Exception:
+            return ""
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -388,10 +421,19 @@ class LPRDetector(Detector):
             if tr.track_id in self._fired:
                 continue
             self._fired.add(tr.track_id)
+            plate = ""
+            provider = "stub"
+            # Try OCR — frame_bgr is set by the inference worker.
+            try:
+                plate = self.recognise(ctx.frame_bgr, det.get("bbox_px"))
+                provider = "easyocr" if plate else "stub"
+            except Exception:
+                pass
             out.append(DetectionEvent(
                 detection_type=self.detection_type, cls=det["cls"],
                 confidence=det["conf"], bbox_norm=det["bbox_norm"],
                 track_id=tr.track_id,
-                extra={"plate": "", "ocr_provider": "stub"},
+                extra={"plate": plate, "ocr_provider": provider,
+                       "store_id": ctx.store_id},
             ))
         return out

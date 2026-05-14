@@ -89,6 +89,29 @@ def detach_camera(store_id: int, camera_id: int,
     return {"camera_id": cam.id, "store_id": None}
 
 
+# Bulk attach — operator picks N cameras from the chain and attaches
+# them to one store in a single call. Returns the list of affected IDs.
+from pydantic import BaseModel
+class BulkAttach(BaseModel):
+    camera_ids: list[int]
+
+
+@router.post("/{store_id}/cameras/bulk-attach", response_model=list[int])
+def bulk_attach(store_id: int, payload: BulkAttach,
+                db: Session = Depends(get_db),
+                _u=Depends(require_role("admin", "operator"))):
+    if not db.get(Store, store_id):
+        raise HTTPException(404, "store not found")
+    affected: list[int] = []
+    for cid in payload.camera_ids:
+        cam = db.get(Camera, cid)
+        if cam:
+            cam.store_id = store_id
+            affected.append(cam.id)
+    db.commit()
+    return affected
+
+
 # ---------- shifts ----------
 
 @router.get("/{store_id}/shifts", response_model=list[ShiftOut])

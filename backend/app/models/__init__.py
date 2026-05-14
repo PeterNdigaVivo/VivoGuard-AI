@@ -13,6 +13,7 @@ from app.models.store     import Store, Shift
 from app.models.metrics   import (
     MetricSnapshot, METRIC_TYPES, VisitorTrack, StockroomAccess, Campaign,
 )
+from app.models.scheduled import ScheduledReport, CustomerJourney
 
 __all__ = [
     "User",
@@ -26,4 +27,5 @@ __all__ = [
     # Retail extension.
     "Store", "Shift",
     "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess", "Campaign",
+    "ScheduledReport", "CustomerJourney",
 ]
