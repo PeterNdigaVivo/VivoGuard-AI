@@ -174,13 +174,18 @@ class OccupancyMetricsDetector(Detector):
 # ---------------------------------------------------------------------------
 
 class UniqueVisitorDetector(Detector):
-    """Marks a new visitor each time a person track is seen for the
-    first time today in an `entry`-tagged zone. Dedup is at the (store,
-    day, camera, track_id) level — good enough without a ReID model;
-    swap the signature builder when a ReID model is wired in.
+    """Always-on per-camera daily dedup of visitors.
 
-    No alert is emitted; the metric lands in `visitor_tracks` and is
-    read by the dashboard.
+    Earlier this detector required an `entry`-tagged zone. Per the
+    overhaul Rule 1 it now runs on every camera unconditionally: any
+    person track seen today on this camera contributes one visitor row.
+    Dedup key = (store_id, day, "cam{id}:tr{track_id}").
+
+    Known limitation: without a ReID model, the same person passing
+    two cameras in one store is counted twice. Tag ONE camera at each
+    store with `entry_exit` zones for the most accurate single-source
+    of truth (see EntryExitDetector); leave the others as ambient
+    contribution to occupancy and heatmap.
     """
 
     detection_type = "unique_visitor"
@@ -190,13 +195,8 @@ class UniqueVisitorDetector(Detector):
         self._seen_today: set[tuple] = set()
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
-        cfg = ctx.config.get(self.detection_type)
-        if not cfg or not cfg.get("enabled"):
-            return []
+        # Always-on per Rule 1; inference loader force-enables this type.
         if ctx.db is None:
-            return []
-        zones = [z for z in ctx.zones if "entry" in (z.get("detection_types_json") or [])]
-        if not zones:
             return []
 
         today = date.today()
@@ -205,14 +205,6 @@ class UniqueVisitorDetector(Detector):
         for tr, det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
-            # Must be inside any entry zone.
-            in_entry = False
-            for z in zones:
-                if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
-                    in_entry = True
-                    break
-            if not in_entry:
-                continue
 
             signature = f"cam{ctx.camera_id}:tr{tr.track_id}"
             cache_key = (ctx.store_id, today, signature)
@@ -220,8 +212,6 @@ class UniqueVisitorDetector(Detector):
                 continue
             self._seen_today.add(cache_key)
 
-            # INSERT … ON CONFLICT DO NOTHING (we have a unique index on
-            # (store_id, day, track_signature)).
             try:
                 vt = VisitorTrack(
                     store_id=ctx.store_id,

@@ -6,6 +6,12 @@
         &camera_id=...
         &since=...&until=...
 
+  GET /analytics/store/{id}/live
+        — Rule-3 dashboard: every required tile in one payload, never
+          returns NULL for an active camera. 0 means 'detector running,
+          nothing detected'. status=="no_data_yet" only when every
+          camera in the store has been online <10 min.
+
   GET /analytics/dashboard/store/{store_id}
         — single-store rollup of key KPIs
   GET /analytics/dashboard/multi
@@ -131,6 +137,261 @@ def store_dashboard(store_id: int, days: int = 7,
             "shutter_open_now":     _last("shutter_open"),
         },
         "alerts_breakdown": alert_breakdown,
+    }
+
+
+# ====================================================================
+# Live store dashboard — Rules 1, 2, 3 of the retail overhaul
+# ====================================================================
+
+@router.get("/store/{store_id}/live")
+def store_live_dashboard(store_id: int,
+                         db: Session = Depends(get_db),
+                         _u=Depends(get_current_user)):
+    """Single payload powering the redesigned store dashboard.
+
+    Semantics (Rule 3):
+      • For every active camera attached to this store we expect at
+        least one metric row in the last 5 minutes. If a camera has been
+        attached <10 minutes ago and has no metrics yet we report it as
+        'no_data_yet'; otherwise missing metrics become 0.
+      • Tiles for zone-gated metrics (queue, staff, etc.) carry a
+        `visible` flag — the frontend hides the tile when the store
+        has no zone of that kind.
+    """
+    from sqlalchemy import extract
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {
+            "store_id": store_id, "store_name": store.name,
+            "country": store.country, "status": "no_cameras",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "tiles": {}, "zone_capabilities": {},
+        }
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=7)
+    five_min_ago = now - timedelta(minutes=5)
+
+    youngest_cam_age = min(
+        ((now - c.created_at).total_seconds() if c.created_at else 999999)
+        for c in cams
+    )
+
+    # Zone capabilities — which tiles to show.
+    from app.models import Zone
+    zone_tags: set[str] = set()
+    for z in (db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()):
+        for t in (z.detection_types_json or []):
+            zone_tags.add(t)
+
+    capabilities = {
+        "queue":         "queue" in zone_tags,
+        "counter":       "counter" in zone_tags,
+        "aisle":         "aisle" in zone_tags,
+        "entry_exit":    "entry_exit" in zone_tags,
+        "shutter":       "shutter" in zone_tags,
+        "stockroom":     "stockroom" in zone_tags,
+        "shelf_change":  "shelf_change" in zone_tags,
+        "sidewalk":      "sidewalk" in zone_tags,
+        "window":        "window" in zone_tags,
+        "high_value":    "high_value" in zone_tags,
+        "restricted":    "restricted" in zone_tags,
+    }
+
+    def _has_recent_data() -> bool:
+        return bool(
+            db.query(MetricSnapshot.id)
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.period_start >= five_min_ago)
+              .first()
+        )
+
+    # If every camera was attached very recently AND there are zero
+    # rows yet, report "no_data_yet" instead of zeroes.
+    if youngest_cam_age < 600 and not _has_recent_data():
+        return {
+            "store_id": store_id, "store_name": store.name,
+            "country": store.country, "status": "no_data_yet",
+            "as_of": now.isoformat(),
+            "tiles": {}, "zone_capabilities": capabilities,
+        }
+
+    # ----- aggregations ---------------------------------------------
+    def _sum(metric: str, since: datetime) -> float:
+        v = (db.query(func.sum(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= since)
+               .scalar())
+        return float(v) if v is not None else 0.0
+
+    def _max(metric: str, since: datetime) -> float:
+        v = (db.query(func.max(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= since)
+               .scalar())
+        return float(v) if v is not None else 0.0
+
+    def _avg(metric: str, since: datetime) -> float:
+        v = (db.query(func.avg(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= since)
+               .scalar())
+        return float(v) if v is not None else 0.0
+
+    def _latest_sum(metric: str) -> float:
+        """Sum the latest sample of `metric` across the store's cameras.
+        Use case: occupancy NOW = sum of each camera's most recent
+        occupancy reading. (Without ReID, this can double-count people
+        seen by two cameras simultaneously — see camera-aggregation doc.)"""
+        # Subquery: latest period_start per camera_id for this metric.
+        sub = (db.query(MetricSnapshot.camera_id,
+                        func.max(MetricSnapshot.period_start).label("p"))
+                 .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                         MetricSnapshot.metric_type == metric,
+                         MetricSnapshot.period_start >= five_min_ago)
+                 .group_by(MetricSnapshot.camera_id)
+                 .subquery())
+        v = (db.query(func.sum(MetricSnapshot.value))
+               .join(sub, (MetricSnapshot.camera_id == sub.c.camera_id)
+                          & (MetricSnapshot.period_start == sub.c.p))
+               .filter(MetricSnapshot.metric_type == metric)
+               .scalar())
+        return float(v) if v is not None else 0.0
+
+    # Unique visitors today across all cameras.
+    from app.models import VisitorTrack
+    unique_today = (db.query(func.count(VisitorTrack.id))
+                      .filter(VisitorTrack.camera_id.in_(cam_ids),
+                              VisitorTrack.day == today_start.date())
+                      .scalar() or 0)
+    unique_yesterday = (db.query(func.count(VisitorTrack.id))
+                          .filter(VisitorTrack.camera_id.in_(cam_ids),
+                                  VisitorTrack.day == (today_start - timedelta(days=1)).date())
+                          .scalar() or 0)
+
+    # Alerts today by type.
+    alerts_today = dict(
+        db.query(DetectionEvent.detection_type, func.count(Alert.id))
+          .join(Alert, Alert.event_id == DetectionEvent.id)
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  Alert.created_at >= today_start)
+          .group_by(DetectionEvent.detection_type)
+          .all()
+    )
+
+    # Hourly footfall sparkline — hour-bucketed occupancy (peak per hour).
+    hourly_rows = (db.query(extract("hour", MetricSnapshot.period_start).label("hr"),
+                            func.max(MetricSnapshot.value))
+                     .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                             MetricSnapshot.metric_type == "occupancy",
+                             MetricSnapshot.period_start >= today_start)
+                     .group_by("hr").order_by("hr").all())
+    hourly_footfall = [{"hour": int(h), "value": float(v or 0)} for h, v in hourly_rows]
+
+    # Per-aisle dwell, top 3.
+    aisle_rows = (db.query(MetricSnapshot.zone_id,
+                           func.avg(MetricSnapshot.value).label("d"))
+                    .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                            MetricSnapshot.metric_type == "dwell_seconds",
+                            MetricSnapshot.period_start >= today_start)
+                    .group_by(MetricSnapshot.zone_id)
+                    .order_by(func.avg(MetricSnapshot.value).desc())
+                    .limit(3).all())
+    top_aisles = []
+    for zid, d in aisle_rows:
+        z = db.get(Zone, zid) if zid else None
+        top_aisles.append({
+            "zone_id": zid,
+            "zone_name": z.name if z else "(unnamed)",
+            "avg_dwell_seconds": round(float(d or 0), 1),
+        })
+
+    # Heatmap thumbnail URL — first camera's most recent Redis grid.
+    heatmap_thumb_url = None
+    if cam_ids:
+        heatmap_thumb_url = f"/api/analytics/heatmap/{cam_ids[0]}/image?alpha=0.65"
+
+    def _trend(today_v: float, yesterday_v: float) -> dict:
+        if yesterday_v <= 0:
+            return {"direction": "flat", "delta_pct": None}
+        pct = (today_v - yesterday_v) / yesterday_v * 100
+        return {
+            "direction": "up" if pct > 5 else "down" if pct < -5 else "flat",
+            "delta_pct": round(pct, 1),
+        }
+
+    # Status traffic light: red if any high-priority alerts today,
+    # amber if staff_present_avg < 0.5 and counter exists, else green.
+    staff_today = _avg("staff_present_pct", today_start) if capabilities["counter"] else None
+    high_alerts_today = sum(
+        cnt for t, cnt in alerts_today.items()
+        if t in ("intrusion", "fight", "weapon", "weapon_brandished", "shrinkage")
+    )
+    if high_alerts_today > 0:
+        status_light = "red"
+    elif staff_today is not None and staff_today < 0.5:
+        status_light = "amber"
+    else:
+        status_light = "green"
+
+    tiles = {
+        "occupancy_now": {
+            "value": round(_latest_sum("occupancy"), 0),
+            "visible": True,
+        },
+        "occupancy_peak_today": {
+            "value": round(_max("occupancy", today_start), 0),
+            "visible": True,
+        },
+        "unique_visitors_today": {
+            "value": int(unique_today),
+            "trend": _trend(unique_today, unique_yesterday),
+            "visible": True,
+        },
+        "queue_length_now": {
+            "value": round(_latest_sum("queue_length"), 0),
+            "visible": capabilities["queue"],
+        },
+        "queue_wait_avg_today_sec": {
+            "value": round(_avg("queue_wait_seconds", today_start), 0),
+            "visible": capabilities["queue"],
+        },
+        "staff_present_pct_today": {
+            "value": round((staff_today or 0) * 100, 0),
+            "visible": capabilities["counter"],
+        },
+        "top_aisles": {"value": top_aisles, "visible": capabilities["aisle"]},
+        "alerts_today_by_type": {"value": alerts_today, "visible": True},
+        "hourly_footfall_today": {"value": hourly_footfall, "visible": True},
+        "heatmap_thumb_url":     {"value": heatmap_thumb_url, "visible": True},
+        "visitors_in_today":     {"value": round(_sum("visitor_count_in", today_start), 0),
+                                  "visible": capabilities["entry_exit"]},
+        "visitors_out_today":    {"value": round(_sum("visitor_count_out", today_start), 0),
+                                  "visible": capabilities["entry_exit"]},
+        "visitors_net_today":    {"value": round(
+                                      _sum("visitor_count_in", today_start)
+                                      - _sum("visitor_count_out", today_start), 0),
+                                  "visible": capabilities["entry_exit"]},
+    }
+
+    return {
+        "store_id": store_id, "store_name": store.name,
+        "country": store.country, "status": "live",
+        "status_light": status_light,
+        "as_of": now.isoformat(),
+        "camera_count": len(cams),
+        "zone_capabilities": capabilities,
+        "tiles": tiles,
     }
 
 

@@ -91,15 +91,25 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
             cfg[t] = {**cfg[t], "enabled": True}
 
     # ------------------------------------------------------------------
-    # Always-on metric detectors. These are KPIs that every operator
-    # wants for every camera (occupancy headcount, footfall heatmap)
-    # so we never gate them on a toggle. Each one defends itself against
-    # missing config inside its evaluate() too.
+    # Always-on metric detectors. Rule 1 of the overhaul: every camera
+    # contributes to these the moment it's attached — no toggles, no
+    # zone tags, no setup. Each detector defends itself against missing
+    # config inside evaluate() too, so this is belt-and-suspenders.
     # ------------------------------------------------------------------
-    for t in ("occupancy_metrics", "heatmap", "customer_journey"):
-        cfg[t] = {**cfg.get(t, {}), "enabled": True,
-                  "confidence_threshold": cfg.get(t, {}).get("confidence_threshold", 0.4),
-                  "detection_every_n_frames": cfg.get(t, {}).get("detection_every_n_frames", 1)}
+    ALWAYS_ON = (
+        "occupancy_metrics",   # headcount KPI
+        "heatmap",             # footfall grid
+        "unique_visitor",      # daily dedup'd visitors
+        "customer_journey",    # zone-sequence path
+        "demographic",         # privacy-compliant aggregate buckets
+    )
+    for t in ALWAYS_ON:
+        cfg[t] = {
+            **cfg.get(t, {}),
+            "enabled": True,
+            "confidence_threshold": cfg.get(t, {}).get("confidence_threshold", 0.4),
+            "detection_every_n_frames": cfg.get(t, {}).get("detection_every_n_frames", 1),
+        }
 
     weights = settings.default_model
     if cam.ai_model_id:

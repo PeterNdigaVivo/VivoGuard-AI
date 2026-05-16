@@ -237,11 +237,10 @@ class ShutterDetector(Detector):
             return None
         h, w = frame_bgr.shape[:2]
         if not polygon_norm or len(polygon_norm) < 3:
-            # No zone polygon — sample the bottom third (typical shutter
-            # location in shop entrance cameras).
-            roi = frame_bgr[int(h * 2 / 3):, :, :]
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            return float(gray.mean()) if gray.size else None
+            # Bug-fix: do NOT fall back to a global frame region. Earlier
+            # code sampled the bottom third, which produced false closures
+            # at night on every camera. Operators must draw a polygon.
+            return None
         try:
             pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in polygon_norm], dtype=np.int32)
             mask = np.zeros((h, w), dtype=np.uint8)
@@ -259,11 +258,16 @@ class ShutterDetector(Detector):
         if not cfg or not cfg.get("enabled"):
             return []
 
+        # Bug-fix: shutter previously fell back to "bottom third of frame"
+        # when no zone was tagged — which fired on every dim-lit camera at
+        # night. Now we REQUIRE an explicit zone tagged `shutter`.
         zone = None
         for z in ctx.zones:
             if "shutter" in (z.get("detection_types_json") or []):
                 zone = z
                 break
+        if zone is None:
+            return []
 
         state = self._detect_state(ctx, zone, cfg)
         if state is None:
