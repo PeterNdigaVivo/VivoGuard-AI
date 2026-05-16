@@ -1,12 +1,19 @@
-// Add Camera wizard:
-//   step 1: pick connection type
-//   step 2: enter host/credentials
-//   step 3: test → preview thumbnail → save (or pick channels for an NVR)
+// Add-camera wizard — Store-first onboarding.
+//
+//   Step 0: pick a store (mandatory). If the URL is /stores/:id/add-camera
+//           the store is pre-locked. If no stores exist we surface a
+//           prominent CTA to create one first.
+//   Step 1: pick connection type (single IP camera vs NVR multi-channel)
+//   Step 2: enter host / credentials
+//   Step 3: test → preview thumbnail → save
+//           (NVR: choose channels → bulk-add to the selected store)
 
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
 import { cameras as camsApi, nvr, type NVRChannel, type TestConnectionOut } from '@/api/cameras'
+import { stores as storesApi, type Store } from '@/api/stores'
+import { api } from '@/api/client'
 
 const TYPES: Array<{ value: string; label: string; isNvr?: boolean; brand: string }> = [
   { value: 'lan_rtsp',   label: 'LAN IP camera (RTSP)',                 brand: 'generic'   },
@@ -20,11 +27,17 @@ const TYPES: Array<{ value: string; label: string; isNvr?: boolean; brand: strin
 
 export default function AddCameraWizard() {
   const nav = useNavigate()
-  const [step, setStep] = useState(1)
+  const params = useParams()                  // when nested under /stores/:id
+  const [search] = useSearchParams()           // legacy ?store_id=
+  const presetStoreId = Number(params.id ?? search.get('store_id') ?? 0) || null
+
+  const [stores, setStores] = useState<Store[] | null>(null)
+  const [storeId, setStoreId] = useState<number | ''>(presetStoreId ?? '')
+  const [step, setStep] = useState<number>(presetStoreId ? 1 : 0)
 
   const [type, setType] = useState(TYPES[0])
   const [form, setForm] = useState({
-    name: '', site: '', host: '', sdk_port: '', rtsp_port: 554, http_port: 80,
+    name: '', host: '', sdk_port: '', rtsp_port: 554, http_port: 80,
     username: 'admin', password: '', channel_number: 1,
     rtsp_url_override: '', ddns_hostname: '', network_type: 'lan',
   })
@@ -35,10 +48,12 @@ export default function AddCameraWizard() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // NVR-specific state.
+  // NVR-specific.
   const [nvrChannels, setNvrChannels] = useState<NVRChannel[] | null>(null)
   const [pickedChannels, setPickedChannels] = useState<Set<number>>(new Set())
   const [nvrId, setNvrId] = useState<number | null>(null)
+
+  useEffect(() => { storesApi.list().then(setStores).catch(console.error) }, [])
 
   async function doTest() {
     setBusy(true); setError(null); setTest(null)
@@ -70,10 +85,12 @@ export default function AddCameraWizard() {
   }
 
   async function saveCamera() {
+    if (!storeId) { setError('Pick a store before saving.'); return }
     setBusy(true); setError(null)
     try {
       await camsApi.add({
-        name: form.name, site: form.site || null,
+        store_id: storeId,
+        name: form.name,
         brand: type.brand, connection_type: type.value,
         host: form.host, public_ip: form.network_type !== 'lan' ? form.host : null,
         sdk_port: form.sdk_port ? Number(form.sdk_port) : null,
@@ -84,30 +101,89 @@ export default function AddCameraWizard() {
         ddns_hostname: form.ddns_hostname || null,
         network_type: form.network_type, ai_enabled: true, inference_fps: 5,
       })
-      nav('/cameras')
+      nav(`/stores/${storeId}`)
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
 
   async function saveNVRChannels() {
     if (!nvrId || !nvrChannels) return
+    if (!storeId) { setError('Pick a store before saving.'); return }
     setBusy(true); setError(null)
     try {
       const picked = nvrChannels.filter(c => pickedChannels.has(c.channel))
-      await nvr.addChannels(nvrId, picked)
-      nav('/cameras')
+      // The legacy API accepted a free-form body; the new shape includes
+      // store_id at the top level.
+      await api(`/nvr/${nvrId}/add-channels`, {
+        method: 'POST',
+        body: { nvr_id: nvrId, store_id: storeId, channels: picked },
+      })
+      nav(`/stores/${storeId}`)
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
 
+  // ----- Step 0: pick a store -----
+  if (step === 0) {
+    if (stores === null) return <div className="p-6 text-slate-500">Loading…</div>
+    if (stores.length === 0) {
+      return (
+        <div className="p-6 max-w-2xl">
+          <PageHeader title="Add a camera" />
+          <Card className="p-8 text-center">
+            <div className="text-5xl mb-2">🏬</div>
+            <div className="text-lg font-medium mb-1">Create a store first</div>
+            <div className="text-slate-500 mb-4">
+              Cameras attach to stores. Add at least one store before adding cameras.
+            </div>
+            <Link to="/stores"><Button>Go to Stores</Button></Link>
+          </Card>
+        </div>
+      )
+    }
+    return (
+      <div className="p-6 max-w-2xl">
+        <PageHeader title="Add a camera" actions={
+          <Button variant="ghost" onClick={() => nav('/cameras')}>Cancel</Button>
+        } />
+        <Card className="p-4">
+          <div className="text-sm font-medium mb-2">1. Which store is this camera for?</div>
+          <Select className="w-full" value={storeId}
+                  onChange={e => setStoreId(Number(e.target.value) || '')}>
+            <option value="">— pick a store —</option>
+            {stores.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.name} — {s.city ?? '—'}, {s.country}
+              </option>
+            ))}
+          </Select>
+          <div className="mt-4 text-right">
+            <Button onClick={() => setStep(1)} disabled={!storeId}>Next →</Button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
+  const lockedStore = stores?.find(s => s.id === storeId)
+
   return (
     <div className="p-6 max-w-3xl">
-      <PageHeader title="Add Camera" actions={
-        <Button variant="ghost" onClick={() => nav('/cameras')}>Cancel</Button>
+      <PageHeader title={lockedStore ? `Add a camera to ${lockedStore.name}` : 'Add a camera'} actions={
+        <Button variant="ghost" onClick={() => storeId ? nav(`/stores/${storeId}`) : nav('/cameras')}>
+          Cancel
+        </Button>
       } />
+
+      {/* Locked-store strip */}
+      {lockedStore && (
+        <div className="mb-4 text-sm text-slate-500">
+          📍 {lockedStore.name} · {lockedStore.city ?? '—'}, {lockedStore.country}
+        </div>
+      )}
 
       {/* Step 1: pick type */}
       {step === 1 && (
         <Card className="p-4">
-          <div className="font-medium mb-3">Connection type</div>
+          <div className="font-medium mb-3">2. Connection type</div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {TYPES.map(t => (
               <label key={t.value}
@@ -121,7 +197,8 @@ export default function AddCameraWizard() {
               </label>
             ))}
           </div>
-          <div className="mt-4 text-right">
+          <div className="mt-4 flex justify-between">
+            <Button variant="ghost" onClick={() => setStep(0)}>← Store</Button>
             <Button onClick={() => setStep(2)}>Next →</Button>
           </div>
         </Card>
@@ -130,13 +207,18 @@ export default function AddCameraWizard() {
       {/* Step 2: details */}
       {step === 2 && (
         <Card className="p-4">
-          <div className="font-medium mb-3">Connection details</div>
+          <div className="font-medium mb-3">3. Connection details</div>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Name"><Input value={form.name} onChange={upd('name')} /></Field>
-            <Field label="Site / Location"><Input value={form.site} onChange={upd('site')} /></Field>
-            <Field label="Host (IP or DDNS)"><Input value={form.host} onChange={upd('host')} placeholder="41.90.110.206" /></Field>
+            <Field label="Camera name *">
+              <Input value={form.name} onChange={upd('name')}
+                     placeholder={type.isNvr ? 'Junction NVR' : 'Entrance Camera'} />
+            </Field>
+            <Field label="Host (IP or DDNS) *">
+              <Input value={form.host} onChange={upd('host')} placeholder="41.90.110.206" />
+            </Field>
             <Field label="Network">
-              <Select value={form.network_type} onChange={(e) => setForm({ ...form, network_type: e.target.value })}>
+              <Select value={form.network_type}
+                      onChange={(e) => setForm({ ...form, network_type: e.target.value })}>
                 <option value="lan">LAN</option>
                 <option value="wan">WAN (public IP / DDNS)</option>
                 <option value="vpn">VPN</option>
@@ -144,7 +226,7 @@ export default function AddCameraWizard() {
             </Field>
             <Field label="RTSP port"><Input type="number" value={form.rtsp_port} onChange={upd('rtsp_port')} /></Field>
             <Field label="HTTP port"><Input type="number" value={form.http_port} onChange={upd('http_port')} /></Field>
-            <Field label="SDK port (optional, e.g. 7000 Dahua / 8000 Hik)">
+            <Field label="SDK port (optional)">
               <Input type="number" value={form.sdk_port} onChange={upd('sdk_port')} placeholder="" />
             </Field>
             {!type.isNvr && (
@@ -155,36 +237,38 @@ export default function AddCameraWizard() {
             <Field label="Username"><Input value={form.username} onChange={upd('username')} /></Field>
             <Field label="Password"><Input type="password" value={form.password} onChange={upd('password')} /></Field>
             <Field label="RTSP URL override (optional)" full>
-              <Input value={form.rtsp_url_override} onChange={upd('rtsp_url_override')} placeholder="rtsp://user:pass@host:554/..." />
+              <Input value={form.rtsp_url_override} onChange={upd('rtsp_url_override')}
+                     placeholder="rtsp://user:pass@host:554/..." />
             </Field>
             <Field label="DDNS hostname (optional)" full>
-              <Input value={form.ddns_hostname} onChange={upd('ddns_hostname')} placeholder="mycamera.dyndns.org" />
+              <Input value={form.ddns_hostname} onChange={upd('ddns_hostname')}
+                     placeholder="mycamera.dyndns.org" />
             </Field>
           </div>
 
           <div className="mt-4 flex justify-between">
-            <Button variant="ghost" onClick={() => setStep(1)}>← Back</Button>
+            <Button variant="ghost" onClick={() => setStep(1)}>← Type</Button>
             <Button onClick={() => { setStep(3); type.isNvr ? connectNVR() : doTest() }}
-                    disabled={!form.host || !form.username}>
+                    disabled={!form.host || !form.username || !form.name}>
               {type.isNvr ? 'Connect NVR' : 'Test connection'}
             </Button>
           </div>
         </Card>
       )}
 
-      {/* Step 3a: regular camera result */}
+      {/* Step 3: result */}
       {step === 3 && !type.isNvr && (
         <Card className="p-4">
-          <div className="font-medium mb-3">Test result</div>
+          <div className="font-medium mb-3">4. Test result</div>
           {busy && <div className="text-slate-500">Probing…</div>}
           {error && <div className="text-red-600">{error}</div>}
           {test && (
             <>
               <div className="mb-3">
-                {test.ok
-                  ? <Badge color="green">OK</Badge>
-                  : <Badge color="red">Failed</Badge>}
-                {test.device_model && <span className="ml-2 text-sm text-slate-600">model: {test.device_model}</span>}
+                {test.ok ? <Badge color="green">OK</Badge> : <Badge color="red">Failed</Badge>}
+                {test.device_model && (
+                  <span className="ml-2 text-sm text-slate-600">model: {test.device_model}</span>
+                )}
               </div>
               {test.snapshot_jpeg_b64 && (
                 <img src={`data:image/jpeg;base64,${test.snapshot_jpeg_b64}`}
@@ -198,18 +282,15 @@ export default function AddCameraWizard() {
               {!test.ok && test.error && <div className="text-red-600 text-sm mt-2">{test.error}</div>}
             </>
           )}
-
           <div className="mt-4 flex justify-between">
-            <Button variant="ghost" onClick={() => setStep(2)}>← Back</Button>
+            <Button variant="ghost" onClick={() => setStep(2)}>← Edit</Button>
             <Button onClick={saveCamera} disabled={busy || !form.name}>Save camera</Button>
           </div>
         </Card>
       )}
-
-      {/* Step 3b: NVR result */}
       {step === 3 && type.isNvr && (
         <Card className="p-4">
-          <div className="font-medium mb-3">NVR channels</div>
+          <div className="font-medium mb-3">4. NVR channels</div>
           {busy && <div className="text-slate-500">Connecting…</div>}
           {error && <div className="text-red-600">{error}</div>}
           {nvrChannels && (
@@ -232,7 +313,7 @@ export default function AddCameraWizard() {
             </div>
           )}
           <div className="mt-4 flex justify-between">
-            <Button variant="ghost" onClick={() => setStep(2)}>← Back</Button>
+            <Button variant="ghost" onClick={() => setStep(2)}>← Edit</Button>
             <Button onClick={saveNVRChannels} disabled={busy || !nvrId || pickedChannels.size === 0}>
               Add {pickedChannels.size} channel{pickedChannels.size === 1 ? '' : 's'}
             </Button>

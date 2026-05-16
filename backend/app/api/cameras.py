@@ -64,6 +64,20 @@ def get_camera(camera_id: int, db: Session = Depends(get_db),
 @router.post("/add", response_model=CameraOut)
 def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
                _u: User = Depends(require_role("admin", "operator"))):
+    # Store-first onboarding rule (May-2026 overhaul): every new camera
+    # must belong to a store at creation time. Existing rows without
+    # store_id remain valid (the UI surfaces an "Assign to store" prompt
+    # for them) — but no NEW orphans are accepted via this endpoint.
+    store_id = getattr(payload, "store_id", None)
+    if not store_id:
+        raise HTTPException(
+            status_code=400,
+            detail="store_id is required. Create a store first, then attach this camera to it."
+        )
+    from app.models import Store
+    if not db.get(Store, store_id):
+        raise HTTPException(status_code=400, detail=f"store_id={store_id} not found")
+
     cam = Camera(
         name=payload.name,
         site=payload.site,
@@ -83,12 +97,21 @@ def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
         network_type=payload.network_type,
         ai_enabled=payload.ai_enabled,
         inference_fps=payload.inference_fps,
+        store_id=store_id,
         status="pending",
     )
     db.add(cam)
     db.commit()
     db.refresh(cam)
     return cam
+
+
+@router.get("/unassigned", response_model=list[CameraOut])
+def list_unassigned(db: Session = Depends(get_db),
+                    _u: User = Depends(get_current_user)):
+    """Legacy/orphan cameras with no store_id — surfaced in the UI as
+    an "Assign to store" prompt so operators can clean them up."""
+    return db.query(Camera).filter(Camera.store_id.is_(None)).order_by(Camera.id).all()
 
 
 @router.patch("/{camera_id}", response_model=CameraOut)

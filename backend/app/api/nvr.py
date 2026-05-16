@@ -85,17 +85,27 @@ async def list_channels(nvr_id: int, db: Session = Depends(get_db),
             for c in chans]
 
 
-class AddChannelsIn(NVRConnectOut):
-    """Re-uses NVRConnectOut shape to bulk-add selected channels."""
+from pydantic import BaseModel
+
+
+class AddChannelsIn(BaseModel):
+    """Selected channels + the destination store. The store is mandatory
+    so every channel-camera created here lands attached to a store."""
+    nvr_id: int | None = None
+    store_id: int
+    channels: list[NVRChannelOut]
 
 
 @router.post("/{nvr_id}/add-channels", response_model=list[CameraOut])
 async def add_channels(nvr_id: int, payload: AddChannelsIn, db: Session = Depends(get_db),
                        _u: User = Depends(require_role("admin", "operator"))):
-    """Materialise the selected channels as Camera rows."""
+    """Materialise the selected channels as Camera rows attached to a store."""
     nvr = db.get(NVRDevice, nvr_id)
     if not nvr:
         raise HTTPException(404, "nvr not found")
+    from app.models import Store
+    if not db.get(Store, payload.store_id):
+        raise HTTPException(400, f"store_id={payload.store_id} not found")
     out: list[Camera] = []
     for ch in payload.channels:
         cam = Camera(
@@ -111,6 +121,7 @@ async def add_channels(nvr_id: int, payload: AddChannelsIn, db: Session = Depend
             channel_number=ch.channel,
             rtsp_url_override=ch.rtsp_main,
             network_type="lan",
+            store_id=payload.store_id,
             status="online",
         )
         db.add(cam)

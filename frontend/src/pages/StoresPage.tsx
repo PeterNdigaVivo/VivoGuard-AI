@@ -1,99 +1,97 @@
-// Stores list + create — head office adds the 26 retail locations here.
+// Stores list — card grid, prominent "Add Store" CTA. After save we
+// jump straight to the new store's detail page so the operator can
+// add their first camera.
 
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
-import { stores, type Store } from '@/api/stores'
+import { Link, useNavigate } from 'react-router-dom'
+import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primitives'
+import StoreForm from '@/components/StoreForm'
+import { stores as storesApi, type Store } from '@/api/stores'
 
-const COUNTRIES = ['Kenya', 'Uganda', 'Rwanda']
+const COUNTRY_FLAG: Record<string, string> = {
+  Kenya: '🇰🇪', Uganda: '🇺🇬', Rwanda: '🇷🇼',
+}
 
 export default function StoresPage() {
-  const [list, setList] = useState<Store[]>([])
-  const [form, setForm] = useState({ name: '', code: '', country: 'Kenya', city: '', capacity: '' })
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const nav = useNavigate()
+  const [list, setList] = useState<Store[] | null>(null)
+  const [creating, setCreating] = useState(false)
 
-  const reload = () => stores.list().then(setList).catch(e => setError(String(e)))
+  const reload = () => storesApi.list().then(setList).catch(console.error)
   useEffect(() => { reload() }, [])
 
-  async function create() {
-    if (!form.name || !form.country) return
-    setBusy(true); setError(null)
-    try {
-      await stores.create({
-        name: form.name, code: form.code || null,
-        country: form.country, city: form.city || null,
-        capacity: form.capacity ? Number(form.capacity) : null,
-      })
-      setForm({ name: '', code: '', country: 'Kenya', city: '', capacity: '' })
-      reload()
-    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+  async function onCreate(data: Partial<Store>) {
+    const created = await storesApi.create(data)
+    setCreating(false)
+    nav(`/stores/${created.id}`)
   }
 
-  // Group by country so the list scans like a chain map.
-  const groups: Record<string, Store[]> = {}
-  for (const s of list) (groups[s.country] ??= []).push(s)
+  if (creating) {
+    return (
+      <div className="p-6">
+        <PageHeader title="Add a new store" actions={
+          <Button variant="ghost" onClick={() => setCreating(false)}>Cancel</Button>
+        } />
+        <StoreForm onSubmit={onCreate}
+                   onCancel={() => setCreating(false)}
+                   submitLabel="Create store" />
+      </div>
+    )
+  }
 
   return (
     <div className="p-6">
-      <PageHeader title="Stores" />
+      <PageHeader title="Stores" actions={
+        <Button onClick={() => setCreating(true)}>+ Add store</Button>
+      } />
 
-      <Card className="p-4 mb-6">
-        <div className="font-medium mb-3">New store</div>
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
-          <Input placeholder="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
-          <Input placeholder="Code (e.g. NRB-001)" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} />
-          <Select value={form.country} onChange={e => setForm({ ...form, country: e.target.value })}>
-            {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-          </Select>
-          <Input placeholder="City" value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} />
-          <Input placeholder="Capacity" type="number" value={form.capacity}
-                 onChange={e => setForm({ ...form, capacity: e.target.value })} />
-          <Button onClick={create} disabled={busy || !form.name}>Add</Button>
+      {list === null && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {[1, 2, 3].map(i => <Skeleton key={i} className="h-40" />)}
         </div>
-        {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
-      </Card>
+      )}
 
-      {Object.entries(groups).map(([country, items]) => (
-        <Card key={country} className="mb-4">
-          <div className="px-4 py-2 bg-slate-50 text-slate-600 font-medium border-b">{country}</div>
-          <table className="w-full text-sm">
-            <thead className="text-slate-600">
-              <tr>
-                <th className="text-left p-3">Store</th>
-                <th className="text-left p-3">Code</th>
-                <th className="text-left p-3">City</th>
-                <th className="text-left p-3">Capacity</th>
-                <th className="text-left p-3">Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map(s => (
-                <tr key={s.id} className="border-t hover:bg-slate-50">
-                  <td className="p-3 font-medium">
-                    <Link to={`/stores/${s.id}`} className="text-sky-600 hover:underline">{s.name}</Link>
-                  </td>
-                  <td className="p-3 font-mono text-xs">{s.code ?? '—'}</td>
-                  <td className="p-3">{s.city ?? '—'}</td>
-                  <td className="p-3">{s.capacity ?? '—'}</td>
-                  <td className="p-3">
-                    {s.is_active ? <Badge color="green">active</Badge> : <Badge color="slate">disabled</Badge>}
-                  </td>
-                  <td className="p-3 text-right">
-                    <Link to={`/stores/${s.id}`} className="text-sky-600 hover:underline">Dashboard</Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {list && list.length === 0 && (
+        <Card className="p-12 text-center">
+          <div className="text-5xl mb-3">🏬</div>
+          <div className="text-lg font-medium mb-1">No stores yet</div>
+          <div className="text-slate-500 mb-4">
+            Start by adding your first store. Cameras attach to stores.
+          </div>
+          <Button onClick={() => setCreating(true)}>+ Add your first store</Button>
         </Card>
-      ))}
+      )}
 
-      {!list.length && (
-        <Card className="p-8 text-center text-slate-500">
-          No stores yet — add one above.
-        </Card>
+      {list && list.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {list.map(s => (
+            <Link key={s.id} to={`/stores/${s.id}`}
+                  className="block hover:scale-[1.01] transition-transform">
+              <Card className="p-5 h-full">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div>
+                    <div className="text-lg font-semibold">{s.name}</div>
+                    <div className="text-sm text-slate-500">
+                      {COUNTRY_FLAG[s.country] ?? '🏳️'} {s.city ?? '—'}, {s.country}
+                    </div>
+                  </div>
+                  {s.is_active
+                    ? <Badge color="green">active</Badge>
+                    : <Badge color="slate">disabled</Badge>}
+                </div>
+                {s.code && <div className="text-xs font-mono text-slate-400 mb-3">{s.code}</div>}
+                <div className="text-xs text-slate-500 space-y-0.5">
+                  {s.manager_name && <div>👤 {s.manager_name}</div>}
+                  {s.manager_phone && <div>📞 {s.manager_phone}</div>}
+                  {s.capacity && <div>👥 capacity: {s.capacity}</div>}
+                </div>
+                <div className="mt-4 text-sky-600 text-sm hover:underline">
+                  Open dashboard →
+                </div>
+              </Card>
+            </Link>
+          ))}
+        </div>
       )}
     </div>
   )

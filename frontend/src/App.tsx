@@ -20,6 +20,7 @@ import ModelsPage          from '@/pages/ModelsPage'
 import SystemHealthPage    from '@/pages/SystemHealthPage'
 import StoresPage          from '@/pages/StoresPage'
 import StoreDashboardPage  from '@/pages/StoreDashboardPage'
+import StoreDetailPage     from '@/pages/StoreDetailPage'
 import MultiStorePage      from '@/pages/MultiStorePage'
 import HeatmapPage         from '@/pages/HeatmapPage'
 import StockroomLogPage    from '@/pages/StockroomLogPage'
@@ -50,7 +51,9 @@ export default function App() {
             <Route index element={<Navigate to="/cameras" replace />} />
             <Route path="/chain"                    element={<MultiStorePage />} />
             <Route path="/stores"                   element={<StoresPage />} />
-            <Route path="/stores/:id"               element={<StoreDashboardPage />} />
+            <Route path="/stores/:id"               element={<StoreDetailPage />} />
+            <Route path="/stores/:id/analytics"     element={<StoreDashboardPage />} />
+            <Route path="/stores/:id/add-camera"    element={<AddCameraWizard />} />
             <Route path="/heatmaps/:id"             element={<StoreHeatmapsPage />} />
             <Route path="/detectors"                element={<DetectorsPage />} />
             <Route path="/cameras"                  element={<CamerasPage />} />

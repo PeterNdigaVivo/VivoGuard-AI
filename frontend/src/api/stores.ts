@@ -6,7 +6,10 @@ export interface Store {
   country: string; city: string | null; address: string | null
   timezone: string
   business_hours_json: Record<string, string[]> | null
-  capacity: number | null; is_active: boolean
+  capacity: number | null
+  manager_name:  string | null
+  manager_phone: string | null
+  is_active: boolean
   created_at: string
 }
 

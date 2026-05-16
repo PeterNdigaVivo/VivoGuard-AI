@@ -14,6 +14,8 @@ class StoreIn(BaseModel):
     # {"mon":["09:00-20:00"], "sat":["09:00-21:00"], "sun":[]}
     business_hours_json: dict | None = None
     capacity: int | None = None
+    manager_name:  str | None = None
+    manager_phone: str | None = None
     is_active: bool = True
 
 
@@ -28,6 +30,8 @@ class StoreOut(BaseModel):
     timezone: str
     business_hours_json: dict | None
     capacity: int | None
+    manager_name:  str | None
+    manager_phone: str | None
     is_active: bool
     created_at: datetime
 

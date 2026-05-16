@@ -36,6 +36,10 @@ class Store(Base):
     # Soft cap used by occupancy alerts.
     capacity:  Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Manager contact — surfaces in the alerts pipeline (WhatsApp routing).
+    manager_name:  Mapped[str | None] = mapped_column(String(128), nullable=True)
+    manager_phone: Mapped[str | None] = mapped_column(String(32),  nullable=True)
+
     is_active: Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

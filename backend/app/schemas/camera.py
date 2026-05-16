@@ -5,6 +5,9 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 class CameraCreate(BaseModel):
+    # Store-first onboarding: required on every new camera created via
+    # POST /cameras/add. The API rejects the call with 400 otherwise.
+    store_id: int
     name: str
     site: str | None = None
     brand: str = Field(pattern=r"^(dahua|hikvision|onvif|generic)$")
