@@ -27,6 +27,8 @@ import CampaignsPage       from '@/pages/CampaignsPage'
 import SearchPage          from '@/pages/SearchPage'
 import ComparePage         from '@/pages/ComparePage'
 import CameraSetupPage     from '@/pages/CameraSetupPage'
+import StoreHeatmapsPage   from '@/pages/StoreHeatmapsPage'
+import DetectorsPage       from '@/pages/DetectorsPage'
 
 // Gate: any unauthenticated request is bounced to /login while preserving
 // the originally requested path so we can redirect back after sign-in.
@@ -49,6 +51,8 @@ export default function App() {
             <Route path="/chain"                    element={<MultiStorePage />} />
             <Route path="/stores"                   element={<StoresPage />} />
             <Route path="/stores/:id"               element={<StoreDashboardPage />} />
+            <Route path="/heatmaps/:id"             element={<StoreHeatmapsPage />} />
+            <Route path="/detectors"                element={<DetectorsPage />} />
             <Route path="/cameras"                  element={<CamerasPage />} />
             <Route path="/cameras/add"              element={<AddCameraWizard />} />
             <Route path="/cameras/:id/setup"        element={<CameraSetupPage />} />

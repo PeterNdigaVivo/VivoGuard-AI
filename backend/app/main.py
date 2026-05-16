@@ -98,6 +98,11 @@ try:
     app.include_router(sched_router)
 except ImportError:
     pass
+try:
+    from app.api.detector_catalog import router as detcat_router     # noqa: E402
+    app.include_router(detcat_router)
+except ImportError:
+    pass
 
 try:
     from app.api.detection_config import router as detection_router  # noqa: E402

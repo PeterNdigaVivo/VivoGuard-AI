@@ -14,6 +14,7 @@ const NAV = [
   { to: '/stockroom', label: 'Stockroom Log' },
   { to: '/campaigns', label: 'Campaigns' },
   { to: '/training', label: 'AI Training' },
+  { to: '/detectors',label: 'Detectors' },
   { to: '/models',   label: 'Models' },
   { to: '/system',   label: 'System' },
 ]

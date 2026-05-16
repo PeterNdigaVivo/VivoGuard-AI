@@ -395,6 +395,56 @@ def store_live_dashboard(store_id: int,
     }
 
 
+# ---- Store-wide heatmap grid (Rule 5) ------------------------------
+
+@router.get("/store/{store_id}/heatmaps")
+def store_heatmaps(store_id: int, db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    """One row per camera in the store with its heatmap thumb URL plus
+    the top hotspot location (highest-count cell). Frontend grids them."""
+    import json
+    import redis
+    from app.config import settings as _settings
+    if not db.get(Store, store_id):
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    r = redis.from_url(_settings.redis_url)
+    out = []
+    for c in cams:
+        raw = r.get(f"vg:heatmap:{c.id}")
+        hotspot = None
+        if raw:
+            try:
+                p = json.loads(raw)
+                g = p.get("grid") or []
+                if g:
+                    mx, my, mv = 0, 0, 0
+                    for y, row in enumerate(g):
+                        for x, v in enumerate(row):
+                            if v > mv:
+                                mv, mx, my = v, x, y
+                    n = p.get("size") or len(g)
+                    hotspot = {
+                        "cell_x": mx, "cell_y": my, "value": int(mv),
+                        "norm_x": round(mx / max(1, n - 1), 3),
+                        "norm_y": round(my / max(1, n - 1), 3),
+                    }
+            except Exception:
+                pass
+        out.append({
+            "camera_id": c.id,
+            "camera_name": c.name,
+            "status": c.status,
+            "heatmap_url": f"/api/analytics/heatmap/{c.id}/image?alpha=0.65",
+            "hotspot": hotspot,
+        })
+    ranked = sorted([o for o in out if o["hotspot"]],
+                    key=lambda x: -(x["hotspot"]["value"] or 0))
+    labels = ["Busiest area", "Second busiest", "Third busiest"]
+    for i, o in enumerate(ranked):
+        o["rank_label"] = labels[i] if i < len(labels) else None
+    return {"store_id": store_id, "cameras": out}
+
+
 # ---- Heatmap export (P2) -------------------------------------------
 
 @router.get("/heatmap/{camera_id}")
