@@ -56,3 +56,38 @@ export function PageHeader({ title, actions }: { title: string; actions?: ReactN
     </div>
   )
 }
+
+// Skeleton block — used while data is loading (Rule 9 of the overhaul).
+export function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse bg-slate-200 rounded ${className}`} />
+}
+
+// Traffic-light status pill for store dashboards (Rule 4).
+export function StatusLight({ value }: { value: 'green' | 'amber' | 'red' }) {
+  const map = {
+    green: { color: 'bg-emerald-500', label: 'Normal' },
+    amber: { color: 'bg-amber-500',   label: 'Attention' },
+    red:   { color: 'bg-red-500',     label: 'Alert' },
+  } as const
+  const s = map[value] ?? map.green
+  return (
+    <span className="inline-flex items-center gap-2 text-sm">
+      <span className={`inline-block w-2.5 h-2.5 rounded-full ${s.color}`} />
+      {s.label}
+    </span>
+  )
+}
+
+// Trend arrow with delta percentage. direction: 'up' | 'down' | 'flat'.
+export function Trend({ direction, deltaPct }:
+  { direction: 'up' | 'down' | 'flat'; deltaPct: number | null }) {
+  if (deltaPct === null) {
+    return <span className="text-xs text-slate-400">no comparison</span>
+  }
+  const symbol = direction === 'up' ? '↑' : direction === 'down' ? '↓' : '→'
+  const color  = direction === 'up' ? 'text-emerald-600'
+               : direction === 'down' ? 'text-red-600' : 'text-slate-500'
+  return (
+    <span className={`text-xs ${color}`}>{symbol} {Math.abs(deltaPct).toFixed(1)}% vs yesterday</span>
+  )
+}

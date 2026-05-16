@@ -3,6 +3,8 @@
   GET    /cameras/{id}/zones
   POST   /cameras/{id}/zones          — create or replace one zone (by name)
   DELETE /cameras/{id}/zones/{zone_id}
+  GET    /zone-purposes               — plain-English purpose catalog
+  POST   /cameras/{id}/zones/by-purpose — create zone with a purpose key
 
 Side effect on create/update: every detection_type listed in the zone's
 detection_types_json is auto-enabled in detection_configs (creating the
@@ -12,14 +14,57 @@ persisting it keeps the AI Settings page truthful.
 """
 from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import require_role
 from app.models import Camera, DetectionConfig, Zone
 from app.schemas.detection import ZoneIn, ZoneOut
+from app.zone_purposes import ZONE_PURPOSES, types_for_purpose
 
 router = APIRouter(prefix="/cameras", tags=["zones"])
+
+
+# Catalog — frontend renders the dropdown from this. Mounted under the
+# zones router prefix so it's discoverable next to the CRUD endpoints,
+# but with a different path so no conflict.
+catalog_router = APIRouter(tags=["zones"])
+
+@catalog_router.get("/zone-purposes")
+def zone_purposes():
+    return ZONE_PURPOSES
+
+
+class ZoneByPurposeIn(BaseModel):
+    name: str
+    purpose: str                          # key into ZONE_PURPOSES
+    polygon_coords_json: list[list[float]]
+    active_schedule_json: dict | None = None
+
+
+@catalog_router.post("/cameras/{camera_id}/zones/by-purpose", response_model=ZoneOut)
+def create_zone_by_purpose(camera_id: int, payload: ZoneByPurposeIn,
+                           db: Session = Depends(get_db),
+                           _u=Depends(require_role("admin", "operator"))):
+    purpose = ZONE_PURPOSES.get(payload.purpose)
+    if not purpose:
+        raise HTTPException(400, f"unknown purpose: {payload.purpose}")
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "camera not found")
+    z = Zone(
+        camera_id=camera_id,
+        name=payload.name,
+        shape=purpose["shape"],
+        polygon_coords_json=payload.polygon_coords_json,
+        detection_types_json=list(purpose["types"]),
+        active_schedule_json=payload.active_schedule_json,
+        suppressed=False,
+    )
+    db.add(z)
+    _autoenable_detection_types(db, camera_id, purpose["types"])
+    db.commit(); db.refresh(z)
+    return z
 
 
 def _autoenable_detection_types(db: Session, camera_id: int, types: list[str]) -> None:

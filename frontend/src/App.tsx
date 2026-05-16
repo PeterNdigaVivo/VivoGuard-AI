@@ -26,6 +26,7 @@ import StockroomLogPage    from '@/pages/StockroomLogPage'
 import CampaignsPage       from '@/pages/CampaignsPage'
 import SearchPage          from '@/pages/SearchPage'
 import ComparePage         from '@/pages/ComparePage'
+import CameraSetupPage     from '@/pages/CameraSetupPage'
 
 // Gate: any unauthenticated request is bounced to /login while preserving
 // the originally requested path so we can redirect back after sign-in.
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="/stores/:id"               element={<StoreDashboardPage />} />
             <Route path="/cameras"                  element={<CamerasPage />} />
             <Route path="/cameras/add"              element={<AddCameraWizard />} />
+            <Route path="/cameras/:id/setup"        element={<CameraSetupPage />} />
             <Route path="/cameras/:id/detection"    element={<DetectionConfigPage />} />
             <Route path="/cameras/:id/heatmap"      element={<HeatmapPage />} />
             <Route path="/stockroom"                element={<StockroomLogPage />} />

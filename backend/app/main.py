@@ -105,8 +105,9 @@ try:
 except ImportError:
     pass
 try:
-    from app.api.zones import router as zones_router                 # noqa: E402
+    from app.api.zones import router as zones_router, catalog_router as zones_catalog_router  # noqa: E402
     app.include_router(zones_router)
+    app.include_router(zones_catalog_router)
 except ImportError:
     pass
 try:

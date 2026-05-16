@@ -71,7 +71,9 @@ export default function CamerasPage() {
                   </td>
                   <td className="p-3 text-right whitespace-nowrap">
                     <Link className="text-sky-600 hover:underline mr-3"
-                          to={`/cameras/${c.id}/detection`}>AI settings</Link>
+                          to={`/cameras/${c.id}/setup`}>Set up</Link>
+                    <Link className="text-slate-500 hover:underline text-xs mr-3"
+                          to={`/cameras/${c.id}/detection`}>advanced</Link>
                     <button className="text-red-600 hover:underline"
                             onClick={() => remove(c.id)}>Remove</button>
                   </td>
