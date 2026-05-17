@@ -23,16 +23,19 @@ class StoreOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     name: str
-    code: str | None
+    code: str | None = None
     country: str
-    city: str | None
-    address: str | None
-    timezone: str
-    business_hours_json: dict | None
-    capacity: int | None
-    manager_name:  str | None
-    manager_phone: str | None
-    is_active: bool
+    city: str | None = None
+    address: str | None = None
+    timezone: str = "Africa/Nairobi"
+    business_hours_json: dict | None = None
+    capacity: int | None = None
+    # All-new fields get explicit `= None` defaults so Pydantic doesn't
+    # raise when from_attributes can't find them — protects against an
+    # api image that's newer than the DB migration.
+    manager_name:  str | None = None
+    manager_phone: str | None = None
+    is_active: bool = True
     created_at: datetime
 
 

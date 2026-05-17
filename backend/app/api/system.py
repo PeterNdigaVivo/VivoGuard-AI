@@ -16,6 +16,38 @@ from app.stream.frame_buffer import FrameBuffer
 router = APIRouter(prefix="/system", tags=["system"])
 
 
+@router.get("/schema-check")
+def schema_check(db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    """Compare actual DB columns to what the ORM expects. Use this to
+    diagnose 'alembic claims head but rows still 500' situations."""
+    from sqlalchemy import text
+    expected = {
+        "stores":  ["manager_name", "manager_phone", "business_hours_json", "capacity"],
+        "cameras": ["store_id"],
+    }
+    out: dict = {}
+    for table, cols in expected.items():
+        rows = db.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name=:t"), {"t": table}).fetchall()
+        present = {r[0] for r in rows}
+        out[table] = {
+            "expected": {c: (c in present) for c in cols},
+            "missing":  sorted(c for c in cols if c not in present),
+        }
+    try:
+        alembic_current = db.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except Exception:
+        alembic_current = None
+    out["alembic_current"] = alembic_current
+    out["recommendation"] = (
+        "If 'missing' is non-empty anywhere but alembic_current is the latest, "
+        "the alembic_version table is ahead of reality. Recover with: "
+        "`alembic stamp 0001 && alembic upgrade head` inside the api container."
+    )
+    return out
+
+
 @router.get("/health")
 def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     fb = FrameBuffer()

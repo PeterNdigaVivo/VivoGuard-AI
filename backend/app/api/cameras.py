@@ -47,7 +47,16 @@ def _camera_rtsp_url(cam: Camera, *, subtype: int = 0, password_plain: str | Non
 
 @router.get("", response_model=list[CameraOut])
 def list_cameras(db: Session = Depends(get_db), _u: User = Depends(get_current_user)):
-    return db.query(Camera).order_by(Camera.id).all()
+    """List cameras. Returns [] (not 500) on schema drift so the page
+    renders something rather than hard-erroring."""
+    import logging as _l
+    _l_log = _l.getLogger(__name__)
+    try:
+        return db.query(Camera).order_by(Camera.id).all()
+    except Exception as e:
+        _l_log.exception("GET /cameras failed (likely schema drift): %s", e)
+        db.rollback()
+        return []
 
 
 @router.get("/{camera_id}", response_model=CameraOut)

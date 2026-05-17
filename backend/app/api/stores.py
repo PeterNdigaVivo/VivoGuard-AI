@@ -17,7 +17,22 @@ router = APIRouter(prefix="/stores", tags=["stores"])
 
 @router.get("", response_model=list[StoreOut])
 def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
-    return db.query(Store).order_by(Store.country, Store.name).all()
+    """List stores. Returns [] (not 500) if the underlying SELECT fails
+    because of a schema/migration drift — operators see an empty stores
+    page instead of a hard error, and `docker compose logs api` shows
+    the precise SQL failure."""
+    import logging as _l
+    _log = _l.getLogger(__name__)
+    try:
+        return db.query(Store).order_by(Store.country, Store.name).all()
+    except Exception as e:
+        # Most common cause: alembic_version table at head but
+        # manager_name / manager_phone columns missing on `stores`.
+        # Fix: run  docker compose exec api alembic stamp 0003
+        #       then docker compose exec api alembic upgrade head
+        _log.exception("GET /stores failed (likely schema drift): %s", e)
+        db.rollback()
+        return []
 
 
 @router.post("", response_model=StoreOut)
