@@ -48,6 +48,8 @@ class CameraOut(BaseModel):
     status: str
     last_seen_at: datetime | None
     last_error: str | None
+    # Store-first onboarding (Alembic 0002+). NULL allowed for legacy rows.
+    store_id: int | None = None
     created_at: datetime
 
 

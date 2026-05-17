@@ -8,6 +8,9 @@ export interface Camera {
   channel_number: number | null; network_type: string
   ai_model_id: number | null; ai_enabled: boolean; inference_fps: number
   status: string; last_seen_at: string | null; last_error: string | null
+  // Store-first onboarding: every newly-created camera has a store.
+  // Legacy rows can still be null until an operator attaches them.
+  store_id: number | null
   created_at: string
 }
 
