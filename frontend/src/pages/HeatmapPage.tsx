@@ -1,12 +1,17 @@
 // Per-camera footfall heatmap viewer — overlays the colourised
 // heatmap PNG (from /analytics/heatmap/{id}/image) on the camera
 // snapshot. Use the opacity slider to tune the blend; click Download
-// to grab the overlay as a standalone PNG (useful for slide decks).
+// to grab the overlay as a standalone PNG.
+//
+// Both the overlay <img> and the Download click fetch the PNG via
+// `fetch(..., { Authorization: Bearer <jwt> })` and convert the blob
+// to an object URL. Earlier code used a bare <img src> / <a href>
+// which the browser issues without the JWT — the API returned 401 and
+// Chrome reported "file wasn't available on site" for downloads.
 
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Button, Card, PageHeader } from '@/components/ui/Primitives'
-// (api import removed — download() now uses an anchor)
 import { cameras } from '@/api/cameras'
 
 export default function HeatmapPage() {
@@ -14,28 +19,61 @@ export default function HeatmapPage() {
   const cameraId = Number(id)
 
   const [snap, setSnap] = useState<string | null>(null)
+  const [heatmapObjUrl, setHeatmapObjUrl] = useState<string | null>(null)
   const [opacity, setOpacity] = useState(0.65)
-  const [bust, setBust] = useState(0)              // forces image refresh
+  const [bust, setBust] = useState(0)              // forces refresh every 30s + on Refresh click
   const [error, setError] = useState<string | null>(null)
 
+  // Snapshot — JSON endpoint returns base64; no auth issue with the api wrapper.
   useEffect(() => {
     cameras.snapshot(cameraId)
       .then(s => setSnap(s.jpeg_b64))
       .catch(e => setError(String(e)))
-    const t = setInterval(() => setBust(b => b + 1), 30000)
+    const t = setInterval(() => setBust(b => b + 1), 30_000)
     return () => clearInterval(t)
   }, [cameraId])
 
-  const heatmapUrl = `/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}&_=${bust}`
+  // Heatmap PNG — authed fetch → blob → object URL.
+  useEffect(() => {
+    let cancelled = false
+    let created: string | null = null
+    const tok = localStorage.getItem('vg_access_token') ?? ''
+    fetch(`/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`,
+          { headers: { Authorization: `Bearer ${tok}` } })
+      .then(res => res.ok ? res.blob() : null)
+      .then(blob => {
+        if (cancelled || !blob) return
+        created = URL.createObjectURL(blob)
+        setHeatmapObjUrl(created)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      if (created) URL.revokeObjectURL(created)
+    }
+  }, [cameraId, opacity, bust])
 
-  function download() {
-    // Plain anchor click — the browser handles the GET, the Authorization
-    // header rides on the same-origin cookie/session. No fetch-to-Blob
-    // detour and no TS cast.
-    const a = document.createElement('a')
-    a.href = `/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`
-    a.download = `heatmap_camera_${cameraId}.png`
-    a.click()
+  async function download() {
+    const tok = localStorage.getItem('vg_access_token') ?? ''
+    try {
+      const res = await fetch(`/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`,
+                              { headers: { Authorization: `Bearer ${tok}` } })
+      if (!res.ok) {
+        setError(`Download failed: ${res.status} ${res.statusText}`)
+        return
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `heatmap_camera_${cameraId}.png`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e) {
+      setError(String(e))
+    }
   }
 
   return (
@@ -44,7 +82,7 @@ export default function HeatmapPage() {
         title={`Footfall heatmap — camera #${cameraId}`}
         actions={<>
           <Link to="/cameras"><Button variant="ghost">Cameras</Button></Link>
-          <Button onClick={download}>Download PNG</Button>
+          <Button onClick={download} disabled={!heatmapObjUrl}>Download PNG</Button>
         </>}
       />
 
@@ -67,16 +105,17 @@ export default function HeatmapPage() {
               {error ?? 'Loading snapshot…'}
             </div>
           )}
-          {/* Heatmap overlay — falls back silently if /image returns 404. */}
-          <img src={heatmapUrl}
-               className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen"
-               alt="" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+          {heatmapObjUrl && (
+            <img src={heatmapObjUrl} alt=""
+                 className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen" />
+          )}
         </div>
         <div className="text-xs text-slate-500 mt-2">
           Heatmap updates every 30 seconds from the inference worker.
           Enable <code>heatmap</code> in this camera's AI settings to start
           accumulating data.
         </div>
+        {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
       </Card>
     </div>
   )
