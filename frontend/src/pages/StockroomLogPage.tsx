@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
+import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
 import { stores as storesApi, type Store } from '@/api/stores'
 
@@ -16,20 +17,19 @@ interface AccessRow {
 export default function StockroomLogPage() {
   const [stores, setStores] = useState<Store[]>([])
   const [storeId, setStoreId] = useState<string>('')
-  const [since, setSince] = useState('')
-  const [until, setUntil] = useState('')
+  const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
   const [rows, setRows] = useState<AccessRow[]>([])
 
   const reload = () => {
     const params = new URLSearchParams()
     if (storeId) params.set('store_id', storeId)
-    if (since)   params.set('since', since)
-    if (until)   params.set('until', until)
+    params.set('since', range.since)
+    params.set('until', range.until)
     api<AccessRow[]>(`/stockroom/accesses?${params}`).then(setRows).catch(console.error)
   }
 
   useEffect(() => { storesApi.list().then(setStores) }, [])
-  useEffect(() => { reload() }, [storeId, since, until])
+  useEffect(() => { reload() }, [storeId, range.since, range.until])
 
   async function mark(id: number, ok: boolean) {
     await api(`/stockroom/accesses/${id}/mark-authorised?is_authorised=${ok}`, { method: 'POST' })
@@ -39,15 +39,19 @@ export default function StockroomLogPage() {
   function downloadCSV() {
     const params = new URLSearchParams()
     if (storeId) params.set('store_id', storeId)
-    if (since)   params.set('since', since)
-    if (until)   params.set('until', until)
+    params.set('since', range.since)
+    params.set('until', range.until)
     window.location.href = `/api/stockroom/accesses.csv?${params}`
   }
 
   return (
     <div className="p-6">
-      <PageHeader title="Stockroom access log"
-                  actions={<Button variant="ghost" onClick={downloadCSV}>Export CSV</Button>} />
+      <PageHeader title="Stockroom access log" actions={
+        <>
+          <DateRangePicker value={range} onChange={setRange} />
+          <Button variant="ghost" onClick={downloadCSV}>Export CSV</Button>
+        </>
+      } />
 
       <Card className="p-3 mb-4 flex flex-wrap gap-3 items-end">
         <label className="text-sm">
@@ -57,14 +61,9 @@ export default function StockroomLogPage() {
             {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
         </label>
-        <label className="text-sm">
-          <div className="text-xs text-slate-500 mb-1">Since</div>
-          <Input type="datetime-local" value={since} onChange={e => setSince(e.target.value)} />
-        </label>
-        <label className="text-sm">
-          <div className="text-xs text-slate-500 mb-1">Until</div>
-          <Input type="datetime-local" value={until} onChange={e => setUntil(e.target.value)} />
-        </label>
+        <div className="text-xs text-slate-500 ml-auto">
+          Showing <strong>{range.label}</strong> · {rows.length} entr{rows.length === 1 ? 'y' : 'ies'}
+        </div>
       </Card>
 
       <Card>

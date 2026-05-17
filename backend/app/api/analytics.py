@@ -146,18 +146,24 @@ def store_dashboard(store_id: int, days: int = 7,
 
 @router.get("/store/{store_id}/live")
 def store_live_dashboard(store_id: int,
+                         since: datetime | None = None,
+                         until: datetime | None = None,
                          db: Session = Depends(get_db),
                          _u=Depends(get_current_user)):
     """Single payload powering the redesigned store dashboard.
 
+    When `since`/`until` are omitted defaults to today (00:00→now) and
+    compares against yesterday (same window). When given explicitly,
+    compares against the prior same-length window so every KPI tile
+    carries a trend arrow regardless of the range chosen.
+
     Semantics (Rule 3):
-      • For every active camera attached to this store we expect at
-        least one metric row in the last 5 minutes. If a camera has been
-        attached <10 minutes ago and has no metrics yet we report it as
-        'no_data_yet'; otherwise missing metrics become 0.
-      • Tiles for zone-gated metrics (queue, staff, etc.) carry a
-        `visible` flag — the frontend hides the tile when the store
-        has no zone of that kind.
+      For every active camera attached we expect at least one metric
+      row in the last 5 minutes. If a camera has been attached <10 min
+      ago and has no metrics yet we report 'no_data_yet'; otherwise
+      missing metrics become 0. Tiles for zone-gated metrics carry a
+      `visible` flag — the frontend hides the tile when no such zone
+      exists in the store.
     """
     from sqlalchemy import extract
     store = db.get(Store, store_id)
@@ -178,6 +184,19 @@ def store_live_dashboard(store_id: int,
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=7)
     five_min_ago = now - timedelta(minutes=5)
+
+    # Active window (defaults to today). The "previous" window is the
+    # same length immediately before — used to compute trend arrows on
+    # every KPI tile.
+    if since is None:
+        active_since = today_start
+        active_until = now
+    else:
+        active_since = since
+        active_until = until or now
+    window_len = active_until - active_since
+    prev_since = active_since - window_len
+    prev_until = active_since
 
     youngest_cam_age = min(
         ((now - c.created_at).total_seconds() if c.created_at else 999999)
@@ -224,29 +243,60 @@ def store_live_dashboard(store_id: int,
         }
 
     # ----- aggregations ---------------------------------------------
-    def _sum(metric: str, since: datetime) -> float:
+    # Each helper takes an explicit window so we can call it twice —
+    # once for the active range, once for the prior same-length window
+    # — and surface trend-vs-previous on every KPI.
+    def _sum(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.sum(MetricSnapshot.value))
                .filter(MetricSnapshot.camera_id.in_(cam_ids),
                        MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= since)
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1)
                .scalar())
         return float(v) if v is not None else 0.0
 
-    def _max(metric: str, since: datetime) -> float:
+    def _max(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.max(MetricSnapshot.value))
                .filter(MetricSnapshot.camera_id.in_(cam_ids),
                        MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= since)
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1)
                .scalar())
         return float(v) if v is not None else 0.0
 
-    def _avg(metric: str, since: datetime) -> float:
+    def _avg(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.avg(MetricSnapshot.value))
                .filter(MetricSnapshot.camera_id.in_(cam_ids),
                        MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= since)
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1)
                .scalar())
         return float(v) if v is not None else 0.0
+
+    def _trend(curr: float, prev: float) -> dict:
+        """Trend dict for the frontend's Trend pill."""
+        if prev <= 0:
+            return {"direction": "flat", "delta_pct": None}
+        pct = (curr - prev) / prev * 100
+        return {
+            "direction": "up" if pct > 5 else "down" if pct < -5 else "flat",
+            "delta_pct": round(pct, 1),
+        }
+
+    def _kpi_avg(metric: str) -> dict:
+        c = _avg(metric, active_since, active_until)
+        p = _avg(metric, prev_since,   prev_until)
+        return {"value": c, "trend": _trend(c, p)}
+
+    def _kpi_sum(metric: str) -> dict:
+        c = _sum(metric, active_since, active_until)
+        p = _sum(metric, prev_since,   prev_until)
+        return {"value": c, "trend": _trend(c, p)}
+
+    def _kpi_max(metric: str) -> dict:
+        c = _max(metric, active_since, active_until)
+        p = _max(metric, prev_since,   prev_until)
+        return {"value": c, "trend": _trend(c, p)}
 
     def _latest_sum(metric: str) -> float:
         """Sum the latest sample of `metric` across the store's cameras.
@@ -268,42 +318,49 @@ def store_live_dashboard(store_id: int,
                .scalar())
         return float(v) if v is not None else 0.0
 
-    # Unique visitors today across all cameras.
+    # Unique visitors in the active range.
     from app.models import VisitorTrack
-    unique_today = (db.query(func.count(VisitorTrack.id))
-                      .filter(VisitorTrack.camera_id.in_(cam_ids),
-                              VisitorTrack.day == today_start.date())
-                      .scalar() or 0)
-    unique_yesterday = (db.query(func.count(VisitorTrack.id))
-                          .filter(VisitorTrack.camera_id.in_(cam_ids),
-                                  VisitorTrack.day == (today_start - timedelta(days=1)).date())
-                          .scalar() or 0)
 
-    # Alerts today by type.
+    def _unique_visitors(t0: datetime, t1: datetime) -> int:
+        return (db.query(func.count(VisitorTrack.id))
+                  .filter(VisitorTrack.camera_id.in_(cam_ids),
+                          VisitorTrack.first_seen >= t0,
+                          VisitorTrack.first_seen <  t1)
+                  .scalar() or 0)
+    unique_curr = _unique_visitors(active_since, active_until)
+    unique_prev = _unique_visitors(prev_since,   prev_until)
+
+    # Alerts in the active range, grouped by type.
     alerts_today = dict(
         db.query(DetectionEvent.detection_type, func.count(Alert.id))
           .join(Alert, Alert.event_id == DetectionEvent.id)
           .filter(DetectionEvent.camera_id.in_(cam_ids),
-                  Alert.created_at >= today_start)
+                  Alert.created_at >= active_since,
+                  Alert.created_at <  active_until)
           .group_by(DetectionEvent.detection_type)
           .all()
     )
 
-    # Hourly footfall sparkline — hour-bucketed occupancy (peak per hour).
+    # Hourly footfall sparkline — hour-bucketed occupancy (peak per hour)
+    # within the active range. For multi-day ranges this becomes 24 bars
+    # of "average peak by hour-of-day"; for single-day ranges it's the
+    # familiar today sparkline.
     hourly_rows = (db.query(extract("hour", MetricSnapshot.period_start).label("hr"),
                             func.max(MetricSnapshot.value))
                      .filter(MetricSnapshot.camera_id.in_(cam_ids),
                              MetricSnapshot.metric_type == "occupancy",
-                             MetricSnapshot.period_start >= today_start)
+                             MetricSnapshot.period_start >= active_since,
+                             MetricSnapshot.period_start <  active_until)
                      .group_by("hr").order_by("hr").all())
     hourly_footfall = [{"hour": int(h), "value": float(v or 0)} for h, v in hourly_rows]
 
-    # Per-aisle dwell, top 3.
+    # Per-aisle dwell, top 3, in the active range.
     aisle_rows = (db.query(MetricSnapshot.zone_id,
                            func.avg(MetricSnapshot.value).label("d"))
                     .filter(MetricSnapshot.camera_id.in_(cam_ids),
                             MetricSnapshot.metric_type == "dwell_seconds",
-                            MetricSnapshot.period_start >= today_start)
+                            MetricSnapshot.period_start >= active_since,
+                            MetricSnapshot.period_start <  active_until)
                     .group_by(MetricSnapshot.zone_id)
                     .order_by(func.avg(MetricSnapshot.value).desc())
                     .limit(3).all())
@@ -321,67 +378,86 @@ def store_live_dashboard(store_id: int,
     if cam_ids:
         heatmap_thumb_url = f"/api/analytics/heatmap/{cam_ids[0]}/image?alpha=0.65"
 
-    def _trend(today_v: float, yesterday_v: float) -> dict:
-        if yesterday_v <= 0:
-            return {"direction": "flat", "delta_pct": None}
-        pct = (today_v - yesterday_v) / yesterday_v * 100
-        return {
-            "direction": "up" if pct > 5 else "down" if pct < -5 else "flat",
-            "delta_pct": round(pct, 1),
-        }
-
-    # Status traffic light: red if any high-priority alerts today,
+    # Status traffic light: red if any high-priority alerts in window,
     # amber if staff_present_avg < 0.5 and counter exists, else green.
-    staff_today = _avg("staff_present_pct", today_start) if capabilities["counter"] else None
-    high_alerts_today = sum(
+    staff_avg = _avg("staff_present_pct", active_since, active_until) if capabilities["counter"] else None
+    high_alerts = sum(
         cnt for t, cnt in alerts_today.items()
         if t in ("intrusion", "fight", "weapon", "weapon_brandished", "shrinkage")
     )
-    if high_alerts_today > 0:
+    if high_alerts > 0:
         status_light = "red"
-    elif staff_today is not None and staff_today < 0.5:
+    elif staff_avg is not None and staff_avg < 0.5:
         status_light = "amber"
     else:
         status_light = "green"
 
+    # Every KPI tile carries a trend dict computed against the prior
+    # same-length window. Operator picks "Last week" → trend shows
+    # vs the week before that, etc.
+    occupancy_peak  = _kpi_max("occupancy")
+    queue_wait_avg  = _kpi_avg("queue_wait_seconds")
+    visitors_in     = _kpi_sum("visitor_count_in")
+    visitors_out    = _kpi_sum("visitor_count_out")
+
     tiles = {
+        # NOW-tiles: latest-sample, no trend (snapshot in time).
         "occupancy_now": {
             "value": round(_latest_sum("occupancy"), 0),
-            "visible": True,
-        },
-        "occupancy_peak_today": {
-            "value": round(_max("occupancy", today_start), 0),
-            "visible": True,
-        },
-        "unique_visitors_today": {
-            "value": int(unique_today),
-            "trend": _trend(unique_today, unique_yesterday),
             "visible": True,
         },
         "queue_length_now": {
             "value": round(_latest_sum("queue_length"), 0),
             "visible": capabilities["queue"],
         },
+        # WINDOW-tiles: scoped to active_since→active_until + trend.
+        "occupancy_peak_today": {
+            "value": round(occupancy_peak["value"], 0),
+            "trend": occupancy_peak["trend"],
+            "visible": True,
+        },
+        "unique_visitors_today": {
+            "value": int(unique_curr),
+            "trend": _trend(unique_curr, unique_prev),
+            "visible": True,
+        },
         "queue_wait_avg_today_sec": {
-            "value": round(_avg("queue_wait_seconds", today_start), 0),
+            "value": round(queue_wait_avg["value"], 0),
+            "trend": queue_wait_avg["trend"],
             "visible": capabilities["queue"],
         },
         "staff_present_pct_today": {
-            "value": round((staff_today or 0) * 100, 0),
+            "value": round((staff_avg or 0) * 100, 0),
+            "trend": _trend(
+                staff_avg or 0,
+                _avg("staff_present_pct", prev_since, prev_until) if capabilities["counter"] else 0,
+            ),
             "visible": capabilities["counter"],
         },
-        "top_aisles": {"value": top_aisles, "visible": capabilities["aisle"]},
-        "alerts_today_by_type": {"value": alerts_today, "visible": True},
+        "visitors_in_today":  {
+            "value": round(visitors_in["value"], 0),
+            "trend": visitors_in["trend"],
+            "visible": capabilities["entry_exit"],
+        },
+        "visitors_out_today": {
+            "value": round(visitors_out["value"], 0),
+            "trend": visitors_out["trend"],
+            "visible": capabilities["entry_exit"],
+        },
+        "visitors_net_today": {
+            "value": round(visitors_in["value"] - visitors_out["value"], 0),
+            "trend": _trend(
+                visitors_in["value"] - visitors_out["value"],
+                _sum("visitor_count_in",  prev_since, prev_until)
+                 - _sum("visitor_count_out", prev_since, prev_until),
+            ),
+            "visible": capabilities["entry_exit"],
+        },
+        # Non-KPI tiles (lists / charts / image URL).
+        "top_aisles":            {"value": top_aisles, "visible": capabilities["aisle"]},
+        "alerts_today_by_type":  {"value": alerts_today, "visible": True},
         "hourly_footfall_today": {"value": hourly_footfall, "visible": True},
         "heatmap_thumb_url":     {"value": heatmap_thumb_url, "visible": True},
-        "visitors_in_today":     {"value": round(_sum("visitor_count_in", today_start), 0),
-                                  "visible": capabilities["entry_exit"]},
-        "visitors_out_today":    {"value": round(_sum("visitor_count_out", today_start), 0),
-                                  "visible": capabilities["entry_exit"]},
-        "visitors_net_today":    {"value": round(
-                                      _sum("visitor_count_in", today_start)
-                                      - _sum("visitor_count_out", today_start), 0),
-                                  "visible": capabilities["entry_exit"]},
     }
 
     return {
@@ -389,6 +465,10 @@ def store_live_dashboard(store_id: int,
         "country": store.country, "status": "live",
         "status_light": status_light,
         "as_of": now.isoformat(),
+        "active_range": {"since": active_since.isoformat(),
+                          "until": active_until.isoformat()},
+        "prev_range":   {"since": prev_since.isoformat(),
+                          "until": prev_until.isoformat()},
         "camera_count": len(cams),
         "zone_capabilities": capabilities,
         "tiles": tiles,

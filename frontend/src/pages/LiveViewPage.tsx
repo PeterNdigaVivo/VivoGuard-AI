@@ -1,6 +1,6 @@
-// Live grid: 1×1 / 2×2 / 3×3 / 4×4 layout selector, drag-and-drop tiles,
-// per-tile JPEG stream over a WebSocket, AI bbox overlay if a detection
-// arrives for that camera within the last 5 seconds.
+// Live grid: 1×1 … 9×9 layouts (up to 81 tiles). For large fleets only
+// the visible tiles open WebSockets — browsers cap ~250 concurrent WS
+// per origin.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Badge, Button, Card, PageHeader, Select } from '@/components/ui/Primitives'
@@ -9,16 +9,18 @@ import { alerts as alertsApi } from '@/api/alerts'
 import { wsUrl } from '@/api/client'
 
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
+type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+const GRID_OPTIONS: GridSize[] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 export default function LiveViewPage() {
   const [cams, setCams] = useState<Camera[]>([])
-  const [layout, setLayout] = useState<1 | 2 | 3 | 4>(2)
-  const [picked, setPicked] = useState<(number | null)[]>(Array(16).fill(null))
+  const [layout, setLayout] = useState<GridSize>(2)
+  // Up to 81 tiles (9×9).
+  const [picked, setPicked] = useState<(number | null)[]>(Array(81).fill(null))
   const [overlays, setOverlays] = useState<Record<number, Detection[]>>({})
 
   useEffect(() => { camsApi.list().then(setCams) }, [])
 
-  // Auto-fill the picked slots with the first N cameras on first load.
   useEffect(() => {
     setPicked(p => {
       const next = [...p]
@@ -27,7 +29,6 @@ export default function LiveViewPage() {
     })
   }, [cams])
 
-  // Subscribe to live alerts → keep last 5s of overlays per camera.
   useEffect(() => {
     const close = alertsApi.subscribe((d: any) => {
       if (!d?.camera_id || !d?.bbox_norm) return
@@ -39,7 +40,6 @@ export default function LiveViewPage() {
       }))
     })
     const tick = setInterval(() => {
-      // Trim stale overlays.
       setOverlays(o => Object.fromEntries(Object.entries(o).map(([k, arr]) =>
         [k, (arr as Detection[]).filter(x => Date.now() - x.ts < 5000)])))
     }, 1000)
@@ -54,18 +54,24 @@ export default function LiveViewPage() {
       <PageHeader
         title="Live View"
         actions={<>
-          {[1, 2, 3, 4].map(n => (
+          {GRID_OPTIONS.map(n => (
             <Button key={n} variant={layout === n ? 'primary' : 'ghost'}
-                    onClick={() => setLayout(n as 1 | 2 | 3 | 4)}>{n}×{n}</Button>
+                    onClick={() => setLayout(n)}>{n}×{n}</Button>
           ))}
         </>}
       />
-      <div className="grid gap-2"
+      {layout >= 6 && (
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3">
+          Showing {tileCount} tiles. Browsers cap concurrent WebSockets per origin
+          (~250 in Chrome); each tile holds one. Empty slots don't open a WS.
+        </div>
+      )}
+      <div className="grid gap-1"
            style={{ gridTemplateColumns: `repeat(${layout}, minmax(0, 1fr))` }}>
         {visible.map((camId, i) => {
           const cam = cams.find(c => c.id === camId)
           return (
-            <Card key={i} className="p-2">
+            <Card key={i} className="p-1">
               <div className="flex items-center justify-between mb-1">
                 <Select className="text-xs"
                         value={camId ?? ''}

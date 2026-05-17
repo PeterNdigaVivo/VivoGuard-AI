@@ -13,6 +13,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   Badge, Card, PageHeader, Skeleton, StatusLight, Trend,
 } from '@/components/ui/Primitives'
+import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
 
 interface LiveResponse {
@@ -33,17 +34,20 @@ export default function StoreDashboardPage() {
   const [data, setData] = useState<LiveResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
 
   useEffect(() => {
     let alive = true
-    const tick = () =>
-      api<LiveResponse>(`/analytics/store/${storeId}/live`)
+    const tick = () => {
+      const q = new URLSearchParams({ since: range.since, until: range.until })
+      api<LiveResponse>(`/analytics/store/${storeId}/live?${q}`)
         .then(d => { if (alive) { setData(d); setError(null); setLoading(false) } })
         .catch(e => { if (alive) { setError(String(e)); setLoading(false) } })
+    }
     tick()
     const t = setInterval(tick, 60_000)
     return () => { alive = false; clearInterval(t) }
-  }, [storeId])
+  }, [storeId, range.since, range.until])
 
   if (loading && !data) return <DashboardSkeleton />
   if (error)  return <div className="p-6 text-red-600">Error: {error}</div>
@@ -81,6 +85,7 @@ export default function StoreDashboardPage() {
         title={data.store_name}
         actions={
           <div className="flex items-center gap-3">
+            <DateRangePicker value={range} onChange={setRange} />
             {data.status_light && <StatusLight value={data.status_light} />}
             <span className="text-xs text-slate-500">
               updated {new Date(data.as_of).toLocaleTimeString()}
@@ -88,6 +93,10 @@ export default function StoreDashboardPage() {
           </div>
         }
       />
+      <div className="text-xs text-slate-500 -mt-3">
+        Showing <strong>{range.label}</strong>. Trend arrows compare with the
+        prior same-length window.
+      </div>
 
       {/* RIGHT NOW */}
       <section>
@@ -108,19 +117,28 @@ export default function StoreDashboardPage() {
       <section>
         <SectionTitle>Today so far</SectionTitle>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Kpi label="Unique visitors today"
+          {/* Every tile in this section now carries trend vs the prior
+              same-length window via t.<key>.trend. */}
+          <Kpi label="Unique visitors"
                value={fmtInt(t.unique_visitors_today?.value)}
                trendDir={t.unique_visitors_today?.trend?.direction}
                trendPct={t.unique_visitors_today?.trend?.delta_pct ?? null} />
-          <Kpi label="Peak occupancy today" value={fmtInt(t.occupancy_peak_today?.value)} />
+          <Kpi label="Peak occupancy"
+               value={fmtInt(t.occupancy_peak_today?.value)}
+               trendDir={t.occupancy_peak_today?.trend?.direction}
+               trendPct={t.occupancy_peak_today?.trend?.delta_pct ?? null} />
           {t.queue_wait_avg_today_sec?.visible && (
-            <Kpi label="Avg queue wait today"
-                 value={`${fmtInt(t.queue_wait_avg_today_sec.value)} sec`} />
+            <Kpi label="Avg queue wait"
+                 value={`${fmtInt(t.queue_wait_avg_today_sec.value)} sec`}
+                 trendDir={t.queue_wait_avg_today_sec?.trend?.direction}
+                 trendPct={t.queue_wait_avg_today_sec?.trend?.delta_pct ?? null} />
           )}
           {t.visitors_net_today?.visible && (
             <Kpi label="Net visitors (in − out)"
                  value={fmtInt(t.visitors_net_today.value)}
-                 sub={`${fmtInt(t.visitors_in_today?.value)} in · ${fmtInt(t.visitors_out_today?.value)} out`} />
+                 sub={`${fmtInt(t.visitors_in_today?.value)} in · ${fmtInt(t.visitors_out_today?.value)} out`}
+                 trendDir={t.visitors_net_today?.trend?.direction}
+                 trendPct={t.visitors_net_today?.trend?.delta_pct ?? null} />
           )}
         </div>
       </section>

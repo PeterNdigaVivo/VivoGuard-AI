@@ -3,23 +3,26 @@
 
 import { useEffect, useState } from 'react'
 import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
+import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
+  const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
   const [filters, setFilters] = useState({
     status: '', detection_type: '', camera_id: '',
-    since: '', until: '',
   })
 
   const reload = () => alertsApi.list({
     status: filters.status || undefined,
     detection_type: filters.detection_type || undefined,
     camera_id: filters.camera_id || undefined,
-    since: filters.since || undefined,
-    until: filters.until || undefined,
+    since: range.since,
+    until: range.until,
   }).then(setItems)
-  useEffect(() => { reload() }, [filters.status, filters.detection_type, filters.camera_id])
+  useEffect(() => { reload() },
+    [filters.status, filters.detection_type, filters.camera_id,
+     range.since, range.until])
 
   // Real-time prepend: when /ws/alerts pushes a new event, refetch.
   useEffect(() => alertsApi.subscribe(() => reload()), [])
@@ -40,7 +43,12 @@ export default function AlertsPage() {
 
   return (
     <div className="p-6">
-      <PageHeader title="Alerts" actions={<Button variant="ghost" onClick={exportCSV}>Export CSV</Button>} />
+      <PageHeader title="Alerts" actions={
+        <>
+          <DateRangePicker value={range} onChange={setRange} />
+          <Button variant="ghost" onClick={exportCSV}>Export CSV</Button>
+        </>
+      } />
 
       <Card className="p-3 mb-4 flex flex-wrap gap-3 items-end">
         <Filter label="Status">
@@ -60,6 +68,9 @@ export default function AlertsPage() {
           <Input value={filters.camera_id}
                  onChange={e => setFilters({ ...filters, camera_id: e.target.value })} />
         </Filter>
+        <div className="text-xs text-slate-500 ml-auto">
+          Showing <strong>{range.label}</strong> · {items.length} result{items.length === 1 ? '' : 's'}
+        </div>
       </Card>
 
       <Card>
