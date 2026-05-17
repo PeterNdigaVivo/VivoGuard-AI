@@ -60,6 +60,9 @@ class CameraUpdate(BaseModel):
     ai_model_id: int | None = None
     inference_fps: int | None = None
     rtsp_url_override: str | None = None
+    # Attach/detach in one PATCH. Pass an int to attach; pass null to
+    # detach. The UI's "Store" dropdown uses this — see CamerasPage.
+    store_id: int | None = None
 
 
 class TestConnectionIn(BaseModel):

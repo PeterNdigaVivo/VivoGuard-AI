@@ -5,6 +5,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-route
 import { type ReactNode } from 'react'
 
 import { AuthProvider, useAuth } from '@/auth/AuthContext'
+import { ToastProvider } from '@/components/ui/Primitives'
 import LoginPage from '@/auth/LoginPage'
 import Layout from '@/components/Layout'
 
@@ -44,6 +45,7 @@ function Protected({ children }: { children: ReactNode }) {
 export default function App() {
   return (
     <AuthProvider>
+      <ToastProvider>
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -76,6 +78,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
+      </ToastProvider>
     </AuthProvider>
   )
 }

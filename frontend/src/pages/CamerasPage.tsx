@@ -3,10 +3,9 @@
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Badge, Button, Card, PageHeader, Select } from '@/components/ui/Primitives'
+import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
-import { api } from '@/api/client'
 
 function statusColor(s: string): 'green' | 'red' | 'amber' | 'slate' {
   if (s === 'online')   return 'green'
@@ -20,6 +19,7 @@ export default function CamerasPage() {
   const [stores, setStores] = useState<Store[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
+  const toast = useToast()
 
   const reload = () => Promise.all([
     camsApi.list().then(setCams),
@@ -33,25 +33,37 @@ export default function CamerasPage() {
     reload()
   }
 
-  // Attach/detach in one click. Empty value = detach.
-  async function setStore(camId: number, storeId: string) {
+  // Single-PATCH approach. Backend's CameraUpdate now accepts
+  // store_id (nullable). Empty dropdown value → detach (store_id=null).
+  // We optimistically update the camera locally and fire a toast on
+  // success so the operator sees the change even before the refetch.
+  async function setStore(camId: number, storeIdRaw: string) {
     const cam = cams.find(c => c.id === camId)
     if (!cam) return
+    const targetId: number | null = storeIdRaw ? Number(storeIdRaw) : null
+    if (cam.store_id === targetId) return
+
     setBusyId(camId)
+    // Optimistic update so the dropdown 'sticks' immediately.
+    setCams(prev => prev.map(c => c.id === camId ? { ...c, store_id: targetId } : c))
     try {
-      // If a different store was previously set, detach first so the
-      // backend doesn't complain about double attachment.
-      if (cam.store_id && String(cam.store_id) !== storeId) {
-        await api(`/stores/${cam.store_id}/cameras/${camId}/detach`, { method: 'POST' })
-      }
-      if (storeId) {
-        await api(`/stores/${storeId}/cameras/${camId}/attach`, { method: 'POST' })
-      }
-      // Trigger backfill so historical metrics for this camera roll up
-      // into the new store's dashboard immediately.
-      api('/analytics/admin/backfill-store-ids', { method: 'POST' }).catch(() => {})
-      await reload()
+      const updated = await camsApi.update(camId, { store_id: targetId })
+      // Reconcile with server response (in case backend coerced anything).
+      setCams(prev => prev.map(c => c.id === camId ? { ...c, ...updated } : c))
+      const storeName = targetId
+        ? (stores.find(s => s.id === targetId)?.name ?? `store ${targetId}`)
+        : '(unattached)'
+      toast.push(`Saved: ${cam.name} → ${storeName}`)
+      // Fire-and-forget metric backfill so the store dashboard picks up
+      // this camera's historical metrics immediately.
+      fetch('/api/analytics/admin/backfill-store-ids', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('vg_access_token') ?? ''}` },
+      }).catch(() => {})
     } catch (e) {
+      // Roll back optimistic update.
+      setCams(prev => prev.map(c => c.id === camId ? { ...c, store_id: cam.store_id } : c))
+      toast.push(`Failed to save: ${e}`, 'err')
       setError(String(e))
     } finally {
       setBusyId(null)

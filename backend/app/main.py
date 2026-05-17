@@ -70,71 +70,39 @@ app.include_router(auth_router)
 app.include_router(cameras_router)
 app.include_router(nvr_router)
 
-# Detection config, zones, alerts, training, system, websockets routers
-# are included from steps 7–9 and 14.
-# Retail extension routers (commit 0+).
-try:
-    from app.api.stores import router as stores_router               # noqa: E402
-    app.include_router(stores_router)
-except ImportError:
-    pass
-try:
-    from app.api.analytics import router as analytics_router         # noqa: E402
-    app.include_router(analytics_router)
-except ImportError:
-    pass
-try:
-    from app.api.stockroom import router as stockroom_router         # noqa: E402
-    app.include_router(stockroom_router)
-except ImportError:
-    pass
-try:
-    from app.api.search import router as search_router               # noqa: E402
-    app.include_router(search_router)
-except ImportError:
-    pass
-try:
-    from app.api.scheduled_reports import router as sched_router     # noqa: E402
-    app.include_router(sched_router)
-except ImportError:
-    pass
-try:
-    from app.api.detector_catalog import router as detcat_router     # noqa: E402
-    app.include_router(detcat_router)
-except ImportError:
-    pass
+# Auto-discovery for all optional routers. Earlier we swallowed
+# ImportError silently — which masked real errors and made endpoints
+# 404 mysteriously. Now we log the precise reason if a router fails
+# to load. Operators can see the missing piece in
+# `docker compose logs api`.
+import logging as _logging
+_router_log = _logging.getLogger("vivoguard.routers")
 
-try:
-    from app.api.detection_config import router as detection_router  # noqa: E402
-    app.include_router(detection_router)
-except ImportError:
-    pass
-try:
-    from app.api.zones import router as zones_router, catalog_router as zones_catalog_router  # noqa: E402
-    app.include_router(zones_router)
-    app.include_router(zones_catalog_router)
-except ImportError:
-    pass
-try:
-    from app.api.alerts import router as alerts_router               # noqa: E402
-    app.include_router(alerts_router)
-except ImportError:
-    pass
-try:
-    from app.api.training import router as training_router           # noqa: E402
-    app.include_router(training_router)
-except ImportError:
-    pass
-try:
-    from app.api.system import router as system_router               # noqa: E402
-    app.include_router(system_router)
-except ImportError:
-    pass
-try:
-    from app.api.websockets import router as ws_router               # noqa: E402
-    app.include_router(ws_router)
-except ImportError:
-    pass
+_OPTIONAL_ROUTERS = [
+    ("app.api.stores",             ["router"]),
+    ("app.api.analytics",          ["router"]),
+    ("app.api.stockroom",          ["router"]),
+    ("app.api.search",             ["router"]),
+    ("app.api.scheduled_reports",  ["router"]),
+    ("app.api.detector_catalog",   ["router"]),
+    ("app.api.detection_config",   ["router"]),
+    ("app.api.zones",              ["router", "catalog_router"]),
+    ("app.api.alerts",             ["router"]),
+    ("app.api.training",           ["router"]),
+    ("app.api.system",             ["router"]),
+    ("app.api.websockets",         ["router"]),
+]
+for _module_name, _attrs in _OPTIONAL_ROUTERS:
+    try:
+        _mod = __import__(_module_name, fromlist=_attrs)
+        for _attr in _attrs:
+            app.include_router(getattr(_mod, _attr))
+        _router_log.info("loaded router: %s (%s)", _module_name, ",".join(_attrs))
+    except Exception as _e:
+        # Catch broadly — not just ImportError. The previous narrow
+        # except hid SyntaxError, AttributeError, and missing-table
+        # errors at startup, silently 404-ing the affected endpoints.
+        _router_log.exception("FAILED to load router %s: %s", _module_name, _e)
 
 
 @app.get("/healthz")

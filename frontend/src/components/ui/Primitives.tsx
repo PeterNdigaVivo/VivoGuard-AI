@@ -78,6 +78,42 @@ export function StatusLight({ value }: { value: 'green' | 'amber' | 'red' }) {
   )
 }
 
+// Lightweight top-right toast. Tiny container component plus a hook
+// so pages can do `const { push, view } = useToast(); push("Saved")`.
+// No dep, no portal — renders inline at the page root.
+import { createContext, useCallback, useContext, useState } from 'react'
+
+interface Toast { id: number; message: string; kind: 'ok' | 'err' }
+const ToastCtx = createContext<{ push: (m: string, kind?: 'ok' | 'err') => void } | null>(null)
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const push = useCallback((message: string, kind: 'ok' | 'err' = 'ok') => {
+    const id = Date.now() + Math.random()
+    setToasts(t => [...t, { id, message, kind }])
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 2500)
+  }, [])
+  return (
+    <ToastCtx.Provider value={{ push }}>
+      {children}
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        {toasts.map(t => (
+          <div key={t.id}
+               className={'rounded shadow-lg px-4 py-2 text-sm text-white ' +
+                          (t.kind === 'err' ? 'bg-red-600' : 'bg-emerald-600')}>
+            {t.message}
+          </div>
+        ))}
+      </div>
+    </ToastCtx.Provider>
+  )
+}
+
+export function useToast() {
+  const ctx = useContext(ToastCtx)
+  return ctx ?? { push: (m: string) => console.log('[toast]', m) }
+}
+
 // Trend arrow with delta percentage. direction: 'up' | 'down' | 'flat'.
 export function Trend({ direction, deltaPct }:
   { direction: 'up' | 'down' | 'flat'; deltaPct: number | null }) {
