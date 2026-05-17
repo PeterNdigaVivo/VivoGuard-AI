@@ -17,8 +17,27 @@ from app.utils.logging import configure_logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: configure logging, ensure bootstrap admin, prep stores."""
+    """Startup: configure logging, run pending alembic migrations,
+    ensure bootstrap admin, prep stores."""
     configure_logging("DEBUG" if settings.app_debug else "INFO")
+
+    # Auto-run alembic migrations. Hand-running 'alembic upgrade head'
+    # in PowerShell has caused repeated drift where the alembic_version
+    # table is at head but the actual DDL never executed. Letting the
+    # API container do it on every boot makes drift self-heal.
+    try:
+        from alembic.config import Config
+        from alembic import command
+        import os as _os
+        # alembic.ini lives at /app/alembic.ini in the container image.
+        cfg_path = "/app/alembic.ini" if _os.path.exists("/app/alembic.ini") else "alembic.ini"
+        cfg = Config(cfg_path)
+        command.upgrade(cfg, "head")
+        import logging
+        logging.getLogger(__name__).info("alembic upgrade head: complete")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("alembic upgrade skipped: %s", e)
 
     # Bootstrap admin (no-op once a user exists).
     from app.auth.routes import ensure_bootstrap_admin

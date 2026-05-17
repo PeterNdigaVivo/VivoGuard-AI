@@ -39,7 +39,28 @@ def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
 def create_store(payload: StoreIn, db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
     s = Store(**payload.model_dump())
-    db.add(s); db.commit(); db.refresh(s)
+    db.add(s)
+    try:
+        db.commit()
+    except Exception as e:
+        # Most common cause is column-drift: the model + Pydantic schema
+        # know about manager_name/manager_phone but the DB doesn't have
+        # the column yet because alembic 0004 never actually ran.
+        db.rollback()
+        import logging as _l
+        _l.getLogger(__name__).exception("create_store failed: %s", e)
+        msg = str(e).split("\n")[0][:300]
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not create store: " + msg +
+                ". This usually means the database schema is behind the API code. "
+                "Recover with:  docker compose exec api alembic stamp 0001 "
+                "&& docker compose exec api alembic upgrade head  "
+                "(or just restart the api container — startup auto-runs migrations now)."
+            ),
+        )
+    db.refresh(s)
     return s
 
 
