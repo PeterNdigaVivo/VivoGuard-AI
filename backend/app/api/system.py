@@ -16,6 +16,53 @@ from app.stream.frame_buffer import FrameBuffer
 router = APIRouter(prefix="/system", tags=["system"])
 
 
+@router.get("/cameras/{camera_id}/stream-health")
+def stream_health(camera_id: int, db: Session = Depends(get_db),
+                  _u=Depends(get_current_user)):
+    """What's the streamer doing for one camera? Used by Live View tiles
+    to explain a black square instead of just showing it.
+
+    Combines:
+      - vg:health:{id}   (streamer's per-camera fps/error heartbeat)
+      - vg:inference-hb:{id}  (worker's per-camera inference heartbeat)
+      - Camera row metadata
+    """
+    import json
+    import time as _t
+    import redis as _redis
+    from app.config import settings as _s
+    from app.models import Camera
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    r = _redis.from_url(_s.redis_url)
+    raw_health = r.get(f"vg:health:{camera_id}")
+    health = json.loads(raw_health) if raw_health else None
+    hb_raw = r.get(f"vg:inference-hb:{camera_id}")
+    inference_hb = float(hb_raw) if hb_raw else None
+
+    now = _t.time()
+    last_frame_at = (health or {}).get("last_frame_at")
+    is_streaming = (
+        last_frame_at is not None and (now - float(last_frame_at)) < 10
+    )
+
+    return {
+        "camera_id": cam.id,
+        "camera_name": cam.name,
+        "ai_enabled": cam.ai_enabled,
+        "is_streaming": is_streaming,
+        "fps": (health or {}).get("fps"),
+        "last_frame_at": last_frame_at,
+        "seconds_since_last_frame": (now - float(last_frame_at)) if last_frame_at else None,
+        "error": (health or {}).get("error"),
+        "inference_last_heartbeat": inference_hb,
+        "inference_running": bool(inference_hb and (now - inference_hb) < 60),
+    }
+
+
 @router.get("/schema-check")
 def schema_check(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     """Compare actual DB columns to what the ORM expects. Use this to

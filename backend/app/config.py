@@ -68,7 +68,10 @@ class Settings(BaseSettings):
     use_gpu: bool = False
     cuda_visible_devices: str = "0"
     default_model: str = "yolov8n.pt"
-    inference_fps_default: int = 5
+    # 2 fps per camera by default — comfortably handles 40+ cameras on
+    # CPU. Bump per camera via Camera.inference_fps if you need finer
+    # tracking on a high-priority camera.
+    inference_fps_default: int = 2
 
     # --- Notifications ---
     smtp_host: str = ""

@@ -113,16 +113,13 @@ services:
     restart: unless-stopped
     # `-B` runs Celery Beat in the same process so the inference
     # supervisor (every 30s) fires without a separate beat container.
-    # `--concurrency=8` lets up to 8 cameras run inference in parallel.
-    # Bump higher when you've sized GPU/CPU for more cameras.
+    # Concurrency is now WORKER_CONCURRENCY (default 16). For 40+
+    # cameras either bump this further (CPU box: 24-32 OK at 1-2 fps
+    # per camera) or scale horizontally: `docker compose up -d --scale worker=3`.
     command:
-      - celery
-      - -A
-      - app.tasks.celery_app
-      - worker
-      - -B
-      - --loglevel=info
-      - --concurrency=8
+      - sh
+      - -c
+      - "celery -A app.tasks.celery_app worker -B --loglevel=info --concurrency=${WORKER_CONCURRENCY:-16}"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings

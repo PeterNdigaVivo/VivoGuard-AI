@@ -33,7 +33,9 @@ except ImportError as e:                                            # pragma: no
 log = logging.getLogger("streamer")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 
-POLL_INTERVAL_SECONDS = int(os.environ.get("STREAMER_POLL_INTERVAL", "10"))
+# Reconcile cadence. Lower = quicker pickup of newly added cameras.
+# At 40+ cameras this is still cheap — just a single SELECT.
+POLL_INTERVAL_SECONDS = int(os.environ.get("STREAMER_POLL_INTERVAL", "5"))
 
 
 def desired_specs() -> list[CameraSpec]:

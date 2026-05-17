@@ -90,36 +90,97 @@ export default function LiveViewPage() {
 
 // One live tile — connects to /ws/stream/{cameraId} and paints incoming
 // JPEG bytes to a <canvas>; draws bounding box overlays on top.
+//
+// Resilience added for the 40+ camera fleet:
+//   • Auto-reconnect WebSocket on close (exponential backoff up to 30s).
+//   • "Connecting…" overlay until the first frame arrives.
+//   • After 10s without a frame, polls /system/cameras/{id}/stream-health
+//     and shows the actual streamer error (RTSP timeout / 401 / no
+//     substream / etc.) instead of a silent black tile.
 function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const overlayRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 640, h: 360 })
+  const [state, setState] = useState<'connecting' | 'live' | 'stale'>('connecting')
+  const [diag, setDiag] = useState<string | null>(null)
+  const lastFrameAt = useRef<number>(0)
 
   useEffect(() => {
-    const ws = new WebSocket(wsUrl(`/ws/stream/${cameraId}`))
-    ws.binaryType = 'blob'
-    ws.onmessage = async (e) => {
-      const blob = e.data as Blob
-      const url = URL.createObjectURL(blob)
-      const img = new Image()
-      img.onload = () => {
-        const c = canvasRef.current
-        if (!c) return
-        c.width = img.naturalWidth; c.height = img.naturalHeight
-        setSize({ w: img.naturalWidth, h: img.naturalHeight })
-        const ctx = c.getContext('2d')!
-        ctx.drawImage(img, 0, 0)
-        URL.revokeObjectURL(url)
+    let ws: WebSocket | null = null
+    let closed = false
+    let retryMs = 1000
+    let healthTimer: ReturnType<typeof setInterval> | null = null
+
+    function connect() {
+      ws = new WebSocket(wsUrl(`/ws/stream/${cameraId}`))
+      ws.binaryType = 'blob'
+      ws.onmessage = (e) => {
+        lastFrameAt.current = Date.now()
+        setState('live'); setDiag(null)
+        const blob = e.data as Blob
+        const url = URL.createObjectURL(blob)
+        const img = new Image()
+        img.onload = () => {
+          const c = canvasRef.current
+          if (!c) { URL.revokeObjectURL(url); return }
+          c.width = img.naturalWidth; c.height = img.naturalHeight
+          setSize({ w: img.naturalWidth, h: img.naturalHeight })
+          c.getContext('2d')!.drawImage(img, 0, 0)
+          URL.revokeObjectURL(url)
+        }
+        img.src = url
+        retryMs = 1000  // reset backoff after a real frame
       }
-      img.src = url
+      ws.onclose = () => {
+        if (closed) return
+        setState(s => s === 'live' ? 'stale' : 'connecting')
+        setTimeout(connect, retryMs)
+        retryMs = Math.min(30_000, retryMs * 2)
+      }
     }
-    return () => ws.close()
+    connect()
+
+    // Stale-frame watchdog: after 10s without a frame, hit the health
+    // endpoint so we can surface the actual reason.
+    healthTimer = setInterval(async () => {
+      const silentMs = Date.now() - lastFrameAt.current
+      if (silentMs > 10_000) {
+        setState(lastFrameAt.current ? 'stale' : 'connecting')
+        try {
+          const tok = localStorage.getItem('vg_access_token') ?? ''
+          const r = await fetch(`/api/system/cameras/${cameraId}/stream-health`,
+                                { headers: { Authorization: `Bearer ${tok}` } })
+          if (r.ok) {
+            const h = await r.json()
+            if (h.error)            setDiag(h.error)
+            else if (!h.is_streaming) setDiag('Streamer not yet attempting this camera. Wait ~10s after attaching, or check streamer logs.')
+            else                     setDiag('Streamer connected but no frames received yet.')
+          }
+        } catch { /* ignore */ }
+      }
+    }, 5000)
+
+    return () => {
+      closed = true
+      if (healthTimer) clearInterval(healthTimer)
+      if (ws) ws.close()
+    }
   }, [cameraId])
 
   return (
-    <div ref={overlayRef} className="relative bg-black rounded overflow-hidden">
+    <div className="relative bg-black rounded overflow-hidden aspect-video">
       <canvas ref={canvasRef} className="block w-full h-auto" />
-      {/* Overlay layer */}
+      {/* Status overlay — visible until first frame, then again if stale. */}
+      {state !== 'live' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-white text-xs gap-2 bg-black/70">
+          <div className="font-medium">
+            {state === 'connecting' ? 'Connecting…' : 'Stream paused'}
+          </div>
+          {diag && (
+            <div className="max-w-[90%] text-center text-amber-300 leading-snug">{diag}</div>
+          )}
+        </div>
+      )}
+      {/* Bounding-box overlay */}
       <div className="absolute inset-0 pointer-events-none">
         {overlays.map((o, i) => {
           const [x1, y1, x2, y2] = o.bbox_norm
