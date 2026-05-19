@@ -15,9 +15,21 @@ from dataclasses import dataclass
 
 from app.stream.ffmpeg_worker import FFmpegWorker
 from app.stream.frame_buffer import FrameBuffer
-from app.stream.http_snapshot_worker import HttpSnapshotWorker
 
 log = logging.getLogger(__name__)
+
+# Optional: HTTP-snapshot worker landed in May-2026. If the deployed
+# image was baked from a stale layer that doesn't have this file,
+# RTSP cameras must still work — operators get a clear log line if
+# they try to use http_snapshot mode without the module installed.
+try:
+    from app.stream.http_snapshot_worker import HttpSnapshotWorker  # type: ignore
+    _HTTP_SNAPSHOT_AVAILABLE = True
+except Exception as _e:  # pragma: no cover
+    HttpSnapshotWorker = None  # type: ignore
+    _HTTP_SNAPSHOT_AVAILABLE = False
+    log.warning("HttpSnapshotWorker not available (%s) — http_snapshot "
+                "cameras will be skipped; rebuild the api image to enable.", _e)
 
 
 @dataclass(frozen=True)
@@ -51,14 +63,19 @@ class StreamManager:
 
     def _spawn_worker(self, spec: CameraSpec) -> threading.Thread:
         if spec.transport == "http_snapshot":
-            log.info("starting HTTP-snapshot worker camera=%s fps=%s url=%s",
-                     spec.camera_id, spec.fps, self._redact(spec.snapshot_url))
-            return HttpSnapshotWorker(
-                spec.camera_id, spec.snapshot_url,
-                fps=spec.fps,
-                username=spec.username, password=spec.password,
-                buffer=self.buffer,
-            )
+            if not _HTTP_SNAPSHOT_AVAILABLE:
+                log.error("camera %s wants http_snapshot but the worker "
+                          "module isn't installed. Falling back to RTSP.",
+                          spec.camera_id)
+            else:
+                log.info("starting HTTP-snapshot worker camera=%s fps=%s url=%s",
+                         spec.camera_id, spec.fps, self._redact(spec.snapshot_url))
+                return HttpSnapshotWorker(
+                    spec.camera_id, spec.snapshot_url,
+                    fps=spec.fps,
+                    username=spec.username, password=spec.password,
+                    buffer=self.buffer,
+                )
         log.info("starting RTSP worker camera=%s fps=%s url=%s",
                  spec.camera_id, spec.fps, self._redact(spec.rtsp_url))
         return FFmpegWorker(

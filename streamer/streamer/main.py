@@ -7,6 +7,21 @@ Loop:
 
 Note: the streamer image is built FROM the backend image (or shares the
 same base layer) so all `app.*` modules are available on PYTHONPATH.
+
+Resilience rules (May-2026):
+
+  1. Run alembic upgrade head on startup — same as the api container.
+     This is the only way to guarantee that newly added columns (e.g.
+     `transport` from migration 0006) actually exist before we SELECT
+     them. Without it, a fresh-build api container that fails its
+     migration leaves the streamer SELECTing a column the DB doesn't
+     have, and EVERY camera goes dark.
+
+  2. Use raw SQL (not the ORM) to read camera rows. The ORM SELECTs
+     ALL mapped columns; if any one new column hasn't migrated yet,
+     the whole query 500s and nothing streams. Raw SQL with an
+     explicit column list, plus a fallback if any column is missing,
+     keeps us streaming the cameras we CAN read about.
 """
 from __future__ import annotations
 import logging
@@ -17,12 +32,11 @@ import time
 # Backend package is mounted/copied at /app/app in the container.
 sys.path.insert(0, "/app")
 
-from sqlalchemy import select                                       # noqa: E402
+from sqlalchemy import text                                          # noqa: E402
 
 try:
     from app.config   import settings                               # type: ignore
     from app.database import SessionLocal                           # type: ignore
-    from app.models   import Camera                                 # type: ignore
     from app.utils.crypto  import decrypt                           # type: ignore
     from app.utils.network import build_rtsp_url                    # type: ignore
     from app.stream.manager import StreamManager, CameraSpec        # type: ignore
@@ -38,68 +52,151 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 POLL_INTERVAL_SECONDS = int(os.environ.get("STREAMER_POLL_INTERVAL", "5"))
 
 
-def _snapshot_url_for(c, password: str) -> str:
+def _run_migrations() -> None:
+    """Bring the DB schema to head before we start polling.
+
+    Without this, a streamer that boots before (or alongside) the api
+    container can SELECT a column the database doesn't have yet, and
+    every reconcile fails until the api finishes migrating. Cheap to
+    run — a no-op when already at head — and self-healing when not.
+    """
+    try:
+        from alembic.config import Config
+        from alembic import command
+        cfg_path = "/app/alembic.ini" if os.path.exists("/app/alembic.ini") else "alembic.ini"
+        if not os.path.exists(cfg_path):
+            log.warning("streamer: alembic.ini not found at %s — skipping auto-migrate", cfg_path)
+            return
+        cfg = Config(cfg_path)
+        command.upgrade(cfg, "head")
+        log.info("streamer: alembic upgrade head complete")
+    except Exception as e:
+        log.warning("streamer: alembic upgrade skipped: %s", e)
+
+
+# Columns we read off `cameras`. Any column added in a NEW migration
+# must be added here AND treated as optional in desired_specs() below,
+# so a missing column never kills the reconcile.
+_CAMERA_COLUMNS = [
+    "id", "brand", "host", "rtsp_port", "http_port",
+    "username", "password_encrypted", "channel_number",
+    "rtsp_url_override", "inference_fps", "ai_enabled",
+    "transport", "snapshot_url_override",
+]
+
+
+def _snapshot_url_for(host: str, http_port: int, channel: int | None,
+                      username: str, password: str,
+                      override: str | None) -> str:
     """Compose the HTTP-snapshot URL for a camera.
 
     Override beats everything; otherwise build the Dahua default:
        http://USER:PASS@HOST:HTTP_PORT/cgi-bin/snapshot.cgi?channel=N
     """
-    if c.snapshot_url_override:
-        return c.snapshot_url_override
-    # We embed creds in the URL only when no override is provided, and
-    # we use HTTP Digest in the worker anyway — the URL form is just a
-    # convenience for logging / Dahua firmwares that accept it.
+    if override:
+        return override
     from urllib.parse import quote
-    user = quote(c.username or "", safe="")
+    user = quote(username or "", safe="")
     pw   = quote(password or "", safe="")
     auth = f"{user}:{pw}@" if user else ""
-    ch   = c.channel_number or 1
-    return f"http://{auth}{c.host}:{c.http_port}/cgi-bin/snapshot.cgi?channel={ch}"
+    ch   = channel or 1
+    return f"http://{auth}{host}:{http_port}/cgi-bin/snapshot.cgi?channel={ch}"
+
+
+def _query_active_cameras(db) -> list[dict]:
+    """Read active cameras as plain dicts using explicit raw SQL.
+
+    Tries the full column set first. If Postgres complains about a
+    missing column (operator hasn't deployed the latest migration
+    yet), strips the unknown column and retries — so legacy DBs keep
+    streaming. Returns dicts so we don't depend on the ORM mapping
+    matching the live DB shape.
+    """
+    cols = list(_CAMERA_COLUMNS)
+    while True:
+        sql = f"SELECT {', '.join(cols)} FROM cameras WHERE ai_enabled = true"
+        try:
+            rows = db.execute(text(sql)).mappings().all()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            msg = str(e).lower()
+            # Rollback the aborted transaction before retrying — otherwise
+            # the next SELECT errors with "current transaction is aborted".
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            dropped = None
+            for c in list(cols):
+                if c == "id":
+                    continue
+                if f'column "{c}"' in msg or f'column cameras.{c}' in msg:
+                    dropped = c
+                    break
+            if dropped is None:
+                log.exception("streamer: camera query failed (unrecoverable): %s", e)
+                raise
+            cols.remove(dropped)
+            log.warning("streamer: DB missing column 'cameras.%s' — falling back without it. "
+                        "Run 'alembic upgrade head' to restore full functionality.", dropped)
 
 
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
-        cams = db.execute(select(Camera).where(Camera.ai_enabled == True)).scalars().all()  # noqa: E712
-        for c in cams:
+        rows = _query_active_cameras(db)
+        for r in rows:
             try:
-                pw = decrypt(c.password_encrypted or "")
+                pw = decrypt(r.get("password_encrypted") or "")
             except Exception:
                 pw = ""
-            transport = getattr(c, "transport", "rtsp") or "rtsp"
+            transport = (r.get("transport") or "rtsp") or "rtsp"
             rtsp_url = build_rtsp_url(
-                brand=c.brand,
-                host=c.host,
-                port=c.rtsp_port,
-                username=c.username,
+                brand=r.get("brand"),
+                host=r.get("host"),
+                port=r.get("rtsp_port") or 554,
+                username=r.get("username"),
                 password=pw,
-                channel=c.channel_number,
+                channel=r.get("channel_number"),
                 subtype=1,             # substream — cheaper for AI inference
-                override=c.rtsp_url_override,
+                override=r.get("rtsp_url_override"),
             )
-            snap_url = _snapshot_url_for(c, pw) if transport == "http_snapshot" else ""
+            snap_url = ""
+            if transport == "http_snapshot":
+                snap_url = _snapshot_url_for(
+                    r.get("host"), r.get("http_port") or 80,
+                    r.get("channel_number"),
+                    r.get("username") or "", pw,
+                    r.get("snapshot_url_override"),
+                )
             out.append(CameraSpec(
-                camera_id=c.id,
+                camera_id=r["id"],
                 rtsp_url=rtsp_url,
-                fps=c.inference_fps or settings.inference_fps_default,
+                fps=r.get("inference_fps") or settings.inference_fps_default,
                 width=640,
                 transport=transport,
                 snapshot_url=snap_url,
-                username=c.username or "",
+                username=r.get("username") or "",
                 password=pw,
             ))
     return out
 
 
 def main() -> None:
+    log.info("streamer: starting up")
+    _run_migrations()
     mgr = StreamManager()
     log.info("streamer: polling every %ss", POLL_INTERVAL_SECONDS)
     try:
         while True:
             try:
                 specs = desired_specs()
+                log.info("streamer: %d desired cameras", len(specs))
                 mgr.reconcile(specs)
             except Exception as e:
+                # Don't let one bad poll kill the loop. Sleep and retry —
+                # the most common cause (migration still running) clears
+                # itself within a few seconds.
                 log.exception("reconcile failed: %s", e)
             time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:

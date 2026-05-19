@@ -25,6 +25,47 @@ def _coerce_empty_strings(payload_dict: dict) -> dict:
             cleaned[k] = v
     return cleaned
 
+
+def _explain_db_error(e: Exception) -> tuple[int, str]:
+    """Inspect any DB exception and return (http_status, user_message).
+
+    The OLD code relied on `isinstance(e, IntegrityError)` to decide if
+    we were looking at a unique-key conflict. That's fragile — psycopg
+    errors get re-wrapped by SQLAlchemy in surprising ways, and the
+    user kept seeing the misleading "schema is behind the API" message
+    for what were really duplicate codes. Now we classify by reading
+    the raw text of the error AND its `.orig`. If it mentions a known
+    unique constraint or the words `duplicate key` / `UniqueViolation`,
+    we surface a clear 409. Only genuinely unknown failures fall
+    through to 503.
+    """
+    raw = str(e)
+    if hasattr(e, "orig") and getattr(e, "orig", None) is not None:
+        raw = f"{raw}\n{e.orig!s}"
+
+    raw_lower = raw.lower()
+
+    # 1) Known named constraint? Use the friendly message.
+    for constraint, friendly in _UNIQUE_CONFLICT_MESSAGES.items():
+        if constraint in raw:
+            return 409, friendly
+
+    # 2) Generic unique violation we don't have a friendly name for.
+    if "uniqueviolation" in raw_lower or "duplicate key" in raw_lower:
+        return 409, "That value already exists. Pick a different one."
+
+    # 3) Other integrity issues (FK, NOT NULL, check).
+    if isinstance(e, IntegrityError):
+        first_line = raw.split("\n")[0][:300]
+        return 409, f"Database rejected the row: {first_line}"
+
+    # 4) Anything else — surface the first line. No scary "schema is
+    #    behind" speculation; operators can read the api logs for the
+    #    full traceback.
+    first_line = raw.split("\n")[0][:300]
+    return 503, f"Could not save store: {first_line}"
+
+
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Campaign, Camera, Shift, Store
@@ -48,10 +89,6 @@ def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     try:
         return db.query(Store).order_by(Store.country, Store.name).all()
     except Exception as e:
-        # Most common cause: alembic_version table at head but
-        # manager_name / manager_phone columns missing on `stores`.
-        # Fix: run  docker compose exec api alembic stamp 0003
-        #       then docker compose exec api alembic upgrade head
         _log.exception("GET /stores failed (likely schema drift): %s", e)
         db.rollback()
         return []
@@ -64,33 +101,15 @@ def create_store(payload: StoreIn, db: Session = Depends(get_db),
     db.add(s)
     try:
         db.commit()
-    except IntegrityError as e:
-        # Unique-constraint conflict — surface a precise message naming
-        # the offending field, rather than a raw psycopg traceback.
-        db.rollback()
-        raw = str(e.orig if hasattr(e, "orig") else e)
-        for constraint, friendly in _UNIQUE_CONFLICT_MESSAGES.items():
-            if constraint in raw:
-                raise HTTPException(status_code=409, detail=friendly) from e
-        # Some other integrity error (FK, NOT NULL). Show the first line.
-        first_line = raw.split("\n")[0][:300]
-        raise HTTPException(status_code=409,
-                            detail=f"Database rejected the row: {first_line}") from e
     except Exception as e:
-        # Reserved for actual schema-drift / DB-level failures.
+        # Single unified handler. _explain_db_error() classifies by
+        # message content, so it stays correct no matter which
+        # SQLAlchemy class wraps the underlying psycopg error.
         db.rollback()
         import logging as _l
         _l.getLogger(__name__).exception("create_store failed: %s", e)
-        msg = str(e).split("\n")[0][:300]
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Could not create store: " + msg +
-                ". If this mentions a missing column, the DB schema is "
-                "behind the API. Restart the api container — startup "
-                "auto-runs migrations."
-            ),
-        )
+        status, detail = _explain_db_error(e)
+        raise HTTPException(status_code=status, detail=detail) from e
     db.refresh(s)
     return s
 
@@ -115,14 +134,12 @@ def update_store(store_id: int, patch: StoreIn,
         setattr(s, k, v)
     try:
         db.commit()
-    except IntegrityError as e:
+    except Exception as e:
         db.rollback()
-        raw = str(e.orig if hasattr(e, "orig") else e)
-        for constraint, friendly in _UNIQUE_CONFLICT_MESSAGES.items():
-            if constraint in raw:
-                raise HTTPException(status_code=409, detail=friendly) from e
-        raise HTTPException(status_code=409,
-                            detail=f"Database rejected the change: {raw.splitlines()[0][:300]}") from e
+        import logging as _l
+        _l.getLogger(__name__).exception("update_store failed: %s", e)
+        status, detail = _explain_db_error(e)
+        raise HTTPException(status_code=status, detail=detail) from e
     db.refresh(s)
     return s
 
