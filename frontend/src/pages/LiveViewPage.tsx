@@ -3,10 +3,10 @@
 // per origin.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Badge, Button, Card, PageHeader, Select } from '@/components/ui/Primitives'
+import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { alerts as alertsApi } from '@/api/alerts'
-import { wsUrl } from '@/api/client'
+import { api, wsUrl } from '@/api/client'
 
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
 type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
@@ -18,6 +18,32 @@ export default function LiveViewPage() {
   // Up to 81 tiles (9×9).
   const [picked, setPicked] = useState<(number | null)[]>(Array(81).fill(null))
   const [overlays, setOverlays] = useState<Record<number, Detection[]>>({})
+  const [fixing, setFixing] = useState(false)
+  const toast = useToast()
+
+  // One-click bulk auto-failover: run a fresh transport probe on
+  // every camera, persist working HTTP-snapshot settings for any
+  // whose RTSP port is unreachable. Useful when adding a whole new
+  // store and finding that ports 554 aren't forwarded — instead of
+  // diagnosing each tile individually, hit this once and let the
+  // streamer re-pick workers on the next reconcile.
+  async function autoFixAll() {
+    if (!confirm('Probe every camera and switch unreachable RTSP ones to HTTP snapshot polling?')) return
+    setFixing(true)
+    try {
+      const res = await api<{ checked: number; switched: number; report: any[] }>(
+        '/cameras/auto-failover', { method: 'POST', body: {} },
+      )
+      toast.push(`Checked ${res.checked} cameras, switched ${res.switched} to HTTP snapshot.`)
+      // Refresh the camera list so the status badges / transport
+      // fields reflect the new state.
+      camsApi.list().then(setCams)
+    } catch (e) {
+      toast.push(`Auto-fix failed: ${e}`, 'err')
+    } finally {
+      setFixing(false)
+    }
+  }
 
   useEffect(() => { camsApi.list().then(setCams) }, [])
 
@@ -54,6 +80,10 @@ export default function LiveViewPage() {
       <PageHeader
         title="Live View"
         actions={<>
+          <Button variant="ghost" onClick={autoFixAll} disabled={fixing}
+                  title="Probe every camera and switch unreachable RTSP ones to HTTP snapshot polling.">
+            {fixing ? 'Probing all cameras…' : '🛠 Auto-fix all offline'}
+          </Button>
           {GRID_OPTIONS.map(n => (
             <Button key={n} variant={layout === n ? 'primary' : 'ghost'}
                     onClick={() => setLayout(n)}>{n}×{n}</Button>

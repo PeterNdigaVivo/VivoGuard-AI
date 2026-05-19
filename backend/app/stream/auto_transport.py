@@ -60,23 +60,30 @@ _DEFAULT_HTTP_PORTS = (80, 8080, 8000, 800, 7000)
 _DEFAULT_RTSP_PORTS = (554, 10554, 5544, 8554)
 
 
-# Snapshot URL templates. {host}, {port}, {ch} substituted in.
+# Snapshot URL templates. {scheme}, {host}, {port}, {ch} substituted in.
 # Multiple per vendor because firmware variants differ. We try every
-# pattern on every port — first JPEG wins.
+# pattern on every port — first JPEG wins. Both http:// and https://
+# are attempted on every port via the `_SNAPSHOT_SCHEMES` list below.
 _SNAPSHOT_TEMPLATES = [
     # Dahua / generic CGI (used by Dahua, Amcrest, Lorex)
-    ("dahua-cgi",   "http://{host}:{port}/cgi-bin/snapshot.cgi?channel={ch}"),
+    ("dahua-cgi",   "{scheme}://{host}:{port}/cgi-bin/snapshot.cgi?channel={ch}"),
     # Hikvision ISAPI standard. Channel encoded as {N}01 where N is
     # the 1-indexed channel; ISAPI distinguishes mainstream (01) vs
     # substream (02).
-    ("hik-isapi",   "http://{host}:{port}/ISAPI/Streaming/channels/{ch}01/picture"),
+    ("hik-isapi",   "{scheme}://{host}:{port}/ISAPI/Streaming/channels/{ch}01/picture"),
     # Older Hikvision firmware without the /ISAPI prefix.
-    ("hik-legacy",  "http://{host}:{port}/Streaming/channels/{ch}01/picture"),
+    ("hik-legacy",  "{scheme}://{host}:{port}/Streaming/channels/{ch}01/picture"),
     # Generic ONVIF media snapshot (some cameras expose this directly).
-    ("onvif-snap",  "http://{host}:{port}/onvif/media_service/snapshot?ProfileToken=Profile_{ch}"),
+    ("onvif-snap",  "{scheme}://{host}:{port}/onvif/media_service/snapshot?ProfileToken=Profile_{ch}"),
     # Axis / Vivotek style
-    ("axis-jpg",    "http://{host}:{port}/axis-cgi/jpg/image.cgi?camera={ch}"),
+    ("axis-jpg",    "{scheme}://{host}:{port}/axis-cgi/jpg/image.cgi?camera={ch}"),
 ]
+
+# Schemes to try, in order. HTTPS goes second because most NVRs in
+# the Vivo fleet serve HTTP — checking HTTP first means we usually
+# don't pay the TLS handshake cost. Some Hikvision firmwares only
+# expose the snapshot endpoint over TLS, hence the fallback.
+_SNAPSHOT_SCHEMES = ("http", "https")
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -128,23 +135,27 @@ def _probe_port_all_templates(
     host: str, port: int, channel: int,
     username: str | None, password: str | None,
 ) -> Optional[dict]:
-    """Try every snapshot template on this port. Return the FIRST one
-    that yields a JPEG, with the vendor tag and full URL, or None.
+    """Try every snapshot template on this port across both HTTP and
+    HTTPS schemes. Return the FIRST combination that yields a JPEG,
+    or None.
 
-    Quick TCP check first so we don't waste 5 × 4s on a port that's
-    not even open.
+    Quick TCP check first so we don't waste N × M × 4s on a port
+    that's not even open.
     """
     if not _tcp_reachable(host, port, timeout=2.0):
         return None
-    for vendor, tmpl in _SNAPSHOT_TEMPLATES:
-        url = tmpl.format(host=host, port=port, ch=channel or 1)
-        ok, reason = _try_snapshot(url, username, password)
-        if ok:
-            log.info("auto-transport: %s:%s -> JPEG via %s (%s)",
-                     host, port, vendor, reason)
-            return {"vendor": vendor, "url": url, "port": port,
-                    "reason": reason}
-        log.debug("auto-transport: %s:%s/%s -> %s", host, port, vendor, reason)
+    for scheme in _SNAPSHOT_SCHEMES:
+        for vendor, tmpl in _SNAPSHOT_TEMPLATES:
+            url = tmpl.format(scheme=scheme, host=host, port=port,
+                              ch=channel or 1)
+            ok, reason = _try_snapshot(url, username, password)
+            if ok:
+                log.info("auto-transport: %s:%s -> JPEG via %s/%s (%s)",
+                         host, port, scheme, vendor, reason)
+                return {"vendor": vendor, "scheme": scheme,
+                        "url": url, "port": port, "reason": reason}
+            log.debug("auto-transport: %s:%s/%s/%s -> %s",
+                      host, port, scheme, vendor, reason)
     return None
 
 
@@ -219,31 +230,36 @@ def negotiate(camera: dict, password_plain: str) -> Optional[dict]:
         if not tcp_ok:
             diagnostic["http_attempts"].append(attempt)
             continue
-        for vendor, tmpl in _SNAPSHOT_TEMPLATES:
-            url = tmpl.format(host=host, port=port, ch=channel)
-            ok, reason = _try_snapshot(url, username, password_plain)
-            attempt["templates"].append(
-                {"vendor": vendor, "url": url, "ok": ok, "reason": reason}
-            )
-            if ok:
-                log.warning("auto-transport: %s -> switching to http_snapshot "
-                            "on port %s via %s", host, port, vendor)
-                diagnostic["http_attempts"].append(attempt)
-                diagnostic["outcome"] = "switched"
-                diagnostic["switched_to"] = {
-                    "port": port, "vendor": vendor, "url": url,
-                }
-                _record_diagnostic(host, rtsp_port, diagnostic)
-                _PROBED[key] = now + _PROBE_TTL_SECONDS
-                updates: dict = {"transport": "http_snapshot"}
-                if port != configured:
-                    updates["http_port"] = port
-                # For non-Dahua URLs we need to tell the worker the
-                # exact URL — the worker's default-construction logic
-                # assumes Dahua CGI.
-                if vendor != "dahua-cgi":
-                    updates["snapshot_url_override"] = url
-                return updates
+        for scheme in _SNAPSHOT_SCHEMES:
+            for vendor, tmpl in _SNAPSHOT_TEMPLATES:
+                url = tmpl.format(scheme=scheme, host=host, port=port,
+                                  ch=channel)
+                ok, reason = _try_snapshot(url, username, password_plain)
+                attempt["templates"].append({
+                    "vendor": vendor, "scheme": scheme,
+                    "url": url, "ok": ok, "reason": reason,
+                })
+                if ok:
+                    log.warning("auto-transport: %s -> switching to http_snapshot "
+                                "on port %s via %s/%s", host, port, scheme, vendor)
+                    diagnostic["http_attempts"].append(attempt)
+                    diagnostic["outcome"] = "switched"
+                    diagnostic["switched_to"] = {
+                        "port": port, "vendor": vendor,
+                        "scheme": scheme, "url": url,
+                    }
+                    _record_diagnostic(host, rtsp_port, diagnostic)
+                    _PROBED[key] = now + _PROBE_TTL_SECONDS
+                    updates: dict = {"transport": "http_snapshot"}
+                    if port != configured:
+                        updates["http_port"] = port
+                    # For non-Dahua URLs OR https schemes we need to
+                    # tell the worker the exact URL — the worker's
+                    # default-construction logic assumes Dahua CGI
+                    # over plain HTTP.
+                    if vendor != "dahua-cgi" or scheme != "http":
+                        updates["snapshot_url_override"] = url
+                    return updates
         diagnostic["http_attempts"].append(attempt)
 
     diagnostic["outcome"] = "no_endpoint_found"

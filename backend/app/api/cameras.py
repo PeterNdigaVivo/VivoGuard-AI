@@ -110,6 +110,49 @@ def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
         store_id=store_id,
         status="pending",
     )
+
+    # Save-time transport negotiation. Operators repeatedly added
+    # cameras at stores where the router doesn't forward 554, then
+    # spent minutes wondering why nothing streamed. Now: at save
+    # time we run a parallel port probe (~5s) and, if RTSP/554
+    # isn't reachable but any HTTP snapshot URL responds with a
+    # JPEG, the row is saved with transport='http_snapshot' + the
+    # working http_port + (when needed) snapshot_url_override.
+    #
+    # discover_ports is used instead of negotiate() because it runs
+    # the port checks concurrently — the wizard returns in ~5s
+    # instead of up to ~90s worst case. If neither RTSP nor any HTTP
+    # path works, the row is saved anyway as RTSP and operators get
+    # the "Diagnose & auto-fix" affordance from the Live View tile.
+    try:
+        from app.stream.auto_transport import discover_ports
+        result = discover_ports(
+            cam.host, cam.username, payload.password or "",
+            cam.channel_number or 1,
+        )
+        # If RTSP is reachable, we leave the row alone — the streamer
+        # will use direct RTSP. We do bump http_port to whichever port
+        # answered, so the streamer's later auto-failover (if RTSP
+        # later breaks) has the right starting candidate.
+        if result.get("http_port") and not result.get("rtsp_port"):
+            cam.transport = "http_snapshot"
+            if result["http_port"] != cam.http_port:
+                cam.http_port = result["http_port"]
+            # Non-Dahua URL OR HTTPS → must persist the exact URL.
+            snap_url = result.get("snapshot_url") or ""
+            vendor = result.get("snapshot_vendor") or ""
+            if snap_url and (vendor != "dahua-cgi" or snap_url.startswith("https://")):
+                cam.snapshot_url_override = snap_url
+        elif result.get("rtsp_port") and result["rtsp_port"] != cam.rtsp_port:
+            # An RTSP port other than the one the operator typed
+            # responded — use it.
+            cam.rtsp_port = result["rtsp_port"]
+    except Exception:
+        # Don't let probing failure block camera creation — we'd
+        # rather save the row and let the streamer fall back to its
+        # own retry loop than 500 the wizard.
+        pass
+
     db.add(cam)
     db.commit()
     db.refresh(cam)
