@@ -88,24 +88,25 @@ class FFmpegWorker(threading.Thread):
                 buf = buf[end + 2:]
 
     def _hb_thread(self, proc: subprocess.Popen, started_at: float) -> None:
-        """Heartbeat: every 5s while ffmpeg is alive and no frame yet,
-        update health so the UI shows 'connecting…' instead of an empty
-        tile. Exits when ffmpeg dies or a frame arrives (last_frame_at
-        moves forward)."""
+        """Heartbeat thread. While ffmpeg is alive AND no real frame has
+        landed since `started_at`, push a 'Connecting to RTSP…' status
+        every 5s. Stops when ffmpeg dies OR a frame arrives."""
         while not self._stop.is_set() and proc.poll() is None:
             time.sleep(5)
             if self._stop.is_set() or proc.poll() is not None:
                 break
-            # If no frame has arrived since this run started, surface a
-            # 'connecting' status so the operator sees activity.
             health = self.buffer.health(self.camera_id) or {}
-            last = float(health.get("last_frame_at") or 0)
-            if last < started_at:
-                elapsed = int(time.time() - started_at)
-                self.buffer.update_health(
-                    self.camera_id, fps=0,
-                    error=f"Connecting to RTSP… ({elapsed}s, ffmpeg still negotiating)",
-                )
+            # `last_frame_at` is bumped only by push_frame() — so any
+            # value > started_at means we got a real JPEG since this run
+            # began. In that case we stop writing the 'connecting' message.
+            last_frame_at = float(health.get("last_frame_at") or 0)
+            if last_frame_at >= started_at:
+                return
+            elapsed = int(time.time() - started_at)
+            self.buffer.update_health(
+                self.camera_id, fps=0,
+                error=f"Connecting to RTSP… ({elapsed}s, ffmpeg still negotiating)",
+            )
 
     def run(self) -> None:
         last_emit = time.time()
@@ -165,9 +166,21 @@ class FFmpegWorker(threading.Thread):
             if self._stop.is_set():
                 return
             wait = self.backoff.fail()
+            err_msg = err.strip()[:200] or "stream ended"
             log.warning("camera %s: ffmpeg exited (err=%s) — retry in %ds",
-                        self.camera_id, err.strip()[:120], wait)
+                        self.camera_id, err_msg[:120], wait)
             self.buffer.update_health(self.camera_id, fps=0,
-                                       error=err.strip()[:200] or "stream ended")
-            if self._stop.wait(wait):
-                return
+                                       error=err_msg)
+            # During the backoff wait, refresh the health row every 5s
+            # with a 'Retrying in Xs (last error: …)' message. Without
+            # this, long waits (40s, 80s, 5min) make the Live View tile
+            # appear to forget what was happening.
+            deadline = time.time() + wait
+            while not self._stop.is_set() and time.time() < deadline:
+                remaining = max(0, int(deadline - time.time()))
+                self.buffer.update_health(
+                    self.camera_id, fps=0,
+                    error=f"Retrying in {remaining}s (last error: {err_msg[:150]})",
+                )
+                if self._stop.wait(min(5, remaining + 0.1)):
+                    return

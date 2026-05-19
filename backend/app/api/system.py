@@ -44,9 +44,16 @@ def stream_health(camera_id: int, db: Session = Depends(get_db),
     inference_hb = float(hb_raw) if hb_raw else None
 
     now = _t.time()
-    last_frame_at = (health or {}).get("last_frame_at")
+    # last_frame_at = REAL JPEG arrival time (push_frame writes this).
+    # last_health_at = any streamer status write (errors, retrying, etc).
+    # is_streaming requires a REAL frame within the last 10 seconds.
+    last_frame_at  = (health or {}).get("last_frame_at")
+    last_health_at = (health or {}).get("last_health_at")
+    fps            = (health or {}).get("fps") or 0
     is_streaming = (
-        last_frame_at is not None and (now - float(last_frame_at)) < 10
+        last_frame_at is not None
+        and (now - float(last_frame_at)) < 10
+        and fps > 0
     )
 
     return {
@@ -54,9 +61,12 @@ def stream_health(camera_id: int, db: Session = Depends(get_db),
         "camera_name": cam.name,
         "ai_enabled": cam.ai_enabled,
         "is_streaming": is_streaming,
-        "fps": (health or {}).get("fps"),
+        "fps": fps,
         "last_frame_at": last_frame_at,
+        "last_health_at": last_health_at,
         "seconds_since_last_frame": (now - float(last_frame_at)) if last_frame_at else None,
+        "seconds_since_last_health_write":
+            (now - float(last_health_at)) if last_health_at else None,
         "error": (health or {}).get("error"),
         "inference_last_heartbeat": inference_hb,
         "inference_running": bool(inference_hb and (now - inference_hb) < 60),
