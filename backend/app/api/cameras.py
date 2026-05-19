@@ -199,6 +199,104 @@ async def intelligent_probe(payload: IntelligentProbeIn,
     return result
 
 
+@router.get("/{camera_id}/transport-diagnose")
+def transport_diagnose(camera_id: int, fresh: bool = False,
+                       db: Session = Depends(get_db),
+                       _u: User = Depends(require_role("admin", "operator"))):
+    """Per-camera transport diagnostic.
+
+    Returns the streamer's most recent auto-failover probe result —
+    which RTSP port it tried, which HTTP ports + URL templates it
+    tried, and exactly what each returned. Operators use this from
+    the Live View tile to see WHY a camera is paused with "Connection
+    refused" instead of guessing.
+
+    Pass `?fresh=true` to force a fresh probe right now (otherwise
+    the cached result from the last reconcile is returned, which can
+    be up to 5 min old).
+    """
+    from app.stream.auto_transport import (
+        last_diagnostic, negotiate, forget,
+    )
+    from app.utils.crypto import decrypt
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    host = cam.host
+    rtsp_port = cam.rtsp_port or 554
+
+    if fresh:
+        # Bust the cache so negotiate() actually re-runs the probe.
+        forget(host, rtsp_port)
+        try:
+            pw = decrypt(cam.password_encrypted or "")
+        except Exception:
+            pw = ""
+        # negotiate() returns None either when RTSP works (no change
+        # needed) OR when nothing worked. The diagnostic record is
+        # written either way — we just want to trigger it now.
+        camera_dict = {
+            "host": host, "rtsp_port": rtsp_port,
+            "http_port": cam.http_port,
+            "transport": "rtsp",   # force probe even if already switched
+            "username": cam.username,
+            "channel_number": cam.channel_number,
+        }
+        try:
+            updates = negotiate(camera_dict, pw)
+            if updates:
+                for k, v in updates.items():
+                    setattr(cam, k, v)
+                db.add(cam)
+                db.commit()
+        except Exception:
+            db.rollback()
+
+    record = last_diagnostic(host, rtsp_port)
+    return {
+        "camera_id": cam.id,
+        "name": cam.name,
+        "host": host,
+        "rtsp_port": rtsp_port,
+        "http_port": cam.http_port,
+        "transport": cam.transport,
+        "snapshot_url_override": cam.snapshot_url_override,
+        "diagnostic": record,
+        "explanation": _explain_diagnostic(record, host, rtsp_port),
+    }
+
+
+def _explain_diagnostic(d: dict | None, host: str, rtsp_port: int) -> str:
+    """One-paragraph plain-English summary suitable for the UI."""
+    if not d:
+        return (f"No probe data yet for {host}:{rtsp_port}. The streamer "
+                f"hasn't tried this camera since startup. Click 'Re-probe' "
+                f"to run one now.")
+    if d.get("outcome") == "rtsp_ok":
+        return f"RTSP/{rtsp_port} is reachable — using direct RTSP."
+    if d.get("outcome") == "switched":
+        sw = d.get("switched_to") or {}
+        return (f"RTSP/{rtsp_port} blocked; auto-switched to HTTP snapshot "
+                f"on port {sw.get('port')} ({sw.get('vendor')}).")
+    if d.get("outcome") == "no_endpoint_found":
+        attempts = d.get("http_attempts") or []
+        any_tcp = any(a.get("tcp") for a in attempts)
+        if not any_tcp:
+            return (f"RTSP/{rtsp_port} blocked AND no HTTP port on {host} "
+                    f"answered at all. The store router likely isn't "
+                    f"forwarding any port to the NVR. Fix port-forwarding "
+                    f"at the router (forward 80, 8080, or 7000 to the "
+                    f"NVR's LAN IP), then click 'Re-probe'.")
+        return (f"RTSP/{rtsp_port} blocked. HTTP port(s) are reachable but "
+                f"none returned a JPEG via Dahua CGI / Hikvision ISAPI / "
+                f"ONVIF paths. The NVR may need its CGI/ISAPI service "
+                f"enabled in its admin UI, or the credentials may be "
+                f"wrong. See the per-attempt detail below.")
+    return "Probe ran but result is inconclusive — see detail below."
+
+
 class AutoFailoverIn(BaseModel):
     # If provided, only failover cameras in this store. Omitted = all.
     store_id: int | None = None

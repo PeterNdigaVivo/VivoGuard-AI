@@ -108,7 +108,25 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
   const [size, setSize] = useState({ w: 640, h: 360 })
   const [state, setState] = useState<'connecting' | 'live' | 'stale'>('connecting')
   const [diag, setDiag] = useState<string | null>(null)
+  const [diagOpen, setDiagOpen] = useState(false)
+  const [diagReport, setDiagReport] = useState<any>(null)
+  const [diagBusy, setDiagBusy] = useState(false)
   const lastFrameAt = useRef<number>(0)
+
+  async function openDiagnose(fresh: boolean) {
+    setDiagBusy(true)
+    try {
+      const tok = localStorage.getItem('vg_access_token') ?? ''
+      const r = await fetch(
+        `/api/cameras/${cameraId}/transport-diagnose?fresh=${fresh}`,
+        { headers: { Authorization: `Bearer ${tok}` } },
+      )
+      if (r.ok) setDiagReport(await r.json())
+    } finally {
+      setDiagBusy(false)
+      setDiagOpen(true)
+    }
+  }
 
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -177,13 +195,67 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
       <canvas ref={canvasRef} className="block w-full h-auto" />
       {/* Status overlay — visible until first frame, then again if stale. */}
       {state !== 'live' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-white text-xs gap-2 bg-black/70">
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-white text-xs gap-2 bg-black/70 p-2">
           <div className="font-medium">
             {state === 'connecting' ? 'Connecting…' : 'Stream paused'}
           </div>
           {diag && (
             <div className="max-w-[90%] text-center text-amber-300 leading-snug">{diag}</div>
           )}
+          {/* Diagnose: surfaces auto-failover's per-port probe results
+              so operators see exactly which ports were tried and why
+              each failed. Shown only on stale tiles to keep the
+              'Connecting…' first-load view clean. */}
+          {state === 'stale' && (
+            <button
+              className="mt-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black text-[11px] font-medium"
+              onClick={(e) => { e.stopPropagation(); openDiagnose(true) }}
+              disabled={diagBusy}>
+              {diagBusy ? 'Probing…' : '🛠 Diagnose & auto-fix'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Diagnostic modal — full transport-probe report. */}
+      {diagOpen && diagReport && (
+        <div className="absolute inset-0 bg-black/90 text-white p-3 overflow-auto text-[11px] z-10"
+             onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-between items-center mb-2">
+            <div className="font-medium">{diagReport.name} — transport probe</div>
+            <button className="text-slate-300 hover:text-white"
+                    onClick={() => setDiagOpen(false)}>✕</button>
+          </div>
+          <div className="text-amber-300 mb-2">{diagReport.explanation}</div>
+          <div className="font-mono text-slate-400 leading-tight">
+            host: {diagReport.host}<br/>
+            rtsp_port: {diagReport.rtsp_port} · http_port: {diagReport.http_port}<br/>
+            transport now: <b className="text-white">{diagReport.transport}</b>
+          </div>
+          {diagReport.diagnostic && (
+            <div className="mt-2">
+              <div className="text-slate-400">RTSP reachable: {String(diagReport.diagnostic.rtsp_reachable)}</div>
+              <div className="text-slate-400 mt-1">HTTP attempts:</div>
+              {(diagReport.diagnostic.http_attempts || []).map((a: any, i: number) => (
+                <div key={i} className="ml-2 mt-1">
+                  <div>
+                    port {a.port}: TCP {a.tcp ? '✓' : '✗'}
+                  </div>
+                  {(a.templates || []).map((t: any, j: number) => (
+                    <div key={j} className={'ml-3 ' + (t.ok ? 'text-emerald-400' : 'text-slate-500')}>
+                      {t.ok ? '✓' : '✗'} {t.vendor}: {t.reason}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          <button
+            className="mt-3 px-2 py-1 rounded bg-sky-600 hover:bg-sky-500"
+            onClick={() => openDiagnose(true)}
+            disabled={diagBusy}>
+            {diagBusy ? 'Probing…' : 'Re-probe now'}
+          </button>
         </div>
       )}
       {/* Bounding-box overlay */}
