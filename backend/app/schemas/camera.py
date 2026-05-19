@@ -50,6 +50,8 @@ class CameraOut(BaseModel):
     last_error: str | None
     # Store-first onboarding (Alembic 0002+). NULL allowed for legacy rows.
     store_id: int | None = None
+    transport: str = "rtsp"
+    snapshot_url_override: str | None = None
     created_at: datetime
 
 
@@ -63,6 +65,12 @@ class CameraUpdate(BaseModel):
     # Attach/detach in one PATCH. Pass an int to attach; pass null to
     # detach. The UI's "Store" dropdown uses this — see CamerasPage.
     store_id: int | None = None
+    # Transport switch — 'rtsp' (default) or 'http_snapshot'.
+    transport: str | None = None
+    snapshot_url_override: str | None = None
+    rtsp_port: int | None = None
+    http_port: int | None = None
+    channel_number: int | None = None
 
 
 class TestConnectionIn(BaseModel):

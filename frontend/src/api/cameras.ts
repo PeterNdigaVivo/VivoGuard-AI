@@ -11,6 +11,10 @@ export interface Camera {
   // Store-first onboarding: every newly-created camera has a store.
   // Legacy rows can still be null until an operator attaches them.
   store_id: number | null
+  // Transport: 'rtsp' (default) or 'http_snapshot' (Dahua CGI polling
+  // — use when the store router doesn't forward port 554).
+  transport: 'rtsp' | 'http_snapshot'
+  snapshot_url_override: string | null
   created_at: string
 }
 

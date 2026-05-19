@@ -38,6 +38,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 POLL_INTERVAL_SECONDS = int(os.environ.get("STREAMER_POLL_INTERVAL", "5"))
 
 
+def _snapshot_url_for(c, password: str) -> str:
+    """Compose the HTTP-snapshot URL for a camera.
+
+    Override beats everything; otherwise build the Dahua default:
+       http://USER:PASS@HOST:HTTP_PORT/cgi-bin/snapshot.cgi?channel=N
+    """
+    if c.snapshot_url_override:
+        return c.snapshot_url_override
+    # We embed creds in the URL only when no override is provided, and
+    # we use HTTP Digest in the worker anyway — the URL form is just a
+    # convenience for logging / Dahua firmwares that accept it.
+    from urllib.parse import quote
+    user = quote(c.username or "", safe="")
+    pw   = quote(password or "", safe="")
+    auth = f"{user}:{pw}@" if user else ""
+    ch   = c.channel_number or 1
+    return f"http://{auth}{c.host}:{c.http_port}/cgi-bin/snapshot.cgi?channel={ch}"
+
+
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
@@ -47,7 +66,8 @@ def desired_specs() -> list[CameraSpec]:
                 pw = decrypt(c.password_encrypted or "")
             except Exception:
                 pw = ""
-            url = build_rtsp_url(
+            transport = getattr(c, "transport", "rtsp") or "rtsp"
+            rtsp_url = build_rtsp_url(
                 brand=c.brand,
                 host=c.host,
                 port=c.rtsp_port,
@@ -57,11 +77,16 @@ def desired_specs() -> list[CameraSpec]:
                 subtype=1,             # substream — cheaper for AI inference
                 override=c.rtsp_url_override,
             )
+            snap_url = _snapshot_url_for(c, pw) if transport == "http_snapshot" else ""
             out.append(CameraSpec(
                 camera_id=c.id,
-                rtsp_url=url,
+                rtsp_url=rtsp_url,
                 fps=c.inference_fps or settings.inference_fps_default,
                 width=640,
+                transport=transport,
+                snapshot_url=snap_url,
+                username=c.username or "",
+                password=pw,
             ))
     return out
 

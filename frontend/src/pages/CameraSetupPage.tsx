@@ -11,9 +11,9 @@
 
 import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
+import { Badge, Button, Card, Input, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
-import { cameras as camsApi } from '@/api/cameras'
+import { cameras as camsApi, type Camera } from '@/api/cameras'
 
 interface Purpose {
   label: string
@@ -32,7 +32,9 @@ export default function CameraSetupPage() {
   const { id } = useParams()
   const cameraId = Number(id)
   const nav = useNavigate()
+  const toast = useToast()
 
+  const [cam, setCam] = useState<Camera | null>(null)
   const [snap, setSnap] = useState<string | null>(null)
   const [purposes, setPurposes] = useState<Record<string, Purpose>>({})
   const [zones, setZones] = useState<ZoneRow[]>([])
@@ -42,8 +44,20 @@ export default function CameraSetupPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Transport switch — flip RTSP ↔ HTTP-snapshot without leaving the page.
+  async function setTransport(mode: 'rtsp' | 'http_snapshot') {
+    try {
+      const updated = await camsApi.update(cameraId, { transport: mode })
+      setCam(updated as Camera)
+      toast.push(`Transport → ${mode === 'rtsp' ? 'RTSP (port 554)' : 'HTTP snapshot (CGI)'}`)
+    } catch (e) {
+      toast.push(String(e), 'err')
+    }
+  }
+
   useEffect(() => {
     api<Record<string, Purpose>>('/zone-purposes').then(setPurposes).catch(console.error)
+    camsApi.get(cameraId).then(setCam).catch(() => setCam(null))
     camsApi.snapshot(cameraId).then(s => setSnap(s.jpeg_b64)).catch(() => setSnap(null))
     camsApi.listZones(cameraId).then(setZones).catch(console.error)
   }, [cameraId])
@@ -175,6 +189,37 @@ export default function CameraSetupPage() {
             </div>
             {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
           </Card>
+
+          {/* Transport switch — surfaces the RTSP↔HTTP-snapshot toggle
+              for stores where port 554 isn't forwarded. */}
+          {cam && (
+            <Card className="p-4">
+              <div className="text-sm font-medium mb-2">How to fetch frames</div>
+              <Select className="w-full" value={cam.transport ?? 'rtsp'}
+                      onChange={e => setTransport(e.target.value as 'rtsp' | 'http_snapshot')}>
+                <option value="rtsp">RTSP video (port 554) — default, smoother</option>
+                <option value="http_snapshot">HTTP snapshot polling — works when 554 is blocked</option>
+              </Select>
+              <div className="text-xs text-slate-500 mt-2">
+                {cam.transport === 'http_snapshot' ? (
+                  <>
+                    Polling{' '}
+                    <code className="bg-slate-100 px-1">
+                      /cgi-bin/snapshot.cgi?channel={cam.channel_number ?? 1}
+                    </code>{' '}
+                    on port {cam.http_port}. Lower fidelity than RTSP but
+                    works wherever your browser does.
+                  </>
+                ) : (
+                  <>
+                    Pulling H.264 over RTSP on port {cam.rtsp_port}. Switch
+                    to HTTP snapshot if the store router doesn't forward
+                    554.
+                  </>
+                )}
+              </div>
+            </Card>
+          )}
 
           <Card className="p-4">
             <div className="text-sm font-medium mb-2">Existing zones on this camera</div>

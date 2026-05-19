@@ -81,6 +81,15 @@ class Camera(Base):
     ddns_hostname:     Mapped[str | None] = mapped_column(String(255), nullable=True)
     network_type:      Mapped[str]   = mapped_column(String(8), default="lan")
 
+    # Transport mode:
+    #   "rtsp"           — default; pulls H.264/H.265 via FFmpeg over port 554
+    #   "http_snapshot"  — polls Dahua/generic CGI on the HTTP port for use
+    #                      where 554 isn't forwarded but the HTTP port is.
+    transport:         Mapped[str]   = mapped_column(String(16),
+                                                     default="rtsp",
+                                                     server_default="rtsp")
+    snapshot_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # AI assignment.
     ai_model_id:       Mapped[int | None] = mapped_column(ForeignKey("ai_models.id", ondelete="SET NULL"), nullable=True)
     ai_enabled:        Mapped[bool]  = mapped_column(Boolean, default=True)
