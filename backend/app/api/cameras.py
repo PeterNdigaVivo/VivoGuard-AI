@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.connectors.base import ConnectionTestResult
@@ -121,6 +122,48 @@ def list_unassigned(db: Session = Depends(get_db),
     """Legacy/orphan cameras with no store_id — surfaced in the UI as
     an "Assign to store" prompt so operators can clean them up."""
     return db.query(Camera).filter(Camera.store_id.is_(None)).order_by(Camera.id).all()
+
+
+class TcpProbeIn(BaseModel):
+    host: str
+    port: int = 554
+    timeout: float = 5.0
+
+
+@router.post("/probe-tcp")
+async def probe_tcp(payload: TcpProbeIn,
+                    _u: User = Depends(require_role("admin", "operator"))):
+    """Open a raw TCP connection to `host:port` from inside the api
+    container and report success/failure. Use this to disambiguate
+    "browser works but VivoGuard doesn't" — the browser may be hitting
+    a different port than RTSP, or running on a different network than
+    Docker. Run a few probes against 80 and 554 to find out which
+    ports are actually forwarded at the store router."""
+    import asyncio
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(payload.host, payload.port),
+            timeout=payload.timeout,
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return {"host": payload.host, "port": payload.port, "ok": True,
+                "detail": "TCP connection succeeded — port is reachable from VivoGuard."}
+    except asyncio.TimeoutError:
+        return {"host": payload.host, "port": payload.port, "ok": False,
+                "detail": "Timed out — host unreachable or firewall dropping packets. "
+                          "Most often the store router doesn't forward this port to the NVR's LAN IP."}
+    except ConnectionRefusedError:
+        return {"host": payload.host, "port": payload.port, "ok": False,
+                "detail": "Connection refused — host responded but nothing listens on this port. "
+                          "Either the NVR's RTSP service is disabled, listening on a different port, "
+                          "or the router forwards a different port number."}
+    except Exception as e:
+        return {"host": payload.host, "port": payload.port, "ok": False,
+                "detail": f"{type(e).__name__}: {e}"}
 
 
 @router.patch("/{camera_id}", response_model=CameraOut)
