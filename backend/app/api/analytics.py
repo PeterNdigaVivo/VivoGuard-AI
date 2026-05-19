@@ -532,6 +532,200 @@ def store_live_dashboard(store_id: int,
     }
 
 
+# ---- Week summary + detector activity (May-2026 redesign) ---------
+
+@router.get("/store/{store_id}/week-summary")
+def store_week_summary(store_id: int, db: Session = Depends(get_db),
+                        _u=Depends(get_current_user)):
+    """Powers the dashboard's THIS WEEK section.
+
+    Three things in one payload:
+
+      1. 7-day footfall — sum of `visitor_count_in` per day for the
+         last 7 days (or `occupancy_peak` when entry/exit aren't
+         instrumented yet — same shape so the chart just works).
+      2. Best/worst day in the window + average occupancy per
+         weekday (Mon-Sun).
+      3. Top 3 busiest hours-of-day across the week (UTC hour
+         buckets, summed counts).
+      4. Detector activity table — for every active detector in
+         the catalog, count events today vs this week so operators
+         can see at a glance which detectors are running.
+
+    All windows are clamped to the store's business-hours session
+    on each day, so closed-store noise doesn't pollute the bars.
+    """
+    from sqlalchemy import extract
+    from app.utils.business_hours import is_store_open, todays_session
+    from app.api.detector_catalog import DETECTOR_CATALOG
+    from app.models import Zone
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"store_id": store_id, "store_name": store.name,
+                "days": [], "best_day": None, "worst_day": None,
+                "weekday_avg_occupancy": [], "top_hours": [],
+                "detector_activity": []}
+
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=7)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    today_session_open, _ = todays_session(store, now)
+
+    # --- 7-day footfall: prefer visitor_count_in; fall back to the
+    #     max occupancy of the day if entry_exit isn't instrumented.
+    visitor_in_rows = (
+        db.query(extract("doy", MetricSnapshot.period_start).label("doy"),
+                 func.sum(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "visitor_count_in",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by("doy").all()
+    )
+    visitor_by_doy = {int(r.doy): float(r.v or 0) for r in visitor_in_rows}
+
+    occ_max_rows = (
+        db.query(extract("doy", MetricSnapshot.period_start).label("doy"),
+                 func.max(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "occupancy",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by("doy").all()
+    )
+    occ_max_by_doy = {int(r.doy): float(r.v or 0) for r in occ_max_rows}
+
+    days: list[dict] = []
+    for i in range(7):
+        day = (week_start + timedelta(days=i))
+        doy = int(day.strftime("%j"))
+        # Prefer visitor count; fall back to peak occupancy
+        # so the chart isn't blank for entry-exit-less stores.
+        value = visitor_by_doy.get(doy)
+        source = "visitors_in"
+        if value is None or value == 0:
+            value = occ_max_by_doy.get(doy, 0.0)
+            source = "occupancy_peak"
+        days.append({
+            "date": day.date().isoformat(),
+            "weekday": day.strftime("%a"),
+            "value": round(value, 0),
+            "source": source,
+        })
+
+    non_zero = [d for d in days if d["value"] > 0]
+    best_day  = max(non_zero, key=lambda d: d["value"]) if non_zero else None
+    worst_day = min(non_zero, key=lambda d: d["value"]) if non_zero else None
+
+    # --- Avg peak occupancy per weekday (Mon-Sun).
+    weekday_rows = (
+        db.query(extract("dow", MetricSnapshot.period_start).label("dow"),
+                 func.avg(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "occupancy",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by("dow").order_by("dow").all()
+    )
+    # Postgres dow: 0=Sun..6=Sat. Map to Mon-first for the UI.
+    pg_dow_to_label = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed",
+                       4: "Thu", 5: "Fri", 6: "Sat"}
+    weekday_avg: list[dict] = []
+    for row in weekday_rows:
+        weekday_avg.append({
+            "weekday": pg_dow_to_label.get(int(row.dow), str(int(row.dow))),
+            "value":   round(float(row.v or 0), 1),
+        })
+
+    # --- Top 3 busiest hours across the week.
+    hour_rows = (
+        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                 func.sum(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "visitor_count_in",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by("h").order_by(func.sum(MetricSnapshot.value).desc())
+          .limit(3).all()
+    )
+    top_hours = [
+        {"hour": int(r.h), "label": f"{int(r.h):02d}:00", "value": int(r.v or 0)}
+        for r in hour_rows
+    ]
+
+    # --- Detector activity: events today vs week, per active detector.
+    # Uses DetectionEvent rows (raw inference output) rather than
+    # MetricSnapshot rows. Some detectors fire events (intrusion,
+    # fight, fall) where each event is interesting; others produce
+    # continuous metrics (occupancy). We report event counts for the
+    # event-emitting set; the rest get '— continuous —' on the row.
+    today_start = today_session_open
+    from app.models import DetectionEvent
+
+    today_counts = dict(
+        db.query(DetectionEvent.detection_type, func.count(DetectionEvent.id))
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  DetectionEvent.detected_at >= today_start)
+          .group_by(DetectionEvent.detection_type).all()
+    )
+    week_counts = dict(
+        db.query(DetectionEvent.detection_type, func.count(DetectionEvent.id))
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  DetectionEvent.detected_at >= week_start)
+          .group_by(DetectionEvent.detection_type).all()
+    )
+
+    # Active zones tell us which zone-gated detectors are even
+    # relevant for this store. Zone-gated detectors that have no
+    # zone get tagged "needs_zone" so the UI can render the right
+    # CTA ('Set up zone' deep link).
+    zone_tags: set[str] = set()
+    for z in db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all():
+        for t in (z.detection_types_json or []):
+            zone_tags.add(t)
+
+    detector_activity: list[dict] = []
+    for det_type, meta in DETECTOR_CATALOG.items():
+        if meta.get("status") != "active":
+            continue
+        needs_zone = bool(meta.get("needs_zone"))
+        zone_present = (det_type in zone_tags) if needs_zone else True
+        detector_activity.append({
+            "detector": det_type,
+            "events_today": int(today_counts.get(det_type, 0)),
+            "events_week":  int(week_counts.get(det_type, 0)),
+            "needs_zone":   needs_zone,
+            "zone_present": zone_present,
+            # 'active' if running for this store; 'needs_setup' if
+            # zone-gated but no zone exists yet.
+            "status": "active" if zone_present else "needs_setup",
+        })
+
+    # Stable sort: store-relevant zone-gated detectors first
+    # (most actionable), then anything else.
+    detector_activity.sort(
+        key=lambda d: (d["status"] != "active", -d["events_week"], d["detector"])
+    )
+
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "window": {"since": week_start.isoformat(), "until": now.isoformat()},
+        "days": days,
+        "best_day":  best_day,
+        "worst_day": worst_day,
+        "weekday_avg_occupancy": weekday_avg,
+        "top_hours": top_hours,
+        "detector_activity": detector_activity,
+    }
+
+
 # ---- Store-wide heatmap grid (Rule 5) ------------------------------
 
 @router.get("/store/{store_id}/heatmaps")

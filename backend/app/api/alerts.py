@@ -20,6 +20,11 @@ def list_alerts(
     db: Session = Depends(get_db),
     _u: User = Depends(get_current_user),
     camera_id: Optional[int]   = Query(None),
+    # New (May-2026 dashboard redesign): scope the feed to a single
+    # store by joining through cameras.store_id. The per-store
+    # dashboard's "Alerts & Incidents" section uses this so operators
+    # don't see other stores' noise.
+    store_id: Optional[int]    = Query(None),
     detection_type: Optional[str] = Query(None),
     zone_id: Optional[int]     = Query(None),
     status: Optional[str]      = Query(None),
@@ -34,6 +39,8 @@ def list_alerts(
         q = q.filter(Alert.status == status)
     if camera_id:
         q = q.filter(DetectionEvent.camera_id == camera_id)
+    if store_id is not None:
+        q = q.filter(Camera.store_id == store_id)
     if detection_type:
         q = q.filter(DetectionEvent.detection_type == detection_type)
     if zone_id:

@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
+import { labelForDetector } from '@/lib/detectorLabels'
 
 interface LiveResponse {
   store_id: number
@@ -279,6 +280,12 @@ export default function StoreDashboardPage() {
           </Card>
         </section>
       )}
+
+      {/* SECTION 3 — THIS WEEK (7-day bars + detector activity table) */}
+      <WeekSection storeId={storeId} />
+
+      {/* SECTION 4 — ALERTS & INCIDENTS (filtered to this store) */}
+      <AlertsFeedSection storeId={storeId} />
     </div>
   )
 }
@@ -315,7 +322,8 @@ function AlertsByType({ data }: { data: Record<string, number> }) {
     <div className="space-y-1">
       {entries.map(([k, v]) => (
         <div key={k} className="flex items-center gap-2 text-sm">
-          <div className="w-32 truncate">{k}</div>
+          {/* Operators see "Loss Prevention", not "shrinkage" */}
+          <div className="w-36 truncate" title={k}>{labelForDetector(k)}</div>
           <div className="flex-1 bg-slate-100 rounded h-4 relative">
             <div className="absolute inset-y-0 left-0 bg-sky-500 rounded"
                  style={{ width: `${(v / max) * 100}%` }} />
@@ -324,6 +332,208 @@ function AlertsByType({ data }: { data: Record<string, number> }) {
         </div>
       ))}
     </div>
+  )
+}
+
+// ----- SECTION 3: THIS WEEK -----
+
+interface WeekSummary {
+  days: { date: string; weekday: string; value: number; source: string }[]
+  best_day:  { date: string; weekday: string; value: number } | null
+  worst_day: { date: string; weekday: string; value: number } | null
+  weekday_avg_occupancy: { weekday: string; value: number }[]
+  top_hours: { hour: number; label: string; value: number }[]
+  detector_activity: {
+    detector: string; events_today: number; events_week: number
+    needs_zone: boolean; zone_present: boolean
+    status: 'active' | 'needs_setup'
+  }[]
+}
+
+function WeekSection({ storeId }: { storeId: number }) {
+  const [d, setD] = useState<WeekSummary | null>(null)
+  useEffect(() => {
+    api<WeekSummary>(`/analytics/store/${storeId}/week-summary`)
+      .then(setD).catch(() => setD(null))
+  }, [storeId])
+  if (!d) return null
+  const maxBar = Math.max(...d.days.map(x => x.value), 1)
+
+  return (
+    <section className="space-y-3">
+      <SectionTitle>This week</SectionTitle>
+
+      {/* 7-day bars + best/worst summary */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="lg:col-span-2 p-4">
+          <div className="text-sm font-medium mb-2">Visitors — last 7 days</div>
+          <div className="flex items-end gap-1 h-32">
+            {d.days.map(day => (
+              <div key={day.date} className="flex-1 flex flex-col items-center justify-end" title={`${day.date}: ${day.value}`}>
+                <div className="text-[10px] text-slate-500 mb-0.5">{day.value > 0 ? Math.round(day.value) : ''}</div>
+                <div className="w-full bg-sky-500 rounded-t"
+                     style={{ height: `${(day.value / maxBar) * 100}%`,
+                              minHeight: day.value > 0 ? '4px' : '1px',
+                              opacity: day.value > 0 ? 1 : 0.2 }} />
+                <div className="text-[10px] text-slate-500 mt-0.5">{day.weekday}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card className="p-4 text-sm space-y-2">
+          {d.best_day && (
+            <div>
+              <div className="text-xs text-slate-500">Best day this week</div>
+              <div className="font-semibold">{d.best_day.weekday} — {Math.round(d.best_day.value)} visitors</div>
+            </div>
+          )}
+          {d.worst_day && (
+            <div>
+              <div className="text-xs text-slate-500">Quietest day</div>
+              <div className="font-semibold">{d.worst_day.weekday} — {Math.round(d.worst_day.value)} visitors</div>
+            </div>
+          )}
+          {d.top_hours.length > 0 && (
+            <div>
+              <div className="text-xs text-slate-500 mt-1">Busiest hours</div>
+              {d.top_hours.map((h, i) => (
+                <div key={h.hour} className="flex justify-between">
+                  <span>{i + 1}. {h.label}</span>
+                  <span className="text-slate-500">{h.value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* Detector activity table */}
+      <Card className="p-4 overflow-x-auto">
+        <div className="text-sm font-medium mb-2">Detector activity</div>
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500 uppercase">
+            <tr>
+              <th className="text-left py-1">Detector</th>
+              <th className="text-right py-1 w-28">Events today</th>
+              <th className="text-right py-1 w-28">Events this week</th>
+              <th className="text-left py-1 w-32">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.detector_activity.map(row => (
+              <tr key={row.detector} className="border-t border-slate-100">
+                <td className="py-1">{labelForDetector(row.detector)}</td>
+                <td className="text-right py-1">{row.events_today}</td>
+                <td className="text-right py-1">{row.events_week}</td>
+                <td className="py-1">
+                  {row.status === 'active'
+                    ? <span className="text-emerald-600 text-xs">✅ Active</span>
+                    : <span className="text-amber-600 text-xs">⚙️ Needs zone</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </section>
+  )
+}
+
+// ----- SECTION 4: ALERTS & INCIDENTS -----
+
+interface AlertRow {
+  id: number
+  status: 'open' | 'confirmed' | 'dismissed'
+  severity: 'critical' | 'warning' | 'info'
+  created_at: string
+  camera_id?: number
+  camera_name?: string | null
+  detection_type?: string | null
+  thumbnail_path?: string | null
+}
+
+function AlertsFeedSection({ storeId }: { storeId: number }) {
+  const [alerts, setAlerts] = useState<AlertRow[] | null>(null)
+  const load = () => api<AlertRow[]>(`/alerts?store_id=${storeId}&limit=20`)
+    .then(setAlerts).catch(() => setAlerts([]))
+  useEffect(() => {
+    load()
+    // Auto-refresh the alerts feed at the same 30s cadence as the
+    // rest of the dashboard so operators see new incidents promptly.
+    const t = setInterval(load, 30_000)
+    return () => clearInterval(t)
+  }, [storeId])
+
+  async function act(id: number, action: 'confirm' | 'dismiss') {
+    try {
+      await api(`/alerts/${id}/${action}`, { method: 'POST' })
+      load()
+    } catch (e) { console.error(e) }
+  }
+
+  if (alerts === null) return null
+
+  return (
+    <section>
+      <SectionTitle>Alerts &amp; incidents</SectionTitle>
+      <Card className="p-3">
+        {alerts.length === 0 ? (
+          <div className="text-slate-400 text-sm p-3">No alerts in the last window.</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {alerts.map(a => (
+              <div key={a.id} className="flex items-center gap-3 py-2">
+                {a.thumbnail_path
+                  ? <img src={a.thumbnail_path} alt=""
+                         className="w-16 h-16 object-cover rounded bg-slate-100" />
+                  : <div className="w-16 h-16 bg-slate-100 rounded flex items-center justify-center text-2xl">🛡️</div>}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <SeverityBadge sev={a.severity} />
+                    <span className="font-medium truncate">
+                      {a.detection_type ? labelForDetector(a.detection_type) : 'Alert'}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-500 truncate">
+                    {a.camera_name ?? `Camera ${a.camera_id ?? '?'}`} ·{' '}
+                    {new Date(a.created_at).toLocaleTimeString()}
+                  </div>
+                </div>
+                <div className="flex gap-1">
+                  {a.status === 'open' && (
+                    <>
+                      <button onClick={() => act(a.id, 'confirm')}
+                              className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200">
+                        Confirm
+                      </button>
+                      <button onClick={() => act(a.id, 'dismiss')}
+                              className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">
+                        Dismiss
+                      </button>
+                    </>
+                  )}
+                  {a.status !== 'open' && (
+                    <span className="text-xs text-slate-400">{a.status}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </section>
+  )
+}
+
+function SeverityBadge({ sev }: { sev: AlertRow['severity'] }) {
+  const map: Record<AlertRow['severity'], { label: string; cls: string }> = {
+    critical: { label: '🔴 Critical', cls: 'bg-red-100 text-red-700' },
+    warning:  { label: '🟡 Warning',  cls: 'bg-amber-100 text-amber-700' },
+    info:     { label: '🔵 Info',     cls: 'bg-sky-100 text-sky-700' },
+  }
+  const m = map[sev] || map.info
+  return (
+    <span className={'text-[10px] px-1.5 py-0.5 rounded ' + m.cls}>{m.label}</span>
   )
 }
 
