@@ -525,6 +525,51 @@ def store_heatmaps(store_id: int, db: Session = Depends(get_db), _u=Depends(get_
     return {"store_id": store_id, "cameras": out}
 
 
+# ---- Heatmap daily archive (30-day rolling retention) --------------
+
+@router.get("/heatmap/{camera_id}/archive")
+def heatmap_archive(camera_id: int, db: Session = Depends(get_db),
+                    _u=Depends(get_current_user)):
+    """List every archived daily heatmap PNG for a camera."""
+    from app.models import HeatmapSnapshot
+    rows = (db.query(HeatmapSnapshot)
+              .filter(HeatmapSnapshot.camera_id == camera_id)
+              .order_by(HeatmapSnapshot.day.desc())
+              .all())
+    return {
+        "camera_id": camera_id,
+        "snapshots": [
+            {
+                "day": r.day.isoformat(),
+                "peak_value": r.peak_value,
+                "download_url": f"/api/analytics/heatmap/{camera_id}/archive/{r.day.isoformat()}",
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/heatmap/{camera_id}/archive/{day}")
+def heatmap_archive_download(camera_id: int, day: str,
+                             db: Session = Depends(get_db),
+                             _u=Depends(get_current_user)):
+    """Return one archived heatmap PNG by camera + date (YYYY-MM-DD)."""
+    from datetime import date as _date
+    from fastapi.responses import FileResponse
+    from app.models import HeatmapSnapshot
+    try:
+        d = _date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+    row = (db.query(HeatmapSnapshot)
+             .filter(HeatmapSnapshot.camera_id == camera_id,
+                     HeatmapSnapshot.day == d).first())
+    if not row:
+        raise HTTPException(404, "no archived heatmap for that day")
+    return FileResponse(row.file_path, media_type="image/png",
+                        filename=f"heatmap_{camera_id}_{day}.png")
+
+
 # ---- Heatmap export (P2) -------------------------------------------
 
 @router.get("/heatmap/{camera_id}")

@@ -39,8 +39,8 @@ def list_reports(db: Session = Depends(get_db), _u=Depends(get_current_user)):
 @router.post("", response_model=ScheduledReportOut)
 def create(body: ScheduledReportIn, db: Session = Depends(get_db),
            _u=Depends(require_role("admin", "operator"))):
-    if body.cadence not in ("daily", "weekly"):
-        raise HTTPException(400, "cadence must be daily or weekly")
+    if body.cadence not in ("daily", "weekly", "monthly", "quarterly"):
+        raise HTTPException(400, "cadence must be daily | weekly | monthly | quarterly")
     if body.format not in ("pdf", "csv"):
         raise HTTPException(400, "format must be pdf or csv")
     r = ScheduledReport(**body.model_dump())

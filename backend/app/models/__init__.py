@@ -11,7 +11,8 @@ from app.models.training  import Dataset, TrainingImage, Annotation, TrainingJob
 # Retail extension models (commit 0+ of the multi-store rollout).
 from app.models.store     import Store, Shift
 from app.models.metrics   import (
-    MetricSnapshot, METRIC_TYPES, VisitorTrack, StockroomAccess, Campaign,
+    MetricSnapshot, METRIC_TYPES, VisitorTrack, StockroomAccess,
+    Campaign, HeatmapSnapshot,
 )
 from app.models.scheduled import ScheduledReport, CustomerJourney
 
@@ -26,6 +27,7 @@ __all__ = [
     "Dataset", "TrainingImage", "Annotation", "TrainingJob",
     # Retail extension.
     "Store", "Shift",
-    "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess", "Campaign",
+    "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess",
+    "Campaign", "HeatmapSnapshot",
     "ScheduledReport", "CustomerJourney",
 ]

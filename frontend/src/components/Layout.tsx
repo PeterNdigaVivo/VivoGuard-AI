@@ -16,6 +16,7 @@ const NAV = [
   { to: '/training', label: 'AI Training' },
   { to: '/detectors',label: 'Detectors' },
   { to: '/models',   label: 'Models' },
+  { to: '/users',    label: 'Users' },
   { to: '/system',   label: 'System' },
 ]
 

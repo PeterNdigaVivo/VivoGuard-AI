@@ -98,6 +98,7 @@ import logging as _logging
 _router_log = _logging.getLogger("vivoguard.routers")
 
 _OPTIONAL_ROUTERS = [
+    ("app.api.users",              ["router"]),
     ("app.api.stores",             ["router"]),
     ("app.api.analytics",          ["router"]),
     ("app.api.stockroom",          ["router"]),

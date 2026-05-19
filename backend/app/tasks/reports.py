@@ -18,7 +18,12 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 
-CADENCE_HOURS = {"daily": 24, "weekly": 24 * 7}
+CADENCE_HOURS = {
+    "daily":     24,
+    "weekly":    24 * 7,
+    "monthly":   24 * 30,
+    "quarterly": 24 * 90,
+}
 
 
 @celery_app.task(name="reports.dispatch_due", ignore_result=True)

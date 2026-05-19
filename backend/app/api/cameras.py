@@ -233,16 +233,15 @@ async def snapshot(camera_id: int, db: Session = Depends(get_db),
     rtsp = _camera_rtsp_url(cam, subtype=1, password_plain=pw)
     img, err = await grab_thumbnail_verbose(rtsp, timeout=15)
     if not img:
-        # Surface the actual FFmpeg error to the caller — "snapshot grab
-        # failed" with no detail makes diagnosis impossible.
-        cam.status = "offline"
-        cam.last_error = (err or "snapshot grab failed")[:1000]
-        db.commit()
-        raise HTTPException(503, detail=cam.last_error)
-    cam.status = "online"
-    cam.last_seen_at = datetime.now(timezone.utc)
-    cam.last_error = None
-    db.commit()
+        # IMPORTANT: do NOT mutate cam.status here. The streamer is the
+        # source of truth for online/offline. A failed one-shot snapshot
+        # from THIS container could just mean a transient network blip,
+        # a slower path than the streamer takes, or the operator's
+        # request raced with an ffmpeg restart. Operators were seeing
+        # every camera flip to 'offline' after opening Camera Setup.
+        raise HTTPException(503, detail=(err or "snapshot grab failed")[:1000])
+    # Same on the success path — leave cam.status alone. The CamerasPage
+    # already shows the streamer-derived live state separately.
     return {"jpeg_b64": img}
 
 

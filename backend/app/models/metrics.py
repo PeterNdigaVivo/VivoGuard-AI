@@ -100,6 +100,25 @@ Index("ix_stockroom_store_ts",
       StockroomAccess.store_id, StockroomAccess.timestamp.desc())
 
 
+class HeatmapSnapshot(Base):
+    """Daily archived heatmap PNG per camera. 30-day rolling retention.
+
+    Snapshot is taken near midnight by `heatmap.snapshot_all` Celery
+    beat task. The PNG itself lives on the recordings/data volume.
+    """
+
+    __tablename__ = "heatmap_snapshots"
+
+    id:         Mapped[int]      = mapped_column(primary_key=True)
+    camera_id:  Mapped[int]      = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    store_id:   Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"),
+                                                   nullable=True, index=True)
+    day:        Mapped[date_t]   = mapped_column(Date, index=True)
+    file_path:  Mapped[str]      = mapped_column(String(512))
+    peak_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Campaign(Base):
     """Marketing campaign window for before/after analytics."""
 
