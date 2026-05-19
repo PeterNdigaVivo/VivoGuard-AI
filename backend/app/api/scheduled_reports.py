@@ -4,9 +4,9 @@ via the existing SMTP notifier infrastructure.
 """
 from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import date as date_t, datetime, time as time_t
 
 from app.database import get_db
 from app.deps import get_current_user, require_role
@@ -18,16 +18,24 @@ router = APIRouter(prefix="/reports/scheduled", tags=["reports"])
 class ScheduledReportIn(BaseModel):
     name: str
     store_id: int | None = None
-    cadence: str = "daily"     # daily | weekly
+    cadence: str = "daily"     # daily | weekly | monthly | quarterly
     format:  str = "pdf"       # pdf | csv
     recipients: str            # comma-separated emails
     is_active: bool = True
+    # Cron-precise dispatch. "21:00" = fire at 21:00 store-local;
+    # null = legacy any-time behaviour.
+    time_of_day: time_t | None = None
+    # Only meaningful for cadence='weekly'. 0=Mon..6=Sun.
+    day_of_week: int | None = Field(default=None, ge=0, le=6)
+    # Optional comma-separated `whatsapp:+<msisdn>` recipients.
+    whatsapp_recipients: str | None = None
 
 
 class ScheduledReportOut(ScheduledReportIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
     last_run_at: datetime | None
+    last_fire_date: date_t | None = None
     created_at: datetime
 
 
