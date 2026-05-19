@@ -85,8 +85,17 @@ async def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
             detail="store_id is required. Create a store first, then attach this camera to it."
         )
     from app.models import Store
-    if not db.get(Store, store_id):
+    store = db.get(Store, store_id)
+    if not store:
         raise HTTPException(status_code=400, detail=f"store_id={store_id} not found")
+
+    # Inherit the store's default RTSP port unless the operator
+    # explicitly set a non-default one in the wizard. Most Vivo
+    # stores are Dahua-on-7000, so once an admin sets the store
+    # default, every camera added afterwards gets the right port.
+    effective_rtsp_port = payload.rtsp_port
+    if payload.rtsp_port == 554 and store.default_rtsp_port:
+        effective_rtsp_port = store.default_rtsp_port
 
     cam = Camera(
         name=payload.name,
@@ -96,7 +105,7 @@ async def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
         host=payload.host,
         public_ip=payload.public_ip,
         sdk_port=payload.sdk_port,
-        rtsp_port=payload.rtsp_port,
+        rtsp_port=effective_rtsp_port,
         http_port=payload.http_port,
         username=payload.username,
         password_encrypted=encrypt(payload.password or ""),
@@ -220,6 +229,110 @@ async def probe_tcp(payload: TcpProbeIn,
                 "detail": f"{type(e).__name__}: {e}"}
 
 
+# Per-brand RTSP port defaults. Dahua-on-7000 is the dominant pattern
+# across the 26 Vivo stores; Hikvision typically sits on 554 with the
+# tunnel fallbacks. The Add Camera wizard reads this map to prefill
+# the port field whenever the brand is changed.
+_BRAND_RTSP_DEFAULTS: dict[str, int] = {
+    "dahua":     7000,
+    "hikvision": 554,
+    "uniview":   554,
+    "onvif":     554,
+    "generic":   554,
+}
+
+
+@router.get("/brand-defaults")
+def brand_defaults(_u: User = Depends(get_current_user)):
+    """Per-brand default ports + fallback list, served to the wizard
+    so the form prefills sensibly when the operator picks a brand."""
+    return {
+        "rtsp_port_defaults": _BRAND_RTSP_DEFAULTS,
+        # Probe order used by Test Connection and auto-failover —
+        # 7000 first because Dahua-on-7000 is the dominant pattern.
+        "fallback_ports": [7000, 554, 80, 800, 8000, 8080],
+    }
+
+
+class BulkUpdatePortIn(BaseModel):
+    """Body for /cameras/bulk-update-port. At least one filter is
+    required so this can't accidentally rewrite every camera in the
+    fleet."""
+    host_filter: str | None = None     # exact match on `cameras.host`
+    store_id: int | None = None        # all cameras in a store
+    new_port: int                      # new RTSP port to set
+    # When True, also flips rtsp_transport to 'http' (most cameras
+    # that need a non-554 port are reached via HTTP tunnel).
+    use_http_tunnel: bool = True
+
+
+@router.post("/bulk-update-port")
+def bulk_update_port(payload: BulkUpdatePortIn,
+                     db: Session = Depends(get_db),
+                     _u: User = Depends(require_role("admin", "operator"))):
+    """Bulk-rewrite cameras.rtsp_port (and optionally rtsp_transport)
+    for a set of cameras matched by host OR by store.
+
+    Typical use:
+      { host_filter: "197.155.67.50", new_port: 7000 } — set all
+        cameras at that public IP to port 7000 with HTTP tunnel.
+      { store_id: 5, new_port: 7000 } — same for every camera
+        attached to store 5.
+
+    Refuses to run with neither filter set (prevents accidental
+    fleet-wide rewrites). Returns the per-camera before/after report.
+    """
+    if not payload.host_filter and payload.store_id is None:
+        raise HTTPException(
+            400,
+            "Specify at least one of host_filter or store_id — bulk "
+            "port update with no filter would rewrite every camera.",
+        )
+
+    q = db.query(Camera)
+    if payload.host_filter:
+        q = q.filter(Camera.host == payload.host_filter)
+    if payload.store_id is not None:
+        q = q.filter(Camera.store_id == payload.store_id)
+    cams = q.all()
+
+    report: list[dict] = []
+    for cam in cams:
+        before = {"rtsp_port": cam.rtsp_port,
+                  "rtsp_transport": cam.rtsp_transport,
+                  "transport": cam.transport}
+        cam.rtsp_port = payload.new_port
+        if payload.use_http_tunnel:
+            cam.rtsp_transport = "http"
+            # If this camera had been demoted to http_snapshot, give
+            # it back full RTSP video.
+            if cam.transport == "http_snapshot":
+                cam.transport = "rtsp"
+                cam.snapshot_url_override = None
+        db.add(cam)
+        report.append({
+            "camera_id": cam.id, "name": cam.name, "host": cam.host,
+            "before": before,
+            "after": {"rtsp_port": cam.rtsp_port,
+                      "rtsp_transport": cam.rtsp_transport,
+                      "transport": cam.transport},
+        })
+    db.commit()
+    # Bust the streamer's probe cache for every affected host so the
+    # next reconcile picks up the new settings immediately.
+    try:
+        from app.stream.auto_transport import forget
+        for cam in cams:
+            forget(cam.host, cam.rtsp_port)
+    except Exception:
+        pass
+    return {
+        "matched": len(cams),
+        "updated": len(report),
+        "report": report,
+    }
+
+
 class TestRtspPortsIn(BaseModel):
     """Body for /cameras/test-rtsp-ports — wizard's 'Test RTSP
     Connection' button uses this BEFORE saving a row."""
@@ -231,7 +344,10 @@ class TestRtspPortsIn(BaseModel):
     rtsp_port: int = 554
     # Ports to try as HTTP-tunneled RTSP if the primary fails.
     # Defaults to the Vivo-fleet HTTP-port catalogue.
-    fallback_ports: list[int] = [80, 800, 8000, 8080, 7000]
+    # Probe order: Dahua-on-7000 is the most common pattern across
+    # the 26 Vivo stores, so 7000 is tried first when the primary
+    # RTSP port fails. Then standard 554, then the long tail.
+    fallback_ports: list[int] = [7000, 554, 80, 800, 8000, 8080]
 
 
 @router.post("/test-rtsp-ports")

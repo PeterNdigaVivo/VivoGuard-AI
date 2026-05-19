@@ -56,6 +56,38 @@ export default function CamerasPage() {
     }
   }
 
+  // Bulk port update — operators have a row of N cameras at one
+  // store IP (Moi Avenue: 7 cameras at 197.155.67.50) that all need
+  // the same port flipped to 7000. Without this they'd PATCH each
+  // camera individually. The endpoint requires at least one filter,
+  // so empty inputs trigger a clear error instead of a fleet-wide
+  // rewrite.
+  const [bulkHost, setBulkHost] = useState('')
+  const [bulkPort, setBulkPort] = useState<number>(7000)
+  const [bulkTunnel, setBulkTunnel] = useState(true)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  async function applyBulkPort() {
+    if (!bulkHost) {
+      toast.push('Enter the host (public IP or DDNS) to filter by.', 'err'); return
+    }
+    if (!confirm(`Set port ${bulkPort} (HTTP tunnel: ${bulkTunnel ? 'yes' : 'no'}) on every camera at ${bulkHost}?`)) return
+    setBulkBusy(true)
+    try {
+      const res = await api<{ matched: number; updated: number; report: any[] }>(
+        '/cameras/bulk-update-port', {
+          method: 'POST',
+          body: { host_filter: bulkHost, new_port: bulkPort, use_http_tunnel: bulkTunnel },
+        },
+      )
+      toast.push(`Matched ${res.matched}, updated ${res.updated} cameras at ${bulkHost}`)
+      reload()
+    } catch (e) {
+      toast.push(`Bulk update failed: ${e}`, 'err')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   // Single-PATCH approach. Backend's CameraUpdate now accepts
   // store_id (nullable). Empty dropdown value → detach (store_id=null).
   // We optimistically update the camera locally and fire a toast on
@@ -114,6 +146,39 @@ export default function CamerasPage() {
         </>}
       />
       {error && <div className="text-red-600 mb-2">{error}</div>}
+
+      {/* Bulk port update — set the RTSP port on every camera at a
+          given host in one shot. The most common use is "every Moi
+          Ave camera at 197.155.67.50 → port 7000 with HTTP tunnel". */}
+      <Card className="p-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-medium">Bulk port update:</span>
+          <input className="border rounded px-2 py-1 text-sm w-64"
+                 placeholder="host (e.g. 197.155.67.50)"
+                 value={bulkHost}
+                 onChange={e => setBulkHost(e.target.value)} />
+          <span>→ port</span>
+          <select className="border rounded px-2 py-1 text-sm"
+                  value={bulkPort}
+                  onChange={e => setBulkPort(Number(e.target.value))}>
+            {[7000, 554, 80, 800, 8000, 8080].map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1">
+            <input type="checkbox" checked={bulkTunnel}
+                   onChange={e => setBulkTunnel(e.target.checked)} />
+            <span className="text-xs">use HTTP tunnel</span>
+          </label>
+          <Button onClick={applyBulkPort} disabled={bulkBusy || !bulkHost}>
+            {bulkBusy ? 'Applying…' : 'Apply'}
+          </Button>
+        </div>
+        <div className="text-xs text-slate-500 mt-1">
+          Updates every camera whose host exactly matches. Most stores
+          use Dahua on port 7000 with HTTP tunneling.
+        </div>
+      </Card>
 
       {Object.entries(groups).map(([label, list]) => (
         <Card key={label} className="mb-4">

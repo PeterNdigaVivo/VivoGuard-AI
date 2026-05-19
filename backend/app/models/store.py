@@ -40,6 +40,12 @@ class Store(Base):
     manager_name:  Mapped[str | None] = mapped_column(String(128), nullable=True)
     manager_phone: Mapped[str | None] = mapped_column(String(32),  nullable=True)
 
+    # Default RTSP port for cameras added to this store. The Add Camera
+    # wizard prefills this when the operator picks a store, so all
+    # Moi Ave cameras (Dahua-on-7000) get 7000 by default without
+    # re-typing per camera.
+    default_rtsp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     is_active: Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

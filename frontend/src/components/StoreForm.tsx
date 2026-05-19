@@ -22,6 +22,7 @@ type FormState = {
   name: string; code: string; country: string; city: string
   address: string; timezone: string; capacity: string
   manager_name: string; manager_phone: string
+  default_rtsp_port: string   // empty = use brand default
   business_hours: Record<string, { open: boolean; start: string; end: string }>
 }
 
@@ -75,6 +76,8 @@ export default function StoreForm({
     capacity: initial?.capacity ? String(initial.capacity) : '',
     manager_name:  initial?.manager_name  ?? '',
     manager_phone: initial?.manager_phone ?? '',
+    default_rtsp_port: initial?.default_rtsp_port
+      ? String(initial.default_rtsp_port) : '',
     business_hours: parseBusinessHours(initial?.business_hours_json ?? null),
   })
   const [busy, setBusy] = useState(false)
@@ -96,6 +99,8 @@ export default function StoreForm({
         capacity: form.capacity ? Number(form.capacity) : null,
         manager_name:  form.manager_name  || null,
         manager_phone: form.manager_phone || null,
+        default_rtsp_port: form.default_rtsp_port
+          ? Number(form.default_rtsp_port) : null,
         business_hours_json: serialiseBusinessHours(form.business_hours),
       })
     } catch (e) {
@@ -146,6 +151,23 @@ export default function StoreForm({
         <Field label="Manager WhatsApp / phone">
           <Input value={form.manager_phone} onChange={upd('manager_phone')}
                  placeholder="+254712345678" />
+        </Field>
+        <Field label="Default NVR port (RTSP)" full>
+          <Select value={form.default_rtsp_port}
+                  onChange={upd('default_rtsp_port')}>
+            <option value="">— use brand default (Dahua=7000, others=554) —</option>
+            <option value="7000">7000 (most Dahua NVRs)</option>
+            <option value="554">554 (standard RTSP)</option>
+            <option value="80">80 (HTTP tunnel)</option>
+            <option value="800">800</option>
+            <option value="8000">8000 (Hikvision ISAPI)</option>
+            <option value="8080">8080</option>
+          </Select>
+          <div className="text-xs text-slate-500 mt-1">
+            Cameras added to this store will inherit this port. Pick
+            7000 for Dahua-on-7000 stores (Moi Avenue, Junction,
+            Sarit and most others in the Vivo fleet).
+          </div>
         </Field>
       </div>
 

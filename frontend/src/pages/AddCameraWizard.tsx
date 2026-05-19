@@ -31,6 +31,38 @@ const TYPES: Array<{ value: string; label: string; isNvr?: boolean; brand: strin
 // dropdown lets operators pick from these without typing.
 const HTTP_PORT_OPTIONS = [80, 800, 8000, 8080, 7000]
 
+// Per-brand RTSP default ports. Dahua-on-7000 is the dominant pattern
+// across the 26 Vivo stores; the rest sit on 554 with HTTP-tunnel
+// fallbacks when the router blocks it. Mirrors the server's
+// _BRAND_RTSP_DEFAULTS so the form prefills correctly on brand change.
+const BRAND_RTSP_DEFAULTS: Record<string, number> = {
+  dahua: 7000, hikvision: 554, uniview: 554, onvif: 554, generic: 554,
+}
+
+// Build the per-brand RTSP URL preview client-side. Mirrors the
+// server's build_rtsp_url() output so the operator sees exactly
+// what FFmpeg will be asked to open. Credentials are URL-encoded
+// the same way the server does it.
+function buildRtspUrl(args: {
+  brand: string; host: string; port: number;
+  username: string; password: string; channel: number;
+}): string {
+  const enc = (s: string) => encodeURIComponent(s)
+  const auth = args.username
+    ? `${enc(args.username)}:${enc(args.password)}@` : ''
+  const ch = args.channel || 1
+  if (args.brand === 'dahua') {
+    return `rtsp://${auth}${args.host}:${args.port}/cam/realmonitor?channel=${ch}&subtype=0`
+  }
+  if (args.brand === 'hikvision' || args.brand === 'hik') {
+    return `rtsp://${auth}${args.host}:${args.port}/Streaming/Channels/${ch}01`
+  }
+  if (args.brand === 'uniview') {
+    return `rtsp://${auth}${args.host}:${args.port}/unicast/c${ch}/s1/live`
+  }
+  return `rtsp://${auth}${args.host}:${args.port}/`
+}
+
 export default function AddCameraWizard() {
   const nav = useNavigate()
   const params = useParams()                  // when nested under /stores/:id
@@ -63,6 +95,37 @@ export default function AddCameraWizard() {
   const [nvrId, setNvrId] = useState<number | null>(null)
 
   useEffect(() => { storesApi.list().then(setStores).catch(console.error) }, [])
+
+  // When the brand changes, snap RTSP port to the brand's default
+  // (Dahua=7000, others=554). Operators can still override.
+  useEffect(() => {
+    const defaultPort = BRAND_RTSP_DEFAULTS[type.brand] ?? 554
+    setForm(f => ({ ...f, rtsp_port: defaultPort }))
+  }, [type.brand])
+
+  // When the operator picks a store, override the brand default with
+  // the STORE's default_rtsp_port if one is set. Lets the Moi Ave
+  // store be a one-time "set port 7000 here" and have every camera
+  // added afterwards inherit it.
+  useEffect(() => {
+    if (!storeId || !stores) return
+    const s = stores.find(x => x.id === storeId)
+    if (s?.default_rtsp_port) {
+      setForm(f => ({ ...f, rtsp_port: s.default_rtsp_port! }))
+    }
+  }, [storeId, stores])
+
+  // Live RTSP URL preview, recomputed on every form change. Shown to
+  // the operator so they can sanity-check before saving — no more
+  // "I added the camera but it points at the wrong path."
+  const rtspPreview = buildRtspUrl({
+    brand: type.brand,
+    host: form.host || 'HOST',
+    port: form.rtsp_port,
+    username: form.username || 'USER',
+    password: form.password || 'PASS',
+    channel: form.channel_number,
+  })
 
   async function doTest() {
     setBusy(true); setError(null); setTest(null)
@@ -417,7 +480,25 @@ export default function AddCameraWizard() {
             <Field label="RTSP URL override (optional)" full>
               <Input value={form.rtsp_url_override} onChange={upd('rtsp_url_override')}
                      placeholder="rtsp://user:pass@host:554/..." />
+              <div className="text-xs text-slate-500 mt-1">
+                Leave blank to use the brand-default template (shown
+                below). Only set this for cameras that don't match
+                the standard Dahua / Hikvision / Uniview paths.
+              </div>
             </Field>
+
+            {/* Live URL preview so operators see exactly what FFmpeg
+                will be asked to open before they save. Password is
+                masked unless the override is also blank — there's
+                already a password field two rows up. */}
+            <div className="col-span-2 -mt-1 mb-1">
+              <div className="text-xs text-slate-600 mb-1">
+                RTSP URL preview ({type.brand})
+              </div>
+              <div className="font-mono text-[11px] break-all bg-slate-50 border rounded p-2 text-slate-700">
+                {form.rtsp_url_override || rtspPreview}
+              </div>
+            </div>
             <Field label="DDNS hostname (optional)" full>
               <Input value={form.ddns_hostname} onChange={upd('ddns_hostname')}
                      placeholder="mycamera.dyndns.org" />

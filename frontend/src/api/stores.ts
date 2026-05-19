@@ -9,6 +9,10 @@ export interface Store {
   capacity: number | null
   manager_name:  string | null
   manager_phone: string | null
+  // Per-store default RTSP port. New cameras attached to this store
+  // inherit this in the Add Camera wizard. Null = no default; use
+  // brand default (Dahua=7000, others=554).
+  default_rtsp_port: number | null
   is_active: boolean
   created_at: string
 }

@@ -16,6 +16,7 @@ class StoreIn(BaseModel):
     capacity: int | None = None
     manager_name:  str | None = None
     manager_phone: str | None = None
+    default_rtsp_port: int | None = None
     is_active: bool = True
 
 
@@ -35,6 +36,7 @@ class StoreOut(BaseModel):
     # api image that's newer than the DB migration.
     manager_name:  str | None = None
     manager_phone: str | None = None
+    default_rtsp_port: int | None = None
     is_active: bool = True
     created_at: datetime
 

@@ -59,11 +59,13 @@ _DEFAULT_HTTP_PORTS = (80, 8080, 8000, 800, 7000)
 # order = preference order.
 _DEFAULT_RTSP_PORTS = (554, 10554, 5544, 8554)
 
-# Ports we'll try as HTTP-tunneled RTSP when 554 is blocked. These
-# are the common HTTP admin ports on Vivo's Dahua/Hik/Uniview NVRs.
+# Ports we'll try as HTTP-tunneled RTSP when 554 is blocked. Probe
+# order matches the empirical distribution across the 26 Vivo stores:
+# Dahua-on-7000 is the dominant pattern (Moi Ave, Junction, Sarit and
+# others), so 7000 goes first. Then standard ports, then the long tail.
 # When `-rtsp_transport http` is set, FFmpeg negotiates RTSP through
 # this port instead of opening a separate 554 connection.
-_DEFAULT_RTSP_TUNNEL_PORTS = (80, 8000, 8080, 7000, 800)
+_DEFAULT_RTSP_TUNNEL_PORTS = (7000, 80, 800, 8000, 8080)
 
 
 # Snapshot URL templates. {scheme}, {host}, {port}, {ch} substituted in.
