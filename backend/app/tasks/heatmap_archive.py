@@ -31,28 +31,47 @@ def _archive_root() -> Path:
 
 
 def _render_png(grid: list[list[int]], size: int, alpha: float = 0.85) -> bytes:
-    """Same blue-cyan-yellow-red ramp the live endpoint uses, upscaled."""
-    from PIL import Image
+    """Premier League-style navy → blue → orange → red ramp.
+
+    Mirrors the live endpoint's renderer so archived PNGs match what
+    operators see on the dashboard. Uses nearest-neighbour upscaling
+    + a bloom ring on the hottest cell for the football-analytics
+    look (sharp banding rather than a smooth jet gradient).
+    """
+    from PIL import Image, ImageDraw
+    # Re-import the live renderer's colour ramp + threshold so the
+    # archive PNG matches the dashboard pixel-for-pixel. Local import
+    # avoids a circular dep at module load.
+    from app.api.analytics import _heatmap_color, _HEATMAP_HOTSPOT_THRESHOLD
     if not grid:
         return b""
     max_v = max((max(row) for row in grid), default=0) or 1
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     px = img.load()
+    hotspots: list[tuple[int, int]] = []
     for y in range(size):
         for x in range(size):
             v = grid[y][x] / max_v
             if v <= 0:
                 continue
-            if v < 0.25:
-                rgb = (0, int(v * 4 * 255), 255)
-            elif v < 0.5:
-                rgb = (0, 255, int((1 - (v - 0.25) * 4) * 255))
-            elif v < 0.75:
-                rgb = (int((v - 0.5) * 4 * 255), 255, 0)
-            else:
-                rgb = (255, int((1 - (v - 0.75) * 4) * 255), 0)
-            px[x, y] = (*rgb, int(alpha * 255))
-    img = img.resize((size * 16, size * 16), Image.BILINEAR)
+            r_, g_, b_ = _heatmap_color(v)
+            a = int(alpha * 255 * (0.7 + 0.3 * v))
+            if v >= _HEATMAP_HOTSPOT_THRESHOLD:
+                a = 255
+                hotspots.append((x, y))
+            px[x, y] = (r_, g_, b_, min(255, a))
+    img = img.resize((size * 16, size * 16), Image.NEAREST)
+    if hotspots and len(hotspots) < (size * size) // 4:
+        draw = ImageDraw.Draw(img)
+        mx, my, mv = hotspots[0][0], hotspots[0][1], grid[hotspots[0][1]][hotspots[0][0]]
+        for (x, y) in hotspots:
+            if grid[y][x] > mv:
+                mx, my, mv = x, y, grid[y][x]
+        cx = mx * 16 + 8
+        cy = my * 16 + 8
+        for radius, width in ((28, 3), (40, 2)):
+            draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
+                         outline=(255, 255, 255, 220), width=width)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

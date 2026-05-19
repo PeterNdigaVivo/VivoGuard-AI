@@ -836,13 +836,62 @@ def heatmap_grid(camera_id: int, _u=Depends(get_current_user)):
     return json.loads(raw)
 
 
-@router.get("/heatmap/{camera_id}/image")
-def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_user)):
-    """Render the heatmap as a PNG with a jet-style colour ramp.
+# Premier League / Opta / SofaScore football-analytics colour scheme.
+# Cold zones in deep navy, hot zones in vivid orange/red. Stops are
+# laid out so transitions land at quartile-ish intensity levels, which
+# gives the sharp banding the football overlays use rather than a
+# smooth jet gradient. Defined here once so the live PNG endpoint and
+# the nightly archive task render the same scheme.
+_HEATMAP_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (0x0a, 0x16, 0x28)),   # deep navy — coldest
+    (0.20, (0x1e, 0x3a, 0x8a)),   # royal blue
+    (0.45, (0x3b, 0x82, 0xf6)),   # sky blue
+    (0.65, (0xf9, 0x73, 0x16)),   # orange
+    (0.85, (0xea, 0x58, 0x0c)),   # bright orange
+    (1.00, (0xff, 0x45, 0x00)),   # vivid orange-red — hotspot
+]
+# Threshold above which we draw a white "bloom" ring around the cell
+# to make the hottest patch unmistakable in the overlay.
+_HEATMAP_HOTSPOT_THRESHOLD = 0.85
 
-    The frontend overlays this on the camera snapshot (or on a manually
-    uploaded floorplan) at the operator's chosen opacity. Returns
-    `image/png` bytes.
+
+def _heatmap_color(v: float) -> tuple[int, int, int]:
+    """Map a 0..1 intensity to the Premier-League-style RGB tuple.
+
+    Banded — interpolates within a stop but doesn't smooth across
+    them aggressively, so adjacent intensity tiers visibly differ
+    (the football-style look the spec asks for).
+    """
+    v = max(0.0, min(1.0, v))
+    for i in range(len(_HEATMAP_STOPS) - 1):
+        lo_v, lo_c = _HEATMAP_STOPS[i]
+        hi_v, hi_c = _HEATMAP_STOPS[i + 1]
+        if v <= hi_v:
+            span = hi_v - lo_v or 1.0
+            t = (v - lo_v) / span
+            return (
+                int(lo_c[0] + (hi_c[0] - lo_c[0]) * t),
+                int(lo_c[1] + (hi_c[1] - lo_c[1]) * t),
+                int(lo_c[2] + (hi_c[2] - lo_c[2]) * t),
+            )
+    return _HEATMAP_STOPS[-1][1]
+
+
+@router.get("/heatmap/{camera_id}/image")
+def heatmap_image(camera_id: int, alpha: float = 0.85,
+                  _u=Depends(get_current_user)):
+    """Render the heatmap as a PNG using the Premier League-style
+    navy → blue → orange → red ramp.
+
+    The frontend overlays this on the camera snapshot (or a manually
+    uploaded floorplan) at the operator's chosen opacity. Default
+    alpha bumped from 0.65 to 0.85 — the new colour scheme is dark
+    enough that the snapshot still reads through, and operators
+    asked for crisper hot zones.
+
+    The hottest cell (top 15% intensity) is rendered at full opacity
+    plus a one-pixel white halo so it pops as a "🔥 Busiest Area"
+    even on cluttered backgrounds.
     """
     import io
     import json
@@ -864,23 +913,43 @@ def heatmap_image(camera_id: int, alpha: float = 0.65, _u=Depends(get_current_us
     max_v = max((max(row) for row in grid), default=0) or 1
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     px = img.load()
+    hotspots: list[tuple[int, int]] = []
     for y in range(n):
         for x in range(n):
             v = grid[y][x] / max_v
             if v <= 0:
                 continue
-            # Simple "blue-cyan-yellow-red" ramp.
-            if v < 0.25:
-                rgb = (0, int(v * 4 * 255), 255)
-            elif v < 0.5:
-                rgb = (0, 255, int((1 - (v - 0.25) * 4) * 255))
-            elif v < 0.75:
-                rgb = (int((v - 0.5) * 4 * 255), 255, 0)
-            else:
-                rgb = (255, int((1 - (v - 0.75) * 4) * 255), 0)
-            px[x, y] = (*rgb, int(alpha * 255))
-    # Upscale 16× for a smoother overlay; bilinear keeps the look soft.
-    img = img.resize((n * 16, n * 16), Image.BILINEAR)
+            r_, g_, b_ = _heatmap_color(v)
+            # Sharper transitions at high intensity — alpha ramps
+            # from the configured base up to 1.0 in the top band so
+            # hotspots pop instead of blending into the background.
+            a = int(alpha * 255 * (0.7 + 0.3 * v))
+            if v >= _HEATMAP_HOTSPOT_THRESHOLD:
+                a = 255
+                hotspots.append((x, y))
+            px[x, y] = (r_, g_, b_, min(255, a))
+
+    # Upscale 16× — nearest-neighbour keeps the cell boundaries sharp
+    # for the football-analytics look (the old bilinear smoothed them
+    # into a soft blob).
+    img = img.resize((n * 16, n * 16), Image.NEAREST)
+
+    # Bloom ring around the single hottest cell. Skip when the grid
+    # is uniformly hot (the ring becomes noise).
+    if hotspots and len(hotspots) < (n * n) // 4:
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        # Pick the cell with the highest absolute count.
+        mx, my, mv = hotspots[0][0], hotspots[0][1], grid[hotspots[0][1]][hotspots[0][0]]
+        for (x, y) in hotspots:
+            if grid[y][x] > mv:
+                mx, my, mv = x, y, grid[y][x]
+        cx = mx * 16 + 8
+        cy = my * 16 + 8
+        for radius, width in ((28, 3), (40, 2)):
+            draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
+                         outline=(255, 255, 255, 220), width=width)
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
