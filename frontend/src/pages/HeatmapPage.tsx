@@ -46,12 +46,27 @@ export default function HeatmapPage() {
     return () => clearInterval(t)
   }, [cameraId])
 
+  // Build the heatmap image URL with the current window selection
+  // baked in. The server keeps three independent accumulators
+  // (vg:heatmap:hour|day|week:{id}) so switching this query param
+  // gets a fresh grid with no client-side filtering.
+  function heatmapUrl(forDownload = false): string {
+    const win = windowSel === 'last_hour' ? 'hour'
+              : windowSel === 'this_week' ? 'week'
+              : 'day'
+    const params = new URLSearchParams({
+      alpha: String(forDownload ? Math.max(0.85, opacity) : opacity),
+      window: win,
+    })
+    return `/api/analytics/heatmap/${cameraId}/image?${params}`
+  }
+
   // Heatmap PNG — authed fetch → blob → object URL.
   useEffect(() => {
     let cancelled = false
     let created: string | null = null
     const tok = localStorage.getItem('vg_access_token') ?? ''
-    fetch(`/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`,
+    fetch(heatmapUrl(),
           { headers: { Authorization: `Bearer ${tok}` } })
       .then(res => res.ok ? res.blob() : null)
       .then(blob => {
@@ -64,12 +79,14 @@ export default function HeatmapPage() {
       cancelled = true
       if (created) URL.revokeObjectURL(created)
     }
-  }, [cameraId, opacity, bust])
+    // Re-fetch on window change too — that's the whole point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, opacity, bust, windowSel])
 
   async function download() {
     const tok = localStorage.getItem('vg_access_token') ?? ''
     try {
-      const res = await fetch(`/api/analytics/heatmap/${cameraId}/image?alpha=${opacity}`,
+      const res = await fetch(heatmapUrl(true),
                               { headers: { Authorization: `Bearer ${tok}` } })
       if (!res.ok) {
         setError(`Download failed: ${res.status} ${res.statusText}`)
@@ -108,6 +125,9 @@ export default function HeatmapPage() {
           {(['last_hour', 'today', 'this_week'] as TimeWindow[]).map(w => (
             <button key={w}
                     onClick={() => setWindowSel(w)}
+                    title={w === 'last_hour' ? 'Rolling last 60 minutes — resets every hour'
+                         : w === 'today'     ? 'Since local midnight today'
+                         : 'Since the start of this iso-week (Mon 00:00)'}
                     className={'px-3 py-1 rounded text-xs font-medium ' +
                       (windowSel === w
                         ? 'bg-orange-500 text-white'

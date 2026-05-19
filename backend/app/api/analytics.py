@@ -729,9 +729,16 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
 # ---- Store-wide heatmap grid (Rule 5) ------------------------------
 
 @router.get("/store/{store_id}/heatmaps")
-def store_heatmaps(store_id: int, db: Session = Depends(get_db), _u=Depends(get_current_user)):
+def store_heatmaps(store_id: int, window: str | None = None,
+                   db: Session = Depends(get_db),
+                   _u=Depends(get_current_user)):
     """One row per camera in the store with its heatmap thumb URL plus
-    the top hotspot location (highest-count cell). Frontend grids them."""
+    the top hotspot location (highest-count cell). Frontend grids them.
+
+    `window` (hour|day|week) propagates through to the per-camera
+    thumb URL so the heatmap grid page can switch all tiles at once
+    instead of one-camera-at-a-time.
+    """
     import json
     import redis
     from app.config import settings as _settings
@@ -740,8 +747,14 @@ def store_heatmaps(store_id: int, db: Session = Depends(get_db), _u=Depends(get_
     cams = db.query(Camera).filter(Camera.store_id == store_id).all()
     r = redis.from_url(_settings.redis_url)
     out = []
+    # Heatmap thumbs the dashboard renders inherit the window.
+    win = window if window in _HEATMAP_WINDOWS else "day"
     for c in cams:
-        raw = r.get(f"vg:heatmap:{c.id}")
+        raw = r.get(_heatmap_redis_key(c.id, win))
+        if not raw:
+            # Legacy un-suffixed key fallback so cameras whose worker
+            # hasn't been restarted yet still show a thumb.
+            raw = r.get(f"vg:heatmap:{c.id}")
         hotspot = None
         if raw:
             try:
@@ -765,7 +778,8 @@ def store_heatmaps(store_id: int, db: Session = Depends(get_db), _u=Depends(get_
             "camera_id": c.id,
             "camera_name": c.name,
             "status": c.status,
-            "heatmap_url": f"/api/analytics/heatmap/{c.id}/image?alpha=0.65",
+            "heatmap_url": f"/api/analytics/heatmap/{c.id}/image?alpha=0.85&window={win}",
+            "window": win,
             "hotspot": hotspot,
         })
     ranked = sorted([o for o in out if o["hotspot"]],
@@ -823,17 +837,55 @@ def heatmap_archive_download(camera_id: int, day: str,
 
 # ---- Heatmap export (P2) -------------------------------------------
 
-@router.get("/heatmap/{camera_id}")
-def heatmap_grid(camera_id: int, _u=Depends(get_current_user)):
-    """Return the latest heatmap as a 2-D array of cell counts."""
+# Allowed values for the `window` query parameter on heatmap reads.
+# Maps each to the Redis key suffix the inference worker publishes
+# under (see HeatmapDetector._publish).
+_HEATMAP_WINDOWS = {"hour", "day", "week"}
+
+
+def _heatmap_redis_key(camera_id: int, window: str | None) -> str:
+    """Pick the per-window Redis key. None / 'day' / unknown all map
+    to the day-window key so legacy callers keep working."""
+    if window in _HEATMAP_WINDOWS:
+        return f"vg:heatmap:{window}:{camera_id}"
+    return f"vg:heatmap:day:{camera_id}"
+
+
+def _heatmap_payload(camera_id: int, window: str | None) -> dict | None:
+    """Fetch + JSON-decode the per-window heatmap payload, with a
+    transparent fallback to the legacy un-suffixed key for cameras
+    that haven't been re-published since the upgrade."""
     import json
     import redis
     from app.config import settings
     r = redis.from_url(settings.redis_url)
-    raw = r.get(f"vg:heatmap:{camera_id}")
+    raw = r.get(_heatmap_redis_key(camera_id, window))
     if not raw:
+        # Backwards-compat: older workers wrote only the un-suffixed
+        # key. If the new key isn't there yet, fall back so the
+        # dashboard doesn't go blank during a rolling deploy.
+        raw = r.get(f"vg:heatmap:{camera_id}")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+@router.get("/heatmap/{camera_id}")
+def heatmap_grid(camera_id: int, window: str | None = None,
+                 _u=Depends(get_current_user)):
+    """Return the latest heatmap grid for the requested time window.
+
+    `window` is 'hour' | 'day' (default) | 'week'. The inference
+    worker maintains separate accumulators for each so picking a
+    window doesn't require any backfill.
+    """
+    payload = _heatmap_payload(camera_id, window)
+    if payload is None:
         raise HTTPException(404, "heatmap not available — is heatmap detection enabled?")
-    return json.loads(raw)
+    return payload
 
 
 # Premier League / Opta / SofaScore football-analytics colour scheme.
@@ -879,31 +931,27 @@ def _heatmap_color(v: float) -> tuple[int, int, int]:
 
 @router.get("/heatmap/{camera_id}/image")
 def heatmap_image(camera_id: int, alpha: float = 0.85,
+                  window: str | None = None,
                   _u=Depends(get_current_user)):
     """Render the heatmap as a PNG using the Premier League-style
     navy → blue → orange → red ramp.
 
-    The frontend overlays this on the camera snapshot (or a manually
-    uploaded floorplan) at the operator's chosen opacity. Default
-    alpha bumped from 0.65 to 0.85 — the new colour scheme is dark
-    enough that the snapshot still reads through, and operators
-    asked for crisper hot zones.
+    `window` selects the time aggregator the inference worker keeps:
+      hour — rolling 60-minute grid (resets each new hour)
+      day  — today's grid since local 00:00 (default)
+      week — this iso-week, reset Monday 00:00
 
-    The hottest cell (top 15% intensity) is rendered at full opacity
-    plus a one-pixel white halo so it pops as a "🔥 Busiest Area"
-    even on cluttered backgrounds.
+    The frontend overlays the PNG on the camera snapshot (or a manually
+    uploaded floorplan) at the operator's chosen opacity. The hottest
+    cell (top 15% intensity) gets full opacity plus a white bloom
+    ring so it pops as a "🔥 Busiest Area" on cluttered backgrounds.
     """
     import io
-    import json
-    import redis
     from fastapi.responses import StreamingResponse
-    from app.config import settings
 
-    r = redis.from_url(settings.redis_url)
-    raw = r.get(f"vg:heatmap:{camera_id}")
-    if not raw:
+    payload = _heatmap_payload(camera_id, window)
+    if payload is None:
         raise HTTPException(404, "heatmap not available")
-    payload = json.loads(raw)
     grid = payload.get("grid") or []
     n    = payload.get("size") or len(grid) or 32
     if not grid:
