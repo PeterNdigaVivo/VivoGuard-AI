@@ -166,6 +166,39 @@ async def probe_tcp(payload: TcpProbeIn,
                 "detail": f"{type(e).__name__}: {e}"}
 
 
+class IntelligentProbeIn(BaseModel):
+    host: str
+    username: str | None = None
+    password: str | None = None
+    channel_number: int | None = 1
+
+
+@router.post("/intelligent-probe")
+async def intelligent_probe(payload: IntelligentProbeIn,
+                            _u: User = Depends(require_role("admin", "operator"))):
+    """Smart port discovery for the Add Camera wizard.
+
+    Tries every common Dahua/Hik port we've seen in the Vivo fleet —
+    RTSP on 554/10554/5544/8554 and HTTP CGI on 80/8080/8000/800/7000 —
+    in parallel and reports which ones answer. Operators no longer
+    have to remember whether THIS NVR firmware put its admin port on
+    7000 or 8080.
+
+    The wizard pre-fills `rtsp_port` and `http_port` from the
+    response so the operator just clicks Save.
+    """
+    import asyncio
+    from app.stream.auto_transport import discover_ports
+    # discover_ports does sync TCP probes; offload so we don't block
+    # the asyncio loop while 8 sockets time out.
+    result = await asyncio.to_thread(
+        discover_ports,
+        payload.host, payload.username, payload.password,
+        payload.channel_number or 1,
+    )
+    return result
+
+
 class AutoFailoverIn(BaseModel):
     # If provided, only failover cameras in this store. Omitted = all.
     store_id: int | None = None

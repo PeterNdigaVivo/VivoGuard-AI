@@ -48,19 +48,40 @@ class HttpSnapshotWorker(threading.Thread):
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
         self._stop = threading.Event()
+        # Persistent client so we reuse the TCP+TLS connection between
+        # polls. The previous version constructed a fresh client every
+        # GET, which at 5fps × 40 cameras is 200 socket setups/sec.
+        # We use httpx HTTP/1.1 keep-alive by default.
+        self._client: httpx.Client | None = None
+        # Auth instance is built once. Falls back to Basic on first
+        # 401 and remembers the choice.
+        self._auth: httpx.Auth | tuple[str, str] | None = None
+        if self.username:
+            self._auth = httpx.DigestAuth(self.username, self.password)
 
     def stop(self) -> None:
         self._stop.set()
+        # Close the keep-alive client so we don't leak sockets when
+        # the StreamManager rebuilds workers during reconciliation.
+        c = self._client
+        self._client = None
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def _get_jpeg(self) -> bytes:
-        """One HTTP GET. Try Digest auth first (Dahua/Hik default); fall
-        back to Basic on 401. Returns JPEG bytes or raises."""
-        digest = httpx.DigestAuth(self.username, self.password) if self.username else None
-        with httpx.Client(timeout=10.0, verify=False) as c:
-            r = c.get(self.snapshot_url, auth=digest)
-            if r.status_code == 401 and self.username:
-                # Some old firmware uses Basic; retry with that.
-                r = c.get(self.snapshot_url, auth=(self.username, self.password))
+        """One HTTP GET. Reuses the persistent client (keep-alive)
+        and the previously-negotiated auth. Falls back from Digest to
+        Basic on 401 once and sticks with whichever worked."""
+        if self._client is None:
+            self._client = httpx.Client(timeout=10.0, verify=False)
+        r = self._client.get(self.snapshot_url, auth=self._auth)
+        if r.status_code == 401 and self.username and isinstance(self._auth, httpx.DigestAuth):
+            # Some old firmware uses Basic; retry once and remember.
+            self._auth = (self.username, self.password)
+            r = self._client.get(self.snapshot_url, auth=self._auth)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:120]}")
         if not r.content or r.content[:3] != b"\xff\xd8\xff":

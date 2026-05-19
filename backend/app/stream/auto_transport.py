@@ -33,9 +33,21 @@ log = logging.getLogger("streamer.auto_transport")
 # streamer will re-probe on container restart, but not every 5s.
 _PROBED: set[tuple[str, int]] = set()
 
-# HTTP ports we'll try, in order. The camera's configured http_port
-# is added at the front so an operator-provided value beats defaults.
-_DEFAULT_HTTP_PORTS = (80, 7000, 8080)
+# HTTP ports we'll try, in order, when negotiating fallback. Operator-
+# configured http_port is added at the front so a value entered in the
+# UI beats defaults. Set covers every commonly-deployed Dahua/Hik HTTP
+# admin port we've actually seen in the Vivo fleet:
+#   80    — default for most consumer-grade cameras
+#   8080  — Hikvision DDNS often, Dahua proxied
+#   8000  — Hikvision SDK / ISAPI (sometimes also CGI)
+#   800   — uncommon Dahua DDNS overlay
+#   7000  — Vivo's Dahua NVRs (Moi Ave / Acacia firmware variant)
+_DEFAULT_HTTP_PORTS = (80, 8080, 8000, 800, 7000)
+
+# RTSP ports tried by the smart-port auto-detect (`/cameras/
+# intelligent-probe`). 554 is the IANA default; the rest are deployments
+# we've seen in the wild. Probe order = preference order.
+_DEFAULT_RTSP_PORTS = (554, 10554, 5544, 8554)
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -151,3 +163,68 @@ def forget(host: str, rtsp_port: int) -> None:
     that lets operators re-trigger negotiation after fixing networking
     (e.g. the store router was reconfigured)."""
     _PROBED.discard((host, rtsp_port))
+
+
+# ----- Add Camera wizard: parallel port discovery -----
+
+def discover_ports(host: str, username: str | None, password: str | None,
+                   channel: int | None = 1) -> dict:
+    """Probe ALL common Dahua/Hik ports for one host and report which
+    work. Powers the "Auto-detect ports" button in the Add Camera
+    wizard so operators don't have to guess port numbers.
+
+    Returns:
+      {
+        "host": str,
+        "rtsp_port": int | None,     # first reachable RTSP port
+        "http_port": int | None,     # first port that returned a JPEG via snapshot.cgi
+        "rtsp_candidates": [int, ...],   # all reachable RTSP ports
+        "http_candidates": [int, ...],   # all HTTP ports that handed back a JPEG
+        "recommended_transport": "rtsp" | "http_snapshot" | None,
+      }
+
+    Probes run in a thread pool so 9 port checks finish in roughly
+    the longest single probe (~3s) instead of 9× that.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # RTSP: just TCP reachability.
+    rtsp_results: dict[int, bool] = {}
+    # HTTP: TCP-reachable AND snapshot.cgi returns a JPEG.
+    http_results: dict[int, bool] = {}
+
+    def _check_rtsp(p: int) -> tuple[int, bool]:
+        return p, _tcp_reachable(host, p, timeout=2.0)
+
+    def _check_http(p: int) -> tuple[int, bool]:
+        if not _tcp_reachable(host, p, timeout=2.0):
+            return p, False
+        return p, _snapshot_jpeg(host, p, channel, username, password, timeout=4.0)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for port, ok in pool.map(_check_rtsp, _DEFAULT_RTSP_PORTS):
+            rtsp_results[port] = ok
+        for port, ok in pool.map(_check_http, _DEFAULT_HTTP_PORTS):
+            http_results[port] = ok
+
+    rtsp_candidates = [p for p in _DEFAULT_RTSP_PORTS if rtsp_results.get(p)]
+    http_candidates = [p for p in _DEFAULT_HTTP_PORTS if http_results.get(p)]
+
+    rtsp_port = rtsp_candidates[0] if rtsp_candidates else None
+    http_port = http_candidates[0] if http_candidates else None
+
+    if rtsp_port:
+        recommended = "rtsp"
+    elif http_port:
+        recommended = "http_snapshot"
+    else:
+        recommended = None
+
+    return {
+        "host": host,
+        "rtsp_port": rtsp_port,
+        "http_port": http_port,
+        "rtsp_candidates": rtsp_candidates,
+        "http_candidates": http_candidates,
+        "recommended_transport": recommended,
+    }

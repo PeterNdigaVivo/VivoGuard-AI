@@ -68,6 +68,46 @@ export default function AddCameraWizard() {
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
 
+  // "Auto-detect ports" — calls /cameras/intelligent-probe to find
+  // which RTSP and HTTP ports respond on this host, then pre-fills
+  // the form so operators don't have to remember per-NVR-firmware
+  // quirks (Moi Ave uses HTTP=7000, etc.).
+  type ProbeResult = {
+    host: string
+    rtsp_port: number | null
+    http_port: number | null
+    rtsp_candidates: number[]
+    http_candidates: number[]
+    recommended_transport: 'rtsp' | 'http_snapshot' | null
+  }
+  const [probe, setProbe] = useState<ProbeResult | null>(null)
+  async function autoDetectPorts() {
+    if (!form.host) { setError('Enter the host first.'); return }
+    setBusy(true); setError(null); setProbe(null)
+    try {
+      const r = await api<ProbeResult>('/cameras/intelligent-probe', {
+        method: 'POST',
+        body: {
+          host: form.host, username: form.username,
+          password: form.password, channel_number: form.channel_number,
+        },
+      })
+      setProbe(r)
+      // Pre-fill whichever ports responded. If both worked, prefer
+      // RTSP (lower bandwidth) and keep the discovered HTTP port as
+      // a fallback for the streamer's auto-failover.
+      setForm(f => ({
+        ...f,
+        rtsp_port: r.rtsp_port ?? f.rtsp_port,
+        http_port: r.http_port ?? f.http_port,
+      }))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function connectNVR() {
     setBusy(true); setError(null)
     try {
@@ -226,6 +266,42 @@ export default function AddCameraWizard() {
             </Field>
             <Field label="RTSP port"><Input type="number" value={form.rtsp_port} onChange={upd('rtsp_port')} /></Field>
             <Field label="HTTP port"><Input type="number" value={form.http_port} onChange={upd('http_port')} /></Field>
+
+            <div className="col-span-2 -mt-1 mb-1">
+              <Button variant="ghost" onClick={autoDetectPorts}
+                      disabled={busy || !form.host}>
+                {busy ? 'Probing…' : '🔍 Auto-detect ports'}
+              </Button>
+              <span className="ml-2 text-xs text-slate-500">
+                Probes RTSP 554/10554/5544/8554 and HTTP 80/8080/8000/800/7000.
+              </span>
+              {probe && (
+                <div className="mt-2 text-xs">
+                  {probe.rtsp_candidates.length > 0 && (
+                    <div className="text-emerald-700">
+                      ✓ RTSP responded on: {probe.rtsp_candidates.join(', ')}
+                    </div>
+                  )}
+                  {probe.http_candidates.length > 0 && (
+                    <div className="text-emerald-700">
+                      ✓ HTTP snapshot responded on: {probe.http_candidates.join(', ')}
+                    </div>
+                  )}
+                  {!probe.rtsp_candidates.length && !probe.http_candidates.length && (
+                    <div className="text-red-600">
+                      ✗ Nothing answered. Verify the host is reachable and the router
+                      forwards at least one of the common ports.
+                    </div>
+                  )}
+                  {probe.recommended_transport === 'http_snapshot' && (
+                    <div className="text-amber-700 mt-1">
+                      RTSP is blocked but HTTP works — this camera will auto-switch
+                      to HTTP snapshot polling after save.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <Field label="SDK port (optional)">
               <Input type="number" value={form.sdk_port} onChange={upd('sdk_port')} placeholder="" />
             </Field>

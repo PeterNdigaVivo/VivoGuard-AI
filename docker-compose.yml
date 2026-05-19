@@ -135,13 +135,22 @@ services:
     # <<: *gpu-reservation
 
   # --- Streamer: ffmpeg subprocess pool. Slim image, no torch.
+  #
+  # Horizontal scaling: each replica claims `id % SHARD_COUNT == SHARD_INDEX`.
+  # With defaults (count=1, index=0) the single container handles every
+  # camera. For 100+ cameras, deploy 2-3 replicas via the override file
+  # `docker-compose.scale.yml` (run with `-f docker-compose.yml
+  # -f docker-compose.scale.yml up -d`).
   streamer:
     build:
       context: ./streamer
       dockerfile: Dockerfile
     image: vivoguard/streamer:latest
     restart: unless-stopped
-    environment: *app-env
+    environment:
+      <<: *app-env
+      STREAMER_SHARD_COUNT: ${STREAMER_SHARD_COUNT:-1}
+      STREAMER_SHARD_INDEX: ${STREAMER_SHARD_INDEX:-0}
     volumes:
       - ./data/recordings:/data/recordings
     depends_on:

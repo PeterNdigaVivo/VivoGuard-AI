@@ -52,6 +52,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # At 40+ cameras this is still cheap — just a single SELECT.
 POLL_INTERVAL_SECONDS = int(os.environ.get("STREAMER_POLL_INTERVAL", "5"))
 
+# Horizontal scaling. Set STREAMER_SHARD_COUNT > 1 across multiple
+# streamer containers and give each a distinct STREAMER_SHARD_INDEX
+# (0..N-1). Each replica filters cameras with `id % count == index`,
+# so every camera lands on exactly one replica with no coordination
+# needed. Cheap to scale — add more containers, increase count.
+#
+# Defaults (count=1, index=0) preserve single-process behaviour for
+# the common case (Vivo's 21-camera fleet runs fine on one streamer).
+SHARD_COUNT = max(1, int(os.environ.get("STREAMER_SHARD_COUNT", "1")))
+SHARD_INDEX = max(0, int(os.environ.get("STREAMER_SHARD_INDEX", "0")))
+if SHARD_INDEX >= SHARD_COUNT:
+    raise SystemExit(
+        f"streamer: STREAMER_SHARD_INDEX={SHARD_INDEX} must be < "
+        f"STREAMER_SHARD_COUNT={SHARD_COUNT}"
+    )
+
 
 def _run_migrations() -> None:
     """Bring the DB schema to head before we start polling.
@@ -114,10 +130,17 @@ def _query_active_cameras(db) -> list[dict]:
     matching the live DB shape.
     """
     cols = list(_CAMERA_COLUMNS)
+    # Shard predicate. With defaults (count=1, index=0) this is
+    # `id % 1 = 0`, i.e. matches every row — no behaviour change.
+    # With count=3 across 3 streamer containers, each replica picks
+    # up roughly a third of the cameras.
+    shard_where = "AND (id %% :shard_count) = :shard_index"
+    params = {"shard_count": SHARD_COUNT, "shard_index": SHARD_INDEX}
     while True:
-        sql = f"SELECT {', '.join(cols)} FROM cameras WHERE ai_enabled = true"
+        sql = (f"SELECT {', '.join(cols)} FROM cameras "
+               f"WHERE ai_enabled = true {shard_where}")
         try:
-            rows = db.execute(text(sql)).mappings().all()
+            rows = db.execute(text(sql), params).mappings().all()
             return [dict(r) for r in rows]
         except Exception as e:
             msg = str(e).lower()
@@ -219,7 +242,7 @@ def desired_specs() -> list[CameraSpec]:
 
 
 def main() -> None:
-    log.info("streamer: starting up")
+    log.info("streamer: starting up (shard %d of %d)", SHARD_INDEX, SHARD_COUNT)
     _run_migrations()
     mgr = StreamManager()
     log.info("streamer: polling every %ss", POLL_INTERVAL_SECONDS)

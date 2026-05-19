@@ -1,0 +1,77 @@
+# Streamer horizontal-scaling overlay.
+#
+# Adds two more streamer replicas (streamer-2 and streamer-3) on top
+# of the default `streamer` from docker-compose.yml. Each replica
+# claims `cameras WHERE id % 3 == SHARD_INDEX`, so every camera lands
+# on exactly one replica with no coordination needed.
+#
+# Use this when your fleet grows past ~60 cameras or you start seeing
+# CPU saturation on a single streamer container. Numbers are
+# illustrative — adjust SHARD_COUNT to match the number of replicas
+# you define.
+#
+# Run:
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --build
+#
+# Verify:
+#   docker compose logs streamer     | grep "shard 0 of 3"
+#   docker compose logs streamer-2   | grep "shard 1 of 3"
+#   docker compose logs streamer-3   | grep "shard 2 of 3"
+#
+# To scale further, copy the streamer-2 block, give it a new name,
+# bump SHARD_INDEX to the next integer, and raise SHARD_COUNT in all
+# three blocks so they agree.
+
+services:
+  streamer:
+    environment:
+      STREAMER_SHARD_COUNT: "3"
+      STREAMER_SHARD_INDEX: "0"
+
+  streamer-2:
+    image: vivoguard/streamer:latest
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      JWT_SECRET: ${JWT_SECRET}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
+      STREAMER_SHARD_COUNT: "3"
+      STREAMER_SHARD_INDEX: "1"
+    volumes:
+      - ./data/recordings:/data/recordings
+    depends_on:
+      - redis
+      - api
+    networks: [vivoguard]
+
+  streamer-3:
+    image: vivoguard/streamer:latest
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      JWT_SECRET: ${JWT_SECRET}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
+      STREAMER_SHARD_COUNT: "3"
+      STREAMER_SHARD_INDEX: "2"
+    volumes:
+      - ./data/recordings:/data/recordings
+    depends_on:
+      - redis
+      - api
+    networks: [vivoguard]
