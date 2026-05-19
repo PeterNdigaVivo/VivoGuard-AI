@@ -1,7 +1,29 @@
 """Stores, shifts, and campaigns API."""
 from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+
+# Stores have unique constraints on `name` and on `code`. Map each
+# constraint to a user-friendly message so the UI doesn't show a
+# raw "psycopg.errors.UniqueViolation" wall of text.
+_UNIQUE_CONFLICT_MESSAGES = {
+    "stores_name_key": "A store with this name already exists. Pick a different name.",
+    "stores_code_key": "A store with this code already exists. Pick a different code (or leave the code blank).",
+}
+
+
+def _coerce_empty_strings(payload_dict: dict) -> dict:
+    """Treat empty-string optional fields as NULL so two blank codes
+    don't collide on the unique index."""
+    cleaned = {}
+    for k, v in payload_dict.items():
+        if v == "":
+            cleaned[k] = None
+        else:
+            cleaned[k] = v
+    return cleaned
 
 from app.database import get_db
 from app.deps import get_current_user, require_role
@@ -38,14 +60,24 @@ def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
 @router.post("", response_model=StoreOut)
 def create_store(payload: StoreIn, db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
-    s = Store(**payload.model_dump())
+    s = Store(**_coerce_empty_strings(payload.model_dump()))
     db.add(s)
     try:
         db.commit()
+    except IntegrityError as e:
+        # Unique-constraint conflict — surface a precise message naming
+        # the offending field, rather than a raw psycopg traceback.
+        db.rollback()
+        raw = str(e.orig if hasattr(e, "orig") else e)
+        for constraint, friendly in _UNIQUE_CONFLICT_MESSAGES.items():
+            if constraint in raw:
+                raise HTTPException(status_code=409, detail=friendly) from e
+        # Some other integrity error (FK, NOT NULL). Show the first line.
+        first_line = raw.split("\n")[0][:300]
+        raise HTTPException(status_code=409,
+                            detail=f"Database rejected the row: {first_line}") from e
     except Exception as e:
-        # Most common cause is column-drift: the model + Pydantic schema
-        # know about manager_name/manager_phone but the DB doesn't have
-        # the column yet because alembic 0004 never actually ran.
+        # Reserved for actual schema-drift / DB-level failures.
         db.rollback()
         import logging as _l
         _l.getLogger(__name__).exception("create_store failed: %s", e)
@@ -54,10 +86,9 @@ def create_store(payload: StoreIn, db: Session = Depends(get_db),
             status_code=503,
             detail=(
                 "Could not create store: " + msg +
-                ". This usually means the database schema is behind the API code. "
-                "Recover with:  docker compose exec api alembic stamp 0001 "
-                "&& docker compose exec api alembic upgrade head  "
-                "(or just restart the api container — startup auto-runs migrations now)."
+                ". If this mentions a missing column, the DB schema is "
+                "behind the API. Restart the api container — startup "
+                "auto-runs migrations."
             ),
         )
     db.refresh(s)
@@ -80,9 +111,19 @@ def update_store(store_id: int, patch: StoreIn,
     s = db.get(Store, store_id)
     if not s:
         raise HTTPException(404, "store not found")
-    for k, v in patch.model_dump(exclude_unset=True).items():
+    for k, v in _coerce_empty_strings(patch.model_dump(exclude_unset=True)).items():
         setattr(s, k, v)
-    db.commit(); db.refresh(s)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raw = str(e.orig if hasattr(e, "orig") else e)
+        for constraint, friendly in _UNIQUE_CONFLICT_MESSAGES.items():
+            if constraint in raw:
+                raise HTTPException(status_code=409, detail=friendly) from e
+        raise HTTPException(status_code=409,
+                            detail=f"Database rejected the change: {raw.splitlines()[0][:300]}") from e
+    db.refresh(s)
     return s
 
 
