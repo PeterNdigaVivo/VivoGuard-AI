@@ -49,8 +49,18 @@ def build_rtsp_url(
       Hikvision:
         rtsp://USER:PASS@HOST:PORT/Streaming/Channels/N0(S+1)
         (channel=1 → /Streaming/Channels/101 main, /102 sub)
+      Uniview:
+        rtsp://USER:PASS@HOST:PORT/media/video1   (channel=1 main)
+                              /media/video2   (channel=1 sub)
+                              /unicast/c{N}/s{1 or 2}  (alt format)
       Generic / ONVIF (caller usually passes override):
         rtsp://USER:PASS@HOST:PORT/  ... (returns override if provided)
+
+    The URL is the same whether the wire is TCP (-rtsp_transport tcp)
+    or HTTP-tunneled (-rtsp_transport http) — the tunnel mode is a
+    FFmpeg flag, not a URL change. So this builder just uses whichever
+    PORT was provided; pass 80 / 8000 / 7000 when tunneling and 554
+    when not, and set the FFmpeg flag separately.
 
     `override` wins over everything when non-empty.
     """
@@ -71,5 +81,9 @@ def build_rtsp_url(
         # Hik path: channel 1 main = 101, sub = 102.
         path_id = ch * 100 + (subtype + 1)
         return f"rtsp://{auth}{host}:{port}/Streaming/Channels/{path_id}"
+    if brand in ("uniview", "univ"):
+        # Uniview uses 1-indexed stream IDs; main=1, sub=2.
+        stream = subtype + 1
+        return f"rtsp://{auth}{host}:{port}/unicast/c{ch}/s{stream}/live"
     # Generic fallback — unlikely to work without an override.
     return f"rtsp://{auth}{host}:{port}/"

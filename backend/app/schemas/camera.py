@@ -10,7 +10,7 @@ class CameraCreate(BaseModel):
     store_id: int
     name: str
     site: str | None = None
-    brand: str = Field(pattern=r"^(dahua|hikvision|onvif|generic)$")
+    brand: str = Field(pattern=r"^(dahua|hikvision|uniview|onvif|generic)$")
     connection_type: str
     host: str
     public_ip: str | None = None
@@ -26,6 +26,9 @@ class CameraCreate(BaseModel):
     network_type: str = "lan"
     ai_enabled: bool = True
     inference_fps: int = 5
+    # FFmpeg -rtsp_transport flag: 'tcp' (default), 'http' (tunnel
+    # for stores behind firewalls that block 554), or 'udp'.
+    rtsp_transport: str = Field(default="tcp", pattern=r"^(tcp|http|udp)$")
 
 
 class CameraOut(BaseModel):
@@ -52,6 +55,7 @@ class CameraOut(BaseModel):
     store_id: int | None = None
     transport: str = "rtsp"
     snapshot_url_override: str | None = None
+    rtsp_transport: str = "tcp"
     created_at: datetime
 
 
@@ -71,6 +75,7 @@ class CameraUpdate(BaseModel):
     rtsp_port: int | None = None
     http_port: int | None = None
     channel_number: int | None = None
+    rtsp_transport: str | None = Field(default=None, pattern=r"^(tcp|http|udp)$")
 
 
 class TestConnectionIn(BaseModel):

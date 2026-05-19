@@ -35,12 +35,25 @@ SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"
 
 
-def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640) -> str:
-    """Build the ffmpeg command. Forces TCP transport, scales to 640w to
-    keep AI bandwidth light, and emits MJPEG to stdout."""
+def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
+               rtsp_transport: str = "tcp") -> str:
+    """Build the ffmpeg command. Scales to 640w to keep AI bandwidth
+    light and emits MJPEG to stdout.
+
+    `rtsp_transport`:
+      'tcp'  (default) — reliable, works on most networks
+      'http' — RTSP-over-HTTP tunnel. Use when the store router
+               blocks 554 but forwards an HTTP port (80, 8000, 8080,
+               7000, 800). The RTSP URL still says rtsp://, but
+               FFmpeg negotiates over the HTTP port instead.
+      'udp'  — lower latency on clean networks; not for the open
+               internet.
+    """
+    if rtsp_transport not in ("tcp", "http", "udp"):
+        rtsp_transport = "tcp"
     return (
         "ffmpeg -hide_banner -loglevel warning "
-        "-rtsp_transport tcp "
+        f"-rtsp_transport {rtsp_transport} "
         "-timeout 5000000 -fflags nobuffer -flags low_delay "
         f"-i {shlex.quote(rtsp_url)} "
         f"-vf scale={width}:-2,fps={fps} "
@@ -53,12 +66,14 @@ class FFmpegWorker(threading.Thread):
 
     def __init__(self, camera_id: int, rtsp_url: str, *,
                  fps: int = 5, width: int = 640,
+                 rtsp_transport: str = "tcp",
                  buffer: FrameBuffer | None = None):
         super().__init__(daemon=True, name=f"ffmpeg-{camera_id}")
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.fps = fps
         self.width = width
+        self.rtsp_transport = rtsp_transport
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
         self._stop = threading.Event()
@@ -118,7 +133,8 @@ class FFmpegWorker(threading.Thread):
             # 'Streamer not yet attempting' for tens of seconds.
             self.buffer.update_health(self.camera_id, fps=0,
                                       error="Starting ffmpeg…")
-            cmd = _build_cmd(self.rtsp_url, fps=self.fps, width=self.width)
+            cmd = _build_cmd(self.rtsp_url, fps=self.fps, width=self.width,
+                             rtsp_transport=self.rtsp_transport)
             log.info("camera %s: starting ffmpeg", self.camera_id)
             started_at = time.time()
             try:

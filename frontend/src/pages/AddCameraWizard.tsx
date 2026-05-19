@@ -20,10 +20,16 @@ const TYPES: Array<{ value: string; label: string; isNvr?: boolean; brand: strin
   { value: 'wan_rtsp',   label: 'WAN IP camera via public IP (RTSP)',   brand: 'generic'   },
   { value: 'wan_dahua',  label: 'Dahua camera over WAN (HTTP+RTSP)',    brand: 'dahua'     },
   { value: 'wan_hik',    label: 'Hikvision camera over WAN (ISAPI+RTSP)',brand: 'hikvision' },
+  { value: 'wan_uniview',label: 'Uniview camera over WAN',              brand: 'uniview'   },
   { value: 'onvif',      label: 'ONVIF camera (auto)',                  brand: 'onvif'     },
   { value: 'nvr_dahua',  label: 'Dahua NVR (multi-channel)',            brand: 'dahua',     isNvr: true },
   { value: 'nvr_hik',    label: 'Hikvision NVR (multi-channel)',        brand: 'hikvision', isNvr: true },
+  { value: 'nvr_uniview',label: 'Uniview NVR (multi-channel)',          brand: 'uniview',   isNvr: true },
 ]
+
+// Common HTTP admin ports on the Vivo fleet. The wizard's HTTP-port
+// dropdown lets operators pick from these without typing.
+const HTTP_PORT_OPTIONS = [80, 800, 8000, 8080, 7000]
 
 export default function AddCameraWizard() {
   const nav = useNavigate()
@@ -40,6 +46,9 @@ export default function AddCameraWizard() {
     name: '', host: '', sdk_port: '', rtsp_port: 554, http_port: 80,
     username: 'admin', password: '', channel_number: 1,
     rtsp_url_override: '', ddns_hostname: '', network_type: 'lan',
+    // 'tcp' = direct RTSP; 'http' = RTSP-over-HTTP tunnel (for stores
+    // behind firewalls that block 554 but forward an HTTP port).
+    rtsp_transport: 'tcp' as 'tcp' | 'http' | 'udp',
   })
   const upd = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: (e.target as HTMLInputElement).type === 'number' ? Number(e.target.value) : e.target.value })
@@ -66,6 +75,52 @@ export default function AddCameraWizard() {
       })
       setTest(r)
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
+  }
+
+  // "Test RTSP Connection" — calls /cameras/test-rtsp-ports which
+  // probes the primary RTSP port (TCP) first and falls through to
+  // HTTP-tunnel on the standard fallback ports (80, 800, 8000, 8080,
+  // 7000). If a working port is found, the form pre-fills with it
+  // and offers a one-click "Use this" button to lock it in.
+  type RtspAttempt = {
+    port: number; transport: string; url: string; ok: boolean; reason: string
+  }
+  type RtspProbe = {
+    host: string; brand: string; ok: boolean
+    working: { port: number; transport: string; url: string } | null
+    attempts: RtspAttempt[]
+    summary: string
+  }
+  const [rtspProbe, setRtspProbe] = useState<RtspProbe | null>(null)
+  async function testRtspPorts() {
+    if (!form.host) { setError('Enter the host first.'); return }
+    setBusy(true); setError(null); setRtspProbe(null)
+    try {
+      const r = await api<RtspProbe>('/cameras/test-rtsp-ports', {
+        method: 'POST',
+        body: {
+          brand: type.brand, host: form.host,
+          username: form.username, password: form.password,
+          channel_number: form.channel_number,
+          rtsp_port: form.rtsp_port,
+          fallback_ports: HTTP_PORT_OPTIONS,
+        },
+      })
+      setRtspProbe(r)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  function applyRtspProbe() {
+    if (!rtspProbe?.working) return
+    const w = rtspProbe.working
+    setForm(f => ({
+      ...f,
+      rtsp_port: w.port,
+      rtsp_transport: w.transport as 'tcp' | 'http',
+    }))
   }
 
   // "Auto-detect ports" — calls /cameras/intelligent-probe to find
@@ -140,6 +195,7 @@ export default function AddCameraWizard() {
         rtsp_url_override: form.rtsp_url_override || null,
         ddns_hostname: form.ddns_hostname || null,
         network_type: form.network_type, ai_enabled: true, inference_fps: 5,
+        rtsp_transport: form.rtsp_transport,
       })
       nav(`/stores/${storeId}`)
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
@@ -264,17 +320,63 @@ export default function AddCameraWizard() {
                 <option value="vpn">VPN</option>
               </Select>
             </Field>
-            <Field label="RTSP port"><Input type="number" value={form.rtsp_port} onChange={upd('rtsp_port')} /></Field>
-            <Field label="HTTP port"><Input type="number" value={form.http_port} onChange={upd('http_port')} /></Field>
+            <Field label="RTSP port">
+              <Input type="number" value={form.rtsp_port} onChange={upd('rtsp_port')} />
+            </Field>
+            <Field label="HTTP port">
+              <Select value={form.http_port}
+                      onChange={e => setForm({ ...form, http_port: Number(e.target.value) })}>
+                {HTTP_PORT_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+              </Select>
+            </Field>
+            <Field label="RTSP transport" full>
+              <Select value={form.rtsp_transport}
+                      onChange={e => setForm({ ...form, rtsp_transport: e.target.value as any })}>
+                <option value="tcp">TCP (direct RTSP, default)</option>
+                <option value="http">HTTP tunnel (use when port 554 is blocked)</option>
+                <option value="udp">UDP (advanced)</option>
+              </Select>
+              <div className="text-xs text-slate-500 mt-1">
+                HTTP tunnel routes RTSP through the HTTP port. Use this
+                if the store router doesn't forward 554 but DOES forward
+                80/8000/8080/7000/800. FFmpeg negotiates RTSP through
+                the HTTP port — full video, just on a different port.
+              </div>
+            </Field>
 
-            <div className="col-span-2 -mt-1 mb-1">
+            <div className="col-span-2 -mt-1 mb-1 flex flex-wrap gap-2 items-center">
+              <Button variant="ghost" onClick={testRtspPorts}
+                      disabled={busy || !form.host}>
+                {busy ? 'Probing…' : '📺 Test RTSP connection'}
+              </Button>
               <Button variant="ghost" onClick={autoDetectPorts}
                       disabled={busy || !form.host}>
-                {busy ? 'Probing…' : '🔍 Auto-detect ports'}
+                {busy ? 'Probing…' : '🔍 Auto-detect snapshot ports'}
               </Button>
-              <span className="ml-2 text-xs text-slate-500">
-                Probes RTSP 554/10554/5544/8554 and HTTP 80/8080/8000/800/7000.
+              <span className="text-xs text-slate-500">
+                RTSP test tries TCP then HTTP-tunnel on 80/800/8000/8080/7000.
               </span>
+              {/* RTSP probe result */}
+              {rtspProbe && (
+                <div className="col-span-2 w-full mt-1 text-xs border rounded p-2">
+                  <div className={'font-medium ' + (rtspProbe.ok ? 'text-emerald-700' : 'text-red-600')}>
+                    {rtspProbe.summary}
+                  </div>
+                  <div className="mt-1 space-y-0.5">
+                    {rtspProbe.attempts.map((a, i) => (
+                      <div key={i} className={a.ok ? 'text-emerald-600' : 'text-slate-500'}>
+                        {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
+                      </div>
+                    ))}
+                  </div>
+                  {rtspProbe.ok && rtspProbe.working && (
+                    <Button variant="ghost" onClick={applyRtspProbe}
+                            className="mt-1 text-xs">
+                      Use port {rtspProbe.working.port} ({rtspProbe.working.transport})
+                    </Button>
+                  )}
+                </div>
+              )}
               {probe && (
                 <div className="mt-2 text-xs">
                   {probe.rtsp_candidates.length > 0 && (

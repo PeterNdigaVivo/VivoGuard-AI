@@ -15,6 +15,9 @@ export interface Camera {
   // — use when the store router doesn't forward port 554).
   transport: 'rtsp' | 'http_snapshot'
   snapshot_url_override: string | null
+  // FFmpeg -rtsp_transport flag. 'http' = RTSP-over-HTTP tunnel for
+  // stores behind firewalls that block port 554.
+  rtsp_transport: 'tcp' | 'http' | 'udp'
   created_at: string
 }
 

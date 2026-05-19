@@ -54,10 +54,16 @@ _LAST_PROBE: dict[tuple[str, int], dict] = {}
 #   7000  — Vivo's Dahua NVRs (Moi Ave / Acacia firmware variant)
 _DEFAULT_HTTP_PORTS = (80, 8080, 8000, 800, 7000)
 
-# RTSP ports tried by the smart-port auto-detect (`/cameras/
-# intelligent-probe`). 554 is the IANA default; the rest are deployments
-# we've seen in the wild. Probe order = preference order.
+# RTSP ports tried by the smart-port auto-detect. 554 is the IANA
+# default; the rest are deployments we've seen in the wild. Probe
+# order = preference order.
 _DEFAULT_RTSP_PORTS = (554, 10554, 5544, 8554)
+
+# Ports we'll try as HTTP-tunneled RTSP when 554 is blocked. These
+# are the common HTTP admin ports on Vivo's Dahua/Hik/Uniview NVRs.
+# When `-rtsp_transport http` is set, FFmpeg negotiates RTSP through
+# this port instead of opening a separate 554 connection.
+_DEFAULT_RTSP_TUNNEL_PORTS = (80, 8000, 8080, 7000, 800)
 
 
 # Snapshot URL templates. {scheme}, {host}, {port}, {ch} substituted in.
@@ -210,9 +216,44 @@ def negotiate(camera: dict, password_plain: str) -> Optional[dict]:
         _PROBED[key] = now + _PROBE_TTL_SECONDS
         return None
 
-    log.warning("auto-transport: %s:%s RTSP unreachable — probing HTTP snapshot",
+    log.warning("auto-transport: %s:%s RTSP/TCP unreachable — trying tunnel + snapshot",
                 host, rtsp_port)
 
+    username = camera.get("username") or ""
+    channel = camera.get("channel_number") or 1
+    brand = camera.get("brand") or "generic"
+
+    # FIRST PREFERENCE: RTSP-over-HTTP tunnel. Delivers full video,
+    # not just snapshots. Try this before HTTP-snapshot polling so
+    # operators don't lose video quality unnecessarily.
+    try:
+        tunnel = probe_rtsp_tunnel(
+            brand=brand, host=host, username=username,
+            password=password_plain, channel=channel,
+        )
+    except Exception as e:
+        log.warning("auto-transport: tunnel probe crashed for %s: %s", host, e)
+        tunnel = {"working_port": None, "attempts": []}
+
+    diagnostic["tunnel_attempts"] = tunnel.get("attempts", [])
+    if tunnel.get("working_port"):
+        port = tunnel["working_port"]
+        log.warning("auto-transport: %s -> switching to RTSP tunnel on port %s",
+                    host, port)
+        diagnostic["outcome"] = "rtsp_tunnel"
+        diagnostic["switched_to"] = {
+            "mode": "rtsp_tunnel", "port": port, "url": tunnel["working_url"],
+        }
+        _record_diagnostic(host, rtsp_port, diagnostic)
+        _PROBED[key] = now + _PROBE_TTL_SECONDS
+        return {
+            "transport": "rtsp",         # still RTSP, just over HTTP transport
+            "rtsp_transport": "http",
+            "rtsp_port": port,
+        }
+
+    # SECOND PREFERENCE: HTTP-snapshot polling. Lower quality but
+    # works when even the tunnel doesn't.
     configured = camera.get("http_port") or 0
     candidates: list[int] = []
     if configured:
@@ -220,9 +261,6 @@ def negotiate(camera: dict, password_plain: str) -> Optional[dict]:
     for p in _DEFAULT_HTTP_PORTS:
         if p not in candidates:
             candidates.append(p)
-
-    username = camera.get("username") or ""
-    channel = camera.get("channel_number") or 1
 
     for port in candidates:
         tcp_ok = _tcp_reachable(host, port, timeout=2.0)
@@ -277,6 +315,75 @@ def last_diagnostic(host: str, rtsp_port: int) -> dict | None:
     was never probed in this process. Used by /cameras/{id}/transport-
     diagnose."""
     return _LAST_PROBE.get((host, rtsp_port))
+
+
+# ----- RTSP-over-HTTP tunnel probe -----------------------------------
+
+def probe_rtsp_tunnel(
+    brand: str, host: str, username: str, password: str,
+    channel: int | None = 1,
+    ports: tuple[int, ...] | None = None,
+) -> dict:
+    """Probe a host for RTSP that responds on alternate ports via the
+    HTTP-tunneled RTSP transport (FFmpeg `-rtsp_transport http`).
+
+    For each candidate port, builds a per-vendor RTSP URL pointing at
+    that port and asks ffprobe to open it with HTTP transport. The
+    first port that successfully negotiates wins. Tunnel-mode RTSP
+    delivers full video (unlike HTTP snapshot polling), so this is
+    the preferred fallback when 554 is blocked.
+
+    Returns:
+      {
+        "host": str,
+        "working_port": int | None,
+        "working_url": str | None,
+        "attempts": [{"port": int, "url": str, "ok": bool, "reason": str}],
+      }
+    """
+    from app.utils.network import build_rtsp_url
+    from app.connectors.rtsp import probe_rtsp
+    import asyncio
+
+    candidate_ports = ports or _DEFAULT_RTSP_TUNNEL_PORTS
+    attempts: list[dict] = []
+    working_port: Optional[int] = None
+    working_url: Optional[str] = None
+
+    async def _run_all() -> None:
+        nonlocal working_port, working_url
+        for p in candidate_ports:
+            url = build_rtsp_url(
+                brand=brand, host=host, port=p,
+                username=username, password=password,
+                channel=channel or 1, subtype=1,
+            )
+            ok, err = await probe_rtsp(url, timeout=8.0, rtsp_transport="http")
+            reason = "ok" if ok else (err or "unknown")
+            attempts.append({"port": p, "url": url, "ok": ok, "reason": reason})
+            if ok:
+                working_port = p
+                working_url = url
+                return  # stop on first success — saves operator time
+
+    try:
+        asyncio.run(_run_all())
+    except RuntimeError:
+        # Already inside a running loop (called from async context);
+        # fall back to thread to avoid the 'event loop already running'
+        # error.
+        from concurrent.futures import ThreadPoolExecutor
+        def _sync() -> None:
+            asyncio.run(_run_all())
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            ex.submit(_sync).result()
+
+    return {
+        "host": host,
+        "working_port": working_port,
+        "working_url": working_url,
+        "attempts": attempts,
+    }
 
 
 def forget(host: str, rtsp_port: int) -> None:

@@ -158,6 +158,31 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
     }
   }
 
+  // "Try alternate ports" — runs RTSP-port iteration (TCP then HTTP
+  // tunnel) on this camera and persists the working port if one is
+  // found. The tile shows live "Trying port N…" status while the
+  // probe is in flight. Distinct from openDiagnose() (which probes
+  // the snapshot URL set) — this one probes RTSP itself with the
+  // HTTP-tunnel flag, recovering full video instead of snapshot
+  // polling.
+  const [portProbe, setPortProbe] = useState<{ trying: number | null; result: any } | null>(null)
+  async function tryAlternatePorts() {
+    setPortProbe({ trying: null, result: null })
+    try {
+      const tok = localStorage.getItem('vg_access_token') ?? ''
+      const r = await fetch(
+        `/api/cameras/${cameraId}/try-alternate-ports`,
+        { method: 'POST', headers: { Authorization: `Bearer ${tok}` } },
+      )
+      const data = await r.json()
+      setPortProbe({ trying: null, result: data })
+      // If a working port was found, the row was updated server-side;
+      // the streamer will spawn a new worker on the next reconcile (~5s).
+    } catch (e) {
+      setPortProbe({ trying: null, result: { ok: false, summary: String(e) } })
+    }
+  }
+
   useEffect(() => {
     let ws: WebSocket | null = null
     let closed = false
@@ -237,12 +262,32 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
               each failed. Shown only on stale tiles to keep the
               'Connecting…' first-load view clean. */}
           {state === 'stale' && (
-            <button
-              className="mt-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black text-[11px] font-medium"
-              onClick={(e) => { e.stopPropagation(); openDiagnose(true) }}
-              disabled={diagBusy}>
-              {diagBusy ? 'Probing…' : '🛠 Diagnose & auto-fix'}
-            </button>
+            <div className="flex gap-1">
+              <button
+                className="mt-1 px-2 py-1 rounded bg-sky-500 hover:bg-sky-400 text-white text-[11px] font-medium"
+                onClick={(e) => { e.stopPropagation(); tryAlternatePorts() }}
+                disabled={portProbe?.trying !== undefined && portProbe?.trying !== null}>
+                {portProbe && !portProbe.result ? 'Trying ports…' : '🔄 Try alternate ports'}
+              </button>
+              <button
+                className="mt-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black text-[11px] font-medium"
+                onClick={(e) => { e.stopPropagation(); openDiagnose(true) }}
+                disabled={diagBusy}>
+                {diagBusy ? 'Probing…' : '🛠 Diagnose'}
+              </button>
+            </div>
+          )}
+          {/* Live port-probe status */}
+          {portProbe?.result && (
+            <div className={'text-[11px] mt-1 text-center max-w-[90%] ' +
+              (portProbe.result.ok ? 'text-emerald-300' : 'text-red-300')}>
+              {portProbe.result.summary}
+              {portProbe.result.ok && (
+                <div className="text-slate-300 mt-0.5">
+                  Restarting worker — should stream within ~10s.
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

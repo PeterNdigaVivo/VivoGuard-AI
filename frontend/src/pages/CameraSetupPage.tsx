@@ -55,6 +55,39 @@ export default function CameraSetupPage() {
     }
   }
 
+  // -rtsp_transport flag selector: 'tcp' (direct) vs 'http' (tunnel).
+  async function setRtspTransport(mode: 'tcp' | 'http' | 'udp') {
+    try {
+      const updated = await camsApi.update(cameraId, { rtsp_transport: mode })
+      setCam(updated as Camera)
+      toast.push(`RTSP transport → ${mode.toUpperCase()}`)
+    } catch (e) {
+      toast.push(String(e), 'err')
+    }
+  }
+
+  // One-click: probe alt RTSP ports (TCP then HTTP tunnel) and persist
+  // a working one if found.
+  const [tryingPorts, setTryingPorts] = useState(false)
+  const [portResult, setPortResult] = useState<any>(null)
+  async function tryAlternatePorts() {
+    setTryingPorts(true); setPortResult(null)
+    try {
+      const r = await api(`/cameras/${cameraId}/try-alternate-ports`, { method: 'POST' })
+      setPortResult(r)
+      if ((r as any).ok) {
+        toast.push((r as any).summary)
+        camsApi.get(cameraId).then(setCam)
+      } else {
+        toast.push((r as any).summary, 'err')
+      }
+    } catch (e) {
+      toast.push(String(e), 'err')
+    } finally {
+      setTryingPorts(false)
+    }
+  }
+
   useEffect(() => {
     api<Record<string, Purpose>>('/zone-purposes').then(setPurposes).catch(console.error)
     camsApi.get(cameraId).then(setCam).catch(() => setCam(null))
@@ -197,10 +230,28 @@ export default function CameraSetupPage() {
               <div className="text-sm font-medium mb-2">How to fetch frames</div>
               <Select className="w-full" value={cam.transport ?? 'rtsp'}
                       onChange={e => setTransport(e.target.value as 'rtsp' | 'http_snapshot')}>
-                <option value="rtsp">RTSP video (port 554) — default, smoother</option>
-                <option value="http_snapshot">HTTP snapshot polling — works when 554 is blocked</option>
+                <option value="rtsp">RTSP video — default, smoother</option>
+                <option value="http_snapshot">HTTP snapshot polling — last-resort fallback</option>
               </Select>
-              <div className="text-xs text-slate-500 mt-2">
+
+              {/* RTSP transport flag — relevant only when transport=='rtsp' */}
+              {cam.transport !== 'http_snapshot' && (
+                <>
+                  <div className="text-sm font-medium mt-3 mb-2">RTSP transport</div>
+                  <Select className="w-full" value={cam.rtsp_transport ?? 'tcp'}
+                          onChange={e => setRtspTransport(e.target.value as any)}>
+                    <option value="tcp">TCP (default)</option>
+                    <option value="http">HTTP tunnel (use when 554 is blocked)</option>
+                    <option value="udp">UDP (advanced)</option>
+                  </Select>
+                  <div className="text-xs text-slate-500 mt-1">
+                    HTTP tunnel routes RTSP through the HTTP port
+                    ({cam.rtsp_port}) so it works on routers that block 554.
+                  </div>
+                </>
+              )}
+
+              <div className="text-xs text-slate-500 mt-3">
                 {cam.transport === 'http_snapshot' ? (
                   <>
                     Polling{' '}
@@ -212,12 +263,32 @@ export default function CameraSetupPage() {
                   </>
                 ) : (
                   <>
-                    Pulling H.264 over RTSP on port {cam.rtsp_port}. Switch
-                    to HTTP snapshot if the store router doesn't forward
-                    554.
+                    Pulling H.264 over RTSP on port {cam.rtsp_port}
+                    {' '}({(cam.rtsp_transport ?? 'tcp').toUpperCase()}
+                    {cam.rtsp_transport === 'http' ? ' tunnel' : ''}).
                   </>
                 )}
               </div>
+
+              <Button variant="ghost" className="mt-3"
+                      onClick={tryAlternatePorts}
+                      disabled={tryingPorts}>
+                {tryingPorts ? 'Probing ports…' : '🔄 Try alternate ports'}
+              </Button>
+              {portResult && (
+                <div className={'mt-2 text-xs ' + (portResult.ok ? 'text-emerald-700' : 'text-red-600')}>
+                  {portResult.summary}
+                  {portResult.attempts && (
+                    <ul className="mt-1 ml-2 space-y-0.5">
+                      {portResult.attempts.map((a: any, i: number) => (
+                        <li key={i} className={a.ok ? 'text-emerald-700' : 'text-slate-500'}>
+                          {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </Card>
           )}
 

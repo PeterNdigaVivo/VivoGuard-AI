@@ -99,6 +99,7 @@ _CAMERA_COLUMNS = [
     "username", "password_encrypted", "channel_number",
     "rtsp_url_override", "inference_fps", "ai_enabled",
     "transport", "snapshot_url_override",
+    "rtsp_transport",
 ]
 
 
@@ -237,6 +238,7 @@ def desired_specs() -> list[CameraSpec]:
                 snapshot_url=snap_url,
                 username=r.get("username") or "",
                 password=pw,
+                rtsp_transport=(r.get("rtsp_transport") or "tcp") or "tcp",
             ))
     return out
 

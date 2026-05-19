@@ -27,22 +27,28 @@ async def _run(cmd: str, timeout: float = 15.0) -> tuple[int, str, str]:
         return 124, "", "timeout"
 
 
-async def probe_rtsp(url: str, timeout: float = 12.0) -> tuple[bool, str | None]:
+async def probe_rtsp(url: str, timeout: float = 12.0,
+                     rtsp_transport: str = "tcp") -> tuple[bool, str | None]:
     """Return (ok, error). `ok=True` means ffprobe could open the stream.
 
+    `rtsp_transport` is the FFmpeg flag: 'tcp' (default), 'http' (RTSP
+    over HTTP — for NVRs behind routers that block 554 but forward an
+    HTTP port), or 'udp'.
+
     Uses `-timeout` (microseconds) — the canonical RTSP demuxer socket
-    timeout in modern FFmpeg. The older `-stimeout` and the AVIO
-    `-rw_timeout` were both rejected by newer builds in the field, so we
-    standardise on `-timeout`.
+    timeout in modern FFmpeg.
     """
+    if rtsp_transport not in ("tcp", "http", "udp"):
+        rtsp_transport = "tcp"
     cmd = (
-        "ffprobe -hide_banner -loglevel error -rtsp_transport tcp "
+        f"ffprobe -hide_banner -loglevel error -rtsp_transport {rtsp_transport} "
         f"-timeout 5000000 -i {shlex.quote(url)}"
     )
     code, _, err = await _run(cmd, timeout=timeout)
     if code == 0:
         return True, None
-    log.info("ffprobe failed for %s: %s", url, err.strip()[:200])
+    log.info("ffprobe failed for %s (transport=%s): %s",
+             url, rtsp_transport, err.strip()[:200])
     return False, err.strip()[:200] or f"ffprobe exit={code}"
 
 

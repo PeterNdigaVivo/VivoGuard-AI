@@ -43,6 +43,8 @@ class CameraSpec:
     snapshot_url: str = ""              # full HTTP URL with embedded {channel}
     username: str = ""
     password: str = ""
+    # FFmpeg -rtsp_transport flag; applies only when transport=='rtsp'.
+    rtsp_transport: str = "tcp"
 
 
 class StreamManager:
@@ -76,11 +78,14 @@ class StreamManager:
                     username=spec.username, password=spec.password,
                     buffer=self.buffer,
                 )
-        log.info("starting RTSP worker camera=%s fps=%s url=%s",
-                 spec.camera_id, spec.fps, self._redact(spec.rtsp_url))
+        log.info("starting RTSP worker camera=%s fps=%s transport=%s url=%s",
+                 spec.camera_id, spec.fps, spec.rtsp_transport,
+                 self._redact(spec.rtsp_url))
         return FFmpegWorker(
             spec.camera_id, spec.rtsp_url,
-            fps=spec.fps, width=spec.width, buffer=self.buffer,
+            fps=spec.fps, width=spec.width,
+            rtsp_transport=spec.rtsp_transport,
+            buffer=self.buffer,
         )
 
     def reconcile(self, desired: list[CameraSpec]) -> None:

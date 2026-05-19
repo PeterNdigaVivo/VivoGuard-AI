@@ -72,8 +72,8 @@ def get_camera(camera_id: int, db: Session = Depends(get_db),
 # ---------- create / update / delete ----------------------------------
 
 @router.post("/add", response_model=CameraOut)
-def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
-               _u: User = Depends(require_role("admin", "operator"))):
+async def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
+                     _u: User = Depends(require_role("admin", "operator"))):
     # Store-first onboarding rule (May-2026 overhaul): every new camera
     # must belong to a store at creation time. Existing rows without
     # store_id remain valid (the UI surfaces an "Assign to store" prompt
@@ -107,50 +107,61 @@ def add_camera(payload: CameraCreate, db: Session = Depends(get_db),
         network_type=payload.network_type,
         ai_enabled=payload.ai_enabled,
         inference_fps=payload.inference_fps,
+        rtsp_transport=payload.rtsp_transport or "tcp",
         store_id=store_id,
         status="pending",
     )
 
-    # Save-time transport negotiation. Operators repeatedly added
-    # cameras at stores where the router doesn't forward 554, then
-    # spent minutes wondering why nothing streamed. Now: at save
-    # time we run a parallel port probe (~5s) and, if RTSP/554
-    # isn't reachable but any HTTP snapshot URL responds with a
-    # JPEG, the row is saved with transport='http_snapshot' + the
-    # working http_port + (when needed) snapshot_url_override.
+    # Save-time transport negotiation. Three-tier preference:
+    #   1. Direct RTSP on the configured port (TCP transport)
+    #   2. RTSP over HTTP tunnel on an alternate port (full video,
+    #      just routed through 80/8000/etc)
+    #   3. HTTP-snapshot polling (last resort — lower quality)
     #
-    # discover_ports is used instead of negotiate() because it runs
-    # the port checks concurrently — the wizard returns in ~5s
-    # instead of up to ~90s worst case. If neither RTSP nor any HTTP
-    # path works, the row is saved anyway as RTSP and operators get
-    # the "Diagnose & auto-fix" affordance from the Live View tile.
+    # We honor `rtsp_transport` if the operator explicitly set it via
+    # the wizard — they may know better than the probe.
     try:
-        from app.stream.auto_transport import discover_ports
-        result = discover_ports(
-            cam.host, cam.username, payload.password or "",
-            cam.channel_number or 1,
+        from app.connectors.rtsp import probe_rtsp
+        from app.stream.auto_transport import (
+            discover_ports, probe_rtsp_tunnel,
         )
-        # If RTSP is reachable, we leave the row alone — the streamer
-        # will use direct RTSP. We do bump http_port to whichever port
-        # answered, so the streamer's later auto-failover (if RTSP
-        # later breaks) has the right starting candidate.
-        if result.get("http_port") and not result.get("rtsp_port"):
-            cam.transport = "http_snapshot"
-            if result["http_port"] != cam.http_port:
-                cam.http_port = result["http_port"]
-            # Non-Dahua URL OR HTTPS → must persist the exact URL.
-            snap_url = result.get("snapshot_url") or ""
-            vendor = result.get("snapshot_vendor") or ""
-            if snap_url and (vendor != "dahua-cgi" or snap_url.startswith("https://")):
-                cam.snapshot_url_override = snap_url
-        elif result.get("rtsp_port") and result["rtsp_port"] != cam.rtsp_port:
-            # An RTSP port other than the one the operator typed
-            # responded — use it.
-            cam.rtsp_port = result["rtsp_port"]
+        primary_url = build_rtsp_url(
+            brand=cam.brand, host=cam.host, port=cam.rtsp_port,
+            username=cam.username, password=payload.password or "",
+            channel=cam.channel_number or 1, subtype=1,
+        )
+        ok, _err = await probe_rtsp(
+            primary_url, timeout=6.0,
+            rtsp_transport=cam.rtsp_transport or "tcp",
+        )
+        if not ok:
+            # Tier 2: RTSP tunnel.
+            tunnel = probe_rtsp_tunnel(
+                brand=cam.brand, host=cam.host,
+                username=cam.username or "",
+                password=payload.password or "",
+                channel=cam.channel_number or 1,
+            )
+            if tunnel.get("working_port"):
+                cam.rtsp_port = tunnel["working_port"]
+                cam.rtsp_transport = "http"
+            else:
+                # Tier 3: HTTP snapshot.
+                result = discover_ports(
+                    cam.host, cam.username, payload.password or "",
+                    cam.channel_number or 1,
+                )
+                if result.get("http_port"):
+                    cam.transport = "http_snapshot"
+                    if result["http_port"] != cam.http_port:
+                        cam.http_port = result["http_port"]
+                    snap_url = result.get("snapshot_url") or ""
+                    vendor = result.get("snapshot_vendor") or ""
+                    if snap_url and (vendor != "dahua-cgi" or
+                                     snap_url.startswith("https://")):
+                        cam.snapshot_url_override = snap_url
     except Exception:
-        # Don't let probing failure block camera creation — we'd
-        # rather save the row and let the streamer fall back to its
-        # own retry loop than 500 the wizard.
+        # Don't let probing failure block camera creation.
         pass
 
     db.add(cam)
@@ -207,6 +218,130 @@ async def probe_tcp(payload: TcpProbeIn,
     except Exception as e:
         return {"host": payload.host, "port": payload.port, "ok": False,
                 "detail": f"{type(e).__name__}: {e}"}
+
+
+class TestRtspPortsIn(BaseModel):
+    """Body for /cameras/test-rtsp-ports — wizard's 'Test RTSP
+    Connection' button uses this BEFORE saving a row."""
+    brand: str
+    host: str
+    username: str | None = None
+    password: str | None = None
+    channel_number: int | None = 1
+    rtsp_port: int = 554
+    # Ports to try as HTTP-tunneled RTSP if the primary fails.
+    # Defaults to the Vivo-fleet HTTP-port catalogue.
+    fallback_ports: list[int] = [80, 800, 8000, 8080, 7000]
+
+
+@router.post("/test-rtsp-ports")
+async def test_rtsp_ports(payload: TestRtspPortsIn,
+                          _u: User = Depends(require_role("admin", "operator"))):
+    """Probe RTSP on the configured port (TCP transport), then iterate
+    through fallback HTTP-tunnel ports if the primary fails.
+
+    Returns a step-by-step report so the wizard UI can show
+    "✅ Connected on port 554" or "❌ Port 554 failed → ✅ Connected
+    on port 8000 (via HTTP tunnel)".
+    """
+    from app.connectors.rtsp import probe_rtsp
+
+    attempts: list[dict] = []
+    working: dict | None = None
+
+    # Primary attempt: TCP transport on the configured RTSP port.
+    primary_url = build_rtsp_url(
+        brand=payload.brand, host=payload.host, port=payload.rtsp_port,
+        username=payload.username, password=payload.password,
+        channel=payload.channel_number or 1, subtype=1,
+    )
+    ok, err = await probe_rtsp(primary_url, timeout=8.0, rtsp_transport="tcp")
+    attempts.append({
+        "port": payload.rtsp_port, "transport": "tcp",
+        "url": primary_url, "ok": ok,
+        "reason": "Connected" if ok else (err or "failed"),
+    })
+    if ok:
+        working = {"port": payload.rtsp_port, "transport": "tcp",
+                   "url": primary_url}
+
+    # Fallbacks: tunnel through each HTTP port until one negotiates.
+    if not working:
+        for p in payload.fallback_ports:
+            if p == payload.rtsp_port:
+                continue          # already tried as TCP above
+            url = build_rtsp_url(
+                brand=payload.brand, host=payload.host, port=p,
+                username=payload.username, password=payload.password,
+                channel=payload.channel_number or 1, subtype=1,
+            )
+            ok, err = await probe_rtsp(url, timeout=8.0, rtsp_transport="http")
+            attempts.append({
+                "port": p, "transport": "http",
+                "url": url, "ok": ok,
+                "reason": "Connected via HTTP tunnel" if ok else (err or "failed"),
+            })
+            if ok:
+                working = {"port": p, "transport": "http", "url": url}
+                break
+
+    return {
+        "host": payload.host,
+        "brand": payload.brand,
+        "ok": working is not None,
+        "working": working,
+        "attempts": attempts,
+        "summary": (
+            f"✅ Connected on port {working['port']}"
+            + (" (HTTP tunnel)" if working and working["transport"] == "http" else "")
+            if working
+            else "❌ No working RTSP port found on " + payload.host
+        ),
+    }
+
+
+@router.post("/{camera_id}/try-alternate-ports")
+async def try_alternate_ports(camera_id: int,
+                              db: Session = Depends(get_db),
+                              _u: User = Depends(require_role("admin", "operator"))):
+    """Per-camera version of test-rtsp-ports. If a working port is
+    found, the camera row is updated to use it (rtsp_port +
+    rtsp_transport) and the streamer's next reconcile spawns a worker
+    on the new settings."""
+    from app.utils.crypto import decrypt
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    try:
+        pw = decrypt(cam.password_encrypted or "")
+    except Exception:
+        pw = ""
+
+    body = TestRtspPortsIn(
+        brand=cam.brand, host=cam.host,
+        username=cam.username, password=pw,
+        channel_number=cam.channel_number or 1,
+        rtsp_port=cam.rtsp_port or 554,
+    )
+    result = await test_rtsp_ports(body, _u=_u)        # reuse the logic
+
+    if result["ok"]:
+        w = result["working"]
+        cam.rtsp_port = w["port"]
+        cam.rtsp_transport = w["transport"]
+        # If we were on http_snapshot but tunnel works, prefer tunnel
+        # (full video over polling).
+        if cam.transport == "http_snapshot":
+            cam.transport = "rtsp"
+            cam.snapshot_url_override = None
+        db.commit()
+        # Bust the auto_transport probe cache so the streamer picks
+        # the new settings up immediately on the next reconcile.
+        from app.stream.auto_transport import forget
+        forget(cam.host, cam.rtsp_port)
+
+    return {**result, "camera_id": cam.id, "updated": result["ok"]}
 
 
 class IntelligentProbeIn(BaseModel):
@@ -319,6 +454,10 @@ def _explain_diagnostic(d: dict | None, host: str, rtsp_port: int) -> str:
                 f"to run one now.")
     if d.get("outcome") == "rtsp_ok":
         return f"RTSP/{rtsp_port} is reachable — using direct RTSP."
+    if d.get("outcome") == "rtsp_tunnel":
+        sw = d.get("switched_to") or {}
+        return (f"RTSP/{rtsp_port} blocked; auto-switched to RTSP over HTTP "
+                f"tunnel on port {sw.get('port')} (full video preserved).")
     if d.get("outcome") == "switched":
         sw = d.get("switched_to") or {}
         return (f"RTSP/{rtsp_port} blocked; auto-switched to HTTP snapshot "

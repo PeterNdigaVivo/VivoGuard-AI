@@ -90,6 +90,17 @@ class Camera(Base):
                                                      server_default="rtsp")
     snapshot_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # FFmpeg -rtsp_transport flag. Independent of the higher-level
+    # `transport` column above.
+    #   "tcp"  — default; reliable, supported everywhere
+    #   "http" — RTSP-over-HTTP tunnel. Lets us reach NVRs behind a router
+    #            that blocks 554 but forwards an HTTP port (most stores
+    #            in the Vivo fleet: Moi Ave, TRM, Acacia, Capital).
+    #   "udp"  — rare; lower latency where TCP retransmits are noisy.
+    rtsp_transport:    Mapped[str]   = mapped_column(String(8),
+                                                     default="tcp",
+                                                     server_default="tcp")
+
     # AI assignment.
     ai_model_id:       Mapped[int | None] = mapped_column(ForeignKey("ai_models.id", ondelete="SET NULL"), nullable=True)
     ai_enabled:        Mapped[bool]  = mapped_column(Boolean, default=True)
