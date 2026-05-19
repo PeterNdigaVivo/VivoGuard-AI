@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
+import { Badge, Button, Card, Input, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
@@ -53,6 +53,58 @@ export default function CamerasPage() {
       toast.push(`Auto-failover failed: ${e}`, 'err')
     } finally {
       setFailingOver(false)
+    }
+  }
+
+  // Quick Add NVR — operator-friendly replacement for the manual
+  // SQL workflow. One form: store + brand + host + port + creds +
+  // channel count; backend materialises all channels in one
+  // transaction with the right per-brand RTSP URL template.
+  const [quickAddOpen, setQuickAddOpen] = useState(false)
+  const [qaForm, setQaForm] = useState({
+    store_id: 0,
+    brand: 'dahua' as 'dahua' | 'hikvision' | 'uniview',
+    host: '',
+    rtsp_port: 7000,           // Dahua-on-7000 is the dominant Vivo pattern
+    http_port: 80,
+    username: 'admin',
+    password: '',
+    channel_count: 16,
+    name_prefix: '',
+    rtsp_transport: 'http' as 'tcp' | 'http' | 'udp',   // HTTP tunnel by default
+    network_type: 'wan',
+  })
+  const [qaBusy, setQaBusy] = useState(false)
+  // When the operator picks a Dahua/Hik/Uniview brand, snap the
+  // RTSP port to the brand default — mirrors the wizard behaviour.
+  function setQaBrand(b: 'dahua' | 'hikvision' | 'uniview') {
+    setQaForm(f => ({
+      ...f, brand: b,
+      rtsp_port: b === 'dahua' ? 7000 : 554,
+    }))
+  }
+  async function quickAddSubmit() {
+    if (!qaForm.store_id) { toast.push('Pick a store first.', 'err'); return }
+    if (!qaForm.host || !qaForm.username) {
+      toast.push('Host and username are required.', 'err'); return
+    }
+    if (!confirm(`Create ${qaForm.channel_count} cameras for the NVR at ${qaForm.host}?`)) return
+    setQaBusy(true)
+    try {
+      const created = await api<Camera[]>('/nvr/quick-add', {
+        method: 'POST',
+        body: {
+          ...qaForm,
+          name_prefix: qaForm.name_prefix || null,
+        },
+      })
+      toast.push(`Created ${created.length} cameras for ${qaForm.host}`)
+      setQuickAddOpen(false)
+      reload()
+    } catch (e) {
+      toast.push(`Quick Add failed: ${e}`, 'err')
+    } finally {
+      setQaBusy(false)
     }
   }
 
@@ -139,6 +191,9 @@ export default function CamerasPage() {
       <PageHeader
         title="Cameras"
         actions={<>
+          <Button variant="ghost" onClick={() => setQuickAddOpen(true)}>
+            ⚡ Quick Add NVR
+          </Button>
           <Button variant="ghost" onClick={autoFailover} disabled={failingOver}>
             {failingOver ? 'Probing…' : 'Auto-fix offline cameras'}
           </Button>
@@ -243,6 +298,108 @@ export default function CamerasPage() {
         <Card className="p-4 text-amber-700 bg-amber-50 border-amber-200">
           You have cameras but no stores yet. <Link to="/stores" className="underline">Create a store</Link> so you can attach them.
         </Card>
+      )}
+
+      {/* Quick Add NVR modal — replaces the manual SQL workflow.
+          Operator picks store + brand + creds + N channels and the
+          backend materialises every channel in one POST. */}
+      {quickAddOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+             onClick={() => !qaBusy && setQuickAddOpen(false)}>
+          <Card className="p-5 max-w-xl w-full" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-3">
+              <div className="text-lg font-semibold">⚡ Quick Add NVR</div>
+              <button className="text-slate-400 hover:text-slate-700"
+                      onClick={() => !qaBusy && setQuickAddOpen(false)}>✕</button>
+            </div>
+            <div className="text-xs text-slate-500 mb-3">
+              Adds every channel of an NVR in one click. RTSP URLs are
+              built per-brand; password is encrypted server-side; no
+              probing — we trust your channel count.
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="col-span-2 block">
+                <div className="text-xs text-slate-600 mb-1">Store *</div>
+                <Select className="w-full" value={qaForm.store_id || ''}
+                        onChange={e => setQaForm(f => ({ ...f, store_id: Number(e.target.value) }))}>
+                  <option value="">— pick a store —</option>
+                  {stores.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} — {s.city ?? '—'}, {s.country}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">NVR brand</div>
+                <Select className="w-full" value={qaForm.brand}
+                        onChange={e => setQaBrand(e.target.value as any)}>
+                  <option value="dahua">Dahua</option>
+                  <option value="hikvision">Hikvision</option>
+                  <option value="uniview">Uniview</option>
+                </Select>
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">Channels *</div>
+                <Input type="number" min={1} max={64} value={qaForm.channel_count}
+                       onChange={e => setQaForm(f => ({ ...f, channel_count: Number(e.target.value) || 1 }))} />
+              </label>
+              <label className="col-span-2 block">
+                <div className="text-xs text-slate-600 mb-1">Host (public IP or DDNS) *</div>
+                <Input value={qaForm.host}
+                       onChange={e => setQaForm(f => ({ ...f, host: e.target.value }))}
+                       placeholder="197.155.67.50" />
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">RTSP port</div>
+                <Select className="w-full" value={qaForm.rtsp_port}
+                        onChange={e => setQaForm(f => ({ ...f, rtsp_port: Number(e.target.value) }))}>
+                  {[7000, 554, 80, 800, 8000, 8080].map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </Select>
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">RTSP transport</div>
+                <Select className="w-full" value={qaForm.rtsp_transport}
+                        onChange={e => setQaForm(f => ({ ...f, rtsp_transport: e.target.value as any }))}>
+                  <option value="tcp">TCP (port 554 unblocked)</option>
+                  <option value="http">HTTP tunnel (port 554 blocked, default)</option>
+                  <option value="udp">UDP</option>
+                </Select>
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">Username</div>
+                <Input value={qaForm.username}
+                       onChange={e => setQaForm(f => ({ ...f, username: e.target.value }))} />
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-600 mb-1">Password</div>
+                <Input type="password" value={qaForm.password}
+                       onChange={e => setQaForm(f => ({ ...f, password: e.target.value }))} />
+              </label>
+              <label className="col-span-2 block">
+                <div className="text-xs text-slate-600 mb-1">
+                  Name prefix (optional — defaults to store name)
+                </div>
+                <Input value={qaForm.name_prefix}
+                       onChange={e => setQaForm(f => ({ ...f, name_prefix: e.target.value }))}
+                       placeholder="Moi Avenue" />
+                <div className="text-xs text-slate-400 mt-1">
+                  Channels will be named "{qaForm.name_prefix || (stores.find(s => s.id === qaForm.store_id)?.name ?? 'Store')} - Channel N"
+                </div>
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => !qaBusy && setQuickAddOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={quickAddSubmit} disabled={qaBusy}>
+                {qaBusy ? 'Creating…' : `Add ${qaForm.channel_count} cameras`}
+              </Button>
+            </div>
+          </Card>
+        </div>
       )}
     </div>
   )
