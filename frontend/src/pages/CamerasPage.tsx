@@ -306,12 +306,16 @@ export default function CamerasPage() {
       {quickAddOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
              onClick={() => !qaBusy && setQuickAddOpen(false)}>
-          <Card className="p-5 max-w-xl w-full" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-3">
-              <div className="text-lg font-semibold">⚡ Quick Add NVR</div>
-              <button className="text-slate-400 hover:text-slate-700"
-                      onClick={() => !qaBusy && setQuickAddOpen(false)}>✕</button>
-            </div>
+          {/* Stop-propagation wrapper because <Card> doesn't accept
+              onClick — clicks inside the modal would otherwise bubble
+              up to the backdrop and close the dialog. */}
+          <div onClick={e => e.stopPropagation()} className="max-w-xl w-full">
+            <Card className="p-5">
+              <div className="flex justify-between items-center mb-3">
+                <div className="text-lg font-semibold">⚡ Quick Add NVR</div>
+                <button className="text-slate-400 hover:text-slate-700"
+                        onClick={() => !qaBusy && setQuickAddOpen(false)}>✕</button>
+              </div>
             <div className="text-xs text-slate-500 mb-3">
               Adds every channel of an NVR in one click. RTSP URLs are
               built per-brand; password is encrypted server-side; no
@@ -398,7 +402,8 @@ export default function CamerasPage() {
                 {qaBusy ? 'Creating…' : `Add ${qaForm.channel_count} cameras`}
               </Button>
             </div>
-          </Card>
+            </Card>
+          </div>
         </div>
       )}
     </div>
