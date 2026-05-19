@@ -166,31 +166,71 @@ def store_live_dashboard(store_id: int,
       exists in the store.
     """
     from sqlalchemy import extract
+    from app.utils.business_hours import (
+        is_store_open, todays_session, todays_hours_label,
+    )
+    from app.stream.frame_buffer import FrameBuffer
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
 
     cams = db.query(Camera).filter(Camera.store_id == store_id).all()
     cam_ids = [c.id for c in cams]
+    now = datetime.now(timezone.utc)
+
+    # ----- Camera liveness gate -----
+    # A camera's `status` column lags reality (gets bumped to 'online'
+    # at create-time). The source of truth is the streamer's Redis
+    # health row — last_frame_at within the last ~30s means we have
+    # current frames flowing. Counting these is cheap (one Redis GET
+    # per camera) and lets the UI distinguish:
+    #   • no cameras attached     → "Add a camera" CTA
+    #   • cameras attached but DARK→ "No cameras online" badge
+    #   • at least one live       → normal dashboard
+    fb = FrameBuffer()
+    cameras_online = 0
+    for cam_id in cam_ids:
+        h = fb.health(cam_id) or {}
+        lfa = h.get("last_frame_at")
+        if lfa and (now.timestamp() - float(lfa)) < 30:
+            cameras_online += 1
+
+    # ----- Business-hours gate -----
+    open_now = is_store_open(store)
+    session_open_utc, session_close_utc = todays_session(store)
+    hours_label = todays_hours_label(store)
+
     if not cam_ids:
         return {
             "store_id": store_id, "store_name": store.name,
             "country": store.country, "status": "no_cameras",
-            "as_of": datetime.now(timezone.utc).isoformat(),
+            "as_of": now.isoformat(),
             "tiles": {}, "zone_capabilities": {},
+            "is_open": open_now,
+            "hours_label": hours_label,
+            "cameras_online": 0,
+            "cameras_total": 0,
         }
 
-    now = datetime.now(timezone.utc)
+    # Cameras attached but none currently streaming → distinct state.
+    # We still return zone capabilities so the dashboard knows what
+    # KPI tiles WOULD have been shown.
+    no_live = cameras_online == 0
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=7)
     five_min_ago = now - timedelta(minutes=5)
 
-    # Active window (defaults to today). The "previous" window is the
-    # same length immediately before — used to compute trend arrows on
-    # every KPI tile.
+    # Active window (defaults to today's BUSINESS-HOURS session, not
+    # raw 00:00→now). Clamping to the session means the "Today so
+    # far" KPIs aggregate over operating hours only — no 6am cleaner
+    # noise inflating the staff-presence average. The "previous"
+    # window is the same length immediately before.
     if since is None:
-        active_since = today_start
-        active_until = now
+        # Default: clamp to today's session. If the store is closed
+        # right now, active_until == session_close (or now if before
+        # close); since == session_open.
+        active_since = session_open_utc
+        active_until = min(now, session_close_utc) if session_close_utc > session_open_utc else now
     else:
         active_since = since
         active_until = until or now
@@ -460,9 +500,20 @@ def store_live_dashboard(store_id: int,
         "heatmap_thumb_url":     {"value": heatmap_thumb_url, "visible": True},
     }
 
+    # `status` precedence (most-specific wins):
+    #   no_cameras_live  — cameras attached but none streaming
+    #   closed           — store is outside its business hours
+    #   live             — normal operation
+    if no_live:
+        status_str = "no_cameras_live"
+    elif not open_now:
+        status_str = "closed"
+    else:
+        status_str = "live"
+
     return {
         "store_id": store_id, "store_name": store.name,
-        "country": store.country, "status": "live",
+        "country": store.country, "status": status_str,
         "status_light": status_light,
         "as_of": now.isoformat(),
         "active_range": {"since": active_since.isoformat(),
@@ -470,6 +521,12 @@ def store_live_dashboard(store_id: int,
         "prev_range":   {"since": prev_since.isoformat(),
                           "until": prev_until.isoformat()},
         "camera_count": len(cams),
+        "cameras_total":  len(cams),
+        "cameras_online": cameras_online,
+        "is_open": open_now,
+        "hours_label": hours_label,
+        "session_open":  session_open_utc.isoformat(),
+        "session_close": session_close_utc.isoformat(),
         "zone_capabilities": capabilities,
         "tiles": tiles,
     }

@@ -20,13 +20,26 @@ interface LiveResponse {
   store_id: number
   store_name: string
   country: string
-  status: 'live' | 'no_data_yet' | 'no_cameras'
+  // May-2026 redesign: 'closed' (outside business hours) and
+  // 'no_cameras_live' (cameras attached but none streaming) are
+  // distinct from 'no_cameras' (nothing attached yet). The UI shows
+  // different messaging for each — never zero KPIs in any of them.
+  status: 'live' | 'no_data_yet' | 'no_cameras' | 'no_cameras_live' | 'closed'
   status_light?: 'green' | 'amber' | 'red'
   as_of: string
   camera_count?: number
+  cameras_total?: number
+  cameras_online?: number
+  is_open?: boolean
+  hours_label?: string
   zone_capabilities: Record<string, boolean>
   tiles: Record<string, { value: any; visible: boolean; trend?: { direction: 'up'|'down'|'flat'; delta_pct: number | null } }>
 }
+
+// 30s auto-refresh — the spec asks every tile to refresh without a
+// page reload. We keep timing in one place so the freshness pill
+// matches the actual refresh cadence.
+const REFRESH_INTERVAL_MS = 30_000
 
 export default function StoreDashboardPage() {
   const { id } = useParams()
@@ -35,28 +48,61 @@ export default function StoreDashboardPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
+  // Wall-clock time of the last successful refresh — drives the
+  // "Last updated: Xs ago" pill via a 1Hz re-render below.
+  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
+  const [, forceTick] = useState(0)
 
   useEffect(() => {
     let alive = true
     const tick = () => {
       const q = new URLSearchParams({ since: range.since, until: range.until })
       api<LiveResponse>(`/analytics/store/${storeId}/live?${q}`)
-        .then(d => { if (alive) { setData(d); setError(null); setLoading(false) } })
+        .then(d => {
+          if (alive) {
+            setData(d); setError(null); setLoading(false)
+            setLastFetchedAt(Date.now())
+          }
+        })
         .catch(e => { if (alive) { setError(String(e)); setLoading(false) } })
     }
     tick()
-    const t = setInterval(tick, 60_000)
-    return () => { alive = false; clearInterval(t) }
+    const t = setInterval(tick, REFRESH_INTERVAL_MS)
+    // Force a 1Hz re-render so the "Xs ago" counter updates between
+    // refreshes — keeps the indicator honest without extra fetches.
+    const c = setInterval(() => forceTick(n => n + 1), 1000)
+    return () => { alive = false; clearInterval(t); clearInterval(c) }
   }, [storeId, range.since, range.until])
 
   if (loading && !data) return <DashboardSkeleton />
   if (error)  return <div className="p-6 text-red-600">Error: {error}</div>
   if (!data)  return <DashboardSkeleton />
 
+  // Freshness pill — green <30s, amber 30–60s, red >60s. The pill
+  // also re-renders every second via forceTick() so operators see
+  // the counter tick UP between fetches.
+  const ageSec = lastFetchedAt ? Math.floor((Date.now() - lastFetchedAt) / 1000) : null
+  const ageColor = ageSec === null ? 'slate'
+                 : ageSec < 30 ? 'green'
+                 : ageSec < 60 ? 'amber' : 'red'
+  const freshness = (
+    <span className={'inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full ' +
+      (ageColor === 'green' ? 'bg-emerald-50 text-emerald-700' :
+       ageColor === 'amber' ? 'bg-amber-50 text-amber-700' :
+       ageColor === 'red'   ? 'bg-red-50 text-red-700' :
+                              'bg-slate-100 text-slate-500')}>
+      <span className={'w-2 h-2 rounded-full ' +
+        (ageColor === 'green' ? 'bg-emerald-500 animate-pulse' :
+         ageColor === 'amber' ? 'bg-amber-500' :
+         ageColor === 'red'   ? 'bg-red-500' : 'bg-slate-400')} />
+      {ageSec === null ? 'loading…' : `updated ${ageSec}s ago`}
+    </span>
+  )
+
   if (data.status === 'no_cameras') {
     return (
       <div className="p-6">
-        <PageHeader title={data.store_name} />
+        <PageHeader title={data.store_name} actions={freshness} />
         <Card className="p-8 text-center text-slate-500">
           No cameras attached to this store yet.{' '}
           <Link to="/cameras" className="text-sky-600 underline">Attach one</Link>{' '}
@@ -66,10 +112,52 @@ export default function StoreDashboardPage() {
     )
   }
 
+  if (data.status === 'closed') {
+    return (
+      <div className="p-6">
+        <PageHeader title={data.store_name} actions={freshness} />
+        <Card className="p-10 text-center">
+          <div className="text-5xl mb-2">🌙</div>
+          <div className="text-xl font-semibold text-slate-700 mb-1">Store closed</div>
+          <div className="text-slate-500 text-sm mb-2">
+            {data.store_name} is outside business hours
+            {data.hours_label ? ` (${data.hours_label})` : ''}.
+          </div>
+          <div className="text-slate-400 text-xs">
+            KPI tiles resume automatically when the store opens. After-hours
+            security alerts are still live — see the Alerts page.
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
+  if (data.status === 'no_cameras_live') {
+    return (
+      <div className="p-6">
+        <PageHeader title={data.store_name} actions={freshness} />
+        <Card className="p-10 text-center">
+          <div className="text-5xl mb-2">📵</div>
+          <div className="text-xl font-semibold text-slate-700 mb-1">No cameras online</div>
+          <div className="text-slate-500 text-sm mb-2">
+            {data.cameras_total ?? 0} cameras attached but none are streaming
+            right now.
+          </div>
+          <div className="text-slate-400 text-xs mb-3">
+            KPIs are hidden so they don't read zero — that would be misleading.
+          </div>
+          <Link to="/live" className="text-sky-600 underline text-sm">
+            Open Live View to diagnose
+          </Link>
+        </Card>
+      </div>
+    )
+  }
+
   if (data.status === 'no_data_yet') {
     return (
       <div className="p-6">
-        <PageHeader title={data.store_name} />
+        <PageHeader title={data.store_name} actions={freshness} />
         <Card className="p-8 text-center text-slate-500">
           Cameras just attached — collecting first measurements.
           Numbers appear within a minute or two. Refresh shortly.
@@ -87,15 +175,21 @@ export default function StoreDashboardPage() {
           <div className="flex items-center gap-3">
             <DateRangePicker value={range} onChange={setRange} />
             {data.status_light && <StatusLight value={data.status_light} />}
-            <span className="text-xs text-slate-500">
-              updated {new Date(data.as_of).toLocaleTimeString()}
-            </span>
+            {freshness}
           </div>
         }
       />
-      <div className="text-xs text-slate-500 -mt-3">
-        Showing <strong>{range.label}</strong>. Trend arrows compare with the
-        prior same-length window.
+      <div className="text-xs text-slate-500 -mt-3 flex flex-wrap items-center gap-3">
+        <span>Showing <strong>{range.label}</strong>. Trend arrows compare with the prior same-length window.</span>
+        {data.hours_label && (
+          <span>· Hours today: <strong>{data.hours_label}</strong></span>
+        )}
+        <span>
+          · Cameras:{' '}
+          <strong className={(data.cameras_online ?? 0) === 0 ? 'text-red-600' : 'text-emerald-700'}>
+            {data.cameras_online ?? 0}/{data.cameras_total ?? data.camera_count ?? 0} live
+          </strong>
+        </span>
       </div>
 
       {/* RIGHT NOW */}
