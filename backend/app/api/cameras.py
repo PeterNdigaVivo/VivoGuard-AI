@@ -166,6 +166,77 @@ async def probe_tcp(payload: TcpProbeIn,
                 "detail": f"{type(e).__name__}: {e}"}
 
 
+class AutoFailoverIn(BaseModel):
+    # If provided, only failover cameras in this store. Omitted = all.
+    store_id: int | None = None
+    # If provided, try this HTTP port first (e.g. 7000 for Dahua NVRs
+    # that put their CGI on a non-default port).
+    http_port: int | None = None
+
+
+@router.post("/auto-failover")
+async def auto_failover(payload: AutoFailoverIn,
+                        db: Session = Depends(get_db),
+                        _u: User = Depends(require_role("admin", "operator"))):
+    """One-click: probe every RTSP camera in scope, switch to
+    http_snapshot for any whose port 554 is unreachable but whose
+    HTTP snapshot endpoint returns a JPEG.
+
+    Use this after fixing a store's router or when adding a new store
+    where you don't know which transport will work. Returns a
+    per-camera report so operators can see which ones flipped, which
+    are still broken, and which are fine.
+    """
+    from app.stream.auto_transport import negotiate, forget
+    from app.utils.crypto import decrypt
+
+    q = db.query(Camera)
+    if payload.store_id is not None:
+        q = q.filter(Camera.store_id == payload.store_id)
+    cams = q.all()
+
+    report: list[dict] = []
+    for cam in cams:
+        # Clear the per-process cache so this call always re-probes.
+        try:
+            forget(cam.host, cam.rtsp_port or 554)
+        except Exception:
+            pass
+        try:
+            pw = decrypt(cam.password_encrypted or "")
+        except Exception:
+            pw = ""
+        camera_dict = {
+            "host": cam.host,
+            "rtsp_port": cam.rtsp_port,
+            # Caller-supplied port takes priority if given.
+            "http_port": payload.http_port or cam.http_port,
+            "transport": "rtsp",   # force a probe even if already http_snapshot
+            "username":  cam.username,
+            "channel_number": cam.channel_number,
+        }
+        updates = negotiate(camera_dict, pw)
+        if updates:
+            for k, v in updates.items():
+                setattr(cam, k, v)
+            db.add(cam)
+            report.append({"camera_id": cam.id, "name": cam.name,
+                           "result": "switched", "updates": updates})
+        else:
+            # If RTSP works, that's already a win. We can't tell from
+            # here which branch ran inside negotiate(); look at the
+            # status field for context.
+            report.append({"camera_id": cam.id, "name": cam.name,
+                           "result": "no_change",
+                           "hint": "RTSP reachable, or no HTTP snapshot "
+                                   "port responded. If still failing, "
+                                   "verify port-forward at the store router."})
+    db.commit()
+    return {"checked": len(cams),
+            "switched": sum(1 for r in report if r["result"] == "switched"),
+            "report": report}
+
+
 @router.patch("/{camera_id}", response_model=CameraOut)
 def update_camera(camera_id: int, patch: CameraUpdate, db: Session = Depends(get_db),
                   _u: User = Depends(require_role("admin", "operator"))):

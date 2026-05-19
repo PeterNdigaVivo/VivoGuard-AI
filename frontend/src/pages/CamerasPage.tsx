@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
+import { api } from '@/api/client'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
 
@@ -31,6 +32,28 @@ export default function CamerasPage() {
     if (!confirm('Remove this camera?')) return
     await camsApi.remove(id)
     reload()
+  }
+
+  // One-click: probe every camera, switch ones whose RTSP/554 is
+  // blocked over to HTTP-snapshot polling on whichever HTTP port
+  // answers with a JPEG. Use after adding a store where you don't
+  // know which transport will work (Vivo Moi Ave / TRM / Acacia
+  // pattern — port 554 not forwarded by the store router).
+  const [failingOver, setFailingOver] = useState(false)
+  async function autoFailover() {
+    if (!confirm('Probe all cameras and switch unreachable RTSP ones to HTTP snapshot polling?')) return
+    setFailingOver(true)
+    try {
+      const res = await api<{ checked: number; switched: number; report: any[] }>(
+        '/cameras/auto-failover', { method: 'POST', body: {} },
+      )
+      toast.push(`Checked ${res.checked}, switched ${res.switched} to HTTP snapshot`)
+      reload()
+    } catch (e) {
+      toast.push(`Auto-failover failed: ${e}`, 'err')
+    } finally {
+      setFailingOver(false)
+    }
   }
 
   // Single-PATCH approach. Backend's CameraUpdate now accepts
@@ -83,7 +106,12 @@ export default function CamerasPage() {
     <div className="p-6">
       <PageHeader
         title="Cameras"
-        actions={<Link to="/cameras/add"><Button>+ Add camera</Button></Link>}
+        actions={<>
+          <Button variant="ghost" onClick={autoFailover} disabled={failingOver}>
+            {failingOver ? 'Probing…' : 'Auto-fix offline cameras'}
+          </Button>
+          <Link to="/cameras/add"><Button>+ Add camera</Button></Link>
+        </>}
       />
       {error && <div className="text-red-600 mb-2">{error}</div>}
 

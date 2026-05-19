@@ -40,6 +40,7 @@ try:
     from app.utils.crypto  import decrypt                           # type: ignore
     from app.utils.network import build_rtsp_url                    # type: ignore
     from app.stream.manager import StreamManager, CameraSpec        # type: ignore
+    from app.stream import auto_transport                           # type: ignore
 except ImportError as e:                                            # pragma: no cover
     print(f"streamer: backend modules not on PYTHONPATH ({e})", file=sys.stderr)
     raise
@@ -141,6 +142,28 @@ def _query_active_cameras(db) -> list[dict]:
                         "Run 'alembic upgrade head' to restore full functionality.", dropped)
 
 
+def _persist_transport(db, camera_id: int, updates: dict) -> None:
+    """Write auto-negotiated transport/port back to the cameras row.
+
+    Uses raw SQL so a missing column never blocks the persistence
+    (e.g. older DBs where `transport` doesn't exist will silently no-
+    op — they don't need the switch anyway).
+    """
+    try:
+        sets = ", ".join(f"{k} = :{k}" for k in updates)
+        params = {**updates, "id": camera_id}
+        db.execute(text(f"UPDATE cameras SET {sets} WHERE id = :id"), params)
+        db.commit()
+        log.info("auto-transport: persisted %s for camera %s", updates, camera_id)
+    except Exception as e:
+        log.warning("auto-transport: could not persist %s for camera %s: %s",
+                    updates, camera_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
@@ -150,6 +173,19 @@ def desired_specs() -> list[CameraSpec]:
                 pw = decrypt(r.get("password_encrypted") or "")
             except Exception:
                 pw = ""
+            # Auto-negotiate transport BEFORE building the spec. If
+            # RTSP/554 is unreachable but the Dahua snapshot CGI
+            # responds on an HTTP port, switch this row to
+            # http_snapshot and persist so the next reconcile picks
+            # the right worker. No-op when RTSP works fine.
+            try:
+                updates = auto_transport.negotiate(r, pw)
+                if updates:
+                    _persist_transport(db, r["id"], updates)
+                    r.update(updates)
+            except Exception as e:
+                log.warning("auto-transport: negotiation failed for camera %s: %s",
+                            r.get("id"), e)
             transport = (r.get("transport") or "rtsp") or "rtsp"
             rtsp_url = build_rtsp_url(
                 brand=r.get("brand"),
