@@ -1150,16 +1150,146 @@ def report_pdf(since: datetime, until: datetime,
 @router.get("/dashboard/multi")
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                 days: int = 7):
-    """Aggregate KPIs across all stores — used by the head-office page."""
+    """Chain-wide aggregate — powers /chain. Adds the May-2026 fields:
+
+      • cameras_online / cameras_total per store
+      • is_open per store (via business hours)
+      • rag_status: 'red' | 'amber' | 'green' summarising overall health
+      • needs_attention[] — the subset of stores with rag != 'green',
+        each with the precise reason ("3 cameras offline",
+        "high-priority alert in last hour", …) so head-office can
+        triage at a glance.
+      • best_store_today — highest visitor count today
+      • totals.alerts_critical — high-priority subset of alerts_total
+    """
+    from app.utils.business_hours import is_store_open
+    from app.stream.frame_buffer import FrameBuffer
+
     stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+    fb = FrameBuffer()
+    now = datetime.now(timezone.utc)
     rows = []
+
+    # KPI thresholds for the RAG light. Tunable in one place so we
+    # don't scatter magic numbers through the loop body.
+    STAFF_MIN_PCT = 0.7        # below 70% → amber
+    CRITICAL_TYPES = {"intrusion", "fight", "weapon",
+                      "weapon_brandished", "shrinkage", "fire"}
+
     for s in stores:
         row = store_dashboard(s.id, days=days, db=db, _u=_u)
+
+        # Camera liveness — Redis health row within the last 30s.
+        store_cams = db.query(Camera).filter(Camera.store_id == s.id).all()
+        cam_total = len(store_cams)
+        cam_online = 0
+        for cam in store_cams:
+            h = fb.health(cam.id) or {}
+            lfa = h.get("last_frame_at")
+            if lfa and (now.timestamp() - float(lfa)) < 30:
+                cam_online += 1
+
+        open_now = is_store_open(s)
+
+        # Count alerts in the last hour scoped to this store. We use
+        # the existing alerts_breakdown for the {days}-window total,
+        # but for the RAG light we care about HOT alerts (last 60min,
+        # critical types).
+        cam_ids = [c.id for c in store_cams]
+        recent_critical = 0
+        if cam_ids:
+            recent_critical = (
+                db.query(func.count(Alert.id))
+                  .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+                  .filter(DetectionEvent.camera_id.in_(cam_ids),
+                          Alert.created_at >= now - timedelta(hours=1),
+                          DetectionEvent.detection_type.in_(CRITICAL_TYPES))
+                  .scalar() or 0
+            )
+
+        staff_pct = row["kpis"].get("staff_present_avg")
+
+        # RAG rules — first matching rule wins.
+        #   red   : open AND (no cameras live OR critical alert in last hour)
+        #   amber : open AND (staff < threshold OR some cameras offline)
+        #   green : everything fine, or store is closed (closed != failing)
+        reasons: list[str] = []
+        rag = "green"
+        if open_now and cam_online == 0:
+            rag = "red"
+            reasons.append(
+                f"{cam_total} cameras attached but none streaming"
+                if cam_total else "no cameras attached"
+            )
+        if open_now and recent_critical > 0:
+            rag = "red"
+            reasons.append(
+                f"{recent_critical} critical alert{'s' if recent_critical != 1 else ''} in the last hour"
+            )
+        if rag != "red":
+            if open_now and staff_pct is not None and staff_pct < STAFF_MIN_PCT:
+                rag = "amber"
+                reasons.append(f"staff presence {round(staff_pct*100)}% (target ≥ {round(STAFF_MIN_PCT*100)}%)")
+            if open_now and cam_total > 0 and cam_online < cam_total:
+                rag = "amber" if rag == "green" else rag
+                reasons.append(f"{cam_total - cam_online} of {cam_total} cameras offline")
+
+        row.update({
+            "cameras_online": cam_online,
+            "cameras_total":  cam_total,
+            "is_open":        open_now,
+            "rag_status":     rag,
+            "rag_reasons":    reasons,
+            "recent_critical_alerts": int(recent_critical),
+        })
         rows.append(row)
-    # Totals across the chain.
+
+    visitors_total = sum((r["kpis"]["unique_visitors_today"] or 0) for r in rows)
+    alerts_total = sum(sum(r["alerts_breakdown"].values()) for r in rows)
+    alerts_critical = sum(r["recent_critical_alerts"] for r in rows)
+
+    best_store = None
+    if rows:
+        best = max(rows, key=lambda r: r["kpis"]["unique_visitors_today"] or 0)
+        if (best["kpis"]["unique_visitors_today"] or 0) > 0:
+            best_store = {
+                "store_id":   best["store_id"],
+                "store_name": best["store_name"],
+                "visitors":   int(best["kpis"]["unique_visitors_today"] or 0),
+            }
+
+    needs_attention = [r for r in rows if r["rag_status"] in ("red", "amber")]
+    # Reds first, then ambers; within a colour bucket sort by recent
+    # critical alerts then by visitors-today desc — biggest stores
+    # with the most acute trouble surface first.
+    needs_attention.sort(key=lambda r: (
+        0 if r["rag_status"] == "red" else 1,
+        -r["recent_critical_alerts"],
+        -(r["kpis"]["unique_visitors_today"] or 0),
+    ))
+
     totals = {
-        "unique_visitors_today": sum((r["kpis"]["unique_visitors_today"] or 0) for r in rows),
-        "stores":                len(rows),
-        "alerts_total":          sum(sum(r["alerts_breakdown"].values()) for r in rows),
+        "unique_visitors_today": visitors_total,
+        "stores":          len(rows),
+        "alerts_total":    alerts_total,
+        "alerts_critical": alerts_critical,
+        "stores_open":     sum(1 for r in rows if r["is_open"]),
+        "stores_attention": len(needs_attention),
     }
-    return {"stores": rows, "totals": totals}
+    return {
+        "stores": rows,
+        "totals": totals,
+        "best_store_today": best_store,
+        "needs_attention": [
+            {
+                "store_id":   r["store_id"],
+                "store_name": r["store_name"],
+                "country":    r["country"],
+                "rag_status": r["rag_status"],
+                "rag_reasons": r["rag_reasons"],
+                "cameras_online": r["cameras_online"],
+                "cameras_total":  r["cameras_total"],
+            } for r in needs_attention
+        ],
+        "as_of": now.isoformat(),
+    }

@@ -72,7 +72,34 @@ export const analytics = {
   },
   storeDashboard: (storeId: number, days = 7) =>
     api<StoreDashboard>(`/analytics/dashboard/store/${storeId}?days=${days}`),
+  // Chain dashboard payload. The May-2026 redesign adds RAG status
+  // per store, a needs_attention list, and a best_store_today field.
+  // Old call sites that read .stores / .totals keep working.
   multiDashboard: (days = 7) =>
-    api<{ stores: StoreDashboard[]; totals: { unique_visitors_today: number; stores: number; alerts_total: number } }>(
-      `/analytics/dashboard/multi?days=${days}`),
+    api<{
+      stores: (StoreDashboard & {
+        cameras_online: number
+        cameras_total: number
+        is_open: boolean
+        rag_status: 'red' | 'amber' | 'green'
+        rag_reasons: string[]
+        recent_critical_alerts: number
+      })[]
+      totals: {
+        unique_visitors_today: number
+        stores: number
+        alerts_total: number
+        alerts_critical: number
+        stores_open: number
+        stores_attention: number
+      }
+      best_store_today: { store_id: number; store_name: string; visitors: number } | null
+      needs_attention: {
+        store_id: number; store_name: string; country: string
+        rag_status: 'red' | 'amber'
+        rag_reasons: string[]
+        cameras_online: number; cameras_total: number
+      }[]
+      as_of: string
+    }>(`/analytics/dashboard/multi?days=${days}`),
 }
