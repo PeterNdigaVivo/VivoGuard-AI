@@ -17,6 +17,8 @@ import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRang
 import { api } from '@/api/client'
 import { labelForDetector } from '@/lib/detectorLabels'
 import StoreBIPanels from '@/components/StoreBIPanels'
+import { AlertCard, groupAlerts } from '@/components/AlertCard'
+import type { Alert as AlertRowFull } from '@/api/alerts'
 
 // Parse a camera_id out of the live tile's heatmap thumb URL.
 // Format: /api/analytics/heatmap/{cam}/image?...
@@ -402,99 +404,40 @@ function WeekSection({ storeId }: { storeId: number }) {
 
 // ----- SECTION 4: ALERTS & INCIDENTS -----
 
-interface AlertRow {
-  id: number
-  status: 'open' | 'confirmed' | 'dismissed'
-  severity: 'critical' | 'warning' | 'info'
-  created_at: string
-  camera_id?: number
-  camera_name?: string | null
-  detection_type?: string | null
-  thumbnail_path?: string | null
-}
-
+// Per-store alerts feed — uses the shared AlertCard component so the
+// presentation matches the chain /alerts page exactly. Server hands
+// us pre-rendered title/body/severity per row.
 function AlertsFeedSection({ storeId }: { storeId: number }) {
-  const [alerts, setAlerts] = useState<AlertRow[] | null>(null)
-  const load = () => api<AlertRow[]>(`/alerts?store_id=${storeId}&limit=20`)
-    .then(setAlerts).catch(() => setAlerts([]))
+  const [rows, setRows] = useState<AlertRowFull[] | null>(null)
+  const load = () => api<AlertRowFull[]>(`/alerts?store_id=${storeId}&limit=50`)
+    .then(setRows).catch(() => setRows([]))
   useEffect(() => {
     load()
-    // Auto-refresh the alerts feed at the same 30s cadence as the
-    // rest of the dashboard so operators see new incidents promptly.
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
   }, [storeId])
 
-  async function act(id: number, action: 'confirm' | 'dismiss') {
-    try {
-      await api(`/alerts/${id}/${action}`, { method: 'POST' })
-      load()
-    } catch (e) { console.error(e) }
-  }
-
-  if (alerts === null) return null
+  if (rows === null) return null
+  const groups = groupAlerts(rows)
 
   return (
     <section>
       <SectionTitle>Alerts &amp; incidents</SectionTitle>
-      <Card className="p-3">
-        {alerts.length === 0 ? (
+      <Card className="p-3 space-y-2">
+        {groups.length === 0 ? (
           <div className="text-slate-400 text-sm p-3">No alerts in the last window.</div>
         ) : (
-          <div className="divide-y divide-slate-100">
-            {alerts.map(a => (
-              <div key={a.id} className="flex items-center gap-3 py-2">
-                {a.thumbnail_path
-                  ? <img src={a.thumbnail_path} alt=""
-                         className="w-16 h-16 object-cover rounded bg-slate-100" />
-                  : <div className="w-16 h-16 bg-slate-100 rounded flex items-center justify-center text-2xl">🛡️</div>}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <SeverityBadge sev={a.severity} />
-                    <span className="font-medium truncate">
-                      {a.detection_type ? labelForDetector(a.detection_type) : 'Alert'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-500 truncate">
-                    {a.camera_name ?? `Camera ${a.camera_id ?? '?'}`} ·{' '}
-                    {new Date(a.created_at).toLocaleTimeString()}
-                  </div>
-                </div>
-                <div className="flex gap-1">
-                  {a.status === 'open' && (
-                    <>
-                      <button onClick={() => act(a.id, 'confirm')}
-                              className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200">
-                        Confirm
-                      </button>
-                      <button onClick={() => act(a.id, 'dismiss')}
-                              className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">
-                        Dismiss
-                      </button>
-                    </>
-                  )}
-                  {a.status !== 'open' && (
-                    <span className="text-xs text-slate-400">{a.status}</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
+          groups.map(g => (
+            <AlertCard key={g.head.id}
+                       alert={g.head}
+                       groupCount={g.count}
+                       groupLast={g.last}
+                       groupSiblings={g.siblings}
+                       onChanged={load} />
+          ))
         )}
       </Card>
     </section>
-  )
-}
-
-function SeverityBadge({ sev }: { sev: AlertRow['severity'] }) {
-  const map: Record<AlertRow['severity'], { label: string; cls: string }> = {
-    critical: { label: '🔴 Critical', cls: 'bg-red-100 text-red-700' },
-    warning:  { label: '🟡 Warning',  cls: 'bg-amber-100 text-amber-700' },
-    info:     { label: '🔵 Info',     cls: 'bg-sky-100 text-sky-700' },
-  }
-  const m = map[sev] || map.info
-  return (
-    <span className={'text-[10px] px-1.5 py-0.5 rounded ' + m.cls}>{m.label}</span>
   )
 }
 

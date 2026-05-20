@@ -1,10 +1,12 @@
-// Alerts page — paginated list with filters, real-time prepend via the
-// WebSocket alerts feed, confirm/dismiss buttons.
+// Alerts page — chain-wide feed using the shared AlertCard.
+// May-2026 redesign: same card component as the per-store dashboard
+// feed so titles, severity colours, and action buttons match exactly.
 
 import { useEffect, useState } from 'react'
-import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
+import { Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import { AlertCard, groupAlerts } from '@/components/AlertCard'
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
@@ -27,8 +29,9 @@ export default function AlertsPage() {
   // Real-time prepend: when /ws/alerts pushes a new event, refetch.
   useEffect(() => alertsApi.subscribe(() => reload()), [])
 
-  async function confirm(id: number) { await alertsApi.confirm(id); reload() }
-  async function dismiss(id: number) { await alertsApi.dismiss(id); reload() }
+  // `groups` collapses repeat-of-same-thing alerts into one row each
+  // (e.g. "Counter Unstaffed ×7 today") to keep the feed scannable.
+  const groups = groupAlerts(items)
 
   function exportCSV() {
     const rows = [
@@ -73,44 +76,22 @@ export default function AlertsPage() {
         </div>
       </Card>
 
-      <Card>
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
-            <tr>
-              <th className="text-left p-3">When</th>
-              <th className="text-left p-3">Camera</th>
-              <th className="text-left p-3">Type</th>
-              <th className="text-left p-3">Confidence</th>
-              <th className="text-left p-3">Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(a => (
-              <tr key={a.id} className="border-t hover:bg-slate-50">
-                <td className="p-3 whitespace-nowrap">{new Date(a.created_at).toLocaleString()}</td>
-                <td className="p-3">{a.camera_name ?? `#${a.camera_id}`}</td>
-                <td className="p-3"><Badge color="sky">{a.detection_type}</Badge></td>
-                <td className="p-3">{a.confidence?.toFixed(2) ?? '—'}</td>
-                <td className="p-3">
-                  {a.status === 'new'       && <Badge color="amber">new</Badge>}
-                  {a.status === 'confirmed' && <Badge color="green">confirmed</Badge>}
-                  {a.status === 'dismissed' && <Badge color="slate">dismissed</Badge>}
-                </td>
-                <td className="p-3 text-right whitespace-nowrap">
-                  {a.status === 'new' && <>
-                    <Button onClick={() => confirm(a.id)} className="mr-2">Confirm</Button>
-                    <Button variant="ghost" onClick={() => dismiss(a.id)}>Dismiss</Button>
-                  </>}
-                </td>
-              </tr>
-            ))}
-            {!items.length && (
-              <tr><td colSpan={6} className="p-8 text-center text-slate-500">No alerts.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </Card>
+      <div className="space-y-2">
+        {groups.length === 0 ? (
+          <Card className="p-8 text-center text-slate-500">
+            No alerts in this window.
+          </Card>
+        ) : (
+          groups.map(g => (
+            <AlertCard key={g.head.id}
+                       alert={g.head}
+                       groupCount={g.count}
+                       groupLast={g.last}
+                       groupSiblings={g.siblings}
+                       onChanged={reload} />
+          ))
+        )}
+      </div>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 """Alerts — operator-facing surface for events that warrant attention."""
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -22,6 +22,13 @@ class Alert(Base):
     assigned_to:      Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     acknowledged_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feedback_used_for_training: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Free-text investigation notes the operator adds via "📋 Add Note".
+    # Accumulates over time — the UI appends rather than overwrites.
+    notes:            Mapped[str | None]    = mapped_column(Text, nullable=True)
+    # Set only when the operator hits "✅ Resolved" — distinct from
+    # `acknowledged_at` (also bumped on dismiss) so we can report on
+    # how quickly real incidents were resolved.
+    resolved_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at:       Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     event = relationship("DetectionEvent", back_populates="alert")
