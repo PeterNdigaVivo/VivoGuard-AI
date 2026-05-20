@@ -109,18 +109,39 @@ export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
 function HourlyChart({ payload }: { payload: HourlyPayload }) {
   const W = 600, H = 180, P_L = 32, P_R = 16, P_T = 16, P_B = 28
   const hours = payload.hours
+  // Text-based fallback — ALWAYS rendered below the SVG (or instead
+  // of it when empty) so operators have a guaranteed read even if
+  // anything goes wrong with the chart itself.
+  const summary = <HourlySummary payload={payload} />
+
   if (hours.length === 0) {
-    return <EmptyState icon="📊" text="No hourly data yet today." />
+    return (
+      <div>
+        <div className="text-center py-6 text-slate-500 text-sm">
+          <div className="text-3xl mb-2">📊</div>
+          No hourly data available yet for this store.
+        </div>
+        {summary}
+      </div>
+    )
   }
   const total = hours.reduce((sum, h) => sum + h.visitors, 0)
-  // When every bucket reads 0 the area collapses to the baseline and
-  // the user sees a "blank" chart. Surface a real empty state instead
-  // — store managers were confused by what they thought was a render
-  // bug.
+  // When every bucket reads 0 the area would collapse to the baseline
+  // and look "blank". Show the explicit wording the user requested
+  // plus the text summary, no SVG attempted.
   if (total === 0) {
     return (
-      <EmptyState icon="📊"
-                  text="No visitors recorded yet today. Bars appear here as customers arrive." />
+      <div>
+        <div className="text-center py-6 text-slate-600 text-sm">
+          <div className="text-3xl mb-2">📊</div>
+          <div className="font-medium text-slate-700">No visitor data recorded today yet</div>
+          <div className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+            Data appears after the first customer is detected during
+            business hours.
+          </div>
+        </div>
+        {summary}
+      </div>
     )
   }
   const max = Math.max(...hours.map(h => h.visitors), 1)
@@ -218,6 +239,39 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
           vs same time yesterday
         </div>
       )}
+      {/* Text summary always rendered under the chart — guarantees a
+          readable answer even if SVG fails to paint for any reason. */}
+      <HourlySummary payload={payload} />
+    </div>
+  )
+}
+
+// Text-based fallback for the hourly chart. ALWAYS rendered — when
+// the SVG is also rendered, it sits below as a key-numbers summary;
+// when the SVG is absent (all-zero day), this is the primary read.
+// Operators get answers regardless of whether the chart paints.
+function HourlySummary({ payload }: { payload: HourlyPayload }) {
+  const peak  = payload.peak
+  const quiet = payload.quiet
+  const total = payload.today_total ?? 0
+  return (
+    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-700 border-t border-slate-100 pt-2">
+      <div>
+        <span className="text-slate-500">Peak hour:</span>{' '}
+        {peak ? (
+          <strong>{peak.hour.toString().padStart(2, '0')}:00 ({peak.visitors} visitors)</strong>
+        ) : <span className="text-slate-400">—</span>}
+      </div>
+      <div>
+        <span className="text-slate-500">Quietest:</span>{' '}
+        {quiet ? (
+          <strong>{quiet.hour.toString().padStart(2, '0')}:00 ({quiet.visitors} visitors)</strong>
+        ) : <span className="text-slate-400">—</span>}
+      </div>
+      <div>
+        <span className="text-slate-500">Total today:</span>{' '}
+        <strong>{total} visitors</strong>
+      </div>
     </div>
   )
 }
@@ -600,10 +654,21 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                   ))}
                 </tbody>
               </table>
-              <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-2">
+              {/* Headline label next to the overall RAG dot. Belt-
+                  and-suspenders: derive the label client-side from
+                  overall_direction if the backend ever omits the
+                  pre-rendered headline string — operators never see
+                  a naked dot. */}
+              <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-2">
                 <RagDot rag={data.overall_rag} big />
-                <div className="text-sm font-semibold text-slate-800">
-                  {data.headline}
+                <div className={'text-sm font-semibold ' +
+                  (data.overall_direction === 'better' ? 'text-emerald-700' :
+                   data.overall_direction === 'worse'  ? 'text-red-700' :
+                                                         'text-slate-700')}>
+                  vs yesterday:{' '}
+                  {data.overall_direction === 'better' ? '▲ Better overall'
+                  : data.overall_direction === 'worse' ? '▼ Worse overall'
+                  : '→ Same overall'}
                 </div>
               </div>
             </>
