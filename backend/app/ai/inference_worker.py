@@ -119,6 +119,17 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     return cam, zones, cfg, weights
 
 
+# Detector types that emit DetectionEvents but should NOT create an
+# Alert row. These are metric-style detectors — they show up on the
+# dashboard's KPI tiles, not in the Alerts & Incidents feed. Keeping
+# them silent stops the alert feed from drowning in routine signals.
+# Mirrors app.api.detection_config.SKIP_ALERTS.
+_SKIP_ALERT_TYPES: set[str] = {
+    "heatmap", "customer_journey", "unique_visitor", "entry_exit",
+    "demographic", "occupancy_metrics",
+}
+
+
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None) -> int:
     rec = DetectionEvent(
         camera_id=camera_id,
@@ -131,7 +142,11 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None) -> int
     )
     db.add(rec)
     db.flush()
-    db.add(Alert(event_id=rec.id, status="new"))
+    # Operator-visible alert — only for detectors NOT in the silent
+    # metric set. The DetectionEvent itself is still persisted so the
+    # detector activity table and ML-feedback paths see every event.
+    if ev.detection_type not in _SKIP_ALERT_TYPES:
+        db.add(Alert(event_id=rec.id, status="new"))
     return rec.id
 
 
@@ -229,8 +244,13 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
 
             db.commit()
 
-            # Publish alerts to the live UI feed.
+            # Publish alerts to the live UI feed. Same skip-list as
+            # _persist_event — silent metric detectors never reach the
+            # vg:pub:alerts channel so the operator feed stays focused
+            # on actionable incidents.
             for ev in events_emitted:
+                if ev.get("detection_type") in _SKIP_ALERT_TYPES:
+                    continue
                 try:
                     pub.publish("vg:pub:alerts", json.dumps(ev))
                 except Exception:

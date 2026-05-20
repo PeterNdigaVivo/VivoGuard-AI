@@ -17,7 +17,11 @@ class DetectionConfigIn(BaseModel):
 
 class DetectionConfigOut(DetectionConfigIn):
     model_config = ConfigDict(from_attributes=True)
-    id: int
+    # `id` is None for VIRTUAL rows synthesised by the GET endpoint
+    # when no DB row exists yet — keeps the response shape uniform so
+    # the frontend renders every detector pre-checked without
+    # special-casing the missing-row case.
+    id: int | None = None
     camera_id: int
 
 

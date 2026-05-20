@@ -51,7 +51,11 @@ export default function DetectionConfigPage() {
       const m: Record<string, Cfg> = {}
       DETECTION_TYPES.forEach(t => {
         const found = rows.find((r: any) => r.detection_type === t)
-        m[t] = found ?? { detection_type: t, enabled: false, confidence_threshold: 0.6,
+        // Default to ENABLED. The backend now returns enabled=true for
+        // detector types with no DB row yet, so this fallback is only
+        // triggered when the endpoint hasn't been redeployed. Either
+        // way, the user sees pre-checked boxes out of the box.
+        m[t] = found ?? { detection_type: t, enabled: true, confidence_threshold: 0.6,
           min_object_size: 0, detection_every_n_frames: 1, dwell_time_seconds: null, crowd_threshold: null }
       })
       setConfig(m)
