@@ -29,22 +29,38 @@ export default function HeatmapPage() {
   const cameraId = Number(id)
 
   const [snap, setSnap] = useState<string | null>(null)
+  const [snapFailed, setSnapFailed] = useState<boolean>(false)
+  const [cameraName, setCameraName] = useState<string | null>(null)
   const [heatmapObjUrl, setHeatmapObjUrl] = useState<string | null>(null)
   // Default 0.85 — the new colour scheme is dark enough that the
   // snapshot still reads through clearly.
   const [opacity, setOpacity] = useState(0.85)
   const [bust, setBust] = useState(0)              // forces refresh every 30s + on Refresh click
   const [windowSel, setWindowSel] = useState<TimeWindow>('today')
+  // `error` only reflects USER-INITIATED failures (download click).
+  // Background snapshot failures are swallowed silently — the UI
+  // shows a grey placeholder with the camera name instead of leaking
+  // FFmpeg stderr to non-technical store managers.
   const [error, setError] = useState<string | null>(null)
 
-  // Snapshot — JSON endpoint returns base64; no auth issue with the api wrapper.
+  // Pull the camera name up-front so the placeholder reads
+  // "Vivo Junction - Camera 3" instead of an anonymous grey box.
   useEffect(() => {
+    cameras.get(cameraId).then(c => setCameraName(c.name)).catch(() => {})
+  }, [cameraId])
+
+  // Snapshot — swallow failures silently. The backend prefers the
+  // streamer's cached Redis frame, then falls back to ffmpeg. If both
+  // miss, the response is a sanitised 503 — we don't surface the
+  // detail string at all.
+  useEffect(() => {
+    setSnapFailed(false)
     cameras.snapshot(cameraId)
-      .then(s => setSnap(s.jpeg_b64))
-      .catch(e => setError(String(e)))
+      .then(s => { setSnap(s.jpeg_b64); setSnapFailed(false) })
+      .catch(() => { setSnap(null); setSnapFailed(true) })
     const t = setInterval(() => setBust(b => b + 1), 30_000)
     return () => clearInterval(t)
-  }, [cameraId])
+  }, [cameraId, bust])
 
   // Build the heatmap image URL with the current window selection
   // baked in. The server keeps three independent accumulators
@@ -156,8 +172,20 @@ export default function HeatmapPage() {
             <img src={`data:image/jpeg;base64,${snap}`}
                  className="block w-full h-auto opacity-90" alt="camera snapshot" />
           ) : (
-            <div className="aspect-video flex items-center justify-center text-slate-500">
-              {error ?? 'Loading snapshot…'}
+            // Grey placeholder with the camera name. We intentionally
+            // do NOT surface FFmpeg / RTSP error strings here — store
+            // managers don't read them, and they make the page look
+            // broken when the heatmap itself is rendering fine on top.
+            <div className="aspect-video flex flex-col items-center justify-center
+                            bg-slate-800 text-slate-300 gap-1">
+              <div className="text-3xl opacity-50">📷</div>
+              <div className="text-sm font-medium">
+                {cameraName ?? `Camera ${cameraId}`}
+              </div>
+              <div className="text-xs text-slate-500">
+                {snapFailed ? 'Snapshot unavailable — heatmap still updating'
+                            : 'Loading snapshot…'}
+              </div>
             </div>
           )}
           {heatmapObjUrl && (

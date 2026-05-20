@@ -52,30 +52,42 @@ async def probe_rtsp(url: str, timeout: float = 12.0,
     return False, err.strip()[:200] or f"ffprobe exit={code}"
 
 
-async def grab_thumbnail(url: str, timeout: float = 15.0) -> str | None:
+async def grab_thumbnail(url: str, timeout: float = 15.0,
+                          rtsp_transport: str = "tcp") -> str | None:
     """Capture a single JPEG frame and return it base64-encoded.
-    Returns None on failure. Stderr is logged for debugging."""
+    Returns None on failure. Stderr is logged for debugging.
+
+    `rtsp_transport` honors the camera's per-row setting so HTTP-
+    tunnel cameras (Moi Ave / TRM / Capital — port 554 blocked at
+    the router) still grab a snapshot via the tunnel instead of
+    timing out on TCP."""
+    if rtsp_transport not in ("tcp", "http", "udp"):
+        rtsp_transport = "tcp"
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "thumb.jpg"
         cmd = (
-            "ffmpeg -hide_banner -loglevel error -rtsp_transport tcp "
+            f"ffmpeg -hide_banner -loglevel error -rtsp_transport {rtsp_transport} "
             f"-timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
             f"{shlex.quote(str(out))}"
         )
         code, _, err = await _run(cmd, timeout=timeout)
         if code != 0 or not out.exists():
-            log.info("grab_thumbnail failed (code=%s): %s", code, err.strip()[:300])
+            log.info("grab_thumbnail failed (code=%s, transport=%s): %s",
+                     code, rtsp_transport, err.strip()[:300])
             return None
         return base64.b64encode(out.read_bytes()).decode()
 
 
-async def grab_thumbnail_verbose(url: str, timeout: float = 15.0) -> tuple[str | None, str | None]:
+async def grab_thumbnail_verbose(url: str, timeout: float = 15.0,
+                                  rtsp_transport: str = "tcp") -> tuple[str | None, str | None]:
     """Like grab_thumbnail, but also returns FFmpeg stderr for the
     /diagnose endpoint so operators can see why a stream is failing."""
+    if rtsp_transport not in ("tcp", "http", "udp"):
+        rtsp_transport = "tcp"
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "thumb.jpg"
         cmd = (
-            "ffmpeg -hide_banner -loglevel info -rtsp_transport tcp "
+            f"ffmpeg -hide_banner -loglevel info -rtsp_transport {rtsp_transport} "
             f"-timeout 5000000 -y -i {shlex.quote(url)} -frames:v 1 -q:v 5 "
             f"{shlex.quote(str(out))}"
         )

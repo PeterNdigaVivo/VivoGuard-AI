@@ -768,23 +768,62 @@ def stream_url(camera_id: int, subtype: int = 0,
 @router.get("/{camera_id}/snapshot")
 async def snapshot(camera_id: int, db: Session = Depends(get_db),
                    _u: User = Depends(get_current_user)):
+    """Return a JPEG snapshot as base64.
+
+    Two-tier strategy:
+      1. Prefer the streamer's most recent frame from Redis. The
+         inference worker already has a live RTSP/HTTP-snapshot pull
+         going for every active camera — that's a fresh frame within
+         seconds, and it's cached in `vg:frame:{camera_id}`. Reading
+         from Redis is fast, never times out, and avoids opening a
+         second RTSP connection per snapshot request.
+      2. Fall back to a one-shot ffmpeg pull when Redis has nothing
+         (camera just attached / streamer down / ai_enabled=false).
+         Use the camera's per-row `rtsp_transport` so HTTP-tunnel
+         cameras work too — `rtsp_url_override` is honored via
+         build_rtsp_url() inside _camera_rtsp_url().
+    """
+    import base64
     from app.utils.crypto import decrypt
+    from app.stream.frame_buffer import FrameBuffer
     cam = db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(404, "camera not found")
+
+    # Tier 1: streamer's cached JPEG.
+    cached = FrameBuffer().latest_jpeg(camera_id)
+    if cached:
+        return {"jpeg_b64": base64.b64encode(cached).decode()}
+
+    # Tier 2: one-shot ffmpeg pull. Use the row's transport setting
+    # so tunnel-mode cameras don't fail with "[rtsp @ ...] Failed
+    # reading RTSP data" the way they did with the hard-coded TCP
+    # flag.
     pw = decrypt(cam.password_encrypted or "")
     rtsp = _camera_rtsp_url(cam, subtype=1, password_plain=pw)
-    img, err = await grab_thumbnail_verbose(rtsp, timeout=15)
+    transport = (cam.rtsp_transport or "tcp")
+    img, err = await grab_thumbnail_verbose(rtsp, timeout=15,
+                                              rtsp_transport=transport)
     if not img:
-        # IMPORTANT: do NOT mutate cam.status here. The streamer is the
-        # source of truth for online/offline. A failed one-shot snapshot
-        # from THIS container could just mean a transient network blip,
-        # a slower path than the streamer takes, or the operator's
-        # request raced with an ffmpeg restart. Operators were seeing
-        # every camera flip to 'offline' after opening Camera Setup.
-        raise HTTPException(503, detail=(err or "snapshot grab failed")[:1000])
-    # Same on the success path — leave cam.status alone. The CamerasPage
-    # already shows the streamer-derived live state separately.
+        # The full ffmpeg stderr — "[rtsp @ 0x...] Failed reading RTSP
+        # data", "Connection refused", etc. — is operationally useful
+        # but not user-facing. We log it in the API container and
+        # return a sanitised 503 with `code` set so the UI can render
+        # a clean placeholder instead of the raw error string.
+        import logging as _l
+        _l.getLogger(__name__).info(
+            "snapshot grab failed for camera %s (transport=%s): %s",
+            camera_id, transport, (err or "")[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "snapshot_unavailable",
+                "camera_id": cam.id,
+                "camera_name": cam.name,
+                "message": "Snapshot temporarily unavailable.",
+            },
+        )
     return {"jpeg_b64": img}
 
 
