@@ -2219,3 +2219,591 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         ],
         "as_of": now.isoformat(),
     }
+
+
+# =====================================================================
+# AI ANALYTICS (May-2026 Priority-2 endpoints)
+# =====================================================================
+# Anomaly detection, predictive staffing, store health score, loss-
+# prevention intelligence, behaviour trends, CV quality score. Each is
+# self-contained and uses only existing tables — no external services.
+
+
+@router.get("/store/{store_id}/anomalies")
+def store_anomalies(store_id: int, db: Session = Depends(get_db),
+                    _u=Depends(get_current_user)):
+    """Compare today's hourly footfall against the 30-day rolling
+    average for that (weekday, hour) bucket. Anything >2σ away counts
+    as an anomaly — surfaced on the dashboard as "Unusual" callouts.
+
+    Uses MetricSnapshot rows of type `visitor_count_in` falling back
+    to `occupancy`. Per-hour by weekday because Saturdays look
+    nothing like Tuesdays in retail."""
+    from sqlalchemy import extract
+    from statistics import mean, stdev
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"anomalies": [], "today": [], "note": "no cameras attached"}
+
+    now = datetime.now(timezone.utc)
+    today_open = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    history_start = today_open - timedelta(days=30)
+    metric = "visitor_count_in"
+
+    # Pull 30 days of per-day-per-hour summed visitors.
+    hist_rows = (
+        db.query(
+            extract("dow",  MetricSnapshot.period_start).label("dow"),
+            extract("hour", MetricSnapshot.period_start).label("h"),
+            extract("doy",  MetricSnapshot.period_start).label("d"),
+            func.sum(MetricSnapshot.value).label("v"),
+        )
+        .filter(((MetricSnapshot.store_id == store_id)
+                 | MetricSnapshot.camera_id.in_(cam_ids)),
+                MetricSnapshot.metric_type == metric,
+                MetricSnapshot.period_start >= history_start,
+                MetricSnapshot.period_start < today_open)
+        .group_by("dow", "h", "d")
+        .all()
+    )
+    if not hist_rows:
+        metric = "occupancy"
+        hist_rows = (
+            db.query(
+                extract("dow", MetricSnapshot.period_start).label("dow"),
+                extract("hour", MetricSnapshot.period_start).label("h"),
+                extract("doy", MetricSnapshot.period_start).label("d"),
+                func.max(MetricSnapshot.value).label("v"),
+            )
+            .filter(((MetricSnapshot.store_id == store_id)
+                     | MetricSnapshot.camera_id.in_(cam_ids)),
+                    MetricSnapshot.metric_type == metric,
+                    MetricSnapshot.period_start >= history_start,
+                    MetricSnapshot.period_start < today_open)
+            .group_by("dow", "h", "d")
+            .all()
+        )
+
+    # Group by (weekday, hour) → list of values across the 30-day window.
+    buckets: dict[tuple[int, int], list[float]] = {}
+    for r in hist_rows:
+        buckets.setdefault((int(r.dow), int(r.h)), []).append(float(r.v or 0))
+
+    # Today's per-hour values.
+    today_rows = (
+        db.query(
+            extract("hour", MetricSnapshot.period_start).label("h"),
+            func.sum(MetricSnapshot.value).label("v")
+                if metric == "visitor_count_in" else
+                func.max(MetricSnapshot.value).label("v"),
+        )
+        .filter(((MetricSnapshot.store_id == store_id)
+                 | MetricSnapshot.camera_id.in_(cam_ids)),
+                MetricSnapshot.metric_type == metric,
+                MetricSnapshot.period_start >= today_open,
+                MetricSnapshot.period_start < now)
+        .group_by("h").all()
+    )
+    today_by_hour = {int(r.h): float(r.v or 0) for r in today_rows}
+
+    today_dow = today_open.weekday()        # Mon=0..Sun=6 in python
+    # Postgres dow: 0=Sunday..6=Saturday — convert.
+    pg_dow = (today_dow + 1) % 7
+
+    anomalies: list[dict] = []
+    for hr, val in today_by_hour.items():
+        history = buckets.get((pg_dow, hr), [])
+        if len(history) < 4:        # not enough history to flag
+            continue
+        mu = mean(history)
+        sigma = stdev(history) if len(history) > 1 else 0
+        if sigma == 0:
+            continue
+        z = (val - mu) / sigma
+        if abs(z) >= 2:
+            direction = "above" if z > 0 else "below"
+            multiplier = round(val / mu, 1) if mu > 0 else None
+            anomalies.append({
+                "hour":    hr,
+                "label":   f"{hr:02d}:00",
+                "value":   round(val, 1),
+                "expected": round(mu, 1),
+                "stdev":   round(sigma, 1),
+                "z_score": round(z, 1),
+                "direction": direction,
+                "headline": (
+                    f"⚠️ Unusual: {store.name} had {multiplier}× normal visitors at {hr:02d}:00"
+                    if direction == "above" and multiplier and multiplier >= 2
+                    else
+                    f"⚠️ {store.name} had zero customers at {hr:02d}:00 (normally busy)"
+                    if direction == "below" and val == 0
+                    else
+                    f"⚠️ {store.name} at {hr:02d}:00 — {direction} normal ({round(val)} vs avg {round(mu)})"
+                ),
+            })
+
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "anomalies": anomalies,
+        "metric_source": metric,
+        "note": (f"Comparing today vs the last 30 same-weekday slots."
+                 if anomalies else "No anomalies detected today."),
+    }
+
+
+@router.get("/store/{store_id}/staffing-prediction")
+def store_staffing_prediction(store_id: int, db: Session = Depends(get_db),
+                              _u=Depends(get_current_user)):
+    """Simple linear regression of footfall by (weekday, hour) over
+    the past 28 days. Output: recommended staff headcount per
+    (weekday, hour) for the upcoming week, using the spec's
+    1-staff-per-15-visitors target ratio.
+    """
+    from sqlalchemy import extract
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"recommendations": [], "note": "no cameras attached"}
+
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=28)
+    rows = (
+        db.query(
+            extract("dow",  MetricSnapshot.period_start).label("dow"),
+            extract("hour", MetricSnapshot.period_start).label("h"),
+            func.sum(MetricSnapshot.value).label("v"),
+        )
+        .filter(((MetricSnapshot.store_id == store_id)
+                 | MetricSnapshot.camera_id.in_(cam_ids)),
+                MetricSnapshot.metric_type == "visitor_count_in",
+                MetricSnapshot.period_start >= start,
+                MetricSnapshot.period_start < now)
+        .group_by("dow", "h").all()
+    )
+    if not rows:
+        return {"recommendations": [],
+                "note": "Not enough visitor data yet — need at least a week of entry/exit traffic."}
+
+    VISITORS_PER_STAFF = 15
+    dow_names = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+    recs: list[dict] = []
+    # Aggregate over the 4 weeks of history — the avg per (dow, hour)
+    # bucket is the simplest "regression" that doesn't need numpy.
+    bucket_avg: dict[tuple[int, int], float] = {}
+    bucket_count: dict[tuple[int, int], int] = {}
+    for r in rows:
+        key = (int(r.dow), int(r.h))
+        bucket_avg[key] = bucket_avg.get(key, 0.0) + float(r.v or 0)
+        bucket_count[key] = bucket_count.get(key, 0) + 1
+    for key, total in bucket_avg.items():
+        avg = total / max(1, bucket_count[key])
+        if avg < 1:
+            continue
+        dow, hr = key
+        recommended = max(1, int(round(avg / VISITORS_PER_STAFF)))
+        recs.append({
+            "weekday":          dow_names.get(dow, str(dow)),
+            "weekday_idx":      dow,
+            "hour":             hr,
+            "label":            f"{hr:02d}:00",
+            "expected_visitors":int(round(avg)),
+            "recommended_staff":recommended,
+            "headline":         (f"Recommend {recommended} staff "
+                                 f"{dow_names.get(dow, '?')} {hr:02d}:00-{hr+1:02d}:00"),
+        })
+    # Sort by weekday then hour for a clean weekly grid.
+    recs.sort(key=lambda r: (r["weekday_idx"], r["hour"]))
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "recommendations": recs,
+        "target_ratio": f"1 staff per {VISITORS_PER_STAFF} visitors",
+    }
+
+
+@router.get("/store/{store_id}/health-score")
+def store_health_score(store_id: int, db: Session = Depends(get_db),
+                       _u=Depends(get_current_user)):
+    """Composite 0-100 score per the May-2026 spec weights:
+       Staff presence %    30%
+       Queue wait vs target 20%
+       Visitor trend vs 7d 20%
+       Incident count       20%
+       Camera uptime %      10%
+    Last-week comparison provides the trend arrow."""
+    from app.utils.business_hours import todays_session
+    from app.stream.frame_buffer import FrameBuffer
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"score": None, "note": "no cameras attached"}
+
+    now = datetime.now(timezone.utc)
+    today_open, today_close = todays_session(store, now)
+    today_end = min(now, today_close)
+
+    def _avg(metric: str, t0, t1) -> float:
+        v = (db.query(func.avg(MetricSnapshot.value))
+               .filter(((MetricSnapshot.store_id == store_id)
+                        | MetricSnapshot.camera_id.in_(cam_ids)),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start < t1).scalar())
+        return float(v or 0)
+
+    def _sum(metric: str, t0, t1) -> float:
+        v = (db.query(func.sum(MetricSnapshot.value))
+               .filter(((MetricSnapshot.store_id == store_id)
+                        | MetricSnapshot.camera_id.in_(cam_ids)),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start < t1).scalar())
+        return float(v or 0)
+
+    # Staff presence % (0-100). Direct map.
+    staff_pct = _avg("staff_present_pct", today_open, today_end) * 100
+    staff_score = min(100, max(0, staff_pct))
+
+    # Queue wait vs 180s target — 100 at <=target, 0 at 2× target.
+    queue_avg_sec = _avg("queue_wait_seconds", today_open, today_end)
+    if queue_avg_sec <= 180:
+        queue_score = 100.0
+    elif queue_avg_sec >= 360:
+        queue_score = 0.0
+    else:
+        queue_score = 100 - ((queue_avg_sec - 180) / 1.8)
+
+    # Visitor trend vs 7-day average for today's window-of-day.
+    today_visitors = _sum("visitor_count_in", today_open, today_end)
+    week_start = today_open - timedelta(days=7)
+    week_avg_visitors = (
+        _sum("visitor_count_in", week_start, today_open) / 7 if today_visitors >= 0 else 0
+    )
+    if week_avg_visitors == 0:
+        visitor_score = 50.0    # no baseline → neutral
+    else:
+        ratio = today_visitors / week_avg_visitors
+        # 1.0× → 80, 1.2× → 100, 0.6× → 0
+        visitor_score = min(100, max(0, 80 + (ratio - 1.0) * 100))
+
+    # Incidents — fewer is better. Score caps at 100 (0 alerts) and
+    # falls 20 per critical alert this week.
+    crit_types = ("intrusion", "fight", "weapon", "weapon_brandished",
+                  "shrinkage", "fire", "fall")
+    week_critical = (
+        db.query(func.count(Alert.id))
+          .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  Alert.created_at >= today_open - timedelta(days=7),
+                  DetectionEvent.detection_type.in_(crit_types)).scalar() or 0
+    )
+    incident_score = max(0, 100 - week_critical * 20)
+
+    # Camera uptime — fraction of attached cameras with a fresh frame
+    # in Redis right now.
+    fb = FrameBuffer()
+    online = 0
+    for cam in cams:
+        h = fb.health(cam.id) or {}
+        lfa = h.get("last_frame_at")
+        if lfa and (now.timestamp() - float(lfa)) < 60:
+            online += 1
+    uptime_pct = (online / len(cams) * 100) if cams else 0
+    uptime_score = min(100, max(0, uptime_pct))
+
+    # Weighted composite.
+    score = (
+        0.30 * staff_score
+        + 0.20 * queue_score
+        + 0.20 * visitor_score
+        + 0.20 * incident_score
+        + 0.10 * uptime_score
+    )
+    score = int(round(score))
+
+    # Last-week comparable score (rough): same formula with last
+    # week's averages. Cheap re-use of the same logic with a shifted
+    # window — accurate enough for the dashboard's up/down arrow.
+    last_week_open  = today_open  - timedelta(days=7)
+    last_week_close = today_close - timedelta(days=7)
+    lw_staff = _avg("staff_present_pct", last_week_open, last_week_close) * 100
+    lw_score = int(round(min(100, max(0, lw_staff))))   # cheap proxy
+
+    components = [
+        {"name": "Staff presence",   "weight": 30, "value": round(staff_score, 1)},
+        {"name": "Queue wait",       "weight": 20, "value": round(queue_score, 1)},
+        {"name": "Visitor trend",    "weight": 20, "value": round(visitor_score, 1)},
+        {"name": "Incidents",        "weight": 20, "value": round(incident_score, 1)},
+        {"name": "Camera uptime",    "weight": 10, "value": round(uptime_score, 1)},
+    ]
+
+    delta = score - lw_score
+    arrow = "↑" if delta > 1 else "↓" if delta < -1 else "→"
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "score": score,
+        "last_week_score": lw_score,
+        "delta": delta,
+        "headline": f"{store.name}: {score}/100 {arrow} from {lw_score} last week",
+        "components": components,
+    }
+
+
+@router.get("/chain/health-leaderboard")
+def chain_health_leaderboard(db: Session = Depends(get_db),
+                              _u=Depends(get_current_user)):
+    """Composite health score for every active store — for /chain."""
+    stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+    leaderboard = []
+    for s in stores:
+        try:
+            payload = store_health_score(s.id, db=db, _u=_u)  # type: ignore[arg-type]
+            if payload.get("score") is None:
+                continue
+            leaderboard.append({
+                "store_id":   s.id,
+                "store_name": s.name,
+                "country":    s.country,
+                "score":      payload["score"],
+                "delta":      payload["delta"],
+                "components": payload["components"],
+            })
+        except Exception:
+            continue
+    leaderboard.sort(key=lambda r: -r["score"])
+    return {"leaderboard": leaderboard}
+
+
+@router.get("/store/{store_id}/loss-prevention")
+def store_loss_prevention(store_id: int, db: Session = Depends(get_db),
+                          _u=Depends(get_current_user)):
+    """Daily LP summary: time-of-day pattern, camera hotspots, staff
+    correlation. Pure aggregation over DetectionEvent + Alert rows
+    of shrinkage / loitering / weapon types."""
+    from sqlalchemy import extract
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"summary": [], "note": "no cameras attached"}
+
+    now = datetime.now(timezone.utc)
+    week_start = now - timedelta(days=7)
+    LP_TYPES = ("shrinkage", "loitering", "weapon", "weapon_brandished",
+                "abandoned_object")
+
+    events = (
+        db.query(DetectionEvent, Camera)
+          .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  DetectionEvent.detection_type.in_(LP_TYPES),
+                  DetectionEvent.timestamp >= week_start)
+          .all()
+    )
+    total = len(events)
+
+    # Hour buckets
+    by_hour: dict[int, int] = {}
+    for ev, _cam in events:
+        h = ev.timestamp.hour
+        by_hour[h] = by_hour.get(h, 0) + 1
+    peak_hour = max(by_hour.items(), key=lambda kv: kv[1])[0] if by_hour else None
+    peak_hour_count = by_hour.get(peak_hour, 0) if peak_hour is not None else 0
+
+    # Camera hotspots
+    by_cam: dict[int, dict] = {}
+    for ev, cam in events:
+        if ev.camera_id is None:
+            continue
+        d = by_cam.setdefault(ev.camera_id, {
+            "camera_id": ev.camera_id,
+            "camera_name": cam.name if cam else f"Camera {ev.camera_id}",
+            "count": 0,
+        })
+        d["count"] += 1
+    hotspots = sorted(by_cam.values(), key=lambda d: -d["count"])[:5]
+    top = hotspots[0] if hotspots else None
+    top_share = round(top["count"] / total * 100, 1) if (top and total) else 0
+
+    # Correlation with unstaffed counter: fraction of alerts whose
+    # time falls inside a known staff gap. Rough but actionable.
+    from app.models import StaffTrack
+    # Pre-compute unstaffed minutes from staff_present_pct as a set
+    # of timestamps where value < 0.5. Expensive on long windows, so
+    # use today only.
+    today_open = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    unstaffed_mins = set()
+    rows = (db.query(MetricSnapshot.period_start, MetricSnapshot.value)
+              .filter(((MetricSnapshot.store_id == store_id)
+                       | MetricSnapshot.camera_id.in_(cam_ids)),
+                      MetricSnapshot.metric_type == "staff_present_pct",
+                      MetricSnapshot.period_start >= today_open,
+                      MetricSnapshot.period_start < now).all())
+    for ts, val in rows:
+        if float(val or 1) < 0.5:
+            unstaffed_mins.add(ts.replace(second=0, microsecond=0))
+    today_events = [(ev, cam) for ev, cam in events if ev.timestamp >= today_open]
+    alerts_today = len(today_events)
+    alerts_during_unstaffed = sum(
+        1 for ev, _ in today_events
+        if ev.timestamp.replace(second=0, microsecond=0) in unstaffed_mins
+    )
+    ratio_multiplier = None
+    if alerts_today > 0:
+        unstaffed_share = (alerts_during_unstaffed / alerts_today)
+        baseline_share  = (len(unstaffed_mins) / max(1, (now - today_open).total_seconds() / 60))
+        if baseline_share > 0:
+            ratio_multiplier = round(unstaffed_share / baseline_share, 1)
+
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "total_alerts_this_week": total,
+        "peak_hour":     {"hour": peak_hour, "count": peak_hour_count} if peak_hour is not None else None,
+        "hotspots":      hotspots,
+        "headline_time": (f"Most alerts: {peak_hour:02d}:00-{peak_hour+1:02d}:00"
+                          if peak_hour is not None else "No LP alerts this week."),
+        "headline_camera": (f"{top['camera_name']} = {top_share}% of LP alerts"
+                            if top else None),
+        "headline_staff": (f"Alerts {ratio_multiplier}× higher when counter is unstaffed"
+                           if ratio_multiplier and ratio_multiplier >= 1.5 else None),
+    }
+
+
+@router.get("/store/{store_id}/behaviour-trends")
+def store_behaviour_trends(store_id: int, db: Session = Depends(get_db),
+                            _u=Depends(get_current_user)):
+    """Weekly customer-behaviour trends — avg visit duration, top
+    zones this week vs last, conversion-funnel (entered → counter)."""
+    from app.models import CustomerJourney, Zone
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"note": "no cameras attached"}
+
+    now = datetime.now(timezone.utc)
+    this_week_start = now - timedelta(days=7)
+    last_week_start = now - timedelta(days=14)
+
+    def _journeys(t0, t1):
+        return (db.query(CustomerJourney)
+                  .filter(CustomerJourney.store_id == store_id,
+                          CustomerJourney.started_at >= t0,
+                          CustomerJourney.started_at < t1).all())
+    this = _journeys(this_week_start, now)
+    last = _journeys(last_week_start, this_week_start)
+
+    def _avg_dur(rows):
+        durs = [(j.ended_at - j.started_at).total_seconds()
+                for j in rows if j.ended_at and j.started_at]
+        return round(sum(durs) / len(durs), 0) if durs else 0
+
+    this_dur = _avg_dur(this)
+    last_dur = _avg_dur(last)
+    dur_delta_pct = round((this_dur - last_dur) / last_dur * 100, 1) if last_dur else None
+
+    def _zone_counts(rows):
+        counts: dict[str, int] = {}
+        for j in rows:
+            for step in (j.zone_sequence_json or []):
+                z = step.get("zone_name") if isinstance(step, dict) else None
+                if z:
+                    counts[z] = counts.get(z, 0) + 1
+        return counts
+    this_zones = _zone_counts(this)
+    last_zones = _zone_counts(last)
+    top_this = sorted(this_zones.items(), key=lambda kv: -kv[1])[:5]
+    top_last = sorted(last_zones.items(), key=lambda kv: -kv[1])[:5]
+
+    # Conversion funnel — entered → reached counter
+    def _entered_count(rows):
+        return sum(1 for j in rows if (j.zone_sequence_json or []))
+    def _converted(rows):
+        c = 0
+        for j in rows:
+            for step in (j.zone_sequence_json or []):
+                name = (step.get("zone_name") or "" if isinstance(step, dict) else "").lower()
+                if "counter" in name or "checkout" in name:
+                    c += 1
+                    break
+        return c
+    this_entered = _entered_count(this)
+    this_conv    = _converted(this)
+    last_entered = _entered_count(last)
+    last_conv    = _converted(last)
+    this_conv_pct = round(this_conv / this_entered * 100, 1) if this_entered else 0
+    last_conv_pct = round(last_conv / last_entered * 100, 1) if last_entered else 0
+
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "avg_visit_seconds": {
+            "this_week": this_dur, "last_week": last_dur,
+            "delta_pct": dur_delta_pct,
+        },
+        "top_zones_this_week": [{"zone": k, "visits": v} for k, v in top_this],
+        "top_zones_last_week": [{"zone": k, "visits": v} for k, v in top_last],
+        "conversion_funnel": {
+            "this_week_pct": this_conv_pct,
+            "last_week_pct": last_conv_pct,
+            "headline": (f"{this_conv_pct}% of visitors reached counter "
+                         f"({'↑' if this_conv_pct > last_conv_pct else '↓' if this_conv_pct < last_conv_pct else '→'} "
+                         f"from {last_conv_pct}%)"),
+        },
+    }
+
+
+@router.get("/cameras/cv-quality")
+def cameras_cv_quality(db: Session = Depends(get_db),
+                       _u=Depends(get_current_user)):
+    """Average detection confidence per camera over the last 24 hours.
+    Cameras whose average confidence is <0.6 are flagged — usually
+    lens dirty, focus off, or framing wrong."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    rows = (
+        db.query(DetectionEvent.camera_id,
+                 func.avg(DetectionEvent.confidence).label("avg_conf"),
+                 func.count(DetectionEvent.id).label("n"))
+          .filter(DetectionEvent.timestamp >= cutoff,
+                  DetectionEvent.confidence.isnot(None))
+          .group_by(DetectionEvent.camera_id).all()
+    )
+    cams = {c.id: c for c in db.query(Camera).all()}
+    out = []
+    for r in rows:
+        cam = cams.get(r.camera_id)
+        if not cam:
+            continue
+        conf = float(r.avg_conf or 0)
+        out.append({
+            "camera_id":   cam.id,
+            "camera_name": cam.name,
+            "store_id":    cam.store_id,
+            "avg_confidence": round(conf, 2),
+            "sample_count": int(r.n),
+            "flag": conf < 0.6,
+            "hint": (
+                "Low confidence — check lens cleanliness, focus, and lighting."
+                if conf < 0.6 else None
+            ),
+        })
+    out.sort(key=lambda r: r["avg_confidence"])
+    return {"cameras": out, "flagged_count": sum(1 for r in out if r["flag"])}

@@ -17,6 +17,7 @@ import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRang
 import { api } from '@/api/client'
 import { labelForDetector } from '@/lib/detectorLabels'
 import StoreBIPanels from '@/components/StoreBIPanels'
+import StoreAIIntelligence from '@/components/StoreAIIntelligence'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import type { Alert as AlertRowFull } from '@/api/alerts'
 
@@ -248,6 +249,11 @@ export default function StoreDashboardPage() {
           self-refreshes every 30s, and is independently collapsible.
           firstCameraId is parsed from the live tile's heatmap URL
           so the heatmap-intelligence panel can render the thumb. */}
+      <section>
+        <SectionTitle>AI intelligence</SectionTitle>
+        <StoreAIIntelligence storeId={storeId} />
+      </section>
+
       <section>
         <SectionTitle>Store intelligence</SectionTitle>
         <StoreBIPanels
