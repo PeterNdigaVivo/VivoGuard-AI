@@ -532,6 +532,625 @@ def store_live_dashboard(store_id: int,
     }
 
 
+# ---- BI panels (May-2026 dashboard intelligence) -------------------
+#
+# Five focused endpoints powering the store analytics page's BI
+# panels. Each returns ALREADY-COMPUTED insights (text strings) along
+# with the raw numbers so the frontend doesn't have to recompute
+# things like "peak hour today" on every render.
+#
+# All endpoints clamp to the store's business-hours session — after-
+# hours noise never appears in any of them.
+
+@router.get("/store/{store_id}/hourly")
+def store_hourly(store_id: int, db: Session = Depends(get_db),
+                 _u=Depends(get_current_user)):
+    """Hourly visitor breakdown for today + yesterday-same-time
+    comparison. Includes auto-generated insights (peak / quiet /
+    restock window / staffing recommendation)."""
+    from sqlalchemy import extract
+    from app.utils.business_hours import todays_session, _store_local_now
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return _empty_hourly()
+
+    now = datetime.now(timezone.utc)
+    session_start, session_end = todays_session(store, now)
+    local_now = _store_local_now(store, now)
+    open_hr  = session_start.astimezone(local_now.tzinfo).hour
+    close_hr = session_end.astimezone(local_now.tzinfo).hour or (open_hr + 12)
+    current_hr = local_now.hour
+
+    # Per-hour visitor count today — local-hour aggregation.
+    # We use `visitor_count_in` when entry/exit zones exist, falling
+    # back to occupancy_peak otherwise so empty rows still show
+    # something useful.
+    metric = "visitor_count_in"
+    rows = (
+        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                 func.sum(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == metric,
+                  MetricSnapshot.period_start >= session_start,
+                  MetricSnapshot.period_start <  session_end)
+          .group_by("h").all()
+    )
+    by_hour = {int(r.h): float(r.v or 0) for r in rows}
+    if not any(by_hour.values()):
+        metric = "occupancy_peak"
+        rows = (
+            db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                     func.max(MetricSnapshot.value).label("v"))
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.metric_type == "occupancy",
+                      MetricSnapshot.period_start >= session_start,
+                      MetricSnapshot.period_start <  session_end)
+              .group_by("h").all()
+        )
+        by_hour = {int(r.h): float(r.v or 0) for r in rows}
+
+    # Same window, yesterday — for the trend-vs-yesterday line.
+    yest_session_start = session_start - timedelta(days=1)
+    yest_session_end   = session_end   - timedelta(days=1)
+    yest_rows = (
+        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                 func.sum(MetricSnapshot.value).label("v"))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == metric if metric == "visitor_count_in" else "occupancy",
+                  MetricSnapshot.period_start >= yest_session_start,
+                  MetricSnapshot.period_start <  yest_session_end)
+          .group_by("h").all()
+    )
+    yest_by_hour = {int(r.h): float(r.v or 0) for r in yest_rows}
+
+    def _intensity(v: float) -> str:
+        if v >= 30: return "high"
+        if v >= 10: return "medium"
+        if v > 0:   return "low"
+        return "empty"
+
+    hours = []
+    for hr in range(open_hr, max(close_hr, open_hr + 1)):
+        v = by_hour.get(hr, 0.0)
+        hours.append({
+            "hour": hr,
+            "label": f"{hr:02d}:00",
+            "visitors": int(round(v)),
+            "intensity": _intensity(v),
+            "is_current": hr == current_hr,
+        })
+
+    today_total = sum(by_hour.values()) or 0
+    yest_so_far = sum(v for h, v in yest_by_hour.items() if h <= current_hr) or 0
+    trend_delta_pct = None
+    if yest_so_far > 0:
+        trend_delta_pct = round((today_total - yest_so_far) / yest_so_far * 100, 1)
+
+    # Peak / quiet — only over hours that actually had data.
+    populated = [(h, v) for h, v in by_hour.items() if v > 0]
+    peak  = max(populated, key=lambda kv: kv[1]) if populated else None
+    quiet = min(populated, key=lambda kv: kv[1]) if populated else None
+
+    insights: list[str] = []
+    if peak:
+        insights.append(
+            f"Peak hour today: {peak[0]:02d}:00–{peak[0]+1:02d}:00 "
+            f"with {int(peak[1])} visitors"
+        )
+    if quiet:
+        insights.append(
+            f"Quietest hour: {quiet[0]:02d}:00–{quiet[0]+1:02d}:00 "
+            f"with {int(quiet[1])} visitors"
+        )
+    # Restock window = first low-traffic hour after opening.
+    restock_hour = None
+    for hr in range(open_hr, min(open_hr + 3, close_hr)):
+        if by_hour.get(hr, 0) <= 10:
+            restock_hour = hr
+            insights.append(
+                f"Best time to restock: {hr:02d}:00–{hr+1:02d}:00 (lowest traffic)"
+            )
+            break
+    # Staffing recommendation: contiguous peak block (>= 75% of peak value).
+    peak_v = peak[1] if peak else 0
+    threshold = peak_v * 0.75
+    busy_hours = sorted(h for h, v in by_hour.items() if v >= threshold and v > 0)
+    if busy_hours:
+        insights.append(
+            f"Recommend extra staff at: {busy_hours[0]:02d}:00–"
+            f"{busy_hours[-1]+1:02d}:00 (peak period)"
+        )
+    if trend_delta_pct is not None:
+        arrow = "▲" if trend_delta_pct > 0 else "▼" if trend_delta_pct < 0 else "▶"
+        insights.append(
+            f"{arrow} {abs(trend_delta_pct)}% vs same time yesterday"
+        )
+
+    return {
+        "store_id": store_id,
+        "open_hour":  open_hr,
+        "close_hour": close_hr,
+        "current_hour": current_hr,
+        "metric_source": metric,
+        "hours": hours,
+        "peak":  {"hour": peak[0],  "visitors": int(peak[1])}  if peak  else None,
+        "quiet": {"hour": quiet[0], "visitors": int(quiet[1])} if quiet else None,
+        "restock_hour": restock_hour,
+        "busy_hour_range": [busy_hours[0], busy_hours[-1] + 1] if busy_hours else None,
+        "today_total": int(today_total),
+        "yesterday_so_far": int(yest_so_far),
+        "trend_delta_pct": trend_delta_pct,
+        "insights": insights,
+    }
+
+
+def _empty_hourly() -> dict:
+    return {
+        "store_id": None, "hours": [], "peak": None, "quiet": None,
+        "open_hour": 9, "close_hour": 21, "current_hour": 0,
+        "metric_source": None, "restock_hour": None,
+        "busy_hour_range": None, "today_total": 0,
+        "yesterday_so_far": 0, "trend_delta_pct": None,
+        "insights": ["No cameras attached to this store yet."],
+    }
+
+
+@router.get("/store/{store_id}/behaviour")
+def store_behaviour(store_id: int, db: Session = Depends(get_db),
+                    _u=Depends(get_current_user)):
+    """Customer journey + dwell aggregates for the journey-map panel.
+
+    Empty payload + setup hint when no journey/zone data exists yet —
+    the frontend renders an explanatory empty state in that case.
+    """
+    from app.models import CustomerJourney, Zone
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"has_journey_data": False,
+                "setup_hint": "No cameras attached to this store yet."}
+
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    journeys = (
+        db.query(CustomerJourney)
+          .filter(CustomerJourney.store_id == store_id,
+                  CustomerJourney.started_at >= week_start)
+          .limit(1000).all()
+    )
+    if not journeys:
+        return {
+            "has_journey_data": False,
+            "setup_hint": (
+                "Draw zones on your cameras (entrance, aisle, counter, exit) "
+                "to unlock journey mapping. Each zone becomes a node in the "
+                "Sankey flow diagram."
+            ),
+        }
+
+    # Aggregate path counts. zone_sequence_json is a list of zone names
+    # (or IDs) in visit order; we collapse adjacent duplicates so a
+    # customer who stayed in 'Aisle 1' for ages doesn't inflate it.
+    path_counts: dict[tuple[str, ...], int] = {}
+    durations: list[int] = []
+    zone_visits: dict[str, int] = {}
+    completed_count = 0   # journeys whose last zone is "counter"-ish
+    for j in journeys:
+        seq = j.zone_sequence_json or []
+        if not seq:
+            continue
+        compact: list[str] = []
+        for step in seq:
+            if not compact or compact[-1] != step:
+                compact.append(str(step))
+        for z in compact:
+            zone_visits[z] = zone_visits.get(z, 0) + 1
+        path_counts[tuple(compact)] = path_counts.get(tuple(compact), 0) + 1
+        if j.ended_at and j.started_at:
+            durations.append(int((j.ended_at - j.started_at).total_seconds()))
+        if any("counter" in (s or "").lower() or "checkout" in (s or "").lower() for s in compact):
+            completed_count += 1
+
+    total_journeys = len(journeys)
+    avg_duration = (sum(durations) // len(durations)) if durations else 0
+    completion_pct = round(completed_count / total_journeys * 100, 1) if total_journeys else 0
+
+    common_path = max(path_counts.items(), key=lambda kv: kv[1])[0] if path_counts else ()
+    # Most-skipped zone: zone with fewest visits relative to known set.
+    known_zones = {z.name for z in db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()}
+    skipped = []
+    for zn in known_zones:
+        visits = zone_visits.get(zn, 0)
+        if total_journeys > 0:
+            skipped.append((zn, visits / total_journeys))
+    most_skipped = min(skipped, key=lambda kv: kv[1])[0] if skipped else None
+
+    return {
+        "has_journey_data": True,
+        "total_journeys": total_journeys,
+        "avg_journey_seconds": avg_duration,
+        "completion_pct": completion_pct,
+        "common_path": list(common_path),
+        "most_skipped_zone": most_skipped,
+        "zone_visit_counts": zone_visits,
+        # Frontend renders this as Sankey-ish nodes + flows.
+        "top_paths": [
+            {"path": list(p), "count": c}
+            for p, c in sorted(path_counts.items(), key=lambda kv: -kv[1])[:5]
+        ],
+    }
+
+
+@router.get("/store/{store_id}/staff-timeline")
+def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
+                         _u=Depends(get_current_user)):
+    """Staffed/unstaffed periods for today, plus the current-status
+    flag the dashboard's gauge uses."""
+    from app.utils.business_hours import todays_session
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"has_data": False, "setup_hint": "No cameras attached."}
+
+    now = datetime.now(timezone.utc)
+    session_start, session_end = todays_session(store, now)
+    # `staff_present_pct` is a [0,1] metric per camera per ~minute. We
+    # treat the store as 'staffed' for a minute when ANY camera with a
+    # counter zone reports >= 0.5 in that minute.
+    rows = (
+        db.query(MetricSnapshot.period_start, MetricSnapshot.value)
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "staff_present_pct",
+                  MetricSnapshot.period_start >= session_start,
+                  MetricSnapshot.period_start <  session_end)
+          .order_by(MetricSnapshot.period_start).all()
+    )
+    if not rows:
+        return {
+            "has_data": False,
+            "setup_hint": "Mark a 'staff counter' zone on one camera to enable this panel.",
+            "today_pct": 0, "current_status": "unknown",
+            "gaps": [], "insights": [],
+        }
+
+    # Bucket into per-minute states.
+    minutes: dict[datetime, bool] = {}
+    for ts, val in rows:
+        m = ts.replace(second=0, microsecond=0)
+        minutes[m] = max(float(val or 0) >= 0.5, minutes.get(m, False))
+
+    staffed_minutes = sum(1 for v in minutes.values() if v)
+    total_minutes = len(minutes) or 1
+    today_pct = round(staffed_minutes / total_minutes * 100, 1)
+
+    # Gaps: contiguous runs of unstaffed minutes >= 5min.
+    sorted_minutes = sorted(minutes.items())
+    gaps: list[dict] = []
+    current_gap_start: datetime | None = None
+    for m, ok in sorted_minutes:
+        if not ok and current_gap_start is None:
+            current_gap_start = m
+        elif ok and current_gap_start is not None:
+            dur = int((m - current_gap_start).total_seconds() // 60)
+            if dur >= 5:
+                gaps.append({
+                    "start": current_gap_start.isoformat(),
+                    "end":   m.isoformat(),
+                    "duration_minutes": dur,
+                })
+            current_gap_start = None
+    # Trailing open gap (still unstaffed right now).
+    if current_gap_start is not None:
+        dur = int((sorted_minutes[-1][0] - current_gap_start).total_seconds() // 60)
+        if dur >= 5:
+            gaps.append({
+                "start": current_gap_start.isoformat(),
+                "end":   None,
+                "duration_minutes": dur,
+                "ongoing": True,
+            })
+
+    current_status = "staffed" if sorted_minutes and sorted_minutes[-1][1] else "unstaffed"
+
+    insights: list[str] = []
+    if gaps:
+        worst = max(gaps, key=lambda g: g["duration_minutes"])
+        insights.append(
+            f"Longest gap: {worst['duration_minutes']} min starting "
+            f"{worst['start'][11:16]}"
+        )
+    ongoing = next((g for g in gaps if g.get("ongoing")), None)
+    if ongoing:
+        insights.insert(0, f"🔴 Counter unstaffed for {ongoing['duration_minutes']} min RIGHT NOW")
+    if today_pct >= 90:
+        insights.append(f"Staff presence on target ({today_pct}% ≥ 90%)")
+    elif today_pct >= 70:
+        insights.append(f"Staff presence below target ({today_pct}% — target ≥ 90%)")
+    else:
+        insights.append(f"Staff presence well below target ({today_pct}% — target ≥ 90%)")
+
+    return {
+        "has_data": True,
+        "today_pct": today_pct,
+        "current_status": current_status,
+        "gaps": gaps,
+        # Per-minute timeline for the horizontal bar; True = staffed.
+        "timeline": [
+            {"minute": m.isoformat(), "staffed": bool(v)}
+            for m, v in sorted_minutes
+        ],
+        "insights": insights,
+    }
+
+
+@router.get("/store/{store_id}/zone-performance")
+def store_zone_performance(store_id: int, db: Session = Depends(get_db),
+                            _u=Depends(get_current_user)):
+    """Per-zone engagement + dwell ranking. Powers the visual-
+    merchandising panel."""
+    from app.models import Zone
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"zones": [], "setup_hint": "No cameras attached."}
+
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    if not zones:
+        return {
+            "zones": [],
+            "setup_hint": (
+                "Draw zones on your cameras to unlock per-aisle metrics. "
+                "Each zone you draw becomes a row here."
+            ),
+        }
+
+    # Average dwell per zone.
+    dwell_rows = dict(
+        db.query(MetricSnapshot.zone_id, func.avg(MetricSnapshot.value))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "dwell_seconds",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by(MetricSnapshot.zone_id).all()
+    )
+    # Engagement = visits to this zone / total store visits.
+    visit_rows = dict(
+        db.query(MetricSnapshot.zone_id, func.sum(MetricSnapshot.value))
+          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                  MetricSnapshot.metric_type == "zone_visit_count",
+                  MetricSnapshot.period_start >= week_start,
+                  MetricSnapshot.period_start <  now)
+          .group_by(MetricSnapshot.zone_id).all()
+    )
+    total_visits = sum(float(v or 0) for v in visit_rows.values()) or 1.0
+
+    zone_rows: list[dict] = []
+    for z in zones:
+        # Skip non-aisle/non-product-display zones (we want
+        # merchandising perf, not the staff counter or checkout).
+        tags = z.detection_types_json or []
+        if "aisle" not in tags and "dwell" not in tags and "window" not in tags:
+            continue
+        dwell_s = float(dwell_rows.get(z.id) or 0)
+        visits  = float(visit_rows.get(z.id) or 0)
+        engagement_pct = round(visits / total_visits * 100, 1) if total_visits else 0
+        zone_rows.append({
+            "zone_id": z.id,
+            "name":    z.name,
+            "engagement_pct": engagement_pct,
+            "avg_dwell_seconds": round(dwell_s, 1),
+            # Plain-English RAG bucket the frontend can colour by.
+            "rag": "green" if engagement_pct >= 70
+                   else "amber" if engagement_pct >= 40
+                   else "red",
+        })
+    zone_rows.sort(key=lambda r: -r["engagement_pct"])
+    for i, row in enumerate(zone_rows, 1):
+        row["rank"] = i
+
+    insights: list[str] = []
+    if zone_rows:
+        top = zone_rows[0]
+        insights.append(
+            f"🏆 Top performer: {top['name']} — "
+            f"{top['engagement_pct']}% engagement, "
+            f"{int(top['avg_dwell_seconds']) // 60}m{int(top['avg_dwell_seconds']) % 60}s avg dwell. "
+            f"Consider expanding display space."
+        )
+        weak = [r for r in zone_rows if r["engagement_pct"] < 40]
+        if weak:
+            w = weak[0]
+            insights.append(
+                f"⚠️ Underperformer: {w['name']} — only {w['engagement_pct']}% "
+                f"of visitors stop here. Recommendation: move to higher-traffic zone "
+                f"near entrance."
+            )
+        if zone_rows and zone_rows[0]["avg_dwell_seconds"] > 120:
+            insights.append(
+                "💡 High dwell zones drive engagement — keep them well-stocked "
+                "and well-lit."
+            )
+
+    return {
+        "zones": zone_rows,
+        "insights": insights,
+        "top_performer":  zone_rows[0]  if zone_rows else None,
+        "underperformer": zone_rows[-1] if zone_rows else None,
+    }
+
+
+@router.get("/store/{store_id}/scorecard")
+def store_scorecard(store_id: int, db: Session = Depends(get_db),
+                    _u=Depends(get_current_user)):
+    """Daily performance scorecard — today vs target vs yesterday
+    with RAG status per metric and an overall 0–100 score."""
+    from app.utils.business_hours import todays_session
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"rows": [], "overall_score": None, "overall_rag": "slate"}
+
+    now = datetime.now(timezone.utc)
+    today_open, today_close = todays_session(store, now)
+    today_end = min(now, today_close)
+    yest_open  = today_open  - timedelta(days=1)
+    yest_close = today_close - timedelta(days=1)
+
+    from app.models import VisitorTrack
+
+    def _sum(metric: str, t0, t1) -> float:
+        v = (db.query(func.sum(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1).scalar())
+        return float(v or 0)
+
+    def _avg(metric: str, t0, t1) -> float:
+        v = (db.query(func.avg(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1).scalar())
+        return float(v or 0)
+
+    def _max(metric: str, t0, t1) -> float:
+        v = (db.query(func.max(MetricSnapshot.value))
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1).scalar())
+        return float(v or 0)
+
+    def _unique(t0, t1) -> int:
+        return (db.query(func.count(VisitorTrack.id))
+                  .filter(VisitorTrack.camera_id.in_(cam_ids),
+                          VisitorTrack.first_seen >= t0,
+                          VisitorTrack.first_seen <  t1).scalar() or 0)
+
+    def _alerts(t0, t1) -> int:
+        return (db.query(func.count(Alert.id))
+                  .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+                  .filter(DetectionEvent.camera_id.in_(cam_ids),
+                          Alert.created_at >= t0,
+                          Alert.created_at <  t1).scalar() or 0)
+
+    def _rag(today: float, target: float, *,
+             higher_is_better: bool = True) -> str:
+        if today is None:
+            return "slate"
+        if higher_is_better:
+            if today >= target:        return "green"
+            if today >= 0.85 * target: return "amber"
+            return "red"
+        # Lower-is-better metric (queue wait, incidents).
+        if today <= target:         return "green"
+        if today <= 1.15 * target:  return "amber"
+        return "red"
+
+    # Targets from the spec; tunable per store later.
+    TARGET_VISITORS    = (store.capacity or 0) * 5 or 300   # ballpark
+    TARGET_PEAK_OCC    = (store.capacity or 30) * 0.7 or 30
+    TARGET_QUEUE_SEC   = 180        # 3 min
+    TARGET_STAFF_PCT   = 0.90
+    TARGET_INCIDENTS   = 5
+    TARGET_DWELL_SEC   = 180        # 3 min
+
+    today_visitors  = _unique(today_open, today_end)
+    yest_visitors   = _unique(yest_open,  yest_close)
+    today_peak_occ  = _max("occupancy", today_open, today_end)
+    yest_peak_occ   = _max("occupancy", yest_open,  yest_close)
+    today_queue_avg = _avg("queue_wait_seconds", today_open, today_end)
+    yest_queue_avg  = _avg("queue_wait_seconds", yest_open,  yest_close)
+    today_staff_pct = _avg("staff_present_pct",  today_open, today_end)
+    yest_staff_pct  = _avg("staff_present_pct",  yest_open,  yest_close)
+    today_alerts    = _alerts(today_open, today_end)
+    yest_alerts     = _alerts(yest_open,  yest_close)
+    today_dwell     = _avg("dwell_seconds", today_open, today_end)
+    yest_dwell      = _avg("dwell_seconds", yest_open,  yest_close)
+
+    rows = [
+        {
+            "metric": "Visitors", "today": round(today_visitors), "yesterday": round(yest_visitors),
+            "target": round(TARGET_VISITORS), "unit": "",
+            "rag": _rag(today_visitors, TARGET_VISITORS),
+            "higher_is_better": True,
+        },
+        {
+            "metric": "Peak Occupancy", "today": round(today_peak_occ), "yesterday": round(yest_peak_occ),
+            "target": round(TARGET_PEAK_OCC), "unit": "",
+            "rag": _rag(today_peak_occ, TARGET_PEAK_OCC),
+            "higher_is_better": True,
+        },
+        {
+            "metric": "Avg Queue Wait", "today": round(today_queue_avg / 60, 1),
+            "yesterday": round(yest_queue_avg / 60, 1),
+            "target": round(TARGET_QUEUE_SEC / 60, 1), "unit": "m",
+            "rag": _rag(today_queue_avg, TARGET_QUEUE_SEC, higher_is_better=False),
+            "higher_is_better": False,
+        },
+        {
+            "metric": "Staff Presence", "today": round(today_staff_pct * 100),
+            "yesterday": round(yest_staff_pct * 100),
+            "target": round(TARGET_STAFF_PCT * 100), "unit": "%",
+            "rag": _rag(today_staff_pct, TARGET_STAFF_PCT),
+            "higher_is_better": True,
+        },
+        {
+            "metric": "Incidents", "today": today_alerts, "yesterday": yest_alerts,
+            "target": TARGET_INCIDENTS, "unit": "",
+            "rag": _rag(today_alerts, TARGET_INCIDENTS, higher_is_better=False),
+            "higher_is_better": False,
+        },
+        {
+            "metric": "Avg Dwell Time", "today": round(today_dwell / 60, 1),
+            "yesterday": round(yest_dwell / 60, 1),
+            "target": round(TARGET_DWELL_SEC / 60, 1), "unit": "m",
+            "rag": _rag(today_dwell, TARGET_DWELL_SEC),
+            "higher_is_better": True,
+        },
+    ]
+
+    # Overall score — fraction-of-green weighted by row count, with
+    # amber counted as 0.5. Crude but actionable.
+    def _row_score(r) -> float:
+        return 1.0 if r["rag"] == "green" else 0.5 if r["rag"] == "amber" else 0.0
+    overall_score = int(round(sum(_row_score(r) for r in rows) / len(rows) * 100))
+    overall_rag = ("green" if overall_score >= 80 else
+                   "amber" if overall_score >= 60 else "red")
+    score_label = ("Excellent" if overall_score >= 90 else
+                   "Good" if overall_score >= 75 else
+                   "Needs attention" if overall_score >= 50 else
+                   "Poor")
+
+    return {
+        "rows": rows,
+        "overall_score": overall_score,
+        "overall_rag": overall_rag,
+        "score_label": score_label,
+        "as_of": now.isoformat(),
+    }
+
+
 # ---- Week summary + detector activity (May-2026 redesign) ---------
 
 @router.get("/store/{store_id}/week-summary")

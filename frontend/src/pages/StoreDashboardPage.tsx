@@ -11,11 +11,22 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
-  Badge, Card, PageHeader, Skeleton, StatusLight, Trend,
+  Card, PageHeader, Skeleton, StatusLight, Trend,
 } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
 import { labelForDetector } from '@/lib/detectorLabels'
+import StoreBIPanels from '@/components/StoreBIPanels'
+
+// Parse a camera_id out of the live tile's heatmap thumb URL.
+// Format: /api/analytics/heatmap/{cam}/image?...
+// Used by the heatmap-intelligence panel so it knows which camera's
+// PNG to render. Returns null if no thumb URL was emitted.
+function extractFirstCameraId(url: string | null): number | null {
+  if (!url) return null
+  const m = url.match(/\/heatmap\/(\d+)\//)
+  return m ? Number(m[1]) : null
+}
 
 interface LiveResponse {
   store_id: number
@@ -229,48 +240,18 @@ export default function StoreDashboardPage() {
         </div>
       </section>
 
-      {/* AISLES + ALERTS + FOOTFALL */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {t.top_aisles?.visible && (
-          <Card className="p-4">
-            <SectionTitle>Top aisles by dwell time</SectionTitle>
-            {(t.top_aisles.value as any[]).length === 0 && (
-              <div className="text-slate-400 text-sm">No dwell data yet today.</div>
-            )}
-            {(t.top_aisles.value as any[]).map((a, i) => (
-              <div key={a.zone_id} className="flex items-center justify-between py-1">
-                <span className="text-sm">{i + 1}. {a.zone_name}</span>
-                <Badge color="sky">{a.avg_dwell_seconds}s</Badge>
-              </div>
-            ))}
-          </Card>
-        )}
-
-        <Card className="p-4">
-          <SectionTitle>Alerts today by type</SectionTitle>
-          <AlertsByType data={(t.alerts_today_by_type?.value as Record<string, number>) || {}} />
-        </Card>
-
-        <Card className="p-4">
-          <SectionTitle>Hourly footfall today</SectionTitle>
-          <Sparkline points={(t.hourly_footfall_today?.value as { hour: number; value: number }[]) || []} />
-        </Card>
-      </div>
-
-      {/* HEATMAP */}
-      {t.heatmap_thumb_url?.visible && (
-        <section>
-          <SectionTitle>Footfall heatmap</SectionTitle>
-          <Card className="p-3">
-            <Link to={`/heatmaps/${storeId}`} className="block">
-              <img src={t.heatmap_thumb_url.value as string} alt=""
-                   onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
-                   className="w-full max-w-xl rounded border" />
-              <div className="text-xs text-slate-500 mt-1">Click to expand · all cameras</div>
-            </Link>
-          </Card>
-        </section>
-      )}
+      {/* BI panels — six interactive insight cards replacing the
+          old "aisles + alerts + footfall" three-column row and the
+          standalone heatmap thumbnail. Each panel self-fetches,
+          self-refreshes every 30s, and is independently collapsible.
+          firstCameraId is parsed from the live tile's heatmap URL
+          so the heatmap-intelligence panel can render the thumb. */}
+      <section>
+        <SectionTitle>Store intelligence</SectionTitle>
+        <StoreBIPanels
+          storeId={storeId}
+          firstCameraId={extractFirstCameraId(t.heatmap_thumb_url?.value as string | null)} />
+      </section>
 
       {/* SECTION 3 — THIS WEEK (7-day bars + detector activity table) */}
       <WeekSection storeId={storeId} />
@@ -312,29 +293,6 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed }: {
         </span>
       )}
     </Card>
-  )
-}
-
-function AlertsByType({ data }: { data: Record<string, number> }) {
-  const entries = Object.entries(data).sort((a, b) => b[1] - a[1])
-  if (entries.length === 0) {
-    return <div className="text-slate-400 text-sm">No alerts today.</div>
-  }
-  const max = Math.max(...entries.map(e => e[1]))
-  return (
-    <div className="space-y-1">
-      {entries.map(([k, v]) => (
-        <div key={k} className="flex items-center gap-2 text-sm">
-          {/* Operators see "Loss Prevention", not "shrinkage" */}
-          <div className="w-36 truncate" title={k}>{labelForDetector(k)}</div>
-          <div className="flex-1 bg-slate-100 rounded h-4 relative">
-            <div className="absolute inset-y-0 left-0 bg-sky-500 rounded"
-                 style={{ width: `${(v / max) * 100}%` }} />
-          </div>
-          <div className="w-8 text-right">{v}</div>
-        </div>
-      ))}
-    </div>
   )
 }
 
@@ -537,29 +495,6 @@ function SeverityBadge({ sev }: { sev: AlertRow['severity'] }) {
   const m = map[sev] || map.info
   return (
     <span className={'text-[10px] px-1.5 py-0.5 rounded ' + m.cls}>{m.label}</span>
-  )
-}
-
-function Sparkline({ points }: { points: { hour: number; value: number }[] }) {
-  if (points.length < 2) {
-    return <div className="text-slate-400 text-sm">Not enough data yet.</div>
-  }
-  const W = 320, H = 80
-  const max = Math.max(...points.map(p => p.value), 1)
-  const path = points.map((p, i) => {
-    const x = (i / (points.length - 1)) * W
-    const y = H - (p.value / max) * H
-    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-  }).join(' ')
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-24">
-      <path d={path} stroke="#0284c7" strokeWidth={2} fill="none" />
-      {points.map((p, i) => {
-        const x = (i / (points.length - 1)) * W
-        const y = H - (p.value / max) * H
-        return <circle key={i} cx={x} cy={y} r={1.5} fill="#0284c7" />
-      })}
-    </svg>
   )
 }
 

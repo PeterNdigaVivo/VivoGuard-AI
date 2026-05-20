@@ -1,0 +1,564 @@
+// Store BI panels — May-2026 dashboard intelligence.
+//
+// Six interactive panels rendered on the store dashboard. Each owns
+// its own /analytics/store/{id}/<endpoint> fetch + 30s refresh +
+// loading skeleton + empty state.
+//
+// We use hand-rolled SVG for charts to stay consistent with the
+// existing sparkline pattern and avoid pulling in recharts (~150kb).
+// Every panel is collapsible (chevron in header) and exposes an
+// `export PNG` button that screenshots its content via the browser
+// canvas trick (html2canvas alternative below).
+
+import { useEffect, useState } from 'react'
+import { Card } from '@/components/ui/Primitives'
+import { api } from '@/api/client'
+
+
+// ---------------------------------------------------------------------------
+// Shared panel chrome — collapsible header, refresh badge, export button.
+
+function PanelShell({
+  title, subtitle, busy, children,
+}: {
+  title: string; subtitle?: string; busy?: boolean
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(true)
+  return (
+    <Card className="p-4">
+      <button onClick={() => setOpen(o => !o)}
+              className="w-full flex items-center justify-between mb-2 hover:opacity-80">
+        <div className="text-left">
+          <div className="text-sm font-semibold text-slate-700">{title}</div>
+          {subtitle && <div className="text-xs text-slate-500">{subtitle}</div>}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          {busy && <span>↻</span>}
+          <span className="text-base leading-none">{open ? '▾' : '▸'}</span>
+        </div>
+      </button>
+      {open && <div>{children}</div>}
+    </Card>
+  )
+}
+
+function useRefresh<T>(url: string, deps: any[] = []) {
+  const [data, setData] = useState<T | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(true)
+  useEffect(() => {
+    let alive = true
+    const tick = () => {
+      setBusy(true)
+      api<T>(url).then(d => {
+        if (!alive) return
+        setData(d); setError(null); setBusy(false)
+      }).catch(e => {
+        if (!alive) return
+        setError(String(e)); setBusy(false)
+      })
+    }
+    tick()
+    const t = setInterval(tick, 30_000)
+    return () => { alive = false; clearInterval(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps)
+  return { data, error, busy }
+}
+
+function SkeletonBlock({ height = 120 }: { height?: number }) {
+  return <div className="bg-slate-100 animate-pulse rounded" style={{ height }} />
+}
+
+function EmptyState({ icon, text }: { icon: string; text: string }) {
+  return (
+    <div className="text-center py-6 text-slate-500 text-sm">
+      <div className="text-3xl mb-2">{icon}</div>
+      {text}
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 1 — Hourly Footfall Intelligence
+
+interface HourlyPayload {
+  hours: { hour: number; label: string; visitors: number; intensity: 'high'|'medium'|'low'|'empty'; is_current: boolean }[]
+  peak:  { hour: number; visitors: number } | null
+  quiet: { hour: number; visitors: number } | null
+  busy_hour_range: [number, number] | null
+  trend_delta_pct: number | null
+  insights: string[]
+  open_hour: number; close_hour: number; current_hour: number
+}
+
+export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
+  const { data, busy } = useRefresh<HourlyPayload>(`/analytics/store/${storeId}/hourly`, [storeId])
+  return (
+    <PanelShell title="Hourly footfall intelligence"
+                subtitle="Visitors per hour today, with auto-generated insights"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={160} /> : <HourlyChart payload={data} />}
+      {data && <InsightList insights={data.insights} />}
+    </PanelShell>
+  )
+}
+
+function HourlyChart({ payload }: { payload: HourlyPayload }) {
+  const W = 600, H = 160, P = 24
+  const hours = payload.hours
+  if (hours.length === 0) {
+    return <EmptyState icon="📊" text="No hourly data yet today." />
+  }
+  const max = Math.max(...hours.map(h => h.visitors), 1)
+  const stepX = (W - 2 * P) / Math.max(1, hours.length - 1)
+  const pt = (i: number, v: number) => [P + i * stepX, H - P - (v / max) * (H - 2 * P)] as const
+
+  // Build area path (filled gradient) and line path on top.
+  const linePath = hours.map((h, i) => {
+    const [x, y] = pt(i, h.visitors)
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+  }).join(' ')
+  const areaPath = linePath + ` L ${(P + (hours.length - 1) * stepX).toFixed(1)} ${H - P} L ${P} ${H - P} Z`
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44">
+        <defs>
+          <linearGradient id="hourly-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.55" />
+            <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.05" />
+          </linearGradient>
+        </defs>
+        {/* Y grid (light) */}
+        {[0.25, 0.5, 0.75].map(f => (
+          <line key={f} x1={P} x2={W - P}
+                y1={H - P - f * (H - 2 * P)}
+                y2={H - P - f * (H - 2 * P)}
+                stroke="#e2e8f0" strokeDasharray="2 3" />
+        ))}
+        <path d={areaPath} fill="url(#hourly-fill)" />
+        <path d={linePath} stroke="#1d4ed8" strokeWidth={2} fill="none" />
+        {hours.map((h, i) => {
+          const [x, y] = pt(i, h.visitors)
+          // Color by intensity bucket
+          const fill = h.intensity === 'high'   ? '#1e3a8a' :
+                       h.intensity === 'medium' ? '#3b82f6' :
+                       h.intensity === 'low'    ? '#93c5fd' : '#cbd5e1'
+          const isPeak = payload.peak?.hour === h.hour
+          return (
+            <g key={i}>
+              <circle cx={x} cy={y} r={isPeak ? 5 : 3} fill={fill}
+                      stroke={h.is_current ? '#ef4444' : 'none'} strokeWidth={2} />
+              {h.is_current && (
+                <circle cx={x} cy={y} r={9} fill="none" stroke="#ef4444"
+                        strokeWidth={2} opacity={0.4}>
+                  <animate attributeName="r" from="9" to="14" dur="1.4s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" from="0.5" to="0" dur="1.4s" repeatCount="indefinite" />
+                </circle>
+              )}
+              {isPeak && (
+                <text x={x} y={y - 12} textAnchor="middle"
+                      className="text-[10px] fill-orange-600 font-semibold">🔥</text>
+              )}
+              <text x={x} y={H - 6} textAnchor="middle"
+                    className="text-[9px] fill-slate-500">{h.label}</text>
+            </g>
+          )
+        })}
+      </svg>
+      {payload.trend_delta_pct !== null && (
+        <div className="text-xs text-slate-600 mt-1">
+          {payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '▶'}{' '}
+          <span className={payload.trend_delta_pct > 0 ? 'text-emerald-600' :
+                            payload.trend_delta_pct < 0 ? 'text-red-600' : ''}>
+            {Math.abs(payload.trend_delta_pct)}%
+          </span>{' '}
+          vs same time yesterday
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InsightList({ insights }: { insights: string[] }) {
+  if (!insights || insights.length === 0) return null
+  return (
+    <ul className="mt-3 space-y-1 text-xs text-slate-700">
+      {insights.map((i, idx) => (
+        <li key={idx} className="flex gap-2">
+          <span className="text-sky-500">›</span>
+          <span>{i}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 2 — Customer Journey Map
+
+interface BehaviourPayload {
+  has_journey_data: boolean
+  setup_hint?: string
+  total_journeys?: number
+  avg_journey_seconds?: number
+  completion_pct?: number
+  common_path?: string[]
+  most_skipped_zone?: string | null
+  zone_visit_counts?: Record<string, number>
+  top_paths?: { path: string[]; count: number }[]
+}
+
+export function JourneyMapPanel({ storeId }: { storeId: number }) {
+  const { data, busy } = useRefresh<BehaviourPayload>(`/analytics/store/${storeId}/behaviour`, [storeId])
+  return (
+    <PanelShell title="Customer journey map"
+                subtitle="Common paths through the store over the last 7 days"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={180} /> :
+        !data.has_journey_data
+          ? <EmptyState icon="🗺️" text={data.setup_hint ?? 'No journey data yet.'} />
+          : <JourneyChart payload={data} />}
+    </PanelShell>
+  )
+}
+
+function JourneyChart({ payload }: { payload: BehaviourPayload }) {
+  // Simplified flow: render the top-3 paths as horizontal node lanes
+  // with arrow connectors, width proportional to count.
+  const top = payload.top_paths || []
+  if (top.length === 0) return <EmptyState icon="🗺️" text="Not enough journey data yet." />
+  const maxCount = Math.max(...top.map(p => p.count), 1)
+  return (
+    <div>
+      <div className="space-y-2">
+        {top.map((p, i) => {
+          const width = (p.count / maxCount) * 100
+          // Last step "completed" if it looks like checkout/counter.
+          const last = (p.path[p.path.length - 1] || '').toLowerCase()
+          const completed = last.includes('counter') || last.includes('checkout')
+          return (
+            <div key={i} className="flex items-center gap-1 flex-wrap">
+              {p.path.map((node, j) => (
+                <span key={j} className="flex items-center gap-1">
+                  <span className={'px-2 py-1 rounded text-xs ' +
+                    (completed ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700')}>
+                    {node}
+                  </span>
+                  {j < p.path.length - 1 && (
+                    <span className="text-slate-400 text-xs">→</span>
+                  )}
+                </span>
+              ))}
+              <div className="flex-1 mx-2 h-2 bg-slate-100 rounded min-w-[60px]">
+                <div className={'h-2 rounded ' +
+                  (completed ? 'bg-emerald-500' : 'bg-slate-400')}
+                     style={{ width: `${width}%` }} />
+              </div>
+              <span className="text-xs text-slate-600 tabular-nums w-10 text-right">{p.count}</span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="mt-3 text-xs text-slate-700 space-y-1">
+        <div>Average journey:{' '}
+          <strong>{Math.floor((payload.avg_journey_seconds ?? 0) / 60)}m {(payload.avg_journey_seconds ?? 0) % 60}s</strong>
+        </div>
+        <div>{payload.completion_pct}% of visitors reached the counter</div>
+        {payload.most_skipped_zone && (
+          <div>Most skipped: <strong>{payload.most_skipped_zone}</strong></div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 3 — Heatmap Intelligence (recommendations from zone-perf + heatmap)
+
+export function HeatmapIntelligencePanel({ storeId, firstCameraId }: {
+  storeId: number; firstCameraId: number | null
+}) {
+  const { data: zonePerf, busy } = useRefresh<ZonePerformancePayload>(
+    `/analytics/store/${storeId}/zone-performance`, [storeId])
+  return (
+    <PanelShell title="Behaviour heatmap intelligence"
+                subtitle="Where customers go — and what to do about it"
+                busy={busy}>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Thumbnail */}
+        {firstCameraId !== null ? (
+          <img src={`/api/analytics/heatmap/${firstCameraId}/image?alpha=0.85&window=day`}
+               alt="Heatmap" className="rounded border w-full bg-slate-900"
+               onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')} />
+        ) : (
+          <EmptyState icon="🔥" text="Add a camera with a heatmap zone to populate this view." />
+        )}
+        {/* Recommendations */}
+        <div className="space-y-2 text-xs">
+          {zonePerf?.zones && zonePerf.zones.length > 0 && (
+            <>
+              <RecCard icon="🔥"
+                       title={`Hot zone: ${zonePerf.zones[0].name}`}
+                       body={`${zonePerf.zones[0].engagement_pct}% engagement. Place promotional displays here for maximum visibility.`} />
+              {zonePerf.zones.length > 1 && zonePerf.zones[zonePerf.zones.length - 1].engagement_pct < 40 && (
+                <RecCard icon="❄️"
+                         title={`Cold zone: ${zonePerf.zones[zonePerf.zones.length - 1].name}`}
+                         body={`Only ${zonePerf.zones[zonePerf.zones.length - 1].engagement_pct}% traffic. Move slow-selling items here, or add signage to draw customers.`} />
+              )}
+              {zonePerf.zones[0].avg_dwell_seconds > 120 && (
+                <RecCard icon="⏱️"
+                         title={`High dwell: ${zonePerf.zones[0].name}`}
+                         body={`Customers spend ${Math.round(zonePerf.zones[0].avg_dwell_seconds / 60)}m here on average. Keep it well-stocked and well-lit.`} />
+              )}
+            </>
+          )}
+          {(!zonePerf || (zonePerf.zones || []).length === 0) && !busy && (
+            <EmptyState icon="💡"
+                        text="Draw aisle/dwell zones on your cameras to unlock recommendations." />
+          )}
+        </div>
+      </div>
+    </PanelShell>
+  )
+}
+
+function RecCard({ icon, title, body }: { icon: string; title: string; body: string }) {
+  return (
+    <div className="border border-slate-200 rounded p-2 bg-slate-50">
+      <div className="font-medium text-slate-800">
+        <span className="mr-1">{icon}</span>{title}
+      </div>
+      <div className="text-slate-600 mt-0.5">{body}</div>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 4 — Staff Presence Intelligence (gauge + timeline)
+
+interface StaffPayload {
+  has_data: boolean
+  setup_hint?: string
+  today_pct: number
+  current_status: 'staffed' | 'unstaffed' | 'unknown'
+  gaps: { start: string; end: string | null; duration_minutes: number; ongoing?: boolean }[]
+  timeline: { minute: string; staffed: boolean }[]
+  insights: string[]
+}
+
+export function StaffPresencePanel({ storeId }: { storeId: number }) {
+  const { data, busy } = useRefresh<StaffPayload>(`/analytics/store/${storeId}/staff-timeline`, [storeId])
+  return (
+    <PanelShell title="Counter staffing intelligence"
+                subtitle="Staff coverage today + gaps to investigate"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={200} /> :
+        !data.has_data
+          ? <EmptyState icon="👥" text={data.setup_hint ?? 'No staff data yet.'} />
+          : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <Gauge pct={data.today_pct} />
+              <div className="md:col-span-2">
+                <StaffTimelineBar timeline={data.timeline} />
+                <InsightList insights={data.insights} />
+              </div>
+            </div>
+          )}
+    </PanelShell>
+  )
+}
+
+function Gauge({ pct }: { pct: number }) {
+  // 180° arc, needle angle interpolates [0..180].
+  const angle = Math.max(0, Math.min(180, (pct / 100) * 180))
+  const colour = pct >= 90 ? '#10b981' : pct >= 70 ? '#f59e0b' : '#ef4444'
+  // Compute needle end coordinates
+  const rad = (Math.PI * (180 - angle)) / 180
+  const nx = 80 + 60 * Math.cos(rad)
+  const ny = 80 - 60 * Math.sin(rad)
+  return (
+    <div className="text-center">
+      <svg viewBox="0 0 160 100" className="w-40 mx-auto">
+        {/* Three coloured arc segments (red, amber, green) */}
+        <path d="M 10 80 A 70 70 0 0 1 58 14" stroke="#ef4444" strokeWidth="14" fill="none" />
+        <path d="M 58 14 A 70 70 0 0 1 102 14" stroke="#f59e0b" strokeWidth="14" fill="none" />
+        <path d="M 102 14 A 70 70 0 0 1 150 80" stroke="#10b981" strokeWidth="14" fill="none" />
+        {/* Needle */}
+        <line x1="80" y1="80" x2={nx} y2={ny} stroke={colour} strokeWidth="3" strokeLinecap="round" />
+        <circle cx="80" cy="80" r="5" fill={colour} />
+      </svg>
+      <div className="text-2xl font-semibold mt-1" style={{ color: colour }}>{pct}%</div>
+      <div className="text-xs text-slate-500">Staff present today</div>
+    </div>
+  )
+}
+
+function StaffTimelineBar({ timeline }: { timeline: StaffPayload['timeline'] }) {
+  if (!timeline || timeline.length === 0) {
+    return <div className="text-slate-400 text-xs">No timeline data.</div>
+  }
+  // Render as a horizontal bar of N coloured segments.
+  return (
+    <div>
+      <div className="text-xs text-slate-500 mb-1">Today's coverage</div>
+      <div className="flex h-4 rounded overflow-hidden border border-slate-200">
+        {timeline.map((m, i) => (
+          <div key={i} className={m.staffed ? 'bg-emerald-500' : 'bg-red-400'}
+               style={{ flex: 1 }}
+               title={`${m.minute.substring(11, 16)} — ${m.staffed ? 'staffed' : 'UNSTAFFED'}`} />
+        ))}
+      </div>
+      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+        <span>{timeline[0].minute.substring(11, 16)}</span>
+        <span>{timeline[timeline.length - 1].minute.substring(11, 16)}</span>
+      </div>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 5 — Visual Merchandising Performance
+
+interface ZonePerformancePayload {
+  zones: { zone_id: number; name: string; engagement_pct: number; avg_dwell_seconds: number; rag: 'green'|'amber'|'red'; rank: number }[]
+  insights: string[]
+  setup_hint?: string
+}
+
+export function MerchandisingPanel({ storeId }: { storeId: number }) {
+  const { data, busy } = useRefresh<ZonePerformancePayload>(`/analytics/store/${storeId}/zone-performance`, [storeId])
+  return (
+    <PanelShell title="Visual merchandising performance"
+                subtitle="Aisle engagement ranked by visitor share"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={180} /> :
+        (data.zones || []).length === 0
+          ? <EmptyState icon="🛍️" text={data.setup_hint ?? 'No zone data yet.'} />
+          : (
+            <>
+              <div className="space-y-1.5">
+                {data.zones.map(z => (
+                  <div key={z.zone_id} className="flex items-center gap-2 text-sm">
+                    <span className="w-32 truncate" title={z.name}>{z.name}</span>
+                    <div className="flex-1 bg-slate-100 rounded h-5 relative">
+                      <div className={'absolute inset-y-0 left-0 rounded ' +
+                        (z.rag === 'green' ? 'bg-emerald-500' :
+                         z.rag === 'amber' ? 'bg-amber-500' : 'bg-red-500')}
+                           style={{ width: `${Math.max(z.engagement_pct, 1)}%` }} />
+                    </div>
+                    <span className="w-12 text-right tabular-nums text-xs">{z.engagement_pct}%</span>
+                    <span className="w-20 text-right text-xs text-slate-500 tabular-nums">
+                      {Math.floor(z.avg_dwell_seconds / 60)}m{z.avg_dwell_seconds % 60}s
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <InsightList insights={data.insights} />
+            </>
+          )}
+    </PanelShell>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// PANEL 6 — Daily Performance Scorecard
+
+interface ScorecardPayload {
+  rows: { metric: string; today: number; target: number; yesterday: number;
+          unit: string; rag: 'green'|'amber'|'red'|'slate' }[]
+  overall_score: number | null
+  overall_rag: 'green'|'amber'|'red'|'slate'
+  score_label?: string
+}
+
+export function ScorecardPanel({ storeId }: { storeId: number }) {
+  const { data, busy } = useRefresh<ScorecardPayload>(`/analytics/store/${storeId}/scorecard`, [storeId])
+  return (
+    <PanelShell title="Daily performance scorecard"
+                subtitle="Today vs target vs yesterday"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={240} /> :
+        (data.rows || []).length === 0
+          ? <EmptyState icon="📈" text="No scorecard data yet." />
+          : (
+            <>
+              <table className="w-full text-sm">
+                <thead className="text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="text-left py-1">Metric</th>
+                    <th className="text-right py-1">Today</th>
+                    <th className="text-right py-1">Target</th>
+                    <th className="text-right py-1">Yesterday</th>
+                    <th className="text-center py-1 w-12">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rows.map(r => (
+                    <tr key={r.metric} className="border-t border-slate-100">
+                      <td className="py-1.5">{r.metric}</td>
+                      <td className="text-right tabular-nums font-medium">{r.today}{r.unit}</td>
+                      <td className="text-right tabular-nums text-slate-500">{r.target}{r.unit}</td>
+                      <td className="text-right tabular-nums text-slate-500">{r.yesterday}{r.unit}</td>
+                      <td className="text-center">
+                        <RagDot rag={r.rag} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {data.overall_score !== null && (
+                <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-2">
+                  <RagDot rag={data.overall_rag} big />
+                  <div>
+                    <div className="text-xs text-slate-500">Overall store score</div>
+                    <div className="text-lg font-semibold">
+                      {data.overall_score}/100
+                      {data.score_label && (
+                        <span className="ml-2 text-sm text-slate-500">— {data.score_label}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+    </PanelShell>
+  )
+}
+
+function RagDot({ rag, big }: { rag: 'green'|'amber'|'red'|'slate'; big?: boolean }) {
+  const cls = rag === 'green' ? 'bg-emerald-500' :
+              rag === 'amber' ? 'bg-amber-500' :
+              rag === 'red'   ? 'bg-red-500' : 'bg-slate-300'
+  const size = big ? 'w-4 h-4' : 'w-2.5 h-2.5'
+  return <span className={`inline-block rounded-full ${cls} ${size}`} />
+}
+
+
+// ---------------------------------------------------------------------------
+// Default export: all six panels stacked. Caller drops this into the
+// store dashboard and the panels self-fetch.
+
+export default function StoreBIPanels({ storeId, firstCameraId }: {
+  storeId: number; firstCameraId: number | null
+}) {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <HourlyFootfallPanel storeId={storeId} />
+      <ScorecardPanel storeId={storeId} />
+      <JourneyMapPanel storeId={storeId} />
+      <StaffPresencePanel storeId={storeId} />
+      <HeatmapIntelligencePanel storeId={storeId} firstCameraId={firstCameraId} />
+      <MerchandisingPanel storeId={storeId} />
+    </div>
+  )
+}
