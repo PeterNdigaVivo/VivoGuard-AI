@@ -107,43 +107,81 @@ export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
 }
 
 function HourlyChart({ payload }: { payload: HourlyPayload }) {
-  const W = 600, H = 160, P = 24
+  const W = 600, H = 180, P_L = 32, P_R = 16, P_T = 16, P_B = 28
   const hours = payload.hours
   if (hours.length === 0) {
     return <EmptyState icon="📊" text="No hourly data yet today." />
   }
+  const total = hours.reduce((sum, h) => sum + h.visitors, 0)
+  // When every bucket reads 0 the area collapses to the baseline and
+  // the user sees a "blank" chart. Surface a real empty state instead
+  // — store managers were confused by what they thought was a render
+  // bug.
+  if (total === 0) {
+    return (
+      <EmptyState icon="📊"
+                  text="No visitors recorded yet today. Bars appear here as customers arrive." />
+    )
+  }
   const max = Math.max(...hours.map(h => h.visitors), 1)
-  const stepX = (W - 2 * P) / Math.max(1, hours.length - 1)
-  const pt = (i: number, v: number) => [P + i * stepX, H - P - (v / max) * (H - 2 * P)] as const
+  // Width per "slot" (between two adjacent hour ticks). At 12 hours
+  // (09:00-21:00) and W=600, P_L=32, P_R=16 → 552/11 ≈ 50px each.
+  const innerW = W - P_L - P_R
+  const innerH = H - P_T - P_B
+  const stepX = innerW / Math.max(1, hours.length - 1)
 
-  // Build area path (filled gradient) and line path on top.
-  const linePath = hours.map((h, i) => {
-    const [x, y] = pt(i, h.visitors)
-    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-  }).join(' ')
-  const areaPath = linePath + ` L ${(P + (hours.length - 1) * stepX).toFixed(1)} ${H - P} L ${P} ${H - P} Z`
+  const xAt = (i: number) => P_L + i * stepX
+  const yAt = (v: number) => P_T + innerH - (v / max) * innerH
+
+  // Build the area + line paths. Line first (M then L), then close
+  // the area down to the baseline with two L commands + Z.
+  const baseline = P_T + innerH
+  const lineCmds = hours.map((h, i) =>
+    `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(h.visitors).toFixed(1)}`,
+  ).join(' ')
+  const areaCmds =
+    lineCmds
+    + ` L ${xAt(hours.length - 1).toFixed(1)} ${baseline.toFixed(1)}`
+    + ` L ${xAt(0).toFixed(1)} ${baseline.toFixed(1)} Z`
+
+  // Y-axis tick values. Round to "nice" numbers so the gridlines
+  // sit on whole-visitor counts even at low scale.
+  const yTicks = niceTicks(0, max, 4)
 
   return (
     <div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44">
+      <svg viewBox={`0 0 ${W} ${H}`}
+           preserveAspectRatio="none"
+           className="w-full h-44">
         <defs>
           <linearGradient id="hourly-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.55" />
+            <stop offset="0%"   stopColor="#3b82f6" stopOpacity="0.55" />
             <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.05" />
           </linearGradient>
         </defs>
-        {/* Y grid (light) */}
-        {[0.25, 0.5, 0.75].map(f => (
-          <line key={f} x1={P} x2={W - P}
-                y1={H - P - f * (H - 2 * P)}
-                y2={H - P - f * (H - 2 * P)}
-                stroke="#e2e8f0" strokeDasharray="2 3" />
-        ))}
-        <path d={areaPath} fill="url(#hourly-fill)" />
-        <path d={linePath} stroke="#1d4ed8" strokeWidth={2} fill="none" />
+
+        {/* Y-axis grid + tick labels */}
+        {yTicks.map((tv, i) => {
+          const y = yAt(tv)
+          return (
+            <g key={i}>
+              <line x1={P_L} x2={W - P_R} y1={y} y2={y}
+                    stroke="#e2e8f0" strokeDasharray="2 3" />
+              <text x={P_L - 6} y={y + 3} textAnchor="end"
+                    fontSize="10" fill="#64748b">{tv}</text>
+            </g>
+          )
+        })}
+
+        {/* Filled area + line */}
+        <path d={areaCmds} fill="url(#hourly-fill)" stroke="none" />
+        <path d={lineCmds} stroke="#1d4ed8" strokeWidth={2} fill="none"
+              strokeLinejoin="round" strokeLinecap="round" />
+
+        {/* Per-hour dots + peak marker + current pulse + axis labels */}
         {hours.map((h, i) => {
-          const [x, y] = pt(i, h.visitors)
-          // Color by intensity bucket
+          const x = xAt(i)
+          const y = yAt(h.visitors)
           const fill = h.intensity === 'high'   ? '#1e3a8a' :
                        h.intensity === 'medium' ? '#3b82f6' :
                        h.intensity === 'low'    ? '#93c5fd' : '#cbd5e1'
@@ -154,26 +192,27 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
                       stroke={h.is_current ? '#ef4444' : 'none'} strokeWidth={2} />
               {h.is_current && (
                 <circle cx={x} cy={y} r={9} fill="none" stroke="#ef4444"
-                        strokeWidth={2} opacity={0.4}>
+                        strokeWidth={2} opacity={0.5}>
                   <animate attributeName="r" from="9" to="14" dur="1.4s" repeatCount="indefinite" />
                   <animate attributeName="opacity" from="0.5" to="0" dur="1.4s" repeatCount="indefinite" />
                 </circle>
               )}
               {isPeak && (
                 <text x={x} y={y - 12} textAnchor="middle"
-                      className="text-[10px] fill-orange-600 font-semibold">🔥</text>
+                      fontSize="12">🔥</text>
               )}
-              <text x={x} y={H - 6} textAnchor="middle"
-                    className="text-[9px] fill-slate-500">{h.label}</text>
+              <text x={x} y={H - 8} textAnchor="middle"
+                    fontSize="10" fill="#64748b">{h.label}</text>
             </g>
           )
         })}
       </svg>
       {payload.trend_delta_pct !== null && (
         <div className="text-xs text-slate-600 mt-1">
-          {payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '▶'}{' '}
+          {payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '→'}{' '}
           <span className={payload.trend_delta_pct > 0 ? 'text-emerald-600' :
-                            payload.trend_delta_pct < 0 ? 'text-red-600' : ''}>
+                            payload.trend_delta_pct < 0 ? 'text-red-600' :
+                            'text-slate-500'}>
             {Math.abs(payload.trend_delta_pct)}%
           </span>{' '}
           vs same time yesterday
@@ -181,6 +220,17 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
       )}
     </div>
   )
+}
+
+// Pick `count` round numbers between 0 and `max` for Y-axis ticks.
+// Avoids "1.3, 2.6, 3.9..." style fractional gridlines.
+function niceTicks(_min: number, max: number, count: number): number[] {
+  if (max <= 0) return [0]
+  const step = Math.max(1, Math.ceil(max / count))
+  const out: number[] = []
+  for (let v = 0; v <= max + 0.01; v += step) out.push(Math.round(v))
+  if (out[out.length - 1] < max) out.push(Math.ceil(max))
+  return out
 }
 
 function InsightList({ insights }: { insights: string[] }) {
@@ -472,19 +522,29 @@ export function MerchandisingPanel({ storeId }: { storeId: number }) {
 // ---------------------------------------------------------------------------
 // PANEL 6 — Daily Performance Scorecard
 
+interface ScorecardRow {
+  metric: string
+  today: number
+  yesterday: number
+  unit: string
+  higher_is_better: boolean
+  // delta semantics — null when there's no yesterday baseline.
+  direction: 'up' | 'down' | 'flat'
+  delta_pct: number | null
+  rag: 'green' | 'amber' | 'red' | 'slate'
+}
 interface ScorecardPayload {
-  rows: { metric: string; today: number; target: number; yesterday: number;
-          unit: string; rag: 'green'|'amber'|'red'|'slate' }[]
-  overall_score: number | null
-  overall_rag: 'green'|'amber'|'red'|'slate'
-  score_label?: string
+  rows: ScorecardRow[]
+  overall_direction: 'better' | 'same' | 'worse'
+  overall_rag: 'green' | 'amber' | 'red' | 'slate'
+  headline: string
 }
 
 export function ScorecardPanel({ storeId }: { storeId: number }) {
   const { data, busy } = useRefresh<ScorecardPayload>(`/analytics/store/${storeId}/scorecard`, [storeId])
   return (
     <PanelShell title="Daily performance scorecard"
-                subtitle="Today vs target vs yesterday"
+                subtitle="Today vs yesterday — same store, same window"
                 busy={busy}>
       {!data ? <SkeletonBlock height={240} /> :
         (data.rows || []).length === 0
@@ -496,9 +556,9 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                   <tr>
                     <th className="text-left py-1">Metric</th>
                     <th className="text-right py-1">Today</th>
-                    <th className="text-right py-1">Target</th>
                     <th className="text-right py-1">Yesterday</th>
-                    <th className="text-center py-1 w-12">Status</th>
+                    <th className="text-right py-1 w-24">Change</th>
+                    <th className="text-center py-1 w-10">RAG</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -506,8 +566,10 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                     <tr key={r.metric} className="border-t border-slate-100">
                       <td className="py-1.5">{r.metric}</td>
                       <td className="text-right tabular-nums font-medium">{r.today}{r.unit}</td>
-                      <td className="text-right tabular-nums text-slate-500">{r.target}{r.unit}</td>
                       <td className="text-right tabular-nums text-slate-500">{r.yesterday}{r.unit}</td>
+                      <td className="text-right tabular-nums">
+                        <ChangeCell row={r} />
+                      </td>
                       <td className="text-center">
                         <RagDot rag={r.rag} />
                       </td>
@@ -515,24 +577,37 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                   ))}
                 </tbody>
               </table>
-              {data.overall_score !== null && (
-                <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-2">
-                  <RagDot rag={data.overall_rag} big />
-                  <div>
-                    <div className="text-xs text-slate-500">Overall store score</div>
-                    <div className="text-lg font-semibold">
-                      {data.overall_score}/100
-                      {data.score_label && (
-                        <span className="ml-2 text-sm text-slate-500">— {data.score_label}</span>
-                      )}
-                    </div>
-                  </div>
+              <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-2">
+                <RagDot rag={data.overall_rag} big />
+                <div className="text-sm font-semibold text-slate-800">
+                  {data.headline}
                 </div>
-              )}
+              </div>
             </>
           )}
     </PanelShell>
   )
+}
+
+// One row's "Change" cell. ▲ green when better-than-yesterday for
+// higher-is-better metrics (or lower-than for lower-is-better), ▼ red
+// when worse, → grey when within ±0.5pp.
+function ChangeCell({ row }: { row: ScorecardRow }) {
+  if (row.delta_pct === null) {
+    return <span className="text-slate-400">—</span>
+  }
+  const pct = row.delta_pct
+  // Movement direction in business terms ("better" / "worse")
+  // depends on whether higher is good or not.
+  const better = row.higher_is_better ? pct > 0.5 : pct < -0.5
+  const worse  = row.higher_is_better ? pct < -0.5 : pct > 0.5
+  if (better) {
+    return <span className="text-emerald-600 font-medium">▲ {Math.abs(pct)}%</span>
+  }
+  if (worse) {
+    return <span className="text-red-600 font-medium">▼ {Math.abs(pct)}%</span>
+  }
+  return <span className="text-slate-400">→ 0%</span>
 }
 
 function RagDot({ rag, big }: { rag: 'green'|'amber'|'red'|'slate'; big?: boolean }) {

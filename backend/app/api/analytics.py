@@ -1054,26 +1054,44 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
                           Alert.created_at >= t0,
                           Alert.created_at <  t1).scalar() or 0)
 
-    def _rag(today: float, target: float, *,
-             higher_is_better: bool = True) -> str:
-        if today is None:
-            return "slate"
-        if higher_is_better:
-            if today >= target:        return "green"
-            if today >= 0.85 * target: return "amber"
-            return "red"
-        # Lower-is-better metric (queue wait, incidents).
-        if today <= target:         return "green"
-        if today <= 1.15 * target:  return "amber"
-        return "red"
+    def _delta(today: float, yesterday: float, *,
+               higher_is_better: bool = True) -> dict:
+        """Compute the today-vs-yesterday change and RAG bucket.
 
-    # Targets from the spec; tunable per store later.
-    TARGET_VISITORS    = (store.capacity or 0) * 5 or 300   # ballpark
-    TARGET_PEAK_OCC    = (store.capacity or 30) * 0.7 or 30
-    TARGET_QUEUE_SEC   = 180        # 3 min
-    TARGET_STAFF_PCT   = 0.90
-    TARGET_INCIDENTS   = 5
-    TARGET_DWELL_SEC   = 180        # 3 min
+        Targets removed in the May-2026 redesign — store managers
+        found the placeholder targets (5000 visitors, 700 occupancy)
+        actively confusing. The signal that matters is "are we
+        having a worse day than yesterday?", and yesterday's value
+        is the only honest benchmark we have.
+
+        RAG rules:
+          green : today >= yesterday              (matching or up)
+          amber : today is 10–30% below yesterday (mild concern)
+          red   : today is >30% below yesterday   (big drop)
+          slate : no yesterday baseline to compare to
+
+        For lower-is-better metrics (queue wait, incidents) we
+        invert: green when today <= yesterday, etc.
+        """
+        if yesterday is None or yesterday == 0:
+            # No baseline. Treat any positive value as informational
+            # (slate); zeros stay slate to avoid false alarms.
+            return {"direction": "flat", "delta_pct": None, "rag": "slate"}
+        # Signed pct: +25 means today is 25% above yesterday.
+        pct = (today - yesterday) / yesterday * 100
+        # For lower-is-better, "up" means "got worse".
+        bad_direction = (pct > 0) if not higher_is_better else (pct < 0)
+        abs_pct = abs(pct)
+        if not bad_direction:
+            rag = "green"
+        elif abs_pct <= 10:
+            rag = "green"      # tolerance band
+        elif abs_pct <= 30:
+            rag = "amber"
+        else:
+            rag = "red"
+        direction = "up" if pct > 0.5 else "down" if pct < -0.5 else "flat"
+        return {"direction": direction, "delta_pct": round(pct, 1), "rag": rag}
 
     today_visitors  = _unique(today_open, today_end)
     yest_visitors   = _unique(yest_open,  yest_close)
@@ -1088,66 +1106,56 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
     today_dwell     = _avg("dwell_seconds", today_open, today_end)
     yest_dwell      = _avg("dwell_seconds", yest_open,  yest_close)
 
+    def _row(metric: str, today: float, yesterday: float,
+             unit: str = "", *, higher_is_better: bool = True) -> dict:
+        d = _delta(today, yesterday, higher_is_better=higher_is_better)
+        return {
+            "metric": metric,
+            "today": today,
+            "yesterday": yesterday,
+            "unit": unit,
+            "higher_is_better": higher_is_better,
+            **d,
+        }
+
     rows = [
-        {
-            "metric": "Visitors", "today": round(today_visitors), "yesterday": round(yest_visitors),
-            "target": round(TARGET_VISITORS), "unit": "",
-            "rag": _rag(today_visitors, TARGET_VISITORS),
-            "higher_is_better": True,
-        },
-        {
-            "metric": "Peak Occupancy", "today": round(today_peak_occ), "yesterday": round(yest_peak_occ),
-            "target": round(TARGET_PEAK_OCC), "unit": "",
-            "rag": _rag(today_peak_occ, TARGET_PEAK_OCC),
-            "higher_is_better": True,
-        },
-        {
-            "metric": "Avg Queue Wait", "today": round(today_queue_avg / 60, 1),
-            "yesterday": round(yest_queue_avg / 60, 1),
-            "target": round(TARGET_QUEUE_SEC / 60, 1), "unit": "m",
-            "rag": _rag(today_queue_avg, TARGET_QUEUE_SEC, higher_is_better=False),
-            "higher_is_better": False,
-        },
-        {
-            "metric": "Staff Presence", "today": round(today_staff_pct * 100),
-            "yesterday": round(yest_staff_pct * 100),
-            "target": round(TARGET_STAFF_PCT * 100), "unit": "%",
-            "rag": _rag(today_staff_pct, TARGET_STAFF_PCT),
-            "higher_is_better": True,
-        },
-        {
-            "metric": "Incidents", "today": today_alerts, "yesterday": yest_alerts,
-            "target": TARGET_INCIDENTS, "unit": "",
-            "rag": _rag(today_alerts, TARGET_INCIDENTS, higher_is_better=False),
-            "higher_is_better": False,
-        },
-        {
-            "metric": "Avg Dwell Time", "today": round(today_dwell / 60, 1),
-            "yesterday": round(yest_dwell / 60, 1),
-            "target": round(TARGET_DWELL_SEC / 60, 1), "unit": "m",
-            "rag": _rag(today_dwell, TARGET_DWELL_SEC),
-            "higher_is_better": True,
-        },
+        _row("Visitors",       round(today_visitors),         round(yest_visitors)),
+        _row("Peak Occupancy", round(today_peak_occ),         round(yest_peak_occ)),
+        _row("Avg Queue Wait", round(today_queue_avg / 60, 1),
+                                round(yest_queue_avg / 60, 1), "m",
+             higher_is_better=False),
+        _row("Staff Presence", round(today_staff_pct * 100),
+                                round(yest_staff_pct * 100),  "%"),
+        _row("Incidents",      today_alerts,                  yest_alerts, "",
+             higher_is_better=False),
+        _row("Avg Dwell Time", round(today_dwell / 60, 1),
+                                round(yest_dwell / 60, 1),    "m"),
     ]
 
-    # Overall score — fraction-of-green weighted by row count, with
-    # amber counted as 0.5. Crude but actionable.
-    def _row_score(r) -> float:
-        return 1.0 if r["rag"] == "green" else 0.5 if r["rag"] == "amber" else 0.0
-    overall_score = int(round(sum(_row_score(r) for r in rows) / len(rows) * 100))
-    overall_rag = ("green" if overall_score >= 80 else
-                   "amber" if overall_score >= 60 else "red")
-    score_label = ("Excellent" if overall_score >= 90 else
-                   "Good" if overall_score >= 75 else
-                   "Needs attention" if overall_score >= 50 else
-                   "Poor")
+    # Headline: where does the store sit vs yesterday overall? Count
+    # rows by RAG bucket and pick the majority signal.
+    greens = sum(1 for r in rows if r["rag"] == "green")
+    reds   = sum(1 for r in rows if r["rag"] == "red")
+    ambers = sum(1 for r in rows if r["rag"] == "amber")
+    if reds > greens:
+        overall_direction = "worse"
+        overall_rag       = "red"
+        headline = "▼ Worse than yesterday overall"
+    elif greens > reds + ambers:
+        overall_direction = "better"
+        overall_rag       = "green"
+        headline = "▲ Better than yesterday overall"
+    else:
+        overall_direction = "same"
+        overall_rag       = "amber"
+        headline = "→ Roughly the same as yesterday"
 
     return {
         "rows": rows,
-        "overall_score": overall_score,
-        "overall_rag": overall_rag,
-        "score_label": score_label,
-        "as_of": now.isoformat(),
+        "overall_direction": overall_direction,   # 'better' | 'same' | 'worse'
+        "overall_rag":       overall_rag,
+        "headline":          headline,
+        "as_of":             now.isoformat(),
     }
 
 
