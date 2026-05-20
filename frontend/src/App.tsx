@@ -13,6 +13,7 @@ import CamerasPage         from '@/pages/CamerasPage'
 import AddCameraWizard     from '@/pages/AddCameraWizard'
 import LiveViewPage        from '@/pages/LiveViewPage'
 import AlertsPage          from '@/pages/AlertsPage'
+import ReportsPage         from '@/pages/ReportsPage'
 import DetectionConfigPage from '@/pages/DetectionConfigPage'
 import TrainingStudioPage  from '@/pages/TrainingStudioPage'
 import AnnotationPage      from '@/pages/AnnotationPage'
@@ -71,6 +72,7 @@ export default function App() {
             <Route path="/compare"                  element={<ComparePage />} />
             <Route path="/live"                     element={<LiveViewPage />} />
             <Route path="/alerts"                   element={<AlertsPage />} />
+            <Route path="/reports"                  element={<ReportsPage />} />
             <Route path="/training"                 element={<TrainingStudioPage />} />
             <Route path="/training/datasets/:dsId"  element={<AnnotationPage />} />
             <Route path="/training/jobs/:jobId"     element={<TrainingDashboardPage />} />

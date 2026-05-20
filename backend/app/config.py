@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     twilio_whatsapp_from: str = ""       # e.g. "whatsapp:+14155238886"
     whatsapp_to: str = ""                # comma-separated "whatsapp:+254..."
     whatsapp_priority_only: bool = True  # only high-priority alerts by default
+    # Weekly chain-briefing recipients (Monday 07:00). Comma-separated
+    # `whatsapp:+<msisdn>` numbers. Empty = no weekly briefing sent.
+    weekly_briefing_to: str = ""
     webhook_url: str = ""
     webhook_auth_header: str = ""
 

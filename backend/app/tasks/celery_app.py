@@ -28,6 +28,7 @@ celery_app = Celery(
         "app.tasks.reports",
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
+        "app.tasks.briefings",
     ],
 )
 celery_app.conf.update(
@@ -64,6 +65,19 @@ celery_app.conf.update(
         "staff-classifier-every-10min": {
             "task": "staff_classifier.classify_today",
             "schedule": 600.0,
+        },
+        # Daily WhatsApp briefing per store — fires at 08:00 store-local
+        # for each active store. The dispatcher checks the local clock
+        # every 5 minutes and uses a Redis day-marker to dedup.
+        "briefings-daily-every-5min": {
+            "task": "briefings.daily_fire_due",
+            "schedule": 300.0,
+        },
+        # Weekly chain briefing — fires Monday 07:00 anchor-time.
+        # Same 5-minute beat tick + iso-week marker for dedup.
+        "briefings-weekly-every-5min": {
+            "task": "briefings.weekly_fire_due",
+            "schedule": 300.0,
         },
     },
 )
