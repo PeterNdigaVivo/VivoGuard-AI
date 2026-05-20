@@ -735,9 +735,28 @@ def store_behaviour(store_id: int, db: Session = Depends(get_db),
             ),
         }
 
-    # Aggregate path counts. zone_sequence_json is a list of zone names
-    # (or IDs) in visit order; we collapse adjacent duplicates so a
-    # customer who stayed in 'Aisle 1' for ages doesn't inflate it.
+    # Aggregate path counts. zone_sequence_json is a list of zone visits
+    # in order. Each step can be:
+    #   - a plain string ("Entrance")
+    #   - a zone-id int (5)
+    #   - a dict ({"zone_id": 5, "zone_name": "Entrance", "entered_at":
+    #     "2026-05-14T..."}) — that's how the customer-journey detector
+    #     writes it today.
+    # We normalise to the human-readable zone NAME so the dashboard
+    # renders pills like "Entrance" instead of the dict's Python repr.
+    def _step_label(step) -> str:
+        if isinstance(step, dict):
+            # Prefer human-readable name, fall back to zone_id, then
+            # the dict string only as a last resort.
+            v = step.get("zone_name") or step.get("name")
+            if v:
+                return str(v)
+            zid = step.get("zone_id") or step.get("id")
+            if zid is not None:
+                return f"Zone {zid}"
+            return "Zone"
+        return str(step)
+
     path_counts: dict[tuple[str, ...], int] = {}
     durations: list[int] = []
     zone_visits: dict[str, int] = {}
@@ -748,8 +767,9 @@ def store_behaviour(store_id: int, db: Session = Depends(get_db),
             continue
         compact: list[str] = []
         for step in seq:
-            if not compact or compact[-1] != step:
-                compact.append(str(step))
+            label = _step_label(step)
+            if not compact or compact[-1] != label:
+                compact.append(label)
         for z in compact:
             zone_visits[z] = zone_visits.get(z, 0) + 1
         path_counts[tuple(compact)] = path_counts.get(tuple(compact), 0) + 1

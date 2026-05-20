@@ -277,6 +277,29 @@ export function JourneyMapPanel({ storeId }: { storeId: number }) {
   )
 }
 
+// Render one step (a node in the journey path) as a clean label.
+// Belt-and-suspenders for the case where the backend stored a dict
+// (legacy data from before the backend normaliser landed) — we don't
+// want to print "{'zone_id': 5, ...}" in the UI.
+function nodeLabel(node: unknown): string {
+  if (node == null) return 'Zone'
+  if (typeof node === 'string') {
+    // Stringified Python dict slipped through — extract zone_name.
+    if (node.startsWith('{') && node.includes('zone_name')) {
+      const m = node.match(/['"]zone_name['"]\s*:\s*['"]([^'"]+)['"]/)
+      if (m) return m[1]
+      const id = node.match(/['"]zone_id['"]\s*:\s*(\d+)/)
+      if (id) return `Zone ${id[1]}`
+    }
+    return node
+  }
+  if (typeof node === 'object') {
+    const o = node as any
+    return o.zone_name || o.name || (o.zone_id ? `Zone ${o.zone_id}` : 'Zone')
+  }
+  return String(node)
+}
+
 function JourneyChart({ payload }: { payload: BehaviourPayload }) {
   // Simplified flow: render the top-3 paths as horizontal node lanes
   // with arrow connectors, width proportional to count.
@@ -288,18 +311,18 @@ function JourneyChart({ payload }: { payload: BehaviourPayload }) {
       <div className="space-y-2">
         {top.map((p, i) => {
           const width = (p.count / maxCount) * 100
-          // Last step "completed" if it looks like checkout/counter.
-          const last = (p.path[p.path.length - 1] || '').toLowerCase()
-          const completed = last.includes('counter') || last.includes('checkout')
+          const labels = (p.path || []).map(nodeLabel)
+          const lastLabel = (labels[labels.length - 1] || '').toLowerCase()
+          const completed = lastLabel.includes('counter') || lastLabel.includes('checkout')
           return (
             <div key={i} className="flex items-center gap-1 flex-wrap">
-              {p.path.map((node, j) => (
+              {labels.map((label, j) => (
                 <span key={j} className="flex items-center gap-1">
                   <span className={'px-2 py-1 rounded text-xs ' +
                     (completed ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700')}>
-                    {node}
+                    {label}
                   </span>
-                  {j < p.path.length - 1 && (
+                  {j < labels.length - 1 && (
                     <span className="text-slate-400 text-xs">→</span>
                   )}
                 </span>
@@ -320,7 +343,7 @@ function JourneyChart({ payload }: { payload: BehaviourPayload }) {
         </div>
         <div>{payload.completion_pct}% of visitors reached the counter</div>
         {payload.most_skipped_zone && (
-          <div>Most skipped: <strong>{payload.most_skipped_zone}</strong></div>
+          <div>Most skipped: <strong>{nodeLabel(payload.most_skipped_zone)}</strong></div>
         )}
       </div>
     </div>
