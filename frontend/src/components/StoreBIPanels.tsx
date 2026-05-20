@@ -92,6 +92,13 @@ interface HourlyPayload {
   trend_delta_pct: number | null
   insights: string[]
   open_hour: number; close_hour: number; current_hour: number
+  // Server-computed today total. Optional because older API
+  // containers don't return it — the chart's HourlySummary helper
+  // falls back to summing hours[] client-side when this is missing.
+  today_total?: number
+  yesterday_so_far?: number
+  metric_source?: string | null
+  restock_hour?: number | null
 }
 
 export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
