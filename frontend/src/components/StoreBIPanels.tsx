@@ -95,46 +95,57 @@ interface HourlyPayload {
 }
 
 export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
-  const { data, busy } = useRefresh<HourlyPayload>(`/analytics/store/${storeId}/hourly`, [storeId])
+  const { data, error, busy } = useRefresh<HourlyPayload>(
+    `/analytics/store/${storeId}/hourly`, [storeId])
   return (
     <PanelShell title="Hourly footfall intelligence"
                 subtitle="Visitors per hour today, with auto-generated insights"
                 busy={busy}>
-      {!data ? <SkeletonBlock height={160} /> : <HourlyChart payload={data} />}
+      {/* Three states: error → loading → render */}
+      {error ? (
+        <div className="text-sm text-red-600 py-4 text-center">
+          Could not load hourly data. The API may not be deployed yet —
+          rebuild the api container and try again.
+          <div className="text-xs text-slate-500 mt-1">({error})</div>
+        </div>
+      ) : !data ? (
+        <SkeletonBlock height={160} />
+      ) : (
+        <SimpleLineChart payload={data} />
+      )}
       {data && <InsightList insights={data.insights} />}
     </PanelShell>
   )
 }
 
-function HourlyChart({ payload }: { payload: HourlyPayload }) {
-  const W = 600, H = 180, P_L = 32, P_R = 16, P_T = 16, P_B = 28
-  const hours = payload.hours
-  // Text-based fallback — ALWAYS rendered below the SVG (or instead
-  // of it when empty) so operators have a guaranteed read even if
-  // anything goes wrong with the chart itself.
+// Dead-simple line graph. Hardcoded fixed pixel dimensions (NOT
+// viewBox with `preserveAspectRatio="none"`) because the previous
+// approach occasionally rendered as a zero-height pane when the
+// container's responsive layout collapsed. Fixed pixels = guaranteed
+// visible pane on every screen size.
+function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
+  const hours = payload.hours || []
   const summary = <HourlySummary payload={payload} />
 
   if (hours.length === 0) {
     return (
       <div>
-        <div className="text-center py-6 text-slate-500 text-sm">
-          <div className="text-3xl mb-2">📊</div>
-          No hourly data available yet for this store.
+        <div className="text-center py-4 text-slate-500 text-sm">
+          No hourly data yet for this store.
         </div>
         {summary}
       </div>
     )
   }
-  const total = hours.reduce((sum, h) => sum + h.visitors, 0)
-  // When every bucket reads 0 the area would collapse to the baseline
-  // and look "blank". Show the explicit wording the user requested
-  // plus the text summary, no SVG attempted.
+  const total = hours.reduce((s, h) => s + (h.visitors || 0), 0)
   if (total === 0) {
     return (
       <div>
-        <div className="text-center py-6 text-slate-600 text-sm">
-          <div className="text-3xl mb-2">📊</div>
-          <div className="font-medium text-slate-700">No visitor data recorded today yet</div>
+        <div className="text-center py-4">
+          <div className="text-3xl mb-1">📊</div>
+          <div className="text-sm font-medium text-slate-700">
+            No visitor data recorded today yet
+          </div>
           <div className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
             Data appears after the first customer is detected during
             business hours.
@@ -144,91 +155,89 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
       </div>
     )
   }
-  const max = Math.max(...hours.map(h => h.visitors), 1)
-  // Width per "slot" (between two adjacent hour ticks). At 12 hours
-  // (09:00-21:00) and W=600, P_L=32, P_R=16 → 552/11 ≈ 50px each.
-  const innerW = W - P_L - P_R
-  const innerH = H - P_T - P_B
-  const stepX = innerW / Math.max(1, hours.length - 1)
 
-  const xAt = (i: number) => P_L + i * stepX
-  const yAt = (v: number) => P_T + innerH - (v / max) * innerH
+  // Fixed-dimension SVG. Width: 100% via wrapper; height: literal
+  // pixels so the chart pane never collapses. viewBox matches so the
+  // SVG scales horizontally without warping the line.
+  const W = 600, H = 200, PAD_L = 36, PAD_R = 12, PAD_T = 12, PAD_B = 32
+  const innerW = W - PAD_L - PAD_R
+  const innerH = H - PAD_T - PAD_B
+  const max = Math.max(...hours.map(h => h.visitors || 0), 1)
+  const stepX = hours.length > 1 ? innerW / (hours.length - 1) : 0
+  const xAt = (i: number) => PAD_L + i * stepX
+  const yAt = (v: number) => PAD_T + innerH - (v / max) * innerH
 
-  // Build the area + line paths. Line first (M then L), then close
-  // the area down to the baseline with two L commands + Z.
-  const baseline = P_T + innerH
-  const lineCmds = hours.map((h, i) =>
-    `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(h.visitors).toFixed(1)}`,
-  ).join(' ')
-  const areaCmds =
-    lineCmds
-    + ` L ${xAt(hours.length - 1).toFixed(1)} ${baseline.toFixed(1)}`
-    + ` L ${xAt(0).toFixed(1)} ${baseline.toFixed(1)} Z`
+  const linePath = hours
+    .map((h, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(h.visitors).toFixed(1)}`)
+    .join(' ')
 
-  // Y-axis tick values. Round to "nice" numbers so the gridlines
-  // sit on whole-visitor counts even at low scale.
-  const yTicks = niceTicks(0, max, 4)
+  // Round y-axis ticks (0, ¼max, ½max, ¾max, max), all whole numbers
+  // when scale is small.
+  const yTicks: number[] = []
+  const step = Math.max(1, Math.ceil(max / 4))
+  for (let v = 0; v <= max; v += step) yTicks.push(v)
+  if (yTicks[yTicks.length - 1] < max) yTicks.push(max)
+
+  // Find the peak hour from the data itself (don't trust the
+  // payload's `peak` field — the old API didn't compute it).
+  const peakHour = hours.reduce((best, h) => h.visitors > (best?.visitors ?? -1) ? h : best, hours[0])
 
   return (
     <div>
-      <svg viewBox={`0 0 ${W} ${H}`}
-           preserveAspectRatio="none"
-           className="w-full h-44">
-        <defs>
-          <linearGradient id="hourly-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"   stopColor="#3b82f6" stopOpacity="0.55" />
-            <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.05" />
-          </linearGradient>
-        </defs>
+      <div className="w-full" style={{ minHeight: H }}>
+        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}
+             style={{ display: 'block' }}>
+          {/* Plot background — explicit so the SVG is never literally
+              blank, even if data math goes sideways. */}
+          <rect x={PAD_L} y={PAD_T} width={innerW} height={innerH}
+                fill="#f8fafc" />
 
-        {/* Y-axis grid + tick labels */}
-        {yTicks.map((tv, i) => {
-          const y = yAt(tv)
-          return (
-            <g key={i}>
-              <line x1={P_L} x2={W - P_R} y1={y} y2={y}
-                    stroke="#e2e8f0" strokeDasharray="2 3" />
-              <text x={P_L - 6} y={y + 3} textAnchor="end"
-                    fontSize="10" fill="#64748b">{tv}</text>
-            </g>
-          )
-        })}
+          {/* Y-axis gridlines + labels */}
+          {yTicks.map((tv, i) => {
+            const y = yAt(tv)
+            return (
+              <g key={i}>
+                <line x1={PAD_L} x2={W - PAD_R} y1={y} y2={y}
+                      stroke="#e2e8f0" strokeDasharray="2 3" />
+                <text x={PAD_L - 6} y={y + 4} textAnchor="end"
+                      fontSize="11" fill="#64748b">{tv}</text>
+              </g>
+            )
+          })}
 
-        {/* Filled area + line */}
-        <path d={areaCmds} fill="url(#hourly-fill)" stroke="none" />
-        <path d={lineCmds} stroke="#1d4ed8" strokeWidth={2} fill="none"
-              strokeLinejoin="round" strokeLinecap="round" />
+          {/* The line itself. Solid blue, generous stroke. */}
+          <path d={linePath} stroke="#1d4ed8" strokeWidth={2.5}
+                fill="none" strokeLinejoin="round" strokeLinecap="round" />
 
-        {/* Per-hour dots + peak marker + current pulse + axis labels */}
-        {hours.map((h, i) => {
-          const x = xAt(i)
-          const y = yAt(h.visitors)
-          const fill = h.intensity === 'high'   ? '#1e3a8a' :
-                       h.intensity === 'medium' ? '#3b82f6' :
-                       h.intensity === 'low'    ? '#93c5fd' : '#cbd5e1'
-          const isPeak = payload.peak?.hour === h.hour
-          return (
-            <g key={i}>
-              <circle cx={x} cy={y} r={isPeak ? 5 : 3} fill={fill}
-                      stroke={h.is_current ? '#ef4444' : 'none'} strokeWidth={2} />
-              {h.is_current && (
-                <circle cx={x} cy={y} r={9} fill="none" stroke="#ef4444"
-                        strokeWidth={2} opacity={0.5}>
-                  <animate attributeName="r" from="9" to="14" dur="1.4s" repeatCount="indefinite" />
-                  <animate attributeName="opacity" from="0.5" to="0" dur="1.4s" repeatCount="indefinite" />
-                </circle>
-              )}
-              {isPeak && (
-                <text x={x} y={y - 12} textAnchor="middle"
-                      fontSize="12">🔥</text>
-              )}
-              <text x={x} y={H - 8} textAnchor="middle"
-                    fontSize="10" fill="#64748b">{h.label}</text>
-            </g>
-          )
-        })}
-      </svg>
-      {payload.trend_delta_pct !== null && (
+          {/* Per-hour dots + axis labels */}
+          {hours.map((h, i) => {
+            const x = xAt(i)
+            const y = yAt(h.visitors)
+            const isPeak = peakHour && h.hour === peakHour.hour && h.visitors > 0
+            return (
+              <g key={i}>
+                <circle cx={x} cy={y} r={isPeak ? 5 : 3.5}
+                        fill={isPeak ? '#ea580c' : '#1d4ed8'}
+                        stroke={h.is_current ? '#ef4444' : 'white'}
+                        strokeWidth={1.5} />
+                {h.is_current && (
+                  <circle cx={x} cy={y} r={9} fill="none"
+                          stroke="#ef4444" strokeWidth={2} opacity={0.5}>
+                    <animate attributeName="r" from="9" to="14" dur="1.4s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" from="0.5" to="0" dur="1.4s" repeatCount="indefinite" />
+                  </circle>
+                )}
+                {isPeak && (
+                  <text x={x} y={y - 10} textAnchor="middle" fontSize="13">🔥</text>
+                )}
+                <text x={x} y={H - 10} textAnchor="middle"
+                      fontSize="11" fill="#64748b">{h.label}</text>
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+      {payload.trend_delta_pct != null && (
         <div className="text-xs text-slate-600 mt-1">
           {payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '→'}{' '}
           <span className={payload.trend_delta_pct > 0 ? 'text-emerald-600' :
@@ -239,9 +248,7 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
           vs same time yesterday
         </div>
       )}
-      {/* Text summary always rendered under the chart — guarantees a
-          readable answer even if SVG fails to paint for any reason. */}
-      <HourlySummary payload={payload} />
+      {summary}
     </div>
   )
 }
@@ -251,9 +258,19 @@ function HourlyChart({ payload }: { payload: HourlyPayload }) {
 // when the SVG is absent (all-zero day), this is the primary read.
 // Operators get answers regardless of whether the chart paints.
 function HourlySummary({ payload }: { payload: HourlyPayload }) {
-  const peak  = payload.peak
-  const quiet = payload.quiet
-  const total = payload.today_total ?? 0
+  // Recompute peak / quiet / total client-side from the `hours`
+  // array if the backend hasn't provided pre-computed fields. Keeps
+  // the summary honest even when an old API container is in front
+  // of a freshly-built frontend.
+  const hrs = payload.hours || []
+  const nonZero = hrs.filter(h => (h.visitors ?? 0) > 0)
+  const peak  = payload.peak  ?? (nonZero.length
+    ? nonZero.reduce((b, h) => h.visitors > b.visitors ? h : b)
+    : null)
+  const quiet = payload.quiet ?? (nonZero.length
+    ? nonZero.reduce((b, h) => h.visitors < b.visitors ? h : b)
+    : null)
+  const total = payload.today_total ?? hrs.reduce((s, h) => s + (h.visitors || 0), 0)
   return (
     <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-700 border-t border-slate-100 pt-2">
       <div>
@@ -337,19 +354,26 @@ export function JourneyMapPanel({ storeId }: { storeId: number }) {
 // want to print "{'zone_id': 5, ...}" in the UI.
 function nodeLabel(node: unknown): string {
   if (node == null) return 'Zone'
-  if (typeof node === 'string') {
-    // Stringified Python dict slipped through — extract zone_name.
-    if (node.startsWith('{') && node.includes('zone_name')) {
-      const m = node.match(/['"]zone_name['"]\s*:\s*['"]([^'"]+)['"]/)
-      if (m) return m[1]
-      const id = node.match(/['"]zone_id['"]\s*:\s*(\d+)/)
-      if (id) return `Zone ${id[1]}`
-    }
-    return node
-  }
   if (typeof node === 'object') {
     const o = node as any
-    return o.zone_name || o.name || (o.zone_id ? `Zone ${o.zone_id}` : 'Zone')
+    return o.zone_name || o.name || (o.zone_id != null ? `Zone ${o.zone_id}` : 'Zone')
+  }
+  if (typeof node === 'string') {
+    const s = node.trim()
+    // Stringified Python dict slipped through. The exact shape we
+    // see in the wild has SINGLE quotes (Python repr):
+    //   {'zone_id': 5, 'zone_name': 'Entrance', 'entered_at': '...'}
+    // Match both single- and double-quoted variants.
+    if (s.startsWith('{')) {
+      let m = s.match(/['"]zone_name['"]\s*:\s*['"]([^'"]+)['"]/)
+      if (m) return m[1]
+      m = s.match(/['"]name['"]\s*:\s*['"]([^'"]+)['"]/)
+      if (m) return m[1]
+      m = s.match(/['"]zone_id['"]\s*:\s*(\d+)/)
+      if (m) return `Zone ${m[1]}`
+      return 'Zone'    // unrecognised dict shape — never print raw JSON
+    }
+    return s
   }
   return String(node)
 }
@@ -659,18 +683,42 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                   overall_direction if the backend ever omits the
                   pre-rendered headline string — operators never see
                   a naked dot. */}
-              <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-2">
-                <RagDot rag={data.overall_rag} big />
-                <div className={'text-sm font-semibold ' +
-                  (data.overall_direction === 'better' ? 'text-emerald-700' :
-                   data.overall_direction === 'worse'  ? 'text-red-700' :
-                                                         'text-slate-700')}>
-                  vs yesterday:{' '}
-                  {data.overall_direction === 'better' ? '▲ Better overall'
-                  : data.overall_direction === 'worse' ? '▼ Worse overall'
-                  : '→ Same overall'}
-                </div>
-              </div>
+              {(() => {
+                // Direction may be absent (old API). Derive from per-
+                // row pct deltas client-side so the label always
+                // renders meaningful text next to the overall dot.
+                let dir = data.overall_direction
+                if (!dir) {
+                  let better = 0, worse = 0
+                  for (const r of data.rows) {
+                    const higher = r.higher_is_better !== false
+                    let p = r.delta_pct ?? null
+                    if (p == null && r.yesterday && r.yesterday !== 0) {
+                      p = ((r.today - r.yesterday) / r.yesterday) * 100
+                    }
+                    if (p == null) continue
+                    if (higher ? p > 0.5 : p < -0.5) better++
+                    else if (higher ? p < -0.5 : p > 0.5) worse++
+                  }
+                  dir = better > worse ? 'better' : worse > better ? 'worse' : 'same'
+                }
+                const rag = data.overall_rag
+                  ?? (dir === 'better' ? 'green' : dir === 'worse' ? 'red' : 'amber')
+                return (
+                  <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-2">
+                    <RagDot rag={rag} big />
+                    <div className={'text-sm font-semibold ' +
+                      (dir === 'better' ? 'text-emerald-700' :
+                       dir === 'worse'  ? 'text-red-700' :
+                                          'text-slate-700')}>
+                      vs yesterday:{' '}
+                      {dir === 'better' ? '▲ Better overall'
+                      : dir === 'worse' ? '▼ Worse overall'
+                      : '→ Same overall'}
+                    </div>
+                  </div>
+                )
+              })()}
             </>
           )}
     </PanelShell>
@@ -681,14 +729,21 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
 // higher-is-better metrics (or lower-than for lower-is-better), ▼ red
 // when worse, → grey when within ±0.5pp.
 function ChangeCell({ row }: { row: ScorecardRow }) {
-  if (row.delta_pct === null) {
+  // delta_pct may be missing entirely when an old API container is
+  // serving the new frontend (the old shape returned `target` instead
+  // of {direction, delta_pct, rag}). Compute it from today/yesterday
+  // ourselves so the column reads correctly regardless.
+  let pct: number | null = row.delta_pct ?? null
+  if (pct == null && row.yesterday && row.yesterday !== 0) {
+    pct = ((row.today - row.yesterday) / row.yesterday) * 100
+    pct = Math.round(pct * 10) / 10
+  }
+  if (pct == null) {
     return <span className="text-slate-400">—</span>
   }
-  const pct = row.delta_pct
-  // Movement direction in business terms ("better" / "worse")
-  // depends on whether higher is good or not.
-  const better = row.higher_is_better ? pct > 0.5 : pct < -0.5
-  const worse  = row.higher_is_better ? pct < -0.5 : pct > 0.5
+  const higher = row.higher_is_better !== false   // default true
+  const better = higher ? pct > 0.5 : pct < -0.5
+  const worse  = higher ? pct < -0.5 : pct > 0.5
   if (better) {
     return <span className="text-emerald-600 font-medium">▲ {Math.abs(pct)}%</span>
   }
