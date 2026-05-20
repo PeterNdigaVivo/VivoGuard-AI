@@ -358,14 +358,26 @@ def store_live_dashboard(store_id: int,
                .scalar())
         return float(v) if v is not None else 0.0
 
-    # Unique visitors in the active range.
-    from app.models import VisitorTrack
+    # Unique visitors in the active range — STAFF EXCLUDED.
+    # We LEFT-JOIN visitor_tracks to staff_tracks on
+    # (store_id, day, track_signature) and filter out any signature
+    # marked as 'staff' by the daily classifier. NULL on the join
+    # (no staff_tracks row yet) is treated as customer — better to
+    # over-count for a few minutes than to silently drop fresh data
+    # before the classifier has had a chance to run.
+    from app.models import VisitorTrack, StaffTrack
 
     def _unique_visitors(t0: datetime, t1: datetime) -> int:
         return (db.query(func.count(VisitorTrack.id))
+                  .outerjoin(StaffTrack,
+                             (StaffTrack.store_id == store_id)
+                             & (StaffTrack.day == VisitorTrack.day)
+                             & (StaffTrack.track_signature == VisitorTrack.track_signature))
                   .filter(VisitorTrack.camera_id.in_(cam_ids),
                           VisitorTrack.first_seen >= t0,
-                          VisitorTrack.first_seen <  t1)
+                          VisitorTrack.first_seen <  t1,
+                          (StaffTrack.classified_as.is_(None))
+                          | (StaffTrack.classified_as != "staff"))
                   .scalar() or 0)
     unique_curr = _unique_visitors(active_since, active_until)
     unique_prev = _unique_visitors(prev_since,   prev_until)
@@ -719,12 +731,23 @@ def store_behaviour(store_id: int, db: Session = Depends(get_db),
 
     now = datetime.now(timezone.utc)
     week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-    journeys = (
-        db.query(CustomerJourney)
-          .filter(CustomerJourney.store_id == store_id,
-                  CustomerJourney.started_at >= week_start)
-          .limit(1000).all()
+    # Staff signatures from the past week — used to filter out staff
+    # movement loops from the journey map (the user's complaint:
+    # "Dwell time averages include staff movement which skews data").
+    from app.models import StaffTrack as _StaffTrack
+    staff_sigs = set(
+        s for (s,) in
+        db.query(_StaffTrack.track_signature)
+          .filter(_StaffTrack.store_id == store_id,
+                  _StaffTrack.day >= week_start.date(),
+                  _StaffTrack.classified_as == "staff").all()
     )
+    j_q = (db.query(CustomerJourney)
+             .filter(CustomerJourney.store_id == store_id,
+                     CustomerJourney.started_at >= week_start))
+    if staff_sigs:
+        j_q = j_q.filter(CustomerJourney.track_signature.notin_(staff_sigs))
+    journeys = j_q.limit(1000).all()
     if not journeys:
         return {
             "has_journey_data": False,
@@ -1061,11 +1084,23 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
                        MetricSnapshot.period_start <  t1).scalar())
         return float(v or 0)
 
+    # Visitors here = "estimated customers" — exclude tracks flagged
+    # as staff by the periodic staff classifier (any track that spent
+    # >10 minutes inside a counter zone today). See app/tasks/
+    # staff_classifier.py for the rules.
+    from app.models import StaffTrack
     def _unique(t0, t1) -> int:
         return (db.query(func.count(VisitorTrack.id))
+                  .outerjoin(StaffTrack,
+                             (StaffTrack.store_id == store_id)
+                             & (StaffTrack.day == VisitorTrack.day)
+                             & (StaffTrack.track_signature == VisitorTrack.track_signature))
                   .filter(VisitorTrack.camera_id.in_(cam_ids),
                           VisitorTrack.first_seen >= t0,
-                          VisitorTrack.first_seen <  t1).scalar() or 0)
+                          VisitorTrack.first_seen <  t1,
+                          (StaffTrack.classified_as.is_(None))
+                          | (StaffTrack.classified_as != "staff"))
+                  .scalar() or 0)
 
     def _alerts(t0, t1) -> int:
         return (db.query(func.count(Alert.id))
@@ -1177,6 +1212,202 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
         "headline":          headline,
         "as_of":             now.isoformat(),
     }
+
+
+@router.get("/store/{store_id}/visitor-intelligence")
+def store_visitor_intelligence(store_id: int, db: Session = Depends(get_db),
+                                _u=Depends(get_current_user)):
+    """3-layer visitor intelligence (May-2026 redesign).
+
+    Returns:
+      • total_persons             — every VisitorTrack seen today
+      • staff_tracks              — count classified 'staff' by the
+                                    spatial heuristic (counter dwell
+                                    > 10 min)
+      • estimated_customers       — total_persons − staff_tracks,
+                                    de-duped across cameras by
+                                    track-time clustering (Layer 2)
+      • staff_signatures          — array of the staff `track_signature`
+                                    values (debug + audit visibility)
+      • avg_dwell_seconds         — average dwell across CUSTOMER
+                                    tracks only, excluding counter
+                                    zone dwell (staff zone)
+      • zones_visited_avg         — average distinct zones per
+                                    customer journey (max == total
+                                    aisle/dwell zones in the store)
+      • visit_quality_score       — avg_dwell_minutes ×
+                                    (zones_visited_avg / total_zones)
+                                    × 100 — bounded 0-100ish
+      • confidence                — 'high' when an entrance zone is
+                                    configured (we know where to
+                                    count from), else 'estimated'
+      • explanation               — plain-English string for the
+                                    dashboard footnote
+
+    All numbers are for TODAY only. Future-upgrade comments live in
+    app/tasks/staff_classifier.py.
+    """
+    from app.models import CustomerJourney, StaffTrack, VisitorTrack, Zone
+    from app.utils.business_hours import todays_session
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return _empty_visitor_intelligence("no cameras attached")
+
+    now = datetime.now(timezone.utc)
+    today_open, _ = todays_session(store, now)
+    today = today_open.date()
+
+    # Total person-tracks today.
+    tracks_today = (
+        db.query(VisitorTrack)
+          .filter(VisitorTrack.camera_id.in_(cam_ids),
+                  VisitorTrack.first_seen >= today_open,
+                  VisitorTrack.first_seen <  now)
+          .all()
+    )
+    total_persons = len(tracks_today)
+
+    # Staff signatures classified for today.
+    staff_rows = (
+        db.query(StaffTrack)
+          .filter(StaffTrack.store_id == store_id,
+                  StaffTrack.day == today,
+                  StaffTrack.classified_as == "staff")
+          .all()
+    )
+    staff_sigs = {s.track_signature for s in staff_rows}
+    customer_tracks = [t for t in tracks_today if t.track_signature not in staff_sigs]
+
+    # Layer 2 — cross-camera deduplication. The same shopper appears
+    # under different track_signatures on different cameras (we don't
+    # have ReID), but the time windows overlap. Greedily group
+    # customer tracks whose [first_seen, last_seen] windows fall
+    # within 30 minutes of an existing cluster's window. Each cluster
+    # = one estimated customer.
+    DEDUPE_GAP_SEC = 30 * 60
+    clusters: list[tuple[datetime, datetime]] = []
+    for t in sorted(customer_tracks, key=lambda x: x.first_seen):
+        merged = False
+        for i, (cstart, cend) in enumerate(clusters):
+            if t.first_seen <= cend + timedelta(seconds=DEDUPE_GAP_SEC):
+                clusters[i] = (min(cstart, t.first_seen),
+                                max(cend,   t.last_seen or t.first_seen))
+                merged = True
+                break
+        if not merged:
+            clusters.append((t.first_seen, t.last_seen or t.first_seen))
+    estimated_customers = len(clusters)
+
+    # Customer dwell (Layer 3): from CustomerJourney rows owned by
+    # non-staff signatures, sum non-counter zone dwell time.
+    store_zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    counter_zone_ids = {
+        z.id for z in store_zones
+        if "counter" in (z.detection_types_json or [])
+    }
+    total_zones = len(store_zones)
+
+    customer_journeys = (
+        db.query(CustomerJourney)
+          .filter(CustomerJourney.store_id == store_id,
+                  CustomerJourney.day == today)
+          .all()
+    )
+    customer_journeys = [j for j in customer_journeys if j.track_signature not in staff_sigs]
+
+    dwell_sum = 0.0
+    dwell_count = 0
+    zones_per_journey: list[int] = []
+    for j in customer_journeys:
+        distinct_zones: set[int] = set()
+        for step in (j.zone_sequence_json or []):
+            if not isinstance(step, dict):
+                continue
+            zid = step.get("zone_id")
+            if zid is None:
+                continue
+            distinct_zones.add(zid)
+            if zid in counter_zone_ids:
+                continue   # staff area — drop from customer dwell math
+            enter = _parse_iso_safe(step.get("entered_at"))
+            exit_ = _parse_iso_safe(step.get("exited_at"))
+            if enter and exit_:
+                dur = (exit_ - enter).total_seconds()
+                if dur > 0:
+                    dwell_sum += dur
+                    dwell_count += 1
+        if distinct_zones:
+            zones_per_journey.append(len(distinct_zones))
+
+    avg_dwell_seconds = (dwell_sum / dwell_count) if dwell_count else 0.0
+    zones_visited_avg = (sum(zones_per_journey) / len(zones_per_journey)) if zones_per_journey else 0.0
+
+    # Visit quality: dwell-minutes × zone-coverage, scaled to a 0-100
+    # ballpark. Below 25 = low, above 75 = excellent.
+    coverage = (zones_visited_avg / total_zones) if total_zones else 0
+    visit_quality_score = round((avg_dwell_seconds / 60.0) * coverage * 100, 1)
+
+    # Confidence: 'high' if an entry/exit zone exists (we can locate
+    # the start of the journey), else 'estimated'.
+    entrance_present = any(
+        ("entry_exit" in (z.detection_types_json or []))
+        for z in store_zones
+    )
+    confidence = "high" if entrance_present else "estimated"
+
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "as_of": now.isoformat(),
+        "day": today.isoformat(),
+        "total_persons":       total_persons,
+        "staff_tracks":        len(staff_sigs),
+        "estimated_customers": estimated_customers,
+        "staff_signatures":    sorted(staff_sigs),
+        "avg_dwell_seconds":   round(avg_dwell_seconds, 1),
+        "zones_visited_avg":   round(zones_visited_avg, 2),
+        "total_zones":         total_zones,
+        "visit_quality_score": visit_quality_score,
+        "confidence":          confidence,
+        "explanation": (
+            f"Today: {total_persons} total persons detected, "
+            f"{len(staff_sigs)} staff tracks identified, "
+            f"~{estimated_customers} estimated customers. "
+            f"Average customer visited {round(zones_visited_avg, 1)} zones "
+            f"and spent {int(avg_dwell_seconds // 60)} min "
+            f"{int(avg_dwell_seconds % 60)} sec."
+        ),
+        "footnote": (
+            "Staff identified by counter presence >10 min "
+            f"({'entrance zone configured — high confidence' if entrance_present else 'no entrance zone — estimated count'})"
+        ),
+    }
+
+
+def _empty_visitor_intelligence(reason: str) -> dict:
+    return {
+        "total_persons": 0, "staff_tracks": 0, "estimated_customers": 0,
+        "staff_signatures": [], "avg_dwell_seconds": 0,
+        "zones_visited_avg": 0, "total_zones": 0,
+        "visit_quality_score": 0, "confidence": "none",
+        "explanation": f"No data yet — {reason}.",
+        "footnote": "",
+    }
+
+
+def _parse_iso_safe(s):
+    if not s:
+        return None
+    try:
+        from datetime import datetime as _dt
+        return _dt.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 # ---- Week summary + detector activity (May-2026 redesign) ---------

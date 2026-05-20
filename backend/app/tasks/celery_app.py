@@ -27,6 +27,7 @@ celery_app = Celery(
         "app.tasks.maintenance",
         "app.tasks.reports",
         "app.tasks.heatmap_archive",
+        "app.tasks.staff_classifier",
     ],
 )
 celery_app.conf.update(
@@ -55,6 +56,14 @@ celery_app.conf.update(
             # Celery's default scheduler doesn't support cron in plain
             # schedule= form; this fires roughly once per 24h relative
             # to worker boot. Acceptable — we just want one snapshot a day.
+        },
+        # Staff classifier — every 10 minutes, walk today's customer
+        # journeys and flag any track that's accumulated >10 min in a
+        # counter zone as 'staff'. The analytics endpoints LEFT-JOIN
+        # staff_tracks and exclude those signatures.
+        "staff-classifier-every-10min": {
+            "task": "staff_classifier.classify_today",
+            "schedule": 600.0,
         },
     },
 )

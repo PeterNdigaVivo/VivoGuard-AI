@@ -641,12 +641,41 @@ interface ScorecardPayload {
   headline: string
 }
 
+// Layer-3 visitor intelligence payload — staff exclusion +
+// confidence indicator. Sits above the scorecard so operators see
+// the customer/staff split + confidence before the per-metric table.
+interface VisitorIntelligencePayload {
+  total_persons: number
+  staff_tracks: number
+  estimated_customers: number
+  staff_signatures: string[]
+  avg_dwell_seconds: number
+  zones_visited_avg: number
+  total_zones: number
+  visit_quality_score: number
+  confidence: 'high' | 'estimated' | 'none'
+  explanation: string
+  footnote: string
+}
+
 export function ScorecardPanel({ storeId }: { storeId: number }) {
-  const { data, busy } = useRefresh<ScorecardPayload>(`/analytics/store/${storeId}/scorecard`, [storeId])
+  const { data, busy } = useRefresh<ScorecardPayload>(
+    `/analytics/store/${storeId}/scorecard`, [storeId])
+  // Separate fetch for the new visitor-intelligence endpoint. Keeps
+  // the scorecard payload backwards-compatible — older API containers
+  // that don't expose /visitor-intelligence just hide the band.
+  const { data: vi } = useRefresh<VisitorIntelligencePayload>(
+    `/analytics/store/${storeId}/visitor-intelligence`, [storeId])
   return (
     <PanelShell title="Daily performance scorecard"
                 subtitle="Today vs yesterday — same store, same window"
                 busy={busy}>
+      {/* Visitor intelligence band — staff/customer split + confidence
+          indicator. Surfaces the May-2026 3-layer logic so operators
+          know "this is customers only, staff filtered out". */}
+      {vi && vi.total_persons > 0 && (
+        <VisitorIntelligenceBand vi={vi} />
+      )}
       {!data ? <SkeletonBlock height={240} /> :
         (data.rows || []).length === 0
           ? <EmptyState icon="📈" text="No scorecard data yet." />
@@ -665,7 +694,18 @@ export function ScorecardPanel({ storeId }: { storeId: number }) {
                 <tbody>
                   {data.rows.map(r => (
                     <tr key={r.metric} className="border-t border-slate-100">
-                      <td className="py-1.5">{r.metric}</td>
+                      {/* "Visitors" row gets relabelled to clarify
+                          that staff have been excluded from the count
+                          (Layer 1 of the visitor-intelligence
+                          redesign). Other rows pass through. */}
+                      <td className="py-1.5">
+                        {r.metric === 'Visitors'
+                          ? <span title="Staff tracks excluded — see visitor intelligence band above">
+                              Estimated customers
+                              <span className="text-slate-400 text-xs"> (staff excluded)</span>
+                            </span>
+                          : r.metric}
+                      </td>
                       <td className="text-right tabular-nums font-medium">{r.today}{r.unit}</td>
                       <td className="text-right tabular-nums text-slate-500">{r.yesterday}{r.unit}</td>
                       <td className="text-right tabular-nums">
@@ -751,6 +791,51 @@ function ChangeCell({ row }: { row: ScorecardRow }) {
     return <span className="text-red-600 font-medium">▼ {Math.abs(pct)}%</span>
   }
   return <span className="text-slate-400">→ 0%</span>
+}
+
+// Visitor intelligence band shown above the scorecard table. Three
+// inline numbers (total persons / staff tracks / estimated customers)
+// plus the confidence badge and the spec's footnote.
+function VisitorIntelligenceBand({ vi }: { vi: VisitorIntelligencePayload }) {
+  const confidenceColour = vi.confidence === 'high'
+    ? 'bg-emerald-100 text-emerald-800'
+    : vi.confidence === 'estimated'
+      ? 'bg-amber-100 text-amber-800'
+      : 'bg-slate-100 text-slate-600'
+  return (
+    <div className="mb-3 rounded border border-sky-100 bg-sky-50 p-3">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+        <div>
+          <span className="text-slate-500">Total persons:</span>{' '}
+          <strong className="tabular-nums">{vi.total_persons}</strong>
+        </div>
+        <div>
+          <span className="text-slate-500">Staff tracks:</span>{' '}
+          <strong className="tabular-nums text-amber-700">{vi.staff_tracks}</strong>
+        </div>
+        <div>
+          <span className="text-slate-500">Estimated customers:</span>{' '}
+          <strong className="tabular-nums text-emerald-700">{vi.estimated_customers}</strong>
+        </div>
+        <div className="ml-auto">
+          <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ' + confidenceColour}>
+            {vi.confidence === 'high' ? '✓ High confidence' :
+             vi.confidence === 'estimated' ? '~ Estimated' : 'No data'}
+          </span>
+        </div>
+      </div>
+      {vi.total_zones > 0 && (
+        <div className="text-xs text-slate-600 mt-1.5">
+          Average customer visited <strong>{vi.zones_visited_avg.toFixed(1)}</strong> of {vi.total_zones} zones, spent{' '}
+          <strong>{Math.floor(vi.avg_dwell_seconds / 60)}m {Math.round(vi.avg_dwell_seconds % 60)}s</strong>{' '}
+          in product areas. Visit quality score: <strong>{vi.visit_quality_score}</strong>
+        </div>
+      )}
+      <div className="text-[11px] text-slate-500 mt-1 italic">
+        {vi.footnote || 'Staff identified by counter presence >10 min'}
+      </div>
+    </div>
+  )
 }
 
 function RagDot({ rag, big }: { rag: 'green'|'amber'|'red'|'slate'; big?: boolean }) {

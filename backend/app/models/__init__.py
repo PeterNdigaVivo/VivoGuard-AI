@@ -15,6 +15,7 @@ from app.models.metrics   import (
     Campaign, HeatmapSnapshot,
 )
 from app.models.scheduled import ScheduledReport, CustomerJourney
+from app.models.staff     import StaffTrack
 
 __all__ = [
     "User",
@@ -30,4 +31,5 @@ __all__ = [
     "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess",
     "Campaign", "HeatmapSnapshot",
     "ScheduledReport", "CustomerJourney",
+    "StaffTrack",
 ]
