@@ -267,7 +267,7 @@ def store_live_dashboard(store_id: int,
     def _has_recent_data() -> bool:
         return bool(
             db.query(MetricSnapshot.id)
-              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+              .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                       MetricSnapshot.period_start >= five_min_ago)
               .first()
         )
@@ -288,7 +288,7 @@ def store_live_dashboard(store_id: int,
     # — and surface trend-vs-previous on every KPI.
     def _sum(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.sum(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1)
@@ -297,7 +297,7 @@ def store_live_dashboard(store_id: int,
 
     def _max(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.max(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1)
@@ -306,7 +306,7 @@ def store_live_dashboard(store_id: int,
 
     def _avg(metric: str, t0: datetime, t1: datetime) -> float:
         v = (db.query(func.avg(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1)
@@ -346,7 +346,7 @@ def store_live_dashboard(store_id: int,
         # Subquery: latest period_start per camera_id for this metric.
         sub = (db.query(MetricSnapshot.camera_id,
                         func.max(MetricSnapshot.period_start).label("p"))
-                 .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                 .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                          MetricSnapshot.metric_type == metric,
                          MetricSnapshot.period_start >= five_min_ago)
                  .group_by(MetricSnapshot.camera_id)
@@ -373,7 +373,7 @@ def store_live_dashboard(store_id: int,
                              (StaffTrack.store_id == store_id)
                              & (StaffTrack.day == VisitorTrack.day)
                              & (StaffTrack.track_signature == VisitorTrack.track_signature))
-                  .filter(VisitorTrack.camera_id.in_(cam_ids),
+                  .filter(((VisitorTrack.store_id == store_id) | VisitorTrack.camera_id.in_(cam_ids)),
                           VisitorTrack.first_seen >= t0,
                           VisitorTrack.first_seen <  t1,
                           (StaffTrack.classified_as.is_(None))
@@ -399,7 +399,7 @@ def store_live_dashboard(store_id: int,
     # familiar today sparkline.
     hourly_rows = (db.query(extract("hour", MetricSnapshot.period_start).label("hr"),
                             func.max(MetricSnapshot.value))
-                     .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                     .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                              MetricSnapshot.metric_type == "occupancy",
                              MetricSnapshot.period_start >= active_since,
                              MetricSnapshot.period_start <  active_until)
@@ -409,7 +409,7 @@ def store_live_dashboard(store_id: int,
     # Per-aisle dwell, top 3, in the active range.
     aisle_rows = (db.query(MetricSnapshot.zone_id,
                            func.avg(MetricSnapshot.value).label("d"))
-                    .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                    .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                             MetricSnapshot.metric_type == "dwell_seconds",
                             MetricSnapshot.period_start >= active_since,
                             MetricSnapshot.period_start <  active_until)
@@ -585,7 +585,7 @@ def store_hourly(store_id: int, db: Session = Depends(get_db),
     rows = (
         db.query(extract("hour", MetricSnapshot.period_start).label("h"),
                  func.sum(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == metric,
                   MetricSnapshot.period_start >= session_start,
                   MetricSnapshot.period_start <  session_end)
@@ -597,7 +597,7 @@ def store_hourly(store_id: int, db: Session = Depends(get_db),
         rows = (
             db.query(extract("hour", MetricSnapshot.period_start).label("h"),
                      func.max(MetricSnapshot.value).label("v"))
-              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+              .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                       MetricSnapshot.metric_type == "occupancy",
                       MetricSnapshot.period_start >= session_start,
                       MetricSnapshot.period_start <  session_end)
@@ -611,7 +611,7 @@ def store_hourly(store_id: int, db: Session = Depends(get_db),
     yest_rows = (
         db.query(extract("hour", MetricSnapshot.period_start).label("h"),
                  func.sum(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == metric if metric == "visitor_count_in" else "occupancy",
                   MetricSnapshot.period_start >= yest_session_start,
                   MetricSnapshot.period_start <  yest_session_end)
@@ -852,7 +852,7 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
     # counter zone reports >= 0.5 in that minute.
     rows = (
         db.query(MetricSnapshot.period_start, MetricSnapshot.value)
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "staff_present_pct",
                   MetricSnapshot.period_start >= session_start,
                   MetricSnapshot.period_start <  session_end)
@@ -966,7 +966,7 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
     # Average dwell per zone.
     dwell_rows = dict(
         db.query(MetricSnapshot.zone_id, func.avg(MetricSnapshot.value))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "dwell_seconds",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
@@ -975,7 +975,7 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
     # Engagement = visits to this zone / total store visits.
     visit_rows = dict(
         db.query(MetricSnapshot.zone_id, func.sum(MetricSnapshot.value))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "zone_visit_count",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
@@ -1062,7 +1062,7 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
 
     def _sum(metric: str, t0, t1) -> float:
         v = (db.query(func.sum(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1).scalar())
@@ -1070,7 +1070,7 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
 
     def _avg(metric: str, t0, t1) -> float:
         v = (db.query(func.avg(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1).scalar())
@@ -1078,7 +1078,7 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
 
     def _max(metric: str, t0, t1) -> float:
         v = (db.query(func.max(MetricSnapshot.value))
-               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1).scalar())
@@ -1095,7 +1095,7 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
                              (StaffTrack.store_id == store_id)
                              & (StaffTrack.day == VisitorTrack.day)
                              & (StaffTrack.track_signature == VisitorTrack.track_signature))
-                  .filter(VisitorTrack.camera_id.in_(cam_ids),
+                  .filter(((VisitorTrack.store_id == store_id) | VisitorTrack.camera_id.in_(cam_ids)),
                           VisitorTrack.first_seen >= t0,
                           VisitorTrack.first_seen <  t1,
                           (StaffTrack.classified_as.is_(None))
@@ -1265,7 +1265,7 @@ def store_visitor_intelligence(store_id: int, db: Session = Depends(get_db),
     # Total person-tracks today.
     tracks_today = (
         db.query(VisitorTrack)
-          .filter(VisitorTrack.camera_id.in_(cam_ids),
+          .filter(((VisitorTrack.store_id == store_id) | VisitorTrack.camera_id.in_(cam_ids)),
                   VisitorTrack.first_seen >= today_open,
                   VisitorTrack.first_seen <  now)
           .all()
@@ -1460,7 +1460,7 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
     visitor_in_rows = (
         db.query(extract("doy", MetricSnapshot.period_start).label("doy"),
                  func.sum(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "visitor_count_in",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
@@ -1471,7 +1471,7 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
     occ_max_rows = (
         db.query(extract("doy", MetricSnapshot.period_start).label("doy"),
                  func.max(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "occupancy",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
@@ -1505,7 +1505,7 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
     weekday_rows = (
         db.query(extract("dow", MetricSnapshot.period_start).label("dow"),
                  func.avg(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "occupancy",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
@@ -1525,7 +1525,7 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
     hour_rows = (
         db.query(extract("hour", MetricSnapshot.period_start).label("h"),
                  func.sum(MetricSnapshot.value).label("v"))
-          .filter(MetricSnapshot.camera_id.in_(cam_ids),
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                   MetricSnapshot.metric_type == "visitor_count_in",
                   MetricSnapshot.period_start >= week_start,
                   MetricSnapshot.period_start <  now)
