@@ -100,6 +100,11 @@ export default function StoreDashboardPage() {
     </span>
   )
 
+  // Only one true blocker remains: a store with no cameras attached
+  // at all. Everything else (closed, cameras down, no data yet) falls
+  // through to the regular dashboard with a contextual banner —
+  // store managers do their end-of-day review AFTER hours, so the
+  // tiles need to stay visible.
   if (data.status === 'no_cameras') {
     return (
       <div className="p-6">
@@ -113,59 +118,33 @@ export default function StoreDashboardPage() {
     )
   }
 
-  if (data.status === 'closed') {
-    return (
-      <div className="p-6">
-        <PageHeader title={data.store_name} actions={freshness} />
-        <Card className="p-10 text-center">
-          <div className="text-5xl mb-2">🌙</div>
-          <div className="text-xl font-semibold text-slate-700 mb-1">Store closed</div>
-          <div className="text-slate-500 text-sm mb-2">
-            {data.store_name} is outside business hours
-            {data.hours_label ? ` (${data.hours_label})` : ''}.
-          </div>
-          <div className="text-slate-400 text-xs">
-            KPI tiles resume automatically when the store opens. After-hours
-            security alerts are still live — see the Alerts page.
-          </div>
-        </Card>
-      </div>
-    )
-  }
-
-  if (data.status === 'no_cameras_live') {
-    return (
-      <div className="p-6">
-        <PageHeader title={data.store_name} actions={freshness} />
-        <Card className="p-10 text-center">
-          <div className="text-5xl mb-2">📵</div>
-          <div className="text-xl font-semibold text-slate-700 mb-1">No cameras online</div>
-          <div className="text-slate-500 text-sm mb-2">
-            {data.cameras_total ?? 0} cameras attached but none are streaming
-            right now.
-          </div>
-          <div className="text-slate-400 text-xs mb-3">
-            KPIs are hidden so they don't read zero — that would be misleading.
-          </div>
-          <Link to="/live" className="text-sky-600 underline text-sm">
-            Open Live View to diagnose
-          </Link>
-        </Card>
-      </div>
-    )
-  }
-
-  if (data.status === 'no_data_yet') {
-    return (
-      <div className="p-6">
-        <PageHeader title={data.store_name} actions={freshness} />
-        <Card className="p-8 text-center text-slate-500">
-          Cameras just attached — collecting first measurements.
-          Numbers appear within a minute or two. Refresh shortly.
-        </Card>
-      </div>
-    )
-  }
+  // Subtle banner — replaces the old full-screen "Store closed" /
+  // "No cameras online" / "No data yet" blockers. Renders above
+  // the normal dashboard so today's accumulated numbers stay visible.
+  const banner = (() => {
+    if (data.status === 'closed') {
+      return {
+        tone: 'amber' as const,
+        text: `🌙 Outside business hours${data.hours_label ? ` (${data.hours_label})` : ''} — showing today's data`,
+      }
+    }
+    if (data.status === 'no_cameras_live') {
+      return {
+        tone: 'red' as const,
+        text: `📵 ${data.cameras_total ?? 0} cameras attached but none streaming — values below may be stale`,
+      }
+    }
+    if (data.status === 'no_data_yet') {
+      return {
+        tone: 'amber' as const,
+        text: '⏳ Cameras just attached — numbers will appear within a minute or two',
+      }
+    }
+    return null
+  })()
+  // Did the dashboard close? Used to dim "Right Now" tiles since the
+  // values they hold are last-known, not live.
+  const closed = data.status === 'closed'
 
   const t = data.tiles
   return (
@@ -193,18 +172,30 @@ export default function StoreDashboardPage() {
         </span>
       </div>
 
-      {/* RIGHT NOW */}
+      {/* Contextual banner — subtle, never blocks. */}
+      {banner && (
+        <div className={'rounded-md border px-3 py-2 text-sm ' +
+          (banner.tone === 'red'
+            ? 'bg-red-50 border-red-200 text-red-800'
+            : 'bg-amber-50 border-amber-200 text-amber-800')}>
+          {banner.text}
+        </div>
+      )}
+
+      {/* RIGHT NOW — values are last-known when the store is closed.
+          The dimmed prop greys the tile and prints a small "Store
+          closed" pill so operators know this isn't a live reading. */}
       <section>
         <SectionTitle>Right now</SectionTitle>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Kpi label="People in store" big value={fmtInt(t.occupancy_now?.value)} />
+          <Kpi label="People in store" big dimmed={closed} value={fmtInt(t.occupancy_now?.value)} />
           {t.queue_length_now?.visible && (
-            <Kpi label="People in queue" big value={fmtInt(t.queue_length_now.value)} />
+            <Kpi label="People in queue" big dimmed={closed} value={fmtInt(t.queue_length_now.value)} />
           )}
           {t.staff_present_pct_today?.visible && (
-            <Kpi label="Staff present today" big value={`${fmtInt(t.staff_present_pct_today.value)}%`} />
+            <Kpi label="Staff present today" big dimmed={closed} value={`${fmtInt(t.staff_present_pct_today.value)}%`} />
           )}
-          <Kpi label="Cameras live" value={String(data.camera_count ?? 0)} />
+          <Kpi label="Cameras live" value={`${data.cameras_online ?? 0}/${data.cameras_total ?? data.camera_count ?? 0}`} />
         </div>
       </section>
 
@@ -296,17 +287,29 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">{children}</h2>
 }
 
-function Kpi({ label, value, big, sub, trendDir, trendPct }: {
+function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed }: {
   label: string; value: string; big?: boolean; sub?: string
   trendDir?: 'up' | 'down' | 'flat'; trendPct?: number | null
+  // When true, greys the tile and shows a small "Store closed" pill
+  // — used on the Right Now row so operators see last-known values
+  // while still understanding the store isn't currently trading.
+  dimmed?: boolean
 }) {
   return (
-    <Card className="p-4">
+    <Card className="p-4 relative">
       <div className="text-xs text-slate-500">{label}</div>
-      <div className={(big ? 'text-3xl' : 'text-2xl') + ' font-semibold mt-1'}>{value}</div>
+      <div className={(big ? 'text-3xl' : 'text-2xl')
+                       + ' font-semibold mt-1 '
+                       + (dimmed ? 'text-slate-400' : '')}>{value}</div>
       {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
       {trendDir && trendPct !== undefined && (
         <div className="mt-1"><Trend direction={trendDir} deltaPct={trendPct} /></div>
+      )}
+      {dimmed && (
+        <span className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded
+                         bg-slate-200 text-slate-600">
+          Store closed
+        </span>
       )}
     </Card>
   )
