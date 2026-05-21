@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.analytics import recorder
 from app.database import get_db
 from app.deps import get_current_user
+from app.utils.cache import cached_store_endpoint
 from app.models import (
     Alert, Camera, DetectionEvent, MetricSnapshot, Store, VisitorTrack,
 )
@@ -145,6 +146,7 @@ def store_dashboard(store_id: int, days: int = 7,
 # ====================================================================
 
 @router.get("/store/{store_id}/live")
+@cached_store_endpoint("store-live", ttl=15)
 def store_live_dashboard(store_id: int,
                          since: datetime | None = None,
                          until: datetime | None = None,
@@ -1039,6 +1041,7 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/store/{store_id}/scorecard")
+@cached_store_endpoint("store-scorecard", ttl=30)
 def store_scorecard(store_id: int, db: Session = Depends(get_db),
                     _u=Depends(get_current_user)):
     """Daily performance scorecard — today vs target vs yesterday
@@ -1413,6 +1416,7 @@ def _parse_iso_safe(s):
 # ---- Week summary + detector activity (May-2026 redesign) ---------
 
 @router.get("/store/{store_id}/week-summary")
+@cached_store_endpoint("store-week-summary", ttl=300)
 def store_week_summary(store_id: int, db: Session = Depends(get_db),
                         _u=Depends(get_current_user)):
     """Powers the dashboard's THIS WEEK section.
@@ -2230,6 +2234,7 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
 
 
 @router.get("/store/{store_id}/anomalies")
+@cached_store_endpoint("store-anomalies", ttl=300)
 def store_anomalies(store_id: int, db: Session = Depends(get_db),
                     _u=Depends(get_current_user)):
     """Compare today's hourly footfall against the 30-day rolling
@@ -2562,6 +2567,7 @@ def store_health_score(store_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/chain/health-leaderboard")
+@cached_store_endpoint("chain-health-leaderboard", ttl=60)
 def chain_health_leaderboard(db: Session = Depends(get_db),
                               _u=Depends(get_current_user)):
     """Composite health score for every active store — for /chain."""
@@ -2685,6 +2691,7 @@ def store_loss_prevention(store_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/store/{store_id}/behaviour-trends")
+@cached_store_endpoint("store-behaviour-trends", ttl=600)
 def store_behaviour_trends(store_id: int, db: Session = Depends(get_db),
                             _u=Depends(get_current_user)):
     """Weekly customer-behaviour trends — avg visit duration, top

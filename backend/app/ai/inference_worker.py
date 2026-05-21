@@ -244,6 +244,18 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
 
             db.commit()
 
+            # Bust this store's analytics cache so the dashboard's
+            # tile endpoints see fresh data on the next request. One
+            # INCR per per-camera-loop iteration — cheap. We skip
+            # this when there were no emitted events to keep the
+            # cache hot for stores where nothing changed.
+            if events_emitted and store_id is not None:
+                try:
+                    from app.utils.cache import bump_store_version
+                    bump_store_version(store_id)
+                except Exception:
+                    pass
+
             # Publish alerts to the live UI feed. Same skip-list as
             # _persist_event — silent metric detectors never reach the
             # vg:pub:alerts channel so the operator feed stays focused
