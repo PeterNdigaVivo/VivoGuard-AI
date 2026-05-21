@@ -8,7 +8,7 @@
 //   Charts:     hourly footfall sparkline, alerts-by-type bar chart
 //   Heatmap:    composite thumbnail; clicks through to the heatmap page
 
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   Card, PageHeader, Skeleton, StatusLight, Trend,
@@ -16,8 +16,10 @@ import {
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
 import { labelForDetector } from '@/lib/detectorLabels'
-import StoreBIPanels from '@/components/StoreBIPanels'
-import StoreAIIntelligence from '@/components/StoreAIIntelligence'
+// Heavy chart bundles — lazy-loaded so the dashboard's critical
+// "Right Now" tiles paint before the chart code is even fetched.
+const StoreBIPanels        = lazy(() => import('@/components/StoreBIPanels'))
+const StoreAIIntelligence  = lazy(() => import('@/components/StoreAIIntelligence'))
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import type { Alert as AlertRowFull } from '@/api/alerts'
 
@@ -249,24 +251,77 @@ export default function StoreDashboardPage() {
           self-refreshes every 30s, and is independently collapsible.
           firstCameraId is parsed from the live tile's heatmap URL
           so the heatmap-intelligence panel can render the thumb. */}
-      <section>
-        <SectionTitle>AI intelligence</SectionTitle>
-        <StoreAIIntelligence storeId={storeId} />
-      </section>
+      {/* Progressive loading. Right Now + Today So Far above render
+          instantly. The heavier sections below appear in order so
+          the page is interactive within a few hundred ms even at
+          117-camera scale, instead of waiting for every endpoint. */}
+      <StaggeredSection delayMs={500}>
+        <WeekSection storeId={storeId} />
+      </StaggeredSection>
 
-      <section>
-        <SectionTitle>Store intelligence</SectionTitle>
-        <StoreBIPanels
-          storeId={storeId}
-          firstCameraId={extractFirstCameraId(t.heatmap_thumb_url?.value as string | null)} />
-      </section>
+      <StaggeredSection delayMs={800}>
+        <AlertsFeedSection storeId={storeId} />
+      </StaggeredSection>
 
-      {/* SECTION 3 — THIS WEEK (7-day bars + detector activity table) */}
-      <WeekSection storeId={storeId} />
+      {/* AI intelligence + BI panels are HEAVY — only fetch their
+          code chunks when the operator scrolls them into view. */}
+      <ScrollMounted>
+        <section>
+          <SectionTitle>AI intelligence</SectionTitle>
+          <Suspense fallback={<div className="text-slate-400 text-sm p-4">Loading insights…</div>}>
+            <StoreAIIntelligence storeId={storeId} />
+          </Suspense>
+        </section>
 
-      {/* SECTION 4 — ALERTS & INCIDENTS (filtered to this store) */}
-      <AlertsFeedSection storeId={storeId} />
+        <section className="mt-6">
+          <SectionTitle>Store intelligence</SectionTitle>
+          <Suspense fallback={<div className="text-slate-400 text-sm p-4">Loading charts…</div>}>
+            <StoreBIPanels
+              storeId={storeId}
+              firstCameraId={extractFirstCameraId(t.heatmap_thumb_url?.value as string | null)} />
+          </Suspense>
+        </section>
+      </ScrollMounted>
     </div>
+  )
+}
+
+
+// Progressive-loading helpers
+// ----------------------------------------------------------------
+// Stagger: render children after a short delay so the main thread
+// gets to paint critical content first. Used for the moderate-cost
+// sections (week summary, alerts feed).
+function StaggeredSection({ delayMs, children }: { delayMs: number; children: React.ReactNode }) {
+  const [show, setShow] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setShow(true), delayMs)
+    return () => clearTimeout(t)
+  }, [delayMs])
+  return show ? <>{children}</> : null
+}
+
+// Scroll-mounted: render children only when a sentinel above is in
+// the viewport. For the heavy AI / BI panel bundles — the chart code
+// isn't even downloaded until the operator scrolls toward it.
+function ScrollMounted({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    if (mounted) return
+    const el = ref.current
+    if (!el) return
+    const io = new IntersectionObserver(entries => {
+      for (const e of entries) if (e.isIntersecting) setMounted(true)
+    }, { rootMargin: '300px 0px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [mounted])
+  return (
+    <>
+      <div ref={ref} />
+      {mounted && children}
+    </>
   )
 }
 

@@ -24,9 +24,32 @@ export default function MultiStorePage() {
   const [data, setData] = useState<Awaited<ReturnType<typeof analytics.multiDashboard>> | null>(null)
   const [sortBy, setSortBy] = useState<string>('rag_status')
 
+  // Incremental load: paint the store list (cheap) from /api/stores
+  // FIRST so the page is interactive in <200ms even when the heavy
+  // chain aggregation endpoint takes a second or two. The full
+  // multiDashboard payload then layers the KPIs on top.
+  const [bootstrapStores, setBootstrapStores] = useState<{ id: number; name: string; country: string }[]>([])
   useEffect(() => {
-    analytics.multiDashboard(days).then(setData).catch(console.error)
-    const t = setInterval(() => analytics.multiDashboard(days).then(setData), 60_000)
+    fetch('/api/stores', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('vg_access_token') ?? ''}` },
+    }).then(r => r.ok ? r.json() : [])
+      .then(rows => setBootstrapStores(rows || []))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    // In-flight dedup — if a previous request is still pending when
+    // the 60s tick fires, skip the new one.
+    let inFlight = false
+    const fetchOnce = () => {
+      if (inFlight) return
+      inFlight = true
+      analytics.multiDashboard(days)
+        .then(setData).catch(console.error)
+        .finally(() => { inFlight = false })
+    }
+    fetchOnce()
+    const t = setInterval(fetchOnce, 60_000)
     return () => clearInterval(t)
   }, [days])
 
@@ -50,7 +73,40 @@ export default function MultiStorePage() {
     return arr
   }, [data, sortBy])
 
-  if (!data) return <div className="p-6 text-slate-500">Loading…</div>
+  // While the heavy aggregation is loading, show the store list with
+  // placeholder rows so the page doesn't read "Loading…" — operators
+  // see "yes, the system is up, here are your stores" immediately.
+  if (!data) {
+    return (
+      <div className="p-6">
+        <PageHeader title="Chain dashboard"
+                    actions={<span className="text-xs text-slate-500">loading metrics…</span>} />
+        <Card className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="text-left p-3">Store</th>
+                <th className="text-left p-3">Country</th>
+                <th className="text-left p-3">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bootstrapStores.map(s => (
+                <tr key={s.id} className="border-t">
+                  <td className="p-3 font-medium">{s.name}</td>
+                  <td className="p-3">{s.country}</td>
+                  <td className="p-3 text-slate-400">loading…</td>
+                </tr>
+              ))}
+              {bootstrapStores.length === 0 && (
+                <tr><td colSpan={3} className="p-8 text-center text-slate-400">Loading…</td></tr>
+              )}
+            </tbody>
+          </table>
+        </Card>
+      </div>
+    )
+  }
 
   const maxVisitors = Math.max(
     ...data.stores.map(s => s.kpis.unique_visitors_today || 0), 1,

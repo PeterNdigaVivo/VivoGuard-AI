@@ -1,60 +1,54 @@
-// Live grid: 1×1 … 9×9 layouts (up to 81 tiles). For large fleets only
-// the visible tiles open WebSockets — browsers cap ~250 concurrent WS
-// per origin.
+// Live View — scales to 117+ cameras via pagination + viewport-lazy
+// streaming.
+//
+// Three layers of "only fetch what you can see":
+//   1. Store filter dropdown — narrow the working set.
+//   2. Page-size cap (default 16) with "Load more" → operators
+//      explicitly grow the grid; nothing autoloads everything.
+//   3. Per-tile Intersection Observer — even within the picked set,
+//      a tile only opens its /ws/stream WebSocket when it's actually
+//      in the viewport. Scroll past, the socket closes; scroll back,
+//      it reconnects. Browsers cap ~250 WS/origin and at 117 cameras
+//      we'd burn through that on a 9×9 grid.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
+import { stores as storesApi, type Store } from '@/api/stores'
 import { alerts as alertsApi } from '@/api/alerts'
 import { api, wsUrl } from '@/api/client'
 
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
 type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 const GRID_OPTIONS: GridSize[] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+const PAGE_INCREMENT = 16   // 4×4
 
 export default function LiveViewPage() {
-  const [cams, setCams] = useState<Camera[]>([])
-  const [layout, setLayout] = useState<GridSize>(2)
-  // Up to 81 tiles (9×9).
-  const [picked, setPicked] = useState<(number | null)[]>(Array(81).fill(null))
+  const [cams, setCams]       = useState<Camera[]>([])
+  const [stores, setStores]   = useState<Store[]>([])
+  const [storeFilter, setStoreFilter] = useState<number | ''>('')
+  const [layout, setLayout]   = useState<GridSize>(4)         // start 4×4
+  const [visibleCount, setVisibleCount] = useState(PAGE_INCREMENT)
   const [overlays, setOverlays] = useState<Record<number, Detection[]>>({})
-  const [fixing, setFixing] = useState(false)
+  const [fixing, setFixing]   = useState(false)
   const toast = useToast()
 
-  // One-click bulk auto-failover: run a fresh transport probe on
-  // every camera, persist working HTTP-snapshot settings for any
-  // whose RTSP port is unreachable. Useful when adding a whole new
-  // store and finding that ports 554 aren't forwarded — instead of
-  // diagnosing each tile individually, hit this once and let the
-  // streamer re-pick workers on the next reconcile.
-  async function autoFixAll() {
-    if (!confirm('Probe every camera and switch unreachable RTSP ones to HTTP snapshot polling?')) return
-    setFixing(true)
-    try {
-      const res = await api<{ checked: number; switched: number; report: any[] }>(
-        '/cameras/auto-failover', { method: 'POST', body: {} },
-      )
-      toast.push(`Checked ${res.checked} cameras, switched ${res.switched} to HTTP snapshot.`)
-      // Refresh the camera list so the status badges / transport
-      // fields reflect the new state.
-      camsApi.list().then(setCams)
-    } catch (e) {
-      toast.push(`Auto-fix failed: ${e}`, 'err')
-    } finally {
-      setFixing(false)
-    }
-  }
-
   useEffect(() => { camsApi.list().then(setCams) }, [])
+  useEffect(() => { storesApi.list().then(setStores) }, [])
 
-  useEffect(() => {
-    setPicked(p => {
-      const next = [...p]
-      cams.forEach((c, i) => { if (i < next.length && next[i] === null) next[i] = c.id })
-      return next
-    })
-  }, [cams])
+  // Filtered + paginated working set. The grid renders the first
+  // `tileCount` of these.
+  const filteredCams = useMemo(() => {
+    if (storeFilter === '') return cams
+    return cams.filter(c => c.store_id === storeFilter)
+  }, [cams, storeFilter])
 
+  // When the filter changes, reset to the first page so the operator
+  // doesn't get stuck mid-list with no visible tiles.
+  useEffect(() => { setVisibleCount(PAGE_INCREMENT) }, [storeFilter])
+
+  // Subscribe to /ws/alerts for live bbox overlays (this is a single
+  // WS, not per-camera, so no pagination concerns).
   useEffect(() => {
     const close = alertsApi.subscribe((d: any) => {
       if (!d?.camera_id || !d?.bbox_norm) return
@@ -72,17 +66,41 @@ export default function LiveViewPage() {
     return () => { close(); clearInterval(tick) }
   }, [])
 
-  const tileCount = layout * layout
-  const visible = picked.slice(0, tileCount)
+  async function autoFixAll() {
+    if (!confirm('Probe every camera and switch unreachable RTSP ones to HTTP snapshot polling?')) return
+    setFixing(true)
+    try {
+      const res = await api<{ checked: number; switched: number; report: any[] }>(
+        '/cameras/auto-failover', { method: 'POST', body: {} },
+      )
+      toast.push(`Checked ${res.checked} cameras, switched ${res.switched} to HTTP snapshot.`)
+      camsApi.list().then(setCams)
+    } catch (e) {
+      toast.push(`Auto-fix failed: ${e}`, 'err')
+    } finally {
+      setFixing(false)
+    }
+  }
+
+  const tileCount = Math.min(visibleCount, filteredCams.length)
+  const visible = filteredCams.slice(0, tileCount)
+  const hasMore = filteredCams.length > tileCount
 
   return (
     <div className="p-6">
       <PageHeader
         title="Live View"
         actions={<>
-          <Button variant="ghost" onClick={autoFixAll} disabled={fixing}
-                  title="Probe every camera and switch unreachable RTSP ones to HTTP snapshot polling.">
-            {fixing ? 'Probing all cameras…' : '🛠 Auto-fix all offline'}
+          <Select value={storeFilter}
+                  onChange={e => setStoreFilter(e.target.value ? Number(e.target.value) : '')}>
+            <option value="">All stores ({cams.length} cams)</option>
+            {stores.map(s => {
+              const n = cams.filter(c => c.store_id === s.id).length
+              return <option key={s.id} value={s.id}>{s.name} ({n})</option>
+            })}
+          </Select>
+          <Button variant="ghost" onClick={autoFixAll} disabled={fixing}>
+            {fixing ? 'Probing…' : '🛠 Auto-fix offline'}
           </Button>
           {GRID_OPTIONS.map(n => (
             <Button key={n} variant={layout === n ? 'primary' : 'ghost'}
@@ -90,44 +108,90 @@ export default function LiveViewPage() {
           ))}
         </>}
       />
-      {layout >= 6 && (
-        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3">
-          Showing {tileCount} tiles. Browsers cap concurrent WebSockets per origin
-          (~250 in Chrome); each tile holds one. Empty slots don't open a WS.
-        </div>
-      )}
+
+      <div className="text-xs text-slate-500 mb-3 flex items-center gap-3">
+        Showing <strong>{tileCount}</strong> of <strong>{filteredCams.length}</strong> cameras
+        {storeFilter !== '' && (
+          <button onClick={() => setStoreFilter('')}
+                  className="text-sky-600 hover:underline">clear filter</button>
+        )}
+        {layout >= 6 && (
+          <span className="text-amber-700">
+            · Tiles open WebSockets only when scrolled into view — browser cap is ~250.
+          </span>
+        )}
+      </div>
+
       <div className="grid gap-1"
            style={{ gridTemplateColumns: `repeat(${layout}, minmax(0, 1fr))` }}>
-        {visible.map((camId, i) => {
-          const cam = cams.find(c => c.id === camId)
-          return (
-            <Card key={i} className="p-1">
-              <div className="flex items-center justify-between mb-1">
-                <Select className="text-xs"
-                        value={camId ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value ? Number(e.target.value) : null
-                          const next = [...picked]; next[i] = v; setPicked(next)
-                        }}>
-                  <option value="">— empty —</option>
-                  {cams.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </Select>
-                {cam && <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>}
-              </div>
-              {camId ? <Tile cameraId={camId} overlays={overlays[camId] ?? []} /> :
-                       <div className="aspect-video bg-slate-200 rounded" />}
-            </Card>
-          )
-        })}
+        {visible.map(cam => (
+          <Card key={cam.id} className="p-1">
+            <div className="flex items-center justify-between mb-1 text-xs">
+              <span className="truncate" title={cam.name}>{cam.name}</span>
+              <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
+            </div>
+            <LazyTile cameraId={cam.id} overlays={overlays[cam.id] ?? []} />
+          </Card>
+        ))}
       </div>
+
+      {hasMore && (
+        <div className="mt-4 text-center">
+          <Button onClick={() => setVisibleCount(n => n + PAGE_INCREMENT)}>
+            Load {Math.min(PAGE_INCREMENT, filteredCams.length - tileCount)} more
+          </Button>
+          <div className="text-xs text-slate-400 mt-1">
+            {filteredCams.length - tileCount} cameras hidden
+          </div>
+        </div>
+      )}
+      {filteredCams.length === 0 && (
+        <Card className="p-8 text-center text-slate-500">
+          {storeFilter !== '' ? 'No cameras attached to this store.' : 'No cameras yet.'}
+        </Card>
+      )}
     </div>
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// LazyTile — wraps Tile with Intersection Observer so the WebSocket
+// only connects when the tile is in the viewport. Below the viewport
+// (or scrolled out): no WS, no frames, no resources.
+
+function LazyTile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] }) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    // rootMargin pre-loads tiles ~200px before they enter the viewport
+    // so scrolling feels instant — no blank flicker.
+    const io = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        if (e.isIntersecting) setVisible(true)
+      }
+    }, { rootMargin: '200px 0px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+  return (
+    <div ref={wrapRef} className="relative">
+      {visible ? <Tile cameraId={cameraId} overlays={overlays} /> :
+                 <div className="aspect-video bg-slate-100 rounded flex items-center justify-center text-slate-400 text-xs">
+                   ⌛ Tile loads when scrolled into view
+                 </div>}
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
 // One live tile — connects to /ws/stream/{cameraId} and paints incoming
 // JPEG bytes to a <canvas>; draws bounding box overlays on top.
 //
-// Resilience added for the 40+ camera fleet:
+// Resilience for the 40+ camera fleet:
 //   • Auto-reconnect WebSocket on close (exponential backoff up to 30s).
 //   • "Connecting…" overlay until the first frame arrives.
 //   • After 10s without a frame, polls /system/cameras/{id}/stream-health
@@ -158,13 +222,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
     }
   }
 
-  // "Try alternate ports" — runs RTSP-port iteration (TCP then HTTP
-  // tunnel) on this camera and persists the working port if one is
-  // found. The tile shows live "Trying port N…" status while the
-  // probe is in flight. Distinct from openDiagnose() (which probes
-  // the snapshot URL set) — this one probes RTSP itself with the
-  // HTTP-tunnel flag, recovering full video instead of snapshot
-  // polling.
   const [portProbe, setPortProbe] = useState<{ trying: number | null; result: any } | null>(null)
   async function tryAlternatePorts() {
     setPortProbe({ trying: null, result: null })
@@ -176,8 +233,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
       )
       const data = await r.json()
       setPortProbe({ trying: null, result: data })
-      // If a working port was found, the row was updated server-side;
-      // the streamer will spawn a new worker on the next reconcile (~5s).
     } catch (e) {
       setPortProbe({ trying: null, result: { ok: false, summary: String(e) } })
     }
@@ -207,7 +262,7 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
           URL.revokeObjectURL(url)
         }
         img.src = url
-        retryMs = 1000  // reset backoff after a real frame
+        retryMs = 1000
       }
       ws.onclose = () => {
         if (closed) return
@@ -218,8 +273,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
     }
     connect()
 
-    // Stale-frame watchdog: after 10s without a frame, hit the health
-    // endpoint so we can surface the actual reason.
     healthTimer = setInterval(async () => {
       const silentMs = Date.now() - lastFrameAt.current
       if (silentMs > 10_000) {
@@ -248,7 +301,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
   return (
     <div className="relative bg-black rounded overflow-hidden aspect-video">
       <canvas ref={canvasRef} className="block w-full h-auto" />
-      {/* Status overlay — visible until first frame, then again if stale. */}
       {state !== 'live' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-white text-xs gap-2 bg-black/70 p-2">
           <div className="font-medium">
@@ -257,10 +309,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
           {diag && (
             <div className="max-w-[90%] text-center text-amber-300 leading-snug">{diag}</div>
           )}
-          {/* Diagnose: surfaces auto-failover's per-port probe results
-              so operators see exactly which ports were tried and why
-              each failed. Shown only on stale tiles to keep the
-              'Connecting…' first-load view clean. */}
           {state === 'stale' && (
             <div className="flex gap-1">
               <button
@@ -277,22 +325,15 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
               </button>
             </div>
           )}
-          {/* Live port-probe status */}
           {portProbe?.result && (
             <div className={'text-[11px] mt-1 text-center max-w-[90%] ' +
               (portProbe.result.ok ? 'text-emerald-300' : 'text-red-300')}>
               {portProbe.result.summary}
-              {portProbe.result.ok && (
-                <div className="text-slate-300 mt-0.5">
-                  Restarting worker — should stream within ~10s.
-                </div>
-              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Diagnostic modal — full transport-probe report. */}
       {diagOpen && diagReport && (
         <div className="absolute inset-0 bg-black/90 text-white p-3 overflow-auto text-[11px] z-10"
              onClick={(e) => e.stopPropagation()}>
@@ -302,29 +343,6 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
                     onClick={() => setDiagOpen(false)}>✕</button>
           </div>
           <div className="text-amber-300 mb-2">{diagReport.explanation}</div>
-          <div className="font-mono text-slate-400 leading-tight">
-            host: {diagReport.host}<br/>
-            rtsp_port: {diagReport.rtsp_port} · http_port: {diagReport.http_port}<br/>
-            transport now: <b className="text-white">{diagReport.transport}</b>
-          </div>
-          {diagReport.diagnostic && (
-            <div className="mt-2">
-              <div className="text-slate-400">RTSP reachable: {String(diagReport.diagnostic.rtsp_reachable)}</div>
-              <div className="text-slate-400 mt-1">HTTP attempts:</div>
-              {(diagReport.diagnostic.http_attempts || []).map((a: any, i: number) => (
-                <div key={i} className="ml-2 mt-1">
-                  <div>
-                    port {a.port}: TCP {a.tcp ? '✓' : '✗'}
-                  </div>
-                  {(a.templates || []).map((t: any, j: number) => (
-                    <div key={j} className={'ml-3 ' + (t.ok ? 'text-emerald-400' : 'text-slate-500')}>
-                      {t.ok ? '✓' : '✗'} {t.vendor}: {t.reason}
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
           <button
             className="mt-3 px-2 py-1 rounded bg-sky-600 hover:bg-sky-500"
             onClick={() => openDiagnose(true)}
@@ -333,7 +351,7 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
           </button>
         </div>
       )}
-      {/* Bounding-box overlay */}
+
       <div className="absolute inset-0 pointer-events-none">
         {overlays.map((o, i) => {
           const [x1, y1, x2, y2] = o.bbox_norm
@@ -348,6 +366,9 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
             </div>
           )
         })}
+      </div>
+      <div className="absolute top-1 right-1 text-[10px] text-white/60">
+        {size.w}×{size.h}
       </div>
     </div>
   )

@@ -68,6 +68,14 @@ if SHARD_INDEX >= SHARD_COUNT:
         f"STREAMER_SHARD_COUNT={SHARD_COUNT}"
     )
 
+# Hard cap on simultaneously-streaming cameras for this replica.
+# At 117 cameras the streamer container hit CPU + FD limits before
+# inference fell behind. The cap forces an ordered priority queue
+# instead of an unbounded fanout: cameras with zones configured first
+# (active detection), then open-store cameras, then everything else.
+# Set to 0 to disable the cap.
+MAX_CONCURRENT_STREAMS = max(0, int(os.environ.get("MAX_CONCURRENT_STREAMS", "50")))
+
 
 def _run_migrations() -> None:
     """Bring the DB schema to head before we start polling.
@@ -100,6 +108,8 @@ _CAMERA_COLUMNS = [
     "rtsp_url_override", "inference_fps", "ai_enabled",
     "transport", "snapshot_url_override",
     "rtsp_transport",
+    # Used by the priority sort (open-store cameras stream first).
+    "store_id",
 ]
 
 
@@ -188,10 +198,58 @@ def _persist_transport(db, camera_id: int, updates: dict) -> None:
             pass
 
 
+def _camera_priority(row: dict, zone_cam_ids: set[int],
+                      open_store_ids: set[int]) -> tuple[int, int]:
+    """Lower tuple sorts FIRST. Three priority tiers:
+       0 — has zones AND store is open right now (active detection)
+       1 — has zones (off-hours)
+       2 — open store but no zones
+       3 — everything else
+    Tie-breaker on camera_id for deterministic ordering."""
+    has_zone = row["id"] in zone_cam_ids
+    is_open  = (row.get("store_id") in open_store_ids) if row.get("store_id") else False
+    if has_zone and is_open: tier = 0
+    elif has_zone:           tier = 1
+    elif is_open:            tier = 2
+    else:                    tier = 3
+    return (tier, row["id"])
+
+
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
         rows = _query_active_cameras(db)
+
+        # Build priority context: which cameras have zones, which
+        # stores are open right now.
+        try:
+            zone_rows = db.execute(text(
+                "SELECT DISTINCT camera_id FROM zones WHERE suppressed = false"
+            )).mappings().all()
+            zone_cam_ids = {r["camera_id"] for r in zone_rows}
+        except Exception:
+            zone_cam_ids = set()
+
+        open_store_ids: set[int] = set()
+        try:
+            from app.models import Store
+            from app.utils.business_hours import is_store_open
+            for s in db.query(Store).filter(Store.is_active == True).all():  # noqa: E712
+                if is_store_open(s):
+                    open_store_ids.add(s.id)
+        except Exception as e:
+            log.warning("priority: could not enumerate open stores: %s", e)
+
+        # ai_enabled=false rows are filtered out by _query_active_cameras
+        # (WHERE ai_enabled = true). Sort the survivors by priority +
+        # cap at MAX_CONCURRENT_STREAMS so the streamer never tries
+        # to stream more than it can handle.
+        rows.sort(key=lambda r: _camera_priority(r, zone_cam_ids, open_store_ids))
+        if MAX_CONCURRENT_STREAMS and len(rows) > MAX_CONCURRENT_STREAMS:
+            dropped = len(rows) - MAX_CONCURRENT_STREAMS
+            log.info("priority cap: streaming top %d of %d cameras (%d deferred)",
+                     MAX_CONCURRENT_STREAMS, len(rows), dropped)
+            rows = rows[:MAX_CONCURRENT_STREAMS]
         for r in rows:
             try:
                 pw = decrypt(r.get("password_encrypted") or "")

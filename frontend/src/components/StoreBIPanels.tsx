@@ -43,13 +43,19 @@ function PanelShell({
   )
 }
 
-function useRefresh<T>(url: string, deps: any[] = []) {
+function useRefresh<T>(url: string, deps: any[] = [], intervalMs = 30_000) {
+  // Keeps stale data on screen during a re-poll instead of flashing
+  // to a skeleton, and dedups overlapping in-flight requests so a
+  // slow API doesn't fire a second tick before the first returns.
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
   useEffect(() => {
     let alive = true
+    let inFlight = false      // dedup gate
     const tick = () => {
+      if (inFlight) return    // previous request still running — skip
+      inFlight = true
       setBusy(true)
       api<T>(url).then(d => {
         if (!alive) return
@@ -57,10 +63,10 @@ function useRefresh<T>(url: string, deps: any[] = []) {
       }).catch(e => {
         if (!alive) return
         setError(String(e)); setBusy(false)
-      })
+      }).finally(() => { inFlight = false })
     }
     tick()
-    const t = setInterval(tick, 30_000)
+    const t = setInterval(tick, intervalMs)
     return () => { alive = false; clearInterval(t) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
