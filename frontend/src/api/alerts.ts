@@ -18,6 +18,10 @@ export interface Alert {
   severity: 'critical' | 'warning' | 'info' | null
   title: string | null
   body:  string | null
+  // "🕒 Between 9:30 PM and 9:55 PM (25 min)" for duration events;
+  // "🕒 Detected at 9:30 PM" for point-in-time events. Formatted in
+  // the camera's store-local timezone.
+  time_range: string | null
   snapshot_url: string | null
 }
 

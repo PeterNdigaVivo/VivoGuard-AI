@@ -155,6 +155,14 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
           {alert.body && (
             <div className="text-sm text-slate-600 mt-1">{alert.body}</div>
           )}
+          {/* When-it-happened line. Server-rendered in the camera's
+              store-local timezone so it always reads as wall-clock
+              EAT (or whatever the store is set to). Shown directly
+              under the two-sentence body so the operator's eye picks
+              up the time as part of the same paragraph block. */}
+          {alert.time_range && (
+            <div className="text-xs text-slate-600 mt-1 font-medium">{alert.time_range}</div>
+          )}
 
           {/* Group siblings */}
           {groupExpanded && groupSiblings && groupSiblings.length > 0 && (

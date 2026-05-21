@@ -233,8 +233,93 @@ def _snapshot_url(alert_id: int, event: DetectionEvent) -> str:
     return f"/api/alerts/{alert_id}/snapshot"
 
 
+def _time_range(event: DetectionEvent, store) -> str | None:
+    """Human-readable when-it-happened line for the alert card.
+
+    Duration-style events (dwell, staff_present, loitering,
+    abandoned_object) show a "From 9:30 PM to 9:55 PM" range, computed
+    from the event's known duration field. Point-in-time events
+    (intrusion, fight, queue, crowd) just show "At 9:30 PM".
+
+    Timestamps are formatted in the STORE's timezone so a Junction
+    manager sees 9:30 PM Nairobi, a future Kampala manager sees
+    9:30 PM EAT, etc.
+    """
+    if not event or not event.timestamp:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        tz_name = (getattr(store, "timezone", None) or "Africa/Nairobi") if store else "Africa/Nairobi"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Africa/Nairobi")
+    except ImportError:
+        tz = None     # py<3.9 fallback — extremely unlikely on our image
+    ts = event.timestamp
+    if tz:
+        ts_local = ts.astimezone(tz)
+    else:
+        ts_local = ts
+    fmt = "%-I:%M %p"   # "9:30 PM" — POSIX strftime; Windows would need %#I
+    try:
+        end_str = ts_local.strftime(fmt)
+    except Exception:
+        # Windows compatibility (the Docker host is usually Linux but
+        # guard anyway).
+        end_str = ts_local.strftime("%I:%M %p").lstrip("0")
+
+    # Extract the per-event duration when the detector provided it.
+    extra = event.extra or {}
+    duration_seconds: float | None = None
+    dt = event.detection_type or ""
+    if dt == "staff_present":
+        m = (extra.get("unstaffed_minutes") or extra.get("duration_min")
+             or extra.get("duration_minutes"))
+        if m is not None:
+            try:
+                duration_seconds = float(m) * 60.0
+            except Exception:
+                duration_seconds = None
+    elif dt == "dwell":
+        s = (extra.get("dwell_seconds") or extra.get("duration_seconds")
+             or extra.get("duration_sec"))
+        if s is not None:
+            try:
+                duration_seconds = float(s)
+            except Exception:
+                duration_seconds = None
+    elif dt == "loitering":
+        m = extra.get("duration_min") or extra.get("duration_minutes")
+        if m is not None:
+            try:
+                duration_seconds = float(m) * 60.0
+            except Exception:
+                duration_seconds = None
+    elif dt == "abandoned_object":
+        s = extra.get("duration_seconds") or extra.get("dwell_seconds")
+        if s is not None:
+            try:
+                duration_seconds = float(s)
+            except Exception:
+                duration_seconds = None
+
+    if duration_seconds and duration_seconds >= 60:
+        from datetime import timedelta
+        start_ts = ts_local - timedelta(seconds=duration_seconds)
+        try:
+            start_str = start_ts.strftime(fmt)
+        except Exception:
+            start_str = start_ts.strftime("%I:%M %p").lstrip("0")
+        mins = int(round(duration_seconds / 60))
+        return f"🕒 Between {start_str} and {end_str} ({mins} min)"
+    # Point-in-time event.
+    return f"🕒 Detected at {end_str}"
+
+
 def _to_alert_out(alert: Alert, event: DetectionEvent,
-                  camera: Camera | None, zone: Zone | None) -> AlertOut:
+                  camera: Camera | None, zone: Zone | None,
+                  store=None) -> AlertOut:
     item = AlertOut.model_validate(alert)
     item.camera_id      = event.camera_id
     item.camera_name    = camera.name if camera else None
@@ -247,6 +332,7 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.severity       = _severity(event.detection_type)
     item.title          = _title(event, camera)
     item.body           = _body(event, zone)
+    item.time_range     = _time_range(event, store)
     item.snapshot_url   = _snapshot_url(alert.id, event)
     return item
 
@@ -286,14 +372,25 @@ def list_alerts(
     q = q.order_by(desc(Alert.created_at)).limit(limit)
 
     rows = q.all()
-    # Bulk-fetch zones referenced by these events so _to_alert_out
-    # gets the zone name without N round-trips. Skipped when no
-    # event in the page references a zone.
-    zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
-    zones_by_id = {z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()} if zone_ids else {}
+    # Bulk-fetch zones AND stores referenced by these events so
+    # _to_alert_out gets the names without N round-trips. Skipped
+    # when no event in the page references one.
+    zone_ids  = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
+    store_ids = {cam.store_id for _, _, cam in rows if cam and cam.store_id is not None}
+    zones_by_id  = ({z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()}
+                    if zone_ids else {})
+    from app.models import Store as _Store
+    stores_by_id = ({s.id: s for s in db.query(_Store).filter(_Store.id.in_(store_ids)).all()}
+                    if store_ids else {})
 
-    return [_to_alert_out(a, ev, cam, zones_by_id.get(ev.zone_id) if ev.zone_id else None)
-            for a, ev, cam in rows]
+    return [
+        _to_alert_out(
+            a, ev, cam,
+            zones_by_id.get(ev.zone_id) if ev.zone_id else None,
+            stores_by_id.get(cam.store_id) if (cam and cam.store_id) else None,
+        )
+        for a, ev, cam in rows
+    ]
 
 
 @router.post("/{alert_id}/confirm", response_model=AlertActionOut)
@@ -367,10 +464,12 @@ def add_note(alert_id: int, body: AlertNoteIn,
     db.commit()
     db.refresh(a)
     # Re-fetch with joins so the response shape matches /alerts.
+    from app.models import Store as _Store
     ev = db.get(DetectionEvent, a.event_id)
     cam = db.get(Camera, ev.camera_id) if ev and ev.camera_id else None
     zone = db.get(Zone, ev.zone_id) if ev and ev.zone_id else None
-    return _to_alert_out(a, ev, cam, zone)
+    store = db.get(_Store, cam.store_id) if (cam and cam.store_id) else None
+    return _to_alert_out(a, ev, cam, zone, store)
 
 
 @router.get("/{alert_id}/snapshot")

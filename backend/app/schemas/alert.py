@@ -33,6 +33,11 @@ class AlertOut(BaseModel):
     severity: str | None = None        # 'critical' | 'warning' | 'info'
     title:    str | None = None        # "⚠️ Counter Unstaffed — Vivo Runda Cam 3"
     body:     str | None = None        # plain-English description with context
+    # Human-readable when-it-happened line. Duration-style events
+    # render as "🕒 Between 9:30 PM and 9:55 PM (25 min)"; point-in-
+    # time events as "🕒 Detected at 9:30 PM". Always in the camera's
+    # store-local timezone.
+    time_range: str | None = None
     # URL the browser can GET to fetch a snapshot for this alert.
     # Falls back to the camera's latest cached frame when the event
     # itself doesn't carry a stored thumbnail.
