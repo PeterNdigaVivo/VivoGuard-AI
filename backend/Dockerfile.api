@@ -23,8 +23,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # image; the API uses it on demand for one-shot probes/snapshots, so we
 # include just the binary, not the libs.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg curl \
+ && apt-get install -y --no-install-recommends ffmpeg curl tzdata \
+ && ln -fs /usr/share/zoneinfo/Africa/Nairobi /etc/localtime \
+ && echo "Africa/Nairobi" > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
+
+# Default TZ for any process started in this image. Override at run
+# time via the TZ env var in docker-compose.yml.
+ENV TZ=Africa/Nairobi
 
 WORKDIR /app
 

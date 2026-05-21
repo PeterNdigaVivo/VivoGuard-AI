@@ -23,7 +23,14 @@ class Settings(BaseSettings):
     app_debug: bool = False
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    app_timezone: str = "UTC"
+    # Default timezone for the application. Drives:
+    #   • Celery beat's clock (so 21:00 daily reports fire at 21:00 EAT)
+    #   • Log timestamps from the api / worker / streamer containers
+    #   • Wall-clock comparisons in the scheduled-report dispatcher
+    #     when a store has no timezone of its own
+    # Per-STORE timezone (stores.timezone) still wins for per-store
+    # business-hours math — this is just the chain-wide default.
+    app_timezone: str = "Africa/Nairobi"
 
     # --- Auth ---
     jwt_secret: str = Field(default="dev-only-change-me", min_length=16)

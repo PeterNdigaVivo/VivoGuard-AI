@@ -22,8 +22,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        ffmpeg curl libgl1 libglib2.0-0 \
+        ffmpeg curl libgl1 libglib2.0-0 tzdata \
+ && ln -fs /usr/share/zoneinfo/Africa/Nairobi /etc/localtime \
+ && echo "Africa/Nairobi" > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
+
+# Match the api image's default TZ so Celery beat ticks and logs all
+# read in EAT. Overridable via the TZ env var in docker-compose.yml.
+ENV TZ=Africa/Nairobi
 
 WORKDIR /app
 

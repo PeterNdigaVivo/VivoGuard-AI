@@ -10,6 +10,12 @@ name: vivoguard
 
 # --- Reusable env block ---------------------------------------------------
 x-app-env: &app-env
+  # System clock — every container reads this at startup. EAT (UTC+3)
+  # is the chain-wide default since 24 of 26 Vivo stores are in Kenya
+  # / Uganda / Rwanda (all UTC+3 / UTC+2). Override via .env if a
+  # specific deployment lives elsewhere.
+  TZ: ${TZ:-Africa/Nairobi}
+  APP_TIMEZONE: ${APP_TIMEZONE:-Africa/Nairobi}
   APP_ENV: ${APP_ENV:-production}
   APP_DEBUG: ${APP_DEBUG:-false}
   JWT_SECRET: ${JWT_SECRET}
@@ -174,9 +180,19 @@ services:
     container_name: vivoguard-postgres
     restart: unless-stopped
     environment:
+      # Server-side clock — every now() / current_timestamp call
+      # returns EAT. Stored values stay timestamptz (UTC under the
+      # hood); the difference is what an admin SQL session sees and
+      # how date_trunc('day', now()) lands.
+      TZ: ${TZ:-Africa/Nairobi}
+      PGTZ: ${TZ:-Africa/Nairobi}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - "postgres"
+      - "-c"
+      - "timezone=Africa/Nairobi"
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks: [vivoguard]
