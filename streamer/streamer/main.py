@@ -269,24 +269,52 @@ def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
         rows = _query_active_cameras(db)
+        # One-off summary of how the negotiation budget will be spent.
+        # Logged at INFO once per reconcile so operators can see at a
+        # glance whether a slow startup is due to many cameras
+        # missing rtsp_url_override.
+        n_override = sum(1 for r in rows if r.get("rtsp_url_override"))
+        n_negotiate = len(rows) - n_override
+        if rows:
+            log.info("desired_specs: %d cameras (%d with rtsp_url_override — fast, "
+                     "%d will run auto-transport)",
+                     len(rows), n_override, n_negotiate)
         for r in rows:
             try:
                 pw = decrypt(r.get("password_encrypted") or "")
             except Exception:
                 pw = ""
-            # Auto-negotiate transport BEFORE building the spec. If
-            # RTSP/554 is unreachable but the Dahua snapshot CGI
-            # responds on an HTTP port, switch this row to
-            # http_snapshot and persist so the next reconcile picks
-            # the right worker. No-op when RTSP works fine.
-            try:
-                updates = auto_transport.negotiate(r, pw)
-                if updates:
-                    _persist_transport(db, r["id"], updates)
-                    r.update(updates)
-            except Exception as e:
-                log.warning("auto-transport: negotiation failed for camera %s: %s",
-                            r.get("id"), e)
+
+            # SHORT-CIRCUIT: if the operator (or a previous probe)
+            # already saved a working rtsp_url_override on this row,
+            # skip auto-transport entirely. At 117 cameras the
+            # negotiate cycle was burning 5+ minutes of synchronous
+            # probes per cold start. Most rows already have the
+            # right URL stored — there's no reason to re-probe them.
+            # If the override later turns out to be wrong, the
+            # FFmpegWorker's retry backoff brings the camera back to
+            # this loop with the override cleared, OR the operator's
+            # "Try alternate ports" button forces a re-probe via
+            # /cameras/{id}/try-alternate-ports.
+            override = r.get("rtsp_url_override")
+            if override:
+                log.debug("streamer: camera %s uses rtsp_url_override — skipping negotiation",
+                          r.get("id"))
+            else:
+                # No override stored — auto-negotiate transport
+                # BEFORE building the spec. If RTSP/554 is
+                # unreachable but the Dahua snapshot CGI responds on
+                # an HTTP port, switch this row to http_snapshot and
+                # persist so the next reconcile picks the right
+                # worker. No-op when RTSP works fine.
+                try:
+                    updates = auto_transport.negotiate(r, pw)
+                    if updates:
+                        _persist_transport(db, r["id"], updates)
+                        r.update(updates)
+                except Exception as e:
+                    log.warning("auto-transport: negotiation failed for camera %s: %s",
+                                r.get("id"), e)
             transport = (r.get("transport") or "rtsp") or "rtsp"
             rtsp_url = build_rtsp_url(
                 brand=r.get("brand"),
