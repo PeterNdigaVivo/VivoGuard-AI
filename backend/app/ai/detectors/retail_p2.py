@@ -185,6 +185,10 @@ class ShutterDetector(Detector):
     def __init__(self):
         self._last_state: dict[int, int] = {}    # camera_id → 1/0
         self._fired: dict[tuple[int, str], float] = {}
+        # (camera_id, "still_closed_at_opening", "YYYY-MM-DD") → 1
+        # Tracks the once-per-day "shop hasn't opened on time" alert so
+        # the operator gets a single nudge, not a flood.
+        self._opening_alerted: dict[tuple[int, str, str], int] = {}
 
     def _detect_state(self, ctx: DetectorContext, zone: dict | None,
                       cfg: dict) -> int | None:
@@ -305,7 +309,50 @@ class ShutterDetector(Detector):
                     detection_type=self.detection_type, cls="closed_during_hours",
                     confidence=1.0, bbox_norm=[0, 0, 1, 1],
                     zone_id=(zone or {}).get("id"),
-                    extra={"shutter_state": "closed", "store_id": ctx.store_id,
+                    extra={"priority": "high", "shutter_state": "closed",
+                           "store_id": ctx.store_id,
                            "rule": "closed_during_hours"},
                 ))
+
+            # "Shutter still closed at opening time" — once per day,
+            # within 30 minutes of the first open window starting.
+            # Distinct from the generic "closed during hours" rule so
+            # the dashboard can flag late openings specifically.
+            opening = self._first_opening_today(ctx.business_hours, now_local)
+            if (state == 0 and opening is not None
+                    and 0 <= (now_local - opening).total_seconds() <= 30 * 60):
+                day_key = now_local.date().isoformat()
+                if not self._opening_alerted.get((ctx.camera_id, "still_closed_at_opening", day_key)):
+                    self._opening_alerted[(ctx.camera_id, "still_closed_at_opening", day_key)] = 1
+                    out.append(DetectionEvent(
+                        detection_type=self.detection_type, cls="still_closed_at_opening",
+                        confidence=1.0, bbox_norm=[0, 0, 1, 1],
+                        zone_id=(zone or {}).get("id"),
+                        extra={"priority": "high", "shutter_state": "closed",
+                               "store_id": ctx.store_id,
+                               "rule": "still_closed_at_opening",
+                               "opening_time": opening.strftime("%H:%M")},
+                    ))
         return out
+
+    @staticmethod
+    def _first_opening_today(business_hours: dict | None, now_local):
+        """Earliest open-window start on today's date in `now_local`'s
+        timezone, or None if the store is closed today."""
+        if not business_hours:
+            return None
+        from datetime import datetime as _dt
+        weekday_keys = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        windows = business_hours.get(weekday_keys[now_local.weekday()]) or []
+        earliest = None
+        for win in windows:
+            try:
+                a, _ = win.split("-")
+                ha, ma = (int(x) for x in a.split(":"))
+                start = _dt(now_local.year, now_local.month, now_local.day,
+                            ha, ma, tzinfo=now_local.tzinfo)
+                if earliest is None or start < earliest:
+                    earliest = start
+            except Exception:
+                continue
+        return earliest

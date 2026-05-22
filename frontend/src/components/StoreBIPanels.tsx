@@ -160,45 +160,39 @@ export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range
 // and intensity-based dot colours. They kept regressing when the
 // data shape shifted. This is the minimum that always paints.
 function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
-  const hours = payload.hours || []
-  if (hours.length === 0) {
-    return <div className="py-6 text-center text-slate-500 text-sm">
-      No visitor data yet today
-    </div>
-  }
-  const total = hours.reduce((s, h) => s + (h.visitors || 0), 0)
-  if (total === 0) {
-    return <div className="py-6 text-center text-slate-500 text-sm">
-      No visitor data yet today
-    </div>
-  }
+  // Always render the canonical 12-point 09:00-20:00 retail window
+  // so the chart never collapses on quiet days. Backend already pads,
+  // but we re-pad client-side too in case an older API is in front.
+  const byHour = new Map<number, number>()
+  for (const h of (payload.hours || [])) byHour.set(h.hour, h.visitors ?? 0)
+  const HOURS = Array.from({ length: 12 }, (_, i) => 9 + i)  // 09..20
+  const series = HOURS.map(hr => ({
+    hour: hr, label: `${hr.toString().padStart(2, '0')}:00`,
+    visitors: byHour.get(hr) ?? 0,
+  }))
 
-  // Fixed canvas. Viewbox + 100% width scales horizontally; fixed
-  // height keeps the pane from collapsing.
   const W = 600, H = 180, PL = 36, PR = 12, PT = 10, PB = 28
   const innerW = W - PL - PR
   const innerH = H - PT - PB
-  const max = Math.max(...hours.map(h => h.visitors || 0), 1)
-  const stepX = hours.length > 1 ? innerW / (hours.length - 1) : 0
+  // Floor at 10 so a flat-zero day still has a visible y-axis scale.
+  const max = Math.max(10, ...series.map(s => s.visitors))
+  const stepX = innerW / (series.length - 1)
   const xAt = (i: number) => PL + i * stepX
   const yAt = (v: number) => PT + innerH - (v / max) * innerH
 
-  const linePath = hours
-    .map((h, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(h.visitors).toFixed(1)}`)
+  // Plain SVG polyline — points="x1,y1 x2,y2 ...". Always 12 points.
+  const points = series
+    .map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.visitors).toFixed(1)}`)
     .join(' ')
 
-  // Y-axis ticks: 0 + max, plus 2 intermediate values if max > 4.
   const yTicks: number[] = [0]
-  if (max > 1) {
-    const step = Math.max(1, Math.ceil(max / 4))
-    for (let v = step; v < max; v += step) yTicks.push(v)
-  }
+  const step = Math.max(1, Math.ceil(max / 4))
+  for (let v = step; v < max; v += step) yTicks.push(v)
   yTicks.push(max)
 
   return (
     <div>
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
-        {/* Y-axis grid + labels */}
         {yTicks.map((tv, i) => {
           const y = yAt(tv)
           return (
@@ -210,16 +204,14 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
             </g>
           )
         })}
-        {/* The line. Single blue stroke. */}
-        <path d={linePath} stroke="#1d4ed8" strokeWidth={2.5}
-              fill="none" strokeLinejoin="round" strokeLinecap="round" />
-        {/* Dots + x-axis labels */}
-        {hours.map((h, i) => (
+        <polyline points={points} fill="none" stroke="#3b82f6" strokeWidth={2.5}
+                  strokeLinejoin="round" strokeLinecap="round" />
+        {series.map((s, i) => (
           <g key={i}>
-            <circle cx={xAt(i)} cy={yAt(h.visitors)} r={3.5}
-                    fill="#1d4ed8" stroke="white" strokeWidth={1.5} />
+            <circle cx={xAt(i)} cy={yAt(s.visitors)} r={3}
+                    fill="#3b82f6" stroke="white" strokeWidth={1.5} />
             <text x={xAt(i)} y={H - 8} textAnchor="middle"
-                  fontSize="11" fill="#64748b">{h.label}</text>
+                  fontSize="11" fill="#64748b">{s.label}</text>
           </g>
         ))}
       </svg>

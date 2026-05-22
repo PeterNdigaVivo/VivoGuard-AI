@@ -639,8 +639,13 @@ def store_hourly(store_id: int,
         if v > 0:   return "low"
         return "empty"
 
+    # Always return the canonical 09:00–21:00 retail window (12 hours,
+    # 12 data points). The chart on the dashboard renders a fixed
+    # 12-point X axis so the line never collapses on slow days.
+    chart_open = min(open_hr, 9)
+    chart_close = max(close_hr, 21)
     hours = []
-    for hr in range(open_hr, max(close_hr, open_hr + 1)):
+    for hr in range(chart_open, max(chart_close, chart_open + 1)):
         v = by_hour.get(hr, 0.0)
         hours.append({
             "hour": hr,
@@ -1663,7 +1668,7 @@ def store_heatmaps(store_id: int, window: str | None = None,
     r = redis.from_url(_settings.redis_url)
     out = []
     # Heatmap thumbs the dashboard renders inherit the window.
-    win = window if window in _HEATMAP_WINDOWS else "day"
+    win = _resolve_window(window)
     for c in cams:
         raw = r.get(_heatmap_redis_key(c.id, win))
         if not raw:
@@ -1755,15 +1760,27 @@ def heatmap_archive_download(camera_id: int, day: str,
 # Allowed values for the `window` query parameter on heatmap reads.
 # Maps each to the Redis key suffix the inference worker publishes
 # under (see HeatmapDetector._publish).
-_HEATMAP_WINDOWS = {"hour", "day", "week"}
+# Window names accepted by the heatmap endpoints. Mirrors
+# HeatmapDetector.WINDOWS. "hour" is kept as a synonym for "3h" so
+# any cached frontend bundle from before the rename still works.
+_HEATMAP_WINDOWS = {"3h", "day", "week"}
+_HEATMAP_WINDOW_ALIASES = {"hour": "3h"}
+
+
+def _resolve_window(window: str | None) -> str:
+    """Normalise `?window=` to a canonical bucket name.
+    `hour` is accepted as an alias for `3h` so any cached frontend
+    bundle from before the rename keeps working."""
+    if not window:
+        return "day"
+    w = _HEATMAP_WINDOW_ALIASES.get(window, window)
+    return w if w in _HEATMAP_WINDOWS else "day"
 
 
 def _heatmap_redis_key(camera_id: int, window: str | None) -> str:
     """Pick the per-window Redis key. None / 'day' / unknown all map
     to the day-window key so legacy callers keep working."""
-    if window in _HEATMAP_WINDOWS:
-        return f"vg:heatmap:{window}:{camera_id}"
-    return f"vg:heatmap:day:{camera_id}"
+    return f"vg:heatmap:{_resolve_window(window)}:{camera_id}"
 
 
 def _heatmap_payload(camera_id: int, window: str | None) -> dict | None:
@@ -1790,17 +1807,72 @@ def _heatmap_payload(camera_id: int, window: str | None) -> dict | None:
 
 @router.get("/heatmap/{camera_id}")
 def heatmap_grid(camera_id: int, window: str | None = None,
+                 db: Session = Depends(get_db),
                  _u=Depends(get_current_user)):
     """Return the latest heatmap grid for the requested time window.
 
-    `window` is 'hour' | 'day' (default) | 'week'. The inference
-    worker maintains separate accumulators for each so picking a
-    window doesn't require any backfill.
+    `window` is '3h' (last 3-hour bucket — resets at 00, 03, 06, 09,
+    12, 15, 18, 21) | 'day' (default — since local midnight) | 'week'
+    (since Monday 00:00). The inference worker maintains separate
+    accumulators for each so picking a window doesn't require any
+    backfill. `hour` is accepted as a synonym for `3h` for
+    backwards-compat with older cached frontend bundles.
     """
     payload = _heatmap_payload(camera_id, window)
     if payload is None:
         raise HTTPException(404, "heatmap not available — is heatmap detection enabled?")
+    payload["window"] = _resolve_window(window)
+    payload["period_label"] = _period_label_for(payload["window"])
+    # Busiest-hour label — independent of the spatial grid; pulled from
+    # MetricSnapshot so it reflects actual today / week occupancy rather
+    # than the cumulative heatmap intensity.
+    payload["peak_hour"], payload["peak_label"] = _peak_hour_for(db, camera_id, payload["window"])
     return payload
+
+
+def _peak_hour_for(db: Session, camera_id: int, window: str) -> tuple[int | None, str | None]:
+    """Hour-of-day with the highest occupancy for this camera in the
+    selected window. Returns (hour, "HH:00-HH+1:00") or (None, None)
+    if no data."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import extract
+    now = datetime.now()
+    if window == "3h":
+        since = now.replace(hour=(now.hour // 3) * 3, minute=0, second=0, microsecond=0)
+    elif window == "week":
+        since = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    row = (db.query(extract("hour", MetricSnapshot.period_start).label("hr"),
+                    func.max(MetricSnapshot.value).label("v"))
+             .filter(MetricSnapshot.camera_id == camera_id,
+                     MetricSnapshot.metric_type == "occupancy",
+                     MetricSnapshot.period_start >= since)
+             .group_by("hr")
+             .order_by(func.max(MetricSnapshot.value).desc())
+             .first())
+    if not row or not row[1]:
+        return None, None
+    hr = int(row[0])
+    return hr, f"{hr:02d}:00–{hr + 1:02d}:00"
+
+
+def _period_label_for(window: str) -> str:
+    """Human-readable label for the current bucket so the frontend
+    can show "Last 3h: 14:00–17:00" without re-deriving the
+    boundary itself."""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    if window == "3h":
+        start_hour = (now.hour // 3) * 3
+        end_hour   = start_hour + 3
+        return f"{start_hour:02d}:00–{end_hour:02d}:00"
+    if window == "week":
+        # ISO week → Monday of the current week.
+        monday = now - timedelta(days=now.weekday())
+        return f"Week of {monday.strftime('%b %d')}"
+    return f"Today, since 00:00 ({now.strftime('%b %d')})"
 
 
 # Premier League / Opta / SofaScore football-analytics colour scheme.

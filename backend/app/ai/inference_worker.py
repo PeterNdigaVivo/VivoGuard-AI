@@ -147,6 +147,8 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None) -> int
     # detector activity table and ML-feedback paths see every event.
     if ev.detection_type not in _SKIP_ALERT_TYPES:
         db.add(Alert(event_id=rec.id, status="new"))
+        log.info("Created alert: %s for camera %s (event=%s)",
+                 ev.detection_type, camera_id, rec.id)
     return rec.id
 
 

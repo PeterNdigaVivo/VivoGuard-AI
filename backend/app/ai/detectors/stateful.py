@@ -312,37 +312,43 @@ class HeatmapDetector(Detector):
     Keeps THREE grids per camera in inference-worker memory and
     periodically publishes each to Redis under its own key:
 
-      vg:heatmap:hour:{camera_id}   reset every 60 minutes (rolling hour)
-      vg:heatmap:day:{camera_id}    reset at local 00:00
-      vg:heatmap:week:{camera_id}   reset at Monday 00:00
+      vg:heatmap:3h:{camera_id}    reset every 3 hours (00:00, 03:00,
+                                    06:00, 09:00, 12:00, 15:00, 18:00,
+                                    21:00). Matches store-manager
+                                    "what's happening THIS shift?"
+                                    cadence better than the previous
+                                    1-hour bucket, which was too
+                                    twitchy to draw conclusions from.
+      vg:heatmap:day:{camera_id}   reset at local 00:00
+      vg:heatmap:week:{camera_id}  reset at Monday 00:00
 
     The dashboard's time-window selector hits the API with
-    `?window=hour|day|week` and gets the matching grid.
+    `?window=3h|day|week` and gets the matching grid.
 
     `vg:heatmap:{camera_id}` (un-suffixed) remains populated with the
-    DAY grid so the existing /analytics/heatmap/{id} call sites
-    (default 'day' semantics) keep working without a version skew.
+    DAY grid so older call sites that didn't pass `?window=…` keep
+    working.
     """
 
     detection_type = "heatmap"
-    # 20×20 grid — 400 cells. Higher than the previous 32×32 in
-    # display-density per camera-frame ratio (cells are larger, easier
-    # to colour-read at thumbnail size) and easier on Redis payload
-    # (400 ints vs 1024). For Vivo retail floorplans the per-cell
-    # resolution maps to roughly 1 m² in a typical 400 m² store,
-    # which is the granularity operators actually act on.
+    # 20×20 grid — 400 cells. Per-cell resolution maps to roughly
+    # 1 m² in a typical 400 m² Vivo store, which is the granularity
+    # operators actually act on.
     GRID = 20
     PUBLISH_INTERVAL = 30   # seconds
-    WINDOWS = ("hour", "day", "week")
+    # Window names also used as the Redis key suffix and the API
+    # `?window=` value. Renamed "hour" → "3h" to reflect the actual
+    # 3-hour rolling bucket.
+    WINDOWS = ("3h", "day", "week")
 
     def __init__(self):
         # camera_id -> {window_name -> grid}
         self.grids: dict[int, dict[str, list[list[int]]]] = {}
         # camera_id -> {window_name -> period_anchor}
-        # `period_anchor` identifies WHICH hour / day / iso-week the
-        # grid currently represents. When the anchor advances (next
-        # hour ticks over / midnight passes / Monday arrives), we
-        # zero the grid before continuing to accumulate.
+        # `period_anchor` identifies WHICH 3-hour bucket / day /
+        # iso-week the grid currently represents. When the anchor
+        # advances (next 3h tick / midnight / Monday arrives), the
+        # grid is zeroed before continuing to accumulate.
         self.anchors: dict[int, dict[str, tuple]] = {}
         self._last_publish: dict[int, float] = {}
 
@@ -353,14 +359,15 @@ class HeatmapDetector(Detector):
         Comparable across calls — if the anchor changed since last
         read, the grid is stale and must be reset.
 
-        hour : (date, hour)
+        3h   : (date, hour_bucket)  where hour_bucket = hour // 3 * 3,
+               so values are always one of {0, 3, 6, 9, 12, 15, 18, 21}
         day  : (date,)
         week : (iso_year, iso_week)
         """
         from datetime import datetime
         ts = ts or datetime.now()
-        if window == "hour":
-            return (ts.date(), ts.hour)
+        if window == "3h":
+            return (ts.date(), (ts.hour // 3) * 3)
         if window == "week":
             iso = ts.isocalendar()
             # (iso_year, iso_week)

@@ -3,56 +3,59 @@
 // Overlays the colourised heatmap PNG (from /analytics/heatmap/{id}/
 // image) on the camera snapshot. Use the opacity slider to tune the
 // blend; click Download to grab the overlay as a standalone PNG.
-//
-// Visual style:
-//   • Dark navy chrome — matches the navy floor of the heatmap and
-//     keeps focus on the orange hotspot.
-//   • Sharp banding rather than smooth gradient (server side).
-//   • Hotspot annotation badge ("🔥 Busiest Area") in the corner.
-//   • Legend bar showing the cool→hot ramp.
-//   • Time-window selector (Last hour / Today / This week) so
-//     non-technical operators can change scope without surveying SQL.
-//
-// Both the overlay <img> and the Download click fetch the PNG via
-// `fetch(..., { Authorization: Bearer <jwt> })` and convert the blob
-// to an object URL.
 
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { Button, Card, PageHeader } from '@/components/ui/Primitives'
 import { cameras } from '@/api/cameras'
+import { stores } from '@/api/stores'
+import { api } from '@/api/client'
 
-type TimeWindow = 'last_hour' | 'today' | 'this_week'
+// "3h" = rolling 3-hour bucket (resets at 00/03/06/09/12/15/18/21).
+type TimeWindow = '3h' | 'today' | 'this_week'
+
+interface HeatmapGridResp {
+  grid?: number[][]
+  rows?: number
+  cols?: number
+  window?: string
+  period_label?: string
+  // peak/busiest cell metadata. Optional — server may omit on cold start.
+  peak_hour?: string | null
+  peak_label?: string | null
+  updated_at?: string | null
+}
 
 export default function HeatmapPage() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const cameraId = Number(id)
 
   const [snap, setSnap] = useState<string | null>(null)
   const [snapFailed, setSnapFailed] = useState<boolean>(false)
   const [cameraName, setCameraName] = useState<string | null>(null)
+  const [storeId, setStoreId] = useState<number | null>(null)
+  const [storeName, setStoreName] = useState<string | null>(null)
   const [heatmapObjUrl, setHeatmapObjUrl] = useState<string | null>(null)
-  // Default 0.85 — the new colour scheme is dark enough that the
-  // snapshot still reads through clearly.
   const [opacity, setOpacity] = useState(0.85)
-  const [bust, setBust] = useState(0)              // forces refresh every 30s + on Refresh click
-  const [windowSel, setWindowSel] = useState<TimeWindow>('today')
-  // `error` only reflects USER-INITIATED failures (download click).
-  // Background snapshot failures are swallowed silently — the UI
-  // shows a grey placeholder with the camera name instead of leaking
-  // FFmpeg stderr to non-technical store managers.
+  const [bust, setBust] = useState(0)
+  const [windowSel, setWindowSel] = useState<TimeWindow>('3h')
+  const [periodLabel, setPeriodLabel] = useState<string | null>(null)
+  const [peakLabel, setPeakLabel] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // Pull the camera name up-front so the placeholder reads
-  // "Vivo Junction - Camera 3" instead of an anonymous grey box.
+  // Pull the camera + its store up-front so the placeholder reads
+  // "Vivo Junction - Camera 3" and the back link knows where to go.
   useEffect(() => {
-    cameras.get(cameraId).then(c => setCameraName(c.name)).catch(() => {})
+    cameras.get(cameraId).then(c => {
+      setCameraName(c.name)
+      setStoreId(c.store_id)
+      if (c.store_id) {
+        stores.get(c.store_id).then(s => setStoreName(s.name)).catch(() => {})
+      }
+    }).catch(() => {})
   }, [cameraId])
 
-  // Snapshot — swallow failures silently. The backend prefers the
-  // streamer's cached Redis frame, then falls back to ffmpeg. If both
-  // miss, the response is a sanitised 503 — we don't surface the
-  // detail string at all.
   useEffect(() => {
     setSnapFailed(false)
     cameras.snapshot(cameraId)
@@ -62,20 +65,35 @@ export default function HeatmapPage() {
     return () => clearInterval(t)
   }, [cameraId, bust])
 
-  // Build the heatmap image URL with the current window selection
-  // baked in. The server keeps three independent accumulators
-  // (vg:heatmap:hour|day|week:{id}) so switching this query param
-  // gets a fresh grid with no client-side filtering.
+  // Map UI window → API window param.
+  function apiWindow(): string {
+    return windowSel === '3h' ? '3h' : windowSel === 'this_week' ? 'week' : 'day'
+  }
+
   function heatmapUrl(forDownload = false): string {
-    const win = windowSel === 'last_hour' ? 'hour'
-              : windowSel === 'this_week' ? 'week'
-              : 'day'
     const params = new URLSearchParams({
       alpha: String(forDownload ? Math.max(0.85, opacity) : opacity),
-      window: win,
+      window: apiWindow(),
     })
     return `/api/analytics/heatmap/${cameraId}/image?${params}`
   }
+
+  // Fetch the JSON grid alongside the image — it carries the
+  // human-readable period label and the busiest-cell hint.
+  useEffect(() => {
+    let cancelled = false
+    api<HeatmapGridResp>(`/analytics/heatmap/${cameraId}?window=${apiWindow()}`)
+      .then(d => {
+        if (cancelled) return
+        setPeriodLabel(d.period_label ?? null)
+        setPeakLabel(d.peak_label ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) { setPeriodLabel(null); setPeakLabel(null) }
+      })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, bust, windowSel])
 
   // Heatmap PNG — authed fetch → blob → object URL.
   useEffect(() => {
@@ -95,7 +113,6 @@ export default function HeatmapPage() {
       cancelled = true
       if (created) URL.revokeObjectURL(created)
     }
-    // Re-fetch on window change too — that's the whole point.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId, opacity, bust, windowSel])
 
@@ -112,7 +129,9 @@ export default function HeatmapPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `heatmap_camera_${cameraId}.png`
+      const safeStore = (storeName ?? 'store').replace(/\s+/g, '_')
+      const safeCam   = (cameraName ?? `camera_${cameraId}`).replace(/\s+/g, '_')
+      a.download = `heatmap_${safeStore}_${safeCam}_${apiWindow()}.png`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
@@ -122,37 +141,50 @@ export default function HeatmapPage() {
     }
   }
 
+  const backHref = storeId ? `/stores/${storeId}` : '/cameras'
+  const backLabel = storeName ? `← Back to ${storeName} Dashboard` : '← Back'
+
   return (
     <div className="p-6">
+      <div className="mb-3">
+        <button
+          onClick={() => navigate(backHref)}
+          className="text-sm text-slate-600 hover:text-slate-900 font-medium">
+          {backLabel}
+        </button>
+      </div>
+
       <PageHeader
-        title={`Footfall heatmap — camera #${cameraId}`}
+        title={cameraName
+          ? `${storeName ? storeName + ' — ' : ''}${cameraName} heatmap`
+          : `Footfall heatmap — camera #${cameraId}`}
         actions={<>
           <Link to="/cameras"><Button variant="ghost">Cameras</Button></Link>
           <Button onClick={download} disabled={!heatmapObjUrl}>Download PNG</Button>
         </>}
       />
 
-      {/* Time-window selector — football-analytics style: large, bold,
-          unmistakeable. Wired up visually now; server-side time
-          windowing on the heatmap accumulator is a separate change. */}
       <Card className="p-3 mb-3 bg-slate-900 text-white border-slate-800">
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs uppercase tracking-wide text-slate-400">Time window</span>
-          {(['last_hour', 'today', 'this_week'] as TimeWindow[]).map(w => (
+          {(['3h', 'today', 'this_week'] as TimeWindow[]).map(w => (
             <button key={w}
                     onClick={() => setWindowSel(w)}
-                    title={w === 'last_hour' ? 'Rolling last 60 minutes — resets every hour'
-                         : w === 'today'     ? 'Since local midnight today'
+                    title={w === '3h' ? 'Rolling 3-hour bucket — resets at 00, 03, 06, 09, 12, 15, 18, 21'
+                         : w === 'today' ? 'Since local midnight today'
                          : 'Since the start of this iso-week (Mon 00:00)'}
                     className={'px-3 py-1 rounded text-xs font-medium ' +
                       (windowSel === w
                         ? 'bg-orange-500 text-white'
                         : 'bg-slate-800 text-slate-300 hover:bg-slate-700')}>
-              {w === 'last_hour' ? 'Last hour'
-                : w === 'today'   ? 'Today'
-                : 'This week'}
+              {w === '3h' ? 'Last 3h' : w === 'today' ? 'Today' : 'This Week'}
             </button>
           ))}
+          {periodLabel && (
+            <span className="text-xs text-slate-300 bg-slate-800 rounded px-2 py-1">
+              Last updated: {periodLabel}
+            </span>
+          )}
           <div className="flex-1" />
           <span className="text-xs text-slate-400">Opacity</span>
           <input type="range" min={0} max={1} step={0.05}
@@ -161,21 +193,19 @@ export default function HeatmapPage() {
           <span className="text-xs w-10 text-right">{Math.round(opacity * 100)}%</span>
           <Button variant="ghost" onClick={() => setBust(b => b + 1)}>Refresh</Button>
         </div>
+        {peakLabel && (
+          <div className="mt-2 text-xs text-orange-300">
+            🔥 Busiest period today: {peakLabel}
+          </div>
+        )}
       </Card>
 
-      {/* Heatmap canvas — dark navy backdrop for football-analytics
-          look. Mix-blend-screen keeps the snapshot visible through the
-          orange hotspots. */}
       <Card className="p-3 bg-[#0d1b2a] text-white border-slate-800">
         <div className="relative w-full bg-[#0a1628] rounded overflow-hidden">
           {snap ? (
             <img src={`data:image/jpeg;base64,${snap}`}
                  className="block w-full h-auto opacity-90" alt="camera snapshot" />
           ) : (
-            // Grey placeholder with the camera name. We intentionally
-            // do NOT surface FFmpeg / RTSP error strings here — store
-            // managers don't read them, and they make the page look
-            // broken when the heatmap itself is rendering fine on top.
             <div className="aspect-video flex flex-col items-center justify-center
                             bg-slate-800 text-slate-300 gap-1">
               <div className="text-3xl opacity-50">📷</div>
@@ -192,7 +222,6 @@ export default function HeatmapPage() {
             <img src={heatmapObjUrl} alt=""
                  className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen" />
           )}
-          {/* Hotspot annotation — pulses for emphasis. */}
           {heatmapObjUrl && (
             <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/70 text-white text-xs font-semibold
                             animate-pulse pointer-events-none">
@@ -201,7 +230,6 @@ export default function HeatmapPage() {
           )}
         </div>
 
-        {/* Legend bar — cool → hot. Matches the server-side stops. */}
         <div className="mt-3 px-1">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">
             Activity intensity
