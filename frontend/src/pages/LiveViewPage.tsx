@@ -1,15 +1,18 @@
-// Live View — scales to 117+ cameras via pagination + viewport-lazy
-// streaming.
+// Live View — true paged streaming. Only the active page's tiles
+// ever exist in the DOM, so the WebSocket count is bounded by
+// `layout × layout`. When the operator pages forward, the old
+// tiles unmount (their useEffect cleanup closes their /ws/stream
+// socket) and the new tiles mount fresh.
 //
-// Three layers of "only fetch what you can see":
-//   1. Store filter dropdown — narrow the working set.
-//   2. Page-size cap (default 16) with "Load more" → operators
-//      explicitly grow the grid; nothing autoloads everything.
-//   3. Per-tile Intersection Observer — even within the picked set,
-//      a tile only opens its /ws/stream WebSocket when it's actually
-//      in the viewport. Scroll past, the socket closes; scroll back,
-//      it reconnects. Browsers cap ~250 WS/origin and at 117 cameras
-//      we'd burn through that on a 9×9 grid.
+// Three features built on top of that:
+//   • Store filter — narrow the working set to one store's cams.
+//   • Auto-cycle — security-guard mode that pages every 30s.
+//   • Full-screen — click any tile to expand; Esc returns.
+//
+// The previous "Load more" behaviour grew the visible set
+// monotonically, which meant after a few clicks you had 48-64
+// WebSockets open. At 117 cameras that crushed both browser and
+// server. True paging caps it at 16.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
@@ -21,31 +24,103 @@ import { api, wsUrl } from '@/api/client'
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
 type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 const GRID_OPTIONS: GridSize[] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-const PAGE_INCREMENT = 16   // 4×4
+const AUTO_CYCLE_MS = 30_000           // 30s — security-guard cadence
+const PAGE_STORAGE_KEY = 'vg:live:pageStart'
+const FILTER_STORAGE_KEY = 'vg:live:storeFilter'
 
 export default function LiveViewPage() {
   const [cams, setCams]       = useState<Camera[]>([])
   const [stores, setStores]   = useState<Store[]>([])
-  const [storeFilter, setStoreFilter] = useState<number | ''>('')
-  const [layout, setLayout]   = useState<GridSize>(4)         // start 4×4
-  const [visibleCount, setVisibleCount] = useState(PAGE_INCREMENT)
+  // Persist filter + page so navigating away and back leaves the
+  // operator looking at the same tiles they had open.
+  const [storeFilter, setStoreFilter] = useState<number | ''>(
+    () => {
+      const raw = (typeof localStorage !== 'undefined' && localStorage.getItem(FILTER_STORAGE_KEY)) || ''
+      return raw ? Number(raw) : ''
+    }
+  )
+  const [layout, setLayout]   = useState<GridSize>(4)         // 4×4 = 16 tiles
+  const [pageStart, setPageStart] = useState<number>(
+    () => {
+      const raw = (typeof localStorage !== 'undefined' && localStorage.getItem(PAGE_STORAGE_KEY)) || '0'
+      const n = Number(raw)
+      return Number.isFinite(n) && n >= 0 ? n : 0
+    }
+  )
   const [overlays, setOverlays] = useState<Record<number, Detection[]>>({})
   const [fixing, setFixing]   = useState(false)
+  const [autoCycle, setAutoCycle] = useState(false)
+  // null = grid view; number = camera_id rendered full-screen.
+  const [fullscreenId, setFullscreenId] = useState<number | null>(null)
   const toast = useToast()
 
   useEffect(() => { camsApi.list().then(setCams) }, [])
   useEffect(() => { storesApi.list().then(setStores) }, [])
 
-  // Filtered + paginated working set. The grid renders the first
-  // `tileCount` of these.
+  // Persist on change.
+  useEffect(() => {
+    try { localStorage.setItem(PAGE_STORAGE_KEY, String(pageStart)) } catch {}
+  }, [pageStart])
+  useEffect(() => {
+    try { localStorage.setItem(FILTER_STORAGE_KEY, storeFilter === '' ? '' : String(storeFilter)) } catch {}
+  }, [storeFilter])
+
+  // Filtered working set.
   const filteredCams = useMemo(() => {
     if (storeFilter === '') return cams
     return cams.filter(c => c.store_id === storeFilter)
   }, [cams, storeFilter])
 
-  // When the filter changes, reset to the first page so the operator
-  // doesn't get stuck mid-list with no visible tiles.
-  useEffect(() => { setVisibleCount(PAGE_INCREMENT) }, [storeFilter])
+  const pageSize = layout * layout       // 4×4 = 16, 3×3 = 9, etc.
+  const total = filteredCams.length
+  // Clamp pageStart to a valid page boundary whenever the filter or
+  // page size changes (e.g. switching from 4×4 to 2×2 with 32 cams
+  // on page 2 → snap to the nearest page boundary).
+  const safePageStart = Math.max(
+    0,
+    Math.min(Math.floor(pageStart / pageSize) * pageSize,
+             Math.max(0, total - 1) - ((total - 1) % pageSize)),
+  )
+  useEffect(() => {
+    if (safePageStart !== pageStart) setPageStart(safePageStart)
+  }, [safePageStart, pageStart])
+  // Reset to first page when filter changes.
+  useEffect(() => { setPageStart(0) }, [storeFilter])
+
+  const pageEnd = Math.min(safePageStart + pageSize, total)
+  const visible = filteredCams.slice(safePageStart, pageEnd)
+  const hasPrev = safePageStart > 0
+  const hasNext = pageEnd < total
+  const pageNumber = Math.floor(safePageStart / pageSize) + 1
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+
+  function goPrev() { setPageStart(s => Math.max(0, s - pageSize)) }
+  function goNext() {
+    setPageStart(s => {
+      const nxt = s + pageSize
+      if (nxt >= total) return 0          // wrap to start
+      return nxt
+    })
+  }
+
+  // Auto-cycle: every AUTO_CYCLE_MS, advance one page. Wraps to 0
+  // when past the last page. Disabled by default.
+  useEffect(() => {
+    if (!autoCycle) return
+    const id = setInterval(() => goNext(), AUTO_CYCLE_MS)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoCycle, total, pageSize])
+
+  // Esc → close fullscreen.
+  useEffect(() => {
+    if (fullscreenId === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFullscreenId(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [fullscreenId])
 
   // Subscribe to /ws/alerts for live bbox overlays (this is a single
   // WS, not per-camera, so no pagination concerns).
@@ -82,9 +157,11 @@ export default function LiveViewPage() {
     }
   }
 
-  const tileCount = Math.min(visibleCount, filteredCams.length)
-  const visible = filteredCams.slice(0, tileCount)
-  const hasMore = filteredCams.length > tileCount
+  // Build a quick lookup so the fullscreen renderer knows the camera
+  // it's expanding without re-searching the array.
+  const fullscreenCam = fullscreenId !== null
+    ? cams.find(c => c.id === fullscreenId) ?? null
+    : null
 
   return (
     <div className="p-6">
@@ -109,79 +186,73 @@ export default function LiveViewPage() {
         </>}
       />
 
-      <div className="text-xs text-slate-500 mb-3 flex items-center gap-3">
-        Showing <strong>{tileCount}</strong> of <strong>{filteredCams.length}</strong> cameras
+      {/* Page navigation + auto-cycle + camera count */}
+      <Card className="p-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
+        <Button variant="ghost" onClick={goPrev} disabled={!hasPrev}>
+          ← Previous {pageSize}
+        </Button>
+        <Button variant="ghost" onClick={goNext} disabled={total === 0}>
+          {hasNext ? `Next ${Math.min(pageSize, total - pageEnd)} →` : 'Wrap to start →'}
+        </Button>
+        <div className="text-slate-700">
+          Cameras{' '}
+          <strong>{total === 0 ? 0 : safePageStart + 1}–{pageEnd}</strong>{' '}
+          of <strong>{total}</strong>
+          {total !== cams.length && <span className="text-slate-500"> (filtered from {cams.length})</span>}
+          <span className="text-slate-400"> · page {pageNumber}/{totalPages}</span>
+        </div>
+        <label className="ml-auto flex items-center gap-1 text-xs text-slate-700">
+          <input type="checkbox" checked={autoCycle}
+                 onChange={e => setAutoCycle(e.target.checked)} />
+          🔄 Auto-cycle every 30s
+        </label>
         {storeFilter !== '' && (
           <button onClick={() => setStoreFilter('')}
-                  className="text-sky-600 hover:underline">clear filter</button>
+                  className="text-sky-600 hover:underline text-xs">clear filter</button>
         )}
-        {layout >= 6 && (
-          <span className="text-amber-700">
-            · Tiles open WebSockets only when scrolled into view — browser cap is ~250.
-          </span>
-        )}
-      </div>
+      </Card>
 
       <div className="grid gap-1"
            style={{ gridTemplateColumns: `repeat(${layout}, minmax(0, 1fr))` }}>
         {visible.map(cam => (
           <Card key={cam.id} className="p-1">
             <div className="flex items-center justify-between mb-1 text-xs">
-              <span className="truncate" title={cam.name}>{cam.name}</span>
+              <button onClick={() => setFullscreenId(cam.id)}
+                      className="truncate hover:underline text-left flex-1 text-sky-700"
+                      title="Click to view full screen">
+                {cam.name}
+              </button>
               <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
             </div>
-            <LazyTile cameraId={cam.id} overlays={overlays[cam.id] ?? []} />
+            <div onClick={() => setFullscreenId(cam.id)} className="cursor-zoom-in">
+              <Tile cameraId={cam.id} overlays={overlays[cam.id] ?? []} />
+            </div>
           </Card>
         ))}
       </div>
 
-      {hasMore && (
-        <div className="mt-4 text-center">
-          <Button onClick={() => setVisibleCount(n => n + PAGE_INCREMENT)}>
-            Load {Math.min(PAGE_INCREMENT, filteredCams.length - tileCount)} more
-          </Button>
-          <div className="text-xs text-slate-400 mt-1">
-            {filteredCams.length - tileCount} cameras hidden
-          </div>
-        </div>
-      )}
-      {filteredCams.length === 0 && (
+      {total === 0 && (
         <Card className="p-8 text-center text-slate-500">
           {storeFilter !== '' ? 'No cameras attached to this store.' : 'No cameras yet.'}
         </Card>
       )}
-    </div>
-  )
-}
 
-
-// ---------------------------------------------------------------------------
-// LazyTile — wraps Tile with Intersection Observer so the WebSocket
-// only connects when the tile is in the viewport. Below the viewport
-// (or scrolled out): no WS, no frames, no resources.
-
-function LazyTile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] }) {
-  const wrapRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(false)
-  useEffect(() => {
-    const el = wrapRef.current
-    if (!el) return
-    // rootMargin pre-loads tiles ~200px before they enter the viewport
-    // so scrolling feels instant — no blank flicker.
-    const io = new IntersectionObserver(entries => {
-      for (const e of entries) {
-        if (e.isIntersecting) setVisible(true)
-      }
-    }, { rootMargin: '200px 0px' })
-    io.observe(el)
-    return () => io.disconnect()
-  }, [])
-  return (
-    <div ref={wrapRef} className="relative">
-      {visible ? <Tile cameraId={cameraId} overlays={overlays} /> :
-                 <div className="aspect-video bg-slate-100 rounded flex items-center justify-center text-slate-400 text-xs">
-                   ⌛ Tile loads when scrolled into view
-                 </div>}
+      {/* Fullscreen overlay — renders ONE tile expanded. Esc closes. */}
+      {fullscreenCam && (
+        <div className="fixed inset-0 bg-black z-50 flex flex-col"
+             onClick={() => setFullscreenId(null)}>
+          <div className="flex justify-between items-center p-3 text-white">
+            <div className="font-medium">{fullscreenCam.name}</div>
+            <div className="text-xs text-slate-400">Press <kbd className="bg-slate-700 px-1 rounded">Esc</kbd> or click anywhere to return</div>
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4"
+               onClick={e => e.stopPropagation()}>
+            <div className="w-full h-full max-w-[1600px]">
+              <Tile cameraId={fullscreenCam.id} overlays={overlays[fullscreenCam.id] ?? []} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
