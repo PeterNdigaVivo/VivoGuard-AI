@@ -91,13 +91,62 @@ _reachable_cache: dict[int, tuple[float, bool]] = {}
 
 
 def _run_migrations() -> None:
-    """Bring the DB schema to head before we start polling.
+    """Wait for the DB schema to be at head — don't run migrations.
 
-    Without this, a streamer that boots before (or alongside) the api
-    container can SELECT a column the database doesn't have yet, and
-    every reconcile fails until the api finishes migrating. Cheap to
-    run — a no-op when already at head — and self-healing when not.
+    HISTORY: this used to call alembic command.upgrade() so a streamer
+    booting before (or alongside) the api container could self-heal a
+    drifted schema. That worked at small scale, but at 117 cameras a
+    pending migration (e.g. CREATE INDEX on metric_snapshots) holds
+    the alembic_version row lock for many minutes. The streamer's
+    upgrade() call then BLOCKS waiting for that lock — even when the
+    DB is already at head — because alembic acquires the lock before
+    it checks the current version. Observed: streamer frozen >20 min
+    after "Will assume transactional DDL".
+
+    The API container owns migrations; the streamer just waits up to
+    `STREAMER_MIGRATION_WAIT_SECONDS` for the schema to look ready
+    (an alembic_version row exists) and proceeds either way. The
+    main loop's _query_active_cameras() already has a column-drop-
+    and-retry fallback that handles a partially-migrated schema, so
+    proceeding without waiting is safe even in the worst case.
+
+    Set STREAMER_RUN_MIGRATIONS=1 in the env to opt back into the
+    old behaviour — for ops who deploy the streamer container alone
+    against a fresh DB.
     """
+    if os.environ.get("STREAMER_RUN_MIGRATIONS", "0") == "1":
+        _run_migrations_inline()
+        return
+
+    wait_seconds = int(os.environ.get("STREAMER_MIGRATION_WAIT_SECONDS", "30"))
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        try:
+            from sqlalchemy import create_engine, text as _text
+            eng = create_engine(settings.database_url, pool_pre_ping=True)
+            with eng.connect() as conn:
+                row = conn.execute(_text(
+                    "SELECT version_num FROM alembic_version LIMIT 1"
+                )).fetchone()
+            eng.dispose()
+            if row:
+                log.info("streamer: schema at alembic version %s — proceeding",
+                         row[0])
+                return
+        except Exception as e:
+            # alembic_version might not exist yet (very fresh DB) —
+            # keep trying for a few seconds.
+            log.debug("streamer: waiting on schema (%s)", e)
+        time.sleep(2)
+    log.warning("streamer: schema-check timed out after %ds — proceeding anyway. "
+                "The main loop will retry queries on missing columns.",
+                wait_seconds)
+
+
+def _run_migrations_inline() -> None:
+    """The ORIGINAL behaviour, kept behind STREAMER_RUN_MIGRATIONS=1.
+    Don't use in production — see _run_migrations() docstring for the
+    lock-contention foot-gun at scale."""
     try:
         from alembic.config import Config
         from alembic import command
