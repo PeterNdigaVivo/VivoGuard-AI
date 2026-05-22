@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # Weekly chain-briefing recipients (Monday 07:00). Comma-separated
     # `whatsapp:+<msisdn>` numbers. Empty = no weekly briefing sent.
     weekly_briefing_to: str = ""
+    # Dashboard escalation recipient — sustained queue + camera-health
+    # alerts go here regardless of per-store manager_phone wiring. The
+    # ops team wanted a single number that gets every high-priority
+    # nudge from the dashboard.
+    dashboard_alert_to: str = "whatsapp:+25441418586"
     webhook_url: str = ""
     webhook_auth_header: str = ""
 

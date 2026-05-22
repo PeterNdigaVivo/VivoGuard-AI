@@ -29,6 +29,7 @@ celery_app = Celery(
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
         "app.tasks.briefings",
+        "app.tasks.alerting",
     ],
 )
 celery_app.conf.update(
@@ -78,6 +79,20 @@ celery_app.conf.update(
         "briefings-weekly-every-5min": {
             "task": "briefings.weekly_fire_due",
             "schedule": 300.0,
+        },
+        # Sustained-queue WhatsApp escalation — every 30s the task
+        # checks the latest queue_length snapshot per zone. Fires once
+        # per zone when count > 5 has held for > 3 min.
+        "queue-escalation-every-30s": {
+            "task": "alerting.queue_escalation_check",
+            "schedule": 30.0,
+        },
+        # Camera-offline WhatsApp nudge — every 60s the task scans
+        # ai_enabled cameras and fires when last_seen is > 5 min stale
+        # AND the store is currently within business hours.
+        "camera-health-every-60s": {
+            "task": "alerting.camera_health_check",
+            "schedule": 60.0,
         },
     },
 )

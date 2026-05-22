@@ -2539,6 +2539,133 @@ def store_staffing_prediction(store_id: int, db: Session = Depends(get_db),
     }
 
 
+@router.get("/store/{store_id}/peak-prediction")
+def store_peak_prediction(store_id: int, db: Session = Depends(get_db),
+                          _u=Depends(get_current_user)):
+    """Predict today's busy window based on the last 7 days of
+    visitor traffic. Returns the hour-of-day that historically peaks
+    on this weekday for this store, plus a 1-hour window centred on
+    that hour.
+
+    Output: {expected_peak_hour, label, mean_visitors_in_peak,
+             based_on_days, headline}.
+    """
+    from sqlalchemy import extract
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"expected_peak_hour": None, "label": None,
+                "headline": "No cameras attached yet"}
+
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=7)
+    rows = (
+        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                 func.sum(MetricSnapshot.value).label("v"))
+          .filter(((MetricSnapshot.store_id == store_id)
+                   | MetricSnapshot.camera_id.in_(cam_ids)),
+                  MetricSnapshot.metric_type == "visitor_count_in",
+                  MetricSnapshot.period_start >= start,
+                  MetricSnapshot.period_start <  now)
+          .group_by("h").all()
+    )
+    # Fallback to occupancy if no entry/exit data yet — same approach
+    # as the hourly endpoint so the prediction works on day-1 cameras.
+    if not rows or not any(float(r.v or 0) for r in rows):
+        rows = (
+            db.query(extract("hour", MetricSnapshot.period_start).label("h"),
+                     func.max(MetricSnapshot.value).label("v"))
+              .filter(((MetricSnapshot.store_id == store_id)
+                       | MetricSnapshot.camera_id.in_(cam_ids)),
+                      MetricSnapshot.metric_type == "occupancy",
+                      MetricSnapshot.period_start >= start,
+                      MetricSnapshot.period_start <  now)
+              .group_by("h").all()
+        )
+    if not rows:
+        return {"expected_peak_hour": None, "label": None, "based_on_days": 0,
+                "headline": "Not enough history yet — need at least a few days of traffic."}
+
+    by_hour = {int(r.h): float(r.v or 0) for r in rows}
+    populated = [(h, v) for h, v in by_hour.items() if v > 0]
+    if not populated:
+        return {"expected_peak_hour": None, "label": None, "based_on_days": 0,
+                "headline": "Not enough history yet."}
+
+    peak_hr, peak_val = max(populated, key=lambda kv: kv[1])
+    # Build a 1-hour window centred on the peak (HH:00–HH+1:00).
+    label = f"{peak_hr:02d}:00–{peak_hr + 1:02d}:00"
+    headline = f"Expected busy time today: {label}"
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "expected_peak_hour": peak_hr,
+        "label": label,
+        "mean_visitors_in_peak": int(round(peak_val / 7)),
+        "based_on_days": 7,
+        "headline": headline,
+    }
+
+
+@router.get("/chain/hourly-comparison")
+def chain_hourly_comparison(db: Session = Depends(get_db),
+                            _u=Depends(get_current_user)):
+    """Per-store hourly footfall today — one row per store, hours
+    09..20. Powers the cross-store comparison chart on /chain. Heavy
+    DB scan; reads MetricSnapshot once per store and groups in Python."""
+    from sqlalchemy import extract
+    stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    cameras_by_store: dict[int, list[int]] = {}
+    cam_rows = db.query(Camera.id, Camera.store_id).all()
+    for cid, sid in cam_rows:
+        if sid is not None:
+            cameras_by_store.setdefault(sid, []).append(cid)
+
+    # Single aggregated query — one DB hit instead of N.
+    all_cam_ids = [c for cs in cameras_by_store.values() for c in cs]
+    rows: list = []
+    if all_cam_ids:
+        rows = (db.query(MetricSnapshot.camera_id,
+                         extract("hour", MetricSnapshot.period_start).label("h"),
+                         func.sum(MetricSnapshot.value).label("v"))
+                  .filter(MetricSnapshot.camera_id.in_(all_cam_ids),
+                          MetricSnapshot.metric_type == "visitor_count_in",
+                          MetricSnapshot.period_start >= midnight,
+                          MetricSnapshot.period_start <  now)
+                  .group_by(MetricSnapshot.camera_id, "h").all())
+    cam_to_store = {cid: sid for cid, sid in cam_rows if sid is not None}
+    by_store_hour: dict[tuple[int, int], float] = {}
+    for cam_id, h, v in rows:
+        sid = cam_to_store.get(int(cam_id))
+        if sid is None:
+            continue
+        key = (sid, int(h))
+        by_store_hour[key] = by_store_hour.get(key, 0.0) + float(v or 0)
+
+    HOURS = list(range(9, 21))   # 09..20 → 12 points
+    out_stores: list[dict] = []
+    for s in stores:
+        series = [int(round(by_store_hour.get((s.id, hr), 0.0))) for hr in HOURS]
+        out_stores.append({
+            "store_id": s.id,
+            "store_name": s.name,
+            "country": s.country,
+            "series": series,
+            "today_total": sum(series),
+        })
+    out_stores.sort(key=lambda r: r["today_total"], reverse=True)
+    return {
+        "hours": [f"{h:02d}:00" for h in HOURS],
+        "stores": out_stores,
+    }
+
+
 @router.get("/store/{store_id}/health-score")
 def store_health_score(store_id: int, db: Session = Depends(get_db),
                        _u=Depends(get_current_user)):

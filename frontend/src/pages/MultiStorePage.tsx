@@ -193,6 +193,9 @@ export default function MultiStorePage() {
         </div>
       </Card>
 
+      {/* Hourly footfall — every store on the same axis, today. */}
+      <HourlyComparisonCard />
+
       {/* Sortable table */}
       <Card className="overflow-auto">
         <table className="w-full text-sm">
@@ -242,6 +245,79 @@ export default function MultiStorePage() {
         </table>
       </Card>
     </div>
+  )
+}
+
+interface HourlyComparisonPayload {
+  hours: string[]
+  stores: { store_id: number; store_name: string; series: number[]; today_total: number }[]
+}
+
+// Multi-line chart — one polyline per store on a shared 09:00–20:00
+// X axis. Hand-rolled SVG so it stays consistent with the rest of the
+// dashboard (no recharts dependency). Capped at the 8 busiest stores
+// so the legend stays readable for chains with 20+ outlets.
+function HourlyComparisonCard() {
+  const [data, setData] = useState<HourlyComparisonPayload | null>(null)
+  useEffect(() => {
+    const load = () => {
+      fetch('/api/analytics/chain/hourly-comparison', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('vg_access_token') ?? ''}` },
+      }).then(r => r.ok ? r.json() : null).then(d => { if (d) setData(d) }).catch(() => {})
+    }
+    load()
+    const t = setInterval(load, 60_000)
+    return () => clearInterval(t)
+  }, [])
+  if (!data || !data.stores.length) return null
+
+  const topStores = data.stores.slice(0, 8)
+  const W = 800, H = 220, PL = 36, PR = 12, PT = 10, PB = 28
+  const innerW = W - PL - PR
+  const innerH = H - PT - PB
+  const maxV = Math.max(10, ...topStores.flatMap(s => s.series))
+  const stepX = innerW / (data.hours.length - 1)
+  const xAt = (i: number) => PL + i * stepX
+  const yAt = (v: number) => PT + innerH - (v / maxV) * innerH
+  const palette = ['#1d4ed8', '#dc2626', '#16a34a', '#ea580c',
+                   '#9333ea', '#0891b2', '#ca8a04', '#db2777']
+
+  const yTicks = [0, Math.ceil(maxV / 2), maxV]
+
+  return (
+    <Card className="p-4">
+      <div className="text-sm font-medium mb-3">Hourly footfall comparison — today</div>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+        {yTicks.map((tv, i) => (
+          <g key={i}>
+            <line x1={PL} x2={W - PR} y1={yAt(tv)} y2={yAt(tv)}
+                  stroke="#e5e7eb" strokeDasharray="2 3" />
+            <text x={PL - 6} y={yAt(tv) + 4} textAnchor="end"
+                  fontSize="11" fill="#64748b">{tv}</text>
+          </g>
+        ))}
+        {topStores.map((s, idx) => {
+          const points = s.series.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(' ')
+          return <polyline key={s.store_id} points={points} fill="none"
+                           stroke={palette[idx % palette.length]} strokeWidth={2}
+                           strokeLinejoin="round" strokeLinecap="round" />
+        })}
+        {data.hours.map((label, i) => (
+          <text key={i} x={xAt(i)} y={H - 8} textAnchor="middle"
+                fontSize="11" fill="#64748b">{label}</text>
+        ))}
+      </svg>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+        {topStores.map((s, idx) => (
+          <span key={s.store_id} className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 h-0.5"
+                  style={{ background: palette[idx % palette.length] }} />
+            <span>{s.store_name}</span>
+            <span className="text-slate-500">({s.today_total})</span>
+          </span>
+        ))}
+      </div>
+    </Card>
   )
 }
 

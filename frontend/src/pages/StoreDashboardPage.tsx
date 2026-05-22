@@ -215,6 +215,9 @@ export default function StoreDashboardPage() {
         </div>
       </section>
 
+      {/* PEAK PREDICTION — 7-day historical average. */}
+      <PeakPredictionBanner storeId={storeId} />
+
       {/* TODAY SO FAR */}
       <section>
         <SectionTitle>Today so far</SectionTitle>
@@ -283,6 +286,24 @@ export default function StoreDashboardPage() {
           </Suspense>
         </section>
       </ScrollMounted>
+    </div>
+  )
+}
+
+// Compact banner showing the predicted busy window for today, derived
+// from the last 7 days of visitor traffic. Hidden when the API has
+// no prediction yet (cold start).
+function PeakPredictionBanner({ storeId }: { storeId: number }) {
+  const [pred, setPred] = useState<{ headline: string; label: string | null } | null>(null)
+  useEffect(() => {
+    fetch(`/api/analytics/store/${storeId}/peak-prediction`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('vg_access_token') ?? ''}` },
+    }).then(r => r.ok ? r.json() : null).then(d => { if (d) setPred(d) }).catch(() => {})
+  }, [storeId])
+  if (!pred || !pred.label) return null
+  return (
+    <div className="rounded-md border border-sky-200 bg-sky-50 text-sky-800 px-3 py-2 text-sm">
+      🔮 {pred.headline}
     </div>
   )
 }
