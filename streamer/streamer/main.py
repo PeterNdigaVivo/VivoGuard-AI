@@ -68,14 +68,6 @@ if SHARD_INDEX >= SHARD_COUNT:
         f"STREAMER_SHARD_COUNT={SHARD_COUNT}"
     )
 
-# Hard cap on simultaneously-streaming cameras for this replica.
-# At 117 cameras the streamer container hit CPU + FD limits before
-# inference fell behind. The cap forces an ordered priority queue
-# instead of an unbounded fanout: cameras with zones configured first
-# (active detection), then open-store cameras, then everything else.
-# Set to 0 to disable the cap.
-MAX_CONCURRENT_STREAMS = max(0, int(os.environ.get("MAX_CONCURRENT_STREAMS", "50")))
-
 
 def _run_migrations() -> None:
     """Bring the DB schema to head before we start polling.
@@ -108,8 +100,6 @@ _CAMERA_COLUMNS = [
     "rtsp_url_override", "inference_fps", "ai_enabled",
     "transport", "snapshot_url_override",
     "rtsp_transport",
-    # Used by the priority sort (open-store cameras stream first).
-    "store_id",
 ]
 
 
@@ -198,149 +188,28 @@ def _persist_transport(db, camera_id: int, updates: dict) -> None:
             pass
 
 
-# Background pool for auto-transport probes. At 117 cameras with a
-# cold cache, doing these synchronously inside desired_specs took
-# 60+ minutes — the streamer appeared hung. Now: each row gets
-# scheduled in a small pool, the hot path returns immediately, and
-# the next reconcile (5s later) picks up any DB updates.
-import threading
-from concurrent.futures import ThreadPoolExecutor
-
-# Cameras whose probe is already queued / running. We don't enqueue
-# again until the worker clears the entry, so cold start doesn't
-# fan out a 117-task storm.
-_probe_in_flight: set[int] = set()
-_probe_in_flight_lock = threading.Lock()
-_probe_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="probe")
-
-
-def _schedule_negotiation(row: dict, password_plain: str) -> None:
-    """Queue a one-shot auto-transport probe for this camera in the
-    background pool. Returns IMMEDIATELY — the hot reconcile loop
-    never blocks on network probes. When the probe finishes and
-    updates the cameras row, the NEXT reconcile reads the new
-    transport/port and spawns the right worker class.
-    """
-    cam_id = row.get("id")
-    if cam_id is None:
-        return
-    with _probe_in_flight_lock:
-        if cam_id in _probe_in_flight:
-            return       # already queued / running
-        _probe_in_flight.add(cam_id)
-
-    def _do_probe():
-        try:
-            updates = auto_transport.negotiate(row, password_plain)
-            if updates:
-                # Each thread opens its own session — never share a
-                # SQLAlchemy Session across threads.
-                with SessionLocal() as bg_db:
-                    _persist_transport(bg_db, cam_id, updates)
-        except Exception as e:
-            log.warning("background probe failed for camera %s: %s", cam_id, e)
-        finally:
-            with _probe_in_flight_lock:
-                _probe_in_flight.discard(cam_id)
-
-    try:
-        _probe_pool.submit(_do_probe)
-    except Exception:
-        # Pool shut down — clear the flight flag so a future call retries.
-        with _probe_in_flight_lock:
-            _probe_in_flight.discard(cam_id)
-
-
-def _camera_priority(row: dict, zone_cam_ids: set[int],
-                      open_store_ids: set[int]) -> tuple[int, int]:
-    """Lower tuple sorts FIRST. Three priority tiers:
-       0 — has zones AND store is open right now (active detection)
-       1 — has zones (off-hours)
-       2 — open store but no zones
-       3 — everything else
-    Tie-breaker on camera_id for deterministic ordering."""
-    has_zone = row["id"] in zone_cam_ids
-    is_open  = (row.get("store_id") in open_store_ids) if row.get("store_id") else False
-    if has_zone and is_open: tier = 0
-    elif has_zone:           tier = 1
-    elif is_open:            tier = 2
-    else:                    tier = 3
-    return (tier, row["id"])
-
-
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
     with SessionLocal() as db:
         rows = _query_active_cameras(db)
-
-        # Priority sort is best-effort: the cap and the ordering are
-        # nice-to-have, not required for the streamer to function. If
-        # ANY part of this block fails, we keep `rows` exactly as
-        # _query_active_cameras returned and stream every ai_enabled
-        # camera. The previous shape had two narrow try/excepts that
-        # could leave the SQLAlchemy session in an aborted state
-        # between them; this single outer try with a rollback before
-        # the inner queries fixes that.
-        try:
-            try:
-                db.rollback()           # clean slate before priority queries
-            except Exception:
-                pass
-            zone_cam_ids: set[int] = set()
-            try:
-                zone_rows = db.execute(text(
-                    "SELECT DISTINCT camera_id FROM zones WHERE suppressed = false"
-                )).mappings().all()
-                zone_cam_ids = {r["camera_id"] for r in zone_rows}
-            except Exception as e:
-                log.warning("priority: zones query failed: %s", e)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-
-            open_store_ids: set[int] = set()
-            try:
-                from app.models import Store
-                from app.utils.business_hours import is_store_open
-                for s in db.query(Store).filter(Store.is_active == True).all():  # noqa: E712
-                    try:
-                        if is_store_open(s):
-                            open_store_ids.add(s.id)
-                    except Exception:
-                        continue        # one bad row never aborts the sort
-            except Exception as e:
-                log.warning("priority: could not enumerate open stores: %s", e)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-
-            rows.sort(key=lambda r: _camera_priority(r, zone_cam_ids, open_store_ids))
-            if MAX_CONCURRENT_STREAMS and len(rows) > MAX_CONCURRENT_STREAMS:
-                dropped = len(rows) - MAX_CONCURRENT_STREAMS
-                log.info("priority cap: streaming top %d of %d cameras (%d deferred)",
-                         MAX_CONCURRENT_STREAMS, len(rows), dropped)
-                rows = rows[:MAX_CONCURRENT_STREAMS]
-        except Exception as e:
-            log.warning("priority sort failed (%s) — streaming all eligible cameras", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
         for r in rows:
             try:
                 pw = decrypt(r.get("password_encrypted") or "")
             except Exception:
                 pw = ""
-            # Auto-transport probes are now scheduled to a background
-            # thread (see _schedule_negotiation below). The hot path
-            # returns the camera's CURRENT DB state immediately so the
-            # streamer can spawn workers without waiting on 30-60s of
-            # network probes per camera. When a probe finishes and
-            # updates the row, the NEXT reconcile picks up the new
-            # transport — usually within ~10s.
-            _schedule_negotiation(r, pw)
+            # Auto-negotiate transport BEFORE building the spec. If
+            # RTSP/554 is unreachable but the Dahua snapshot CGI
+            # responds on an HTTP port, switch this row to
+            # http_snapshot and persist so the next reconcile picks
+            # the right worker. No-op when RTSP works fine.
+            try:
+                updates = auto_transport.negotiate(r, pw)
+                if updates:
+                    _persist_transport(db, r["id"], updates)
+                    r.update(updates)
+            except Exception as e:
+                log.warning("auto-transport: negotiation failed for camera %s: %s",
+                            r.get("id"), e)
             transport = (r.get("transport") or "rtsp") or "rtsp"
             rtsp_url = build_rtsp_url(
                 brand=r.get("brand"),
@@ -375,23 +244,15 @@ def desired_specs() -> list[CameraSpec]:
 
 
 def main() -> None:
-    log.info("streamer: starting up (shard %d of %d, max_concurrent=%d)",
-             SHARD_INDEX, SHARD_COUNT, MAX_CONCURRENT_STREAMS)
+    log.info("streamer: starting up (shard %d of %d)", SHARD_INDEX, SHARD_COUNT)
     _run_migrations()
-    log.info("streamer: migrations complete — entering reconcile loop")
     mgr = StreamManager()
     log.info("streamer: polling every %ss", POLL_INTERVAL_SECONDS)
     try:
         while True:
             try:
-                t0 = time.monotonic()
                 specs = desired_specs()
-                elapsed = time.monotonic() - t0
-                # Log every loop so silence is unambiguous diagnostic
-                # data. At 117 cameras the elapsed should be <1s now
-                # that probes are background-scheduled.
-                log.info("streamer: %d desired cameras (computed in %.2fs)",
-                         len(specs), elapsed)
+                log.info("streamer: %d desired cameras", len(specs))
                 mgr.reconcile(specs)
             except Exception as e:
                 # Don't let one bad poll kill the loop. Sleep and retry —
@@ -403,10 +264,6 @@ def main() -> None:
         pass
     finally:
         mgr.stop_all()
-        try:
-            _probe_pool.shutdown(wait=False)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
