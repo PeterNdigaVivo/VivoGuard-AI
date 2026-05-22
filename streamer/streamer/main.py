@@ -202,10 +202,17 @@ def _query_active_cameras(db) -> list[dict]:
     """
     cols = list(_CAMERA_COLUMNS)
     # Shard predicate. With defaults (count=1, index=0) this is
-    # `id % 1 = 0`, i.e. matches every row — no behaviour change.
+    # `MOD(id, 1) = 0`, i.e. matches every row — no behaviour change.
     # With count=3 across 3 streamer containers, each replica picks
     # up roughly a third of the cameras.
-    shard_where = "AND (id %% :shard_count) = :shard_index"
+    #
+    # Uses MOD() not the `%` operator. psycopg3 (current pg driver)
+    # does NOT do the psycopg2-style `%%` → `%` escaping inside
+    # bound queries when SQLAlchemy passes them as text(), so the
+    # operator form leaked literal `%%` characters into the SQL and
+    # Postgres rejected the query with
+    #   operator does not exist: integer %% smallint
+    shard_where = "AND MOD(id, :shard_count) = :shard_index"
     params = {"shard_count": SHARD_COUNT, "shard_index": SHARD_INDEX}
     while True:
         sql = (f"SELECT {', '.join(cols)} FROM cameras "
