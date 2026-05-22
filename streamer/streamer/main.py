@@ -24,8 +24,10 @@ Resilience rules (May-2026):
      keeps us streaming the cameras we CAN read about.
 """
 from __future__ import annotations
+import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 
@@ -67,6 +69,25 @@ if SHARD_INDEX >= SHARD_COUNT:
         f"streamer: STREAMER_SHARD_INDEX={SHARD_INDEX} must be < "
         f"STREAMER_SHARD_COUNT={SHARD_COUNT}"
     )
+
+# --- Staggered startup tuning ----------------------------------------
+# At 117 cameras a single reconcile pass spawned 117 FFmpeg subprocesses
+# back-to-back; CPU + network + file-descriptor saturation made the
+# whole batch take 2-3 minutes (and made the first ~30 cameras lose
+# their RTSP handshake under load). We now:
+#   1. TCP-probe every camera in parallel (asyncio.gather) with a
+#      2 s timeout — total wall time ~3 s for 117 cameras.
+#   2. Cache reachability for RETRY_UNREACHABLE_SECONDS — unreachable
+#      cameras skip the probe until the cache entry expires.
+#   3. Spawn FFmpeg workers in batches of STARTUP_BATCH_SIZE with
+#      STARTUP_BATCH_DELAY_SECONDS sleep between batches.
+TCP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("STREAMER_TCP_CHECK_TIMEOUT", "2.0"))
+RETRY_UNREACHABLE_SECONDS = int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "300"))
+STARTUP_BATCH_SIZE        = int(os.environ.get("STREAMER_STARTUP_BATCH_SIZE", "10"))
+STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY", "2.0"))
+
+# camera_id -> (checked_at_epoch, reachable)
+_reachable_cache: dict[int, tuple[float, bool]] = {}
 
 
 def _run_migrations() -> None:
@@ -243,17 +264,165 @@ def desired_specs() -> list[CameraSpec]:
     return out
 
 
+def _spec_probe_endpoint(spec: CameraSpec) -> tuple[str, int] | None:
+    """Pick (host, port) to TCP-probe for a CameraSpec.
+
+    For RTSP-transport cameras we probe the RTSP socket the worker
+    will open. For http_snapshot cameras we probe the HTTP port that
+    the worker will poll. snapshot_url's host/port are parsed when
+    available; otherwise we fall back to the rtsp_url's netloc.
+    """
+    from urllib.parse import urlsplit
+    if spec.transport == "http_snapshot" and spec.snapshot_url:
+        u = urlsplit(spec.snapshot_url)
+        if u.hostname and u.port:
+            return (u.hostname, u.port)
+    if spec.rtsp_url:
+        u = urlsplit(spec.rtsp_url)
+        if u.hostname and u.port:
+            return (u.hostname, u.port)
+    return None
+
+
+async def _tcp_open(host: str, port: int, timeout: float) -> bool:
+    """Single async TCP probe — opens socket, closes immediately."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout,
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def _async_check_all(specs: list[CameraSpec]) -> dict[int, bool]:
+    """TCP-probe every spec in parallel. Total wall time ≈ the
+    longest single timeout (2 s default), not N × 2 s."""
+    async def _one(spec: CameraSpec) -> tuple[int, bool]:
+        ep = _spec_probe_endpoint(spec)
+        if not ep:
+            return spec.camera_id, False
+        ok = await _tcp_open(ep[0], ep[1], TCP_CHECK_TIMEOUT_SECONDS)
+        return spec.camera_id, ok
+    results = await asyncio.gather(*(_one(s) for s in specs), return_exceptions=False)
+    return {cam_id: ok for cam_id, ok in results}
+
+
+def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
+    """Drop specs whose camera failed a recent TCP probe. Cameras
+    that haven't been probed (or whose cache entry expired) get
+    probed now — in parallel via asyncio.
+
+    Returns the reachable subset. Unreachable cameras are written
+    back into _reachable_cache with the current timestamp so we
+    don't re-probe them until RETRY_UNREACHABLE_SECONDS has passed.
+    """
+    if not specs:
+        return []
+    now = time.time()
+    need_check: list[CameraSpec] = []
+    reachable: list[CameraSpec] = []
+    for spec in specs:
+        entry = _reachable_cache.get(spec.camera_id)
+        if entry is not None:
+            checked_at, was_reachable = entry
+            if (now - checked_at) < RETRY_UNREACHABLE_SECONDS:
+                if was_reachable:
+                    reachable.append(spec)
+                # Unreachable + within retry window → skip silently.
+                continue
+        need_check.append(spec)
+
+    if not need_check:
+        return reachable
+
+    # Run the asyncio TCP probes. We're in a sync context, so use
+    # asyncio.run() — creates a fresh loop each call. Cheap; ~3 s
+    # at 117 cameras with 2 s timeout.
+    t0 = time.monotonic()
+    try:
+        results = asyncio.run(_async_check_all(need_check))
+    except Exception as e:
+        log.warning("TCP health check failed (%s) — treating all as reachable", e)
+        results = {s.camera_id: True for s in need_check}
+    elapsed = time.monotonic() - t0
+    log.info("health check: probed %d cameras in %.2fs", len(need_check), elapsed)
+
+    for spec in need_check:
+        ok = results.get(spec.camera_id, False)
+        _reachable_cache[spec.camera_id] = (now, ok)
+        if ok:
+            reachable.append(spec)
+    return reachable
+
+
+def _reconcile_batched(mgr: StreamManager, specs: list[CameraSpec]) -> None:
+    """Spawn FFmpeg workers in batches to avoid the CPU / network
+    burst that comes from starting 117 subprocesses simultaneously.
+
+    Calls mgr.reconcile() progressively with growing slices. Each
+    intermediate call adds STARTUP_BATCH_SIZE new workers without
+    stopping any (reconcile only stops workers whose camera_id is
+    absent from `desired`; a strict superset never stops anyone)."""
+    n = len(specs)
+    if n == 0 or STARTUP_BATCH_SIZE <= 0 or n <= STARTUP_BATCH_SIZE:
+        # Single shot — either nothing to do, batching disabled, or
+        # the fleet fits in one batch.
+        mgr.reconcile(specs)
+        return
+    total_batches = (n + STARTUP_BATCH_SIZE - 1) // STARTUP_BATCH_SIZE
+    for i in range(0, n, STARTUP_BATCH_SIZE):
+        end = min(i + STARTUP_BATCH_SIZE, n)
+        batch_idx = (i // STARTUP_BATCH_SIZE) + 1
+        log.info("Starting batch %d/%d (cameras %d-%d of %d)…",
+                 batch_idx, total_batches, i + 1, end, n)
+        mgr.reconcile(specs[:end])
+        if end < n:
+            time.sleep(STARTUP_BATCH_DELAY_SECONDS)
+
+
 def main() -> None:
-    log.info("streamer: starting up (shard %d of %d)", SHARD_INDEX, SHARD_COUNT)
+    log.info("VivoGuard streamer starting (shard %d of %d)", SHARD_INDEX, SHARD_COUNT)
     _run_migrations()
+    log.info("streamer: migrations complete — entering reconcile loop")
     mgr = StreamManager()
     log.info("streamer: polling every %ss", POLL_INTERVAL_SECONDS)
+    first_pass = True
     try:
         while True:
             try:
+                t0 = time.monotonic()
                 specs = desired_specs()
-                log.info("streamer: %d desired cameras", len(specs))
-                mgr.reconcile(specs)
+                spec_elapsed = time.monotonic() - t0
+                total = len(specs)
+                if first_pass:
+                    log.info("VivoGuard streamer: %d cameras configured", total)
+
+                # TCP pre-filter — drops unreachable cameras before
+                # we burn FFmpeg subprocesses on them. Cached for
+                # RETRY_UNREACHABLE_SECONDS so the next pass is
+                # essentially free.
+                reachable = _filter_reachable(specs)
+                offline = total - len(reachable)
+                if first_pass:
+                    log.info("Health check: %d reachable, %d offline (skipped)",
+                             len(reachable), offline)
+                    log.info("Starting RTSP streams for %d reachable cameras…",
+                             len(reachable))
+                    _reconcile_batched(mgr, reachable)
+                    log.info("All reachable cameras streaming")
+                    first_pass = False
+                else:
+                    # Subsequent passes: reconcile is idempotent and
+                    # cheap — just stream whatever's reachable now.
+                    log.info("streamer: %d/%d cameras reachable (probe cost %.2fs)",
+                             len(reachable), total, spec_elapsed)
+                    mgr.reconcile(reachable)
             except Exception as e:
                 # Don't let one bad poll kill the loop. Sleep and retry —
                 # the most common cause (migration still running) clears
