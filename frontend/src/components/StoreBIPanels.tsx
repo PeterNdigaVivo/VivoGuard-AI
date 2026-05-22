@@ -73,6 +73,20 @@ function useRefresh<T>(url: string, deps: any[] = [], intervalMs = 30_000) {
   return { data, error, busy }
 }
 
+// Helper: append ?since=…&until=… to a path, dropping empties so
+// the backend's "default to today's session" fallback still kicks
+// in when the operator hasn't picked a range.
+
+type RangeProp = { since?: string; until?: string } | undefined
+
+function withRange(path: string, range?: { since?: string; until?: string }): string {
+  if (!range || (!range.since && !range.until)) return path
+  const q = new URLSearchParams()
+  if (range.since) q.set("since", range.since)
+  if (range.until) q.set("until", range.until)
+  return path + (path.includes("?") ? "&" : "?") + q.toString()
+}
+
 function SkeletonBlock({ height = 120 }: { height?: number }) {
   return <div className="bg-slate-100 animate-pulse rounded" style={{ height }} />
 }
@@ -107,9 +121,9 @@ interface HourlyPayload {
   restock_hour?: number | null
 }
 
-export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
+export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const { data, error, busy } = useRefresh<HourlyPayload>(
-    `/analytics/store/${storeId}/hourly`, [storeId])
+    withRange(`/analytics/store/${storeId}/hourly`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Hourly footfall intelligence"
                 subtitle="Visitors per hour today, with auto-generated insights"
@@ -136,132 +150,80 @@ export function HourlyFootfallPanel({ storeId }: { storeId: number }) {
 // approach occasionally rendered as a zero-height pane when the
 // container's responsive layout collapsed. Fixed pixels = guaranteed
 // visible pane on every screen size.
+// Hourly footfall — simple line graph per the May-2026 spec.
+//   X axis: hours
+//   Y axis: visitor count
+//   Single blue line + dot at each data point
+//   "No visitor data yet today" when every bucket is 0
+//   Inline SVG — no external libs, no animation, no fancy markers.
+// Previous variants had peak markers, pulsing rings, gradient fills,
+// and intensity-based dot colours. They kept regressing when the
+// data shape shifted. This is the minimum that always paints.
 function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
   const hours = payload.hours || []
-  const summary = <HourlySummary payload={payload} />
-
   if (hours.length === 0) {
-    return (
-      <div>
-        <div className="text-center py-4 text-slate-500 text-sm">
-          No hourly data yet for this store.
-        </div>
-        {summary}
-      </div>
-    )
+    return <div className="py-6 text-center text-slate-500 text-sm">
+      No visitor data yet today
+    </div>
   }
   const total = hours.reduce((s, h) => s + (h.visitors || 0), 0)
   if (total === 0) {
-    return (
-      <div>
-        <div className="text-center py-4">
-          <div className="text-3xl mb-1">📊</div>
-          <div className="text-sm font-medium text-slate-700">
-            No visitor data recorded today yet
-          </div>
-          <div className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-            Data appears after the first customer is detected during
-            business hours.
-          </div>
-        </div>
-        {summary}
-      </div>
-    )
+    return <div className="py-6 text-center text-slate-500 text-sm">
+      No visitor data yet today
+    </div>
   }
 
-  // Fixed-dimension SVG. Width: 100% via wrapper; height: literal
-  // pixels so the chart pane never collapses. viewBox matches so the
-  // SVG scales horizontally without warping the line.
-  const W = 600, H = 200, PAD_L = 36, PAD_R = 12, PAD_T = 12, PAD_B = 32
-  const innerW = W - PAD_L - PAD_R
-  const innerH = H - PAD_T - PAD_B
+  // Fixed canvas. Viewbox + 100% width scales horizontally; fixed
+  // height keeps the pane from collapsing.
+  const W = 600, H = 180, PL = 36, PR = 12, PT = 10, PB = 28
+  const innerW = W - PL - PR
+  const innerH = H - PT - PB
   const max = Math.max(...hours.map(h => h.visitors || 0), 1)
   const stepX = hours.length > 1 ? innerW / (hours.length - 1) : 0
-  const xAt = (i: number) => PAD_L + i * stepX
-  const yAt = (v: number) => PAD_T + innerH - (v / max) * innerH
+  const xAt = (i: number) => PL + i * stepX
+  const yAt = (v: number) => PT + innerH - (v / max) * innerH
 
   const linePath = hours
     .map((h, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(h.visitors).toFixed(1)}`)
     .join(' ')
 
-  // Round y-axis ticks (0, ¼max, ½max, ¾max, max), all whole numbers
-  // when scale is small.
-  const yTicks: number[] = []
-  const step = Math.max(1, Math.ceil(max / 4))
-  for (let v = 0; v <= max; v += step) yTicks.push(v)
-  if (yTicks[yTicks.length - 1] < max) yTicks.push(max)
-
-  // Find the peak hour from the data itself (don't trust the
-  // payload's `peak` field — the old API didn't compute it).
-  const peakHour = hours.reduce((best, h) => h.visitors > (best?.visitors ?? -1) ? h : best, hours[0])
+  // Y-axis ticks: 0 + max, plus 2 intermediate values if max > 4.
+  const yTicks: number[] = [0]
+  if (max > 1) {
+    const step = Math.max(1, Math.ceil(max / 4))
+    for (let v = step; v < max; v += step) yTicks.push(v)
+  }
+  yTicks.push(max)
 
   return (
     <div>
-      <div className="w-full" style={{ minHeight: H }}>
-        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}
-             style={{ display: 'block' }}>
-          {/* Plot background — explicit so the SVG is never literally
-              blank, even if data math goes sideways. */}
-          <rect x={PAD_L} y={PAD_T} width={innerW} height={innerH}
-                fill="#f8fafc" />
-
-          {/* Y-axis gridlines + labels */}
-          {yTicks.map((tv, i) => {
-            const y = yAt(tv)
-            return (
-              <g key={i}>
-                <line x1={PAD_L} x2={W - PAD_R} y1={y} y2={y}
-                      stroke="#e2e8f0" strokeDasharray="2 3" />
-                <text x={PAD_L - 6} y={y + 4} textAnchor="end"
-                      fontSize="11" fill="#64748b">{tv}</text>
-              </g>
-            )
-          })}
-
-          {/* The line itself. Solid blue, generous stroke. */}
-          <path d={linePath} stroke="#1d4ed8" strokeWidth={2.5}
-                fill="none" strokeLinejoin="round" strokeLinecap="round" />
-
-          {/* Per-hour dots + axis labels */}
-          {hours.map((h, i) => {
-            const x = xAt(i)
-            const y = yAt(h.visitors)
-            const isPeak = peakHour && h.hour === peakHour.hour && h.visitors > 0
-            return (
-              <g key={i}>
-                <circle cx={x} cy={y} r={isPeak ? 5 : 3.5}
-                        fill={isPeak ? '#ea580c' : '#1d4ed8'}
-                        stroke={h.is_current ? '#ef4444' : 'white'}
-                        strokeWidth={1.5} />
-                {h.is_current && (
-                  <circle cx={x} cy={y} r={9} fill="none"
-                          stroke="#ef4444" strokeWidth={2} opacity={0.5}>
-                    <animate attributeName="r" from="9" to="14" dur="1.4s" repeatCount="indefinite" />
-                    <animate attributeName="opacity" from="0.5" to="0" dur="1.4s" repeatCount="indefinite" />
-                  </circle>
-                )}
-                {isPeak && (
-                  <text x={x} y={y - 10} textAnchor="middle" fontSize="13">🔥</text>
-                )}
-                <text x={x} y={H - 10} textAnchor="middle"
-                      fontSize="11" fill="#64748b">{h.label}</text>
-              </g>
-            )
-          })}
-        </svg>
-      </div>
-      {payload.trend_delta_pct != null && (
-        <div className="text-xs text-slate-600 mt-1">
-          {payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '→'}{' '}
-          <span className={payload.trend_delta_pct > 0 ? 'text-emerald-600' :
-                            payload.trend_delta_pct < 0 ? 'text-red-600' :
-                            'text-slate-500'}>
-            {Math.abs(payload.trend_delta_pct)}%
-          </span>{' '}
-          vs same time yesterday
-        </div>
-      )}
-      {summary}
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+        {/* Y-axis grid + labels */}
+        {yTicks.map((tv, i) => {
+          const y = yAt(tv)
+          return (
+            <g key={i}>
+              <line x1={PL} x2={W - PR} y1={y} y2={y}
+                    stroke="#e5e7eb" strokeDasharray="2 3" />
+              <text x={PL - 6} y={y + 4} textAnchor="end"
+                    fontSize="11" fill="#64748b">{tv}</text>
+            </g>
+          )
+        })}
+        {/* The line. Single blue stroke. */}
+        <path d={linePath} stroke="#1d4ed8" strokeWidth={2.5}
+              fill="none" strokeLinejoin="round" strokeLinecap="round" />
+        {/* Dots + x-axis labels */}
+        {hours.map((h, i) => (
+          <g key={i}>
+            <circle cx={xAt(i)} cy={yAt(h.visitors)} r={3.5}
+                    fill="#1d4ed8" stroke="white" strokeWidth={1.5} />
+            <text x={xAt(i)} y={H - 8} textAnchor="middle"
+                  fontSize="11" fill="#64748b">{h.label}</text>
+          </g>
+        ))}
+      </svg>
+      <HourlySummary payload={payload} />
     </div>
   )
 }
@@ -347,8 +309,8 @@ interface BehaviourPayload {
   top_paths?: { path: string[]; count: number }[]
 }
 
-export function JourneyMapPanel({ storeId }: { storeId: number }) {
-  const { data, busy } = useRefresh<BehaviourPayload>(`/analytics/store/${storeId}/behaviour`, [storeId])
+export function JourneyMapPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
+  const { data, busy } = useRefresh<BehaviourPayload>(withRange(`/analytics/store/${storeId}/behaviour`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Customer journey map"
                 subtitle="Common paths through the store over the last 7 days"
@@ -445,11 +407,11 @@ function JourneyChart({ payload }: { payload: BehaviourPayload }) {
 // ---------------------------------------------------------------------------
 // PANEL 3 — Heatmap Intelligence (recommendations from zone-perf + heatmap)
 
-export function HeatmapIntelligencePanel({ storeId, firstCameraId }: {
-  storeId: number; firstCameraId: number | null
+export function HeatmapIntelligencePanel({ storeId, firstCameraId, range }: {
+  storeId: number; firstCameraId: number | null; range?: RangeProp
 }) {
   const { data: zonePerf, busy } = useRefresh<ZonePerformancePayload>(
-    `/analytics/store/${storeId}/zone-performance`, [storeId])
+    withRange(`/analytics/store/${storeId}/zone-performance`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Behaviour heatmap intelligence"
                 subtitle="Where customers go — and what to do about it"
@@ -517,8 +479,8 @@ interface StaffPayload {
   insights: string[]
 }
 
-export function StaffPresencePanel({ storeId }: { storeId: number }) {
-  const { data, busy } = useRefresh<StaffPayload>(`/analytics/store/${storeId}/staff-timeline`, [storeId])
+export function StaffPresencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
+  const { data, busy } = useRefresh<StaffPayload>(withRange(`/analytics/store/${storeId}/staff-timeline`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Counter staffing intelligence"
                 subtitle="Staff coverage today + gaps to investigate"
@@ -597,8 +559,8 @@ interface ZonePerformancePayload {
   setup_hint?: string
 }
 
-export function MerchandisingPanel({ storeId }: { storeId: number }) {
-  const { data, busy } = useRefresh<ZonePerformancePayload>(`/analytics/store/${storeId}/zone-performance`, [storeId])
+export function MerchandisingPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
+  const { data, busy } = useRefresh<ZonePerformancePayload>(withRange(`/analytics/store/${storeId}/zone-performance`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Visual merchandising performance"
                 subtitle="Aisle engagement ranked by visitor share"
@@ -671,14 +633,14 @@ interface VisitorIntelligencePayload {
   footnote: string
 }
 
-export function ScorecardPanel({ storeId }: { storeId: number }) {
+export function ScorecardPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const { data, busy } = useRefresh<ScorecardPayload>(
-    `/analytics/store/${storeId}/scorecard`, [storeId])
+    withRange(`/analytics/store/${storeId}/scorecard`, range), [storeId, range?.since, range?.until])
   // Separate fetch for the new visitor-intelligence endpoint. Keeps
   // the scorecard payload backwards-compatible — older API containers
   // that don't expose /visitor-intelligence just hide the band.
   const { data: vi } = useRefresh<VisitorIntelligencePayload>(
-    `/analytics/store/${storeId}/visitor-intelligence`, [storeId])
+    withRange(`/analytics/store/${storeId}/visitor-intelligence`, range), [storeId, range?.since, range?.until])
   return (
     <PanelShell title="Daily performance scorecard"
                 subtitle="Today vs yesterday — same store, same window"
@@ -864,17 +826,17 @@ function RagDot({ rag, big }: { rag: 'green'|'amber'|'red'|'slate'; big?: boolea
 // Default export: all six panels stacked. Caller drops this into the
 // store dashboard and the panels self-fetch.
 
-export default function StoreBIPanels({ storeId, firstCameraId }: {
-  storeId: number; firstCameraId: number | null
+export default function StoreBIPanels({ storeId, firstCameraId, range }: {
+  storeId: number; firstCameraId: number | null; range?: RangeProp
 }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <HourlyFootfallPanel storeId={storeId} />
-      <ScorecardPanel storeId={storeId} />
-      <JourneyMapPanel storeId={storeId} />
-      <StaffPresencePanel storeId={storeId} />
-      <HeatmapIntelligencePanel storeId={storeId} firstCameraId={firstCameraId} />
-      <MerchandisingPanel storeId={storeId} />
+      <HourlyFootfallPanel        storeId={storeId} range={range} />
+      <ScorecardPanel             storeId={storeId} range={range} />
+      <JourneyMapPanel            storeId={storeId} range={range} />
+      <StaffPresencePanel         storeId={storeId} range={range} />
+      <HeatmapIntelligencePanel   storeId={storeId} range={range} firstCameraId={firstCameraId} />
+      <MerchandisingPanel         storeId={storeId} range={range} />
     </div>
   )
 }

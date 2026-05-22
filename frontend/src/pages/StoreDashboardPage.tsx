@@ -269,7 +269,7 @@ export default function StoreDashboardPage() {
         <section>
           <SectionTitle>AI intelligence</SectionTitle>
           <Suspense fallback={<div className="text-slate-400 text-sm p-4">Loading insights…</div>}>
-            <StoreAIIntelligence storeId={storeId} />
+            <StoreAIIntelligence storeId={storeId} range={range} />
           </Suspense>
         </section>
 
@@ -278,6 +278,7 @@ export default function StoreDashboardPage() {
           <Suspense fallback={<div className="text-slate-400 text-sm p-4">Loading charts…</div>}>
             <StoreBIPanels
               storeId={storeId}
+              range={range}
               firstCameraId={extractFirstCameraId(t.heatmap_thumb_url?.value as string | null)} />
           </Suspense>
         </section>
@@ -486,7 +487,18 @@ function AlertsFeedSection({ storeId }: { storeId: number }) {
       <SectionTitle>Alerts &amp; incidents</SectionTitle>
       <Card className="p-3 space-y-2">
         {groups.length === 0 ? (
-          <div className="text-slate-400 text-sm p-3">No alerts in the last window.</div>
+          <div className="p-3 text-sm">
+            <div className="text-slate-500">No alerts in the last window.</div>
+            <div className="text-xs text-slate-400 mt-1">
+              If you expect alerts but see none, check that detectors are
+              enabled on each camera under{' '}
+              <Link to="/detectors" className="text-sky-600 hover:underline">Detectors</Link>{' '}
+              and that detection_events are being written. From the host:
+              <pre className="bg-slate-50 rounded p-2 mt-1 text-[11px] font-mono">{`docker compose exec postgres psql -U $POSTGRES_USER $POSTGRES_DB \\
+  -c "SELECT COUNT(*) FROM detection_events
+      WHERE timestamp > now() - interval '1 hour';"`}</pre>
+            </div>
+          </div>
         ) : (
           groups.map(g => (
             <AlertCard key={g.head.id}

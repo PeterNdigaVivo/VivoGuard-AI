@@ -5,6 +5,17 @@ import { useEffect, useState } from 'react'
 import { Card } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
 
+type RangeProp = { since?: string; until?: string } | undefined
+
+function withRange(path: string, range?: RangeProp): string {
+  if (!range || (!range.since && !range.until)) return path
+  const q = new URLSearchParams()
+  if (range.since) q.set("since", range.since)
+  if (range.until) q.set("until", range.until)
+  return path + (path.includes("?") ? "&" : "?") + q.toString()
+}
+
+
 
 // ----- AnomaliesPanel -------------------------------------------------
 
@@ -13,15 +24,15 @@ interface AnomaliesPayload {
   note: string
 }
 
-export function AnomaliesPanel({ storeId }: { storeId: number }) {
+export function AnomaliesPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const [data, setData] = useState<AnomaliesPayload | null>(null)
   useEffect(() => {
-    const tick = () => api<AnomaliesPayload>(`/analytics/store/${storeId}/anomalies`)
+    const tick = () => api<AnomaliesPayload>(withRange(`/analytics/store/${storeId}/anomalies`, range))
       .then(setData).catch(() => setData(null))
     tick()
     const t = setInterval(tick, 60_000)
     return () => clearInterval(t)
-  }, [storeId])
+  }, [storeId, range?.since, range?.until])
   if (!data || data.anomalies.length === 0) return null
   return (
     <Card className="p-4 bg-amber-50 border-amber-200">
@@ -45,12 +56,12 @@ interface StaffRec {
   recommended_staff: number; headline: string
 }
 
-export function StaffingPredictionPanel({ storeId }: { storeId: number }) {
+export function StaffingPredictionPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const [data, setData] = useState<{ recommendations: StaffRec[]; note?: string } | null>(null)
   useEffect(() => {
-    api<typeof data>(`/analytics/store/${storeId}/staffing-prediction`)
+    api<typeof data>(withRange(`/analytics/store/${storeId}/staffing-prediction`, range))
       .then(d => setData(d as any)).catch(() => setData(null))
-  }, [storeId])
+  }, [storeId, range?.since, range?.until])
   if (!data) return null
   // Pick the top 5 busiest predicted slots by visitor count.
   const top = (data.recommendations || [])
@@ -90,15 +101,15 @@ interface HealthPayload {
   components: { name: string; weight: number; value: number }[]
 }
 
-export function HealthScorePanel({ storeId }: { storeId: number }) {
+export function HealthScorePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const [data, setData] = useState<HealthPayload | null>(null)
   useEffect(() => {
-    const tick = () => api<HealthPayload>(`/analytics/store/${storeId}/health-score`)
+    const tick = () => api<HealthPayload>(withRange(`/analytics/store/${storeId}/health-score`, range))
       .then(setData).catch(() => setData(null))
     tick()
     const t = setInterval(tick, 60_000)
     return () => clearInterval(t)
-  }, [storeId])
+  }, [storeId, range?.since, range?.until])
   if (!data || data.score === null) return null
   const rag = data.score >= 80 ? 'emerald' : data.score >= 60 ? 'amber' : 'red'
   return (
@@ -146,12 +157,12 @@ interface LPPayload {
   headline_staff: string | null
 }
 
-export function LossPreventionPanel({ storeId }: { storeId: number }) {
+export function LossPreventionPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const [data, setData] = useState<LPPayload | null>(null)
   useEffect(() => {
-    api<LPPayload>(`/analytics/store/${storeId}/loss-prevention`)
+    api<LPPayload>(withRange(`/analytics/store/${storeId}/loss-prevention`, range))
       .then(setData).catch(() => setData(null))
-  }, [storeId])
+  }, [storeId, range?.since, range?.until])
   if (!data || data.total_alerts_this_week === 0) return null
   return (
     <Card className="p-4">
@@ -177,12 +188,12 @@ interface TrendsPayload {
   conversion_funnel: { this_week_pct: number; last_week_pct: number; headline: string }
 }
 
-export function BehaviourTrendsPanel({ storeId }: { storeId: number }) {
+export function BehaviourTrendsPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const [data, setData] = useState<TrendsPayload | null>(null)
   useEffect(() => {
-    api<TrendsPayload>(`/analytics/store/${storeId}/behaviour-trends`)
+    api<TrendsPayload>(withRange(`/analytics/store/${storeId}/behaviour-trends`, range))
       .then(setData).catch(() => setData(null))
-  }, [storeId])
+  }, [storeId, range?.since, range?.until])
   if (!data) return null
   const v = data.avg_visit_seconds
   return (
@@ -219,15 +230,15 @@ export function BehaviourTrendsPanel({ storeId }: { storeId: number }) {
 
 // ----- bundle for the dashboard --------------------------------------
 
-export default function StoreAIIntelligence({ storeId }: { storeId: number }) {
+export default function StoreAIIntelligence({ storeId, range }: { storeId: number; range?: RangeProp }) {
   return (
     <div className="space-y-3">
-      <AnomaliesPanel storeId={storeId} />
+      <AnomaliesPanel storeId={storeId} range={range} />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <HealthScorePanel storeId={storeId} />
-        <StaffingPredictionPanel storeId={storeId} />
-        <LossPreventionPanel storeId={storeId} />
-        <BehaviourTrendsPanel storeId={storeId} />
+        <HealthScorePanel storeId={storeId} range={range} />
+        <StaffingPredictionPanel storeId={storeId} range={range} />
+        <LossPreventionPanel storeId={storeId} range={range} />
+        <BehaviourTrendsPanel storeId={storeId} range={range} />
       </div>
     </div>
   )

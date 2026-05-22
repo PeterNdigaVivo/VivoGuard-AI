@@ -557,11 +557,15 @@ def store_live_dashboard(store_id: int,
 # hours noise never appears in any of them.
 
 @router.get("/store/{store_id}/hourly")
-def store_hourly(store_id: int, db: Session = Depends(get_db),
+@cached_store_endpoint("store-hourly", ttl=60)
+def store_hourly(store_id: int,
+                 since: datetime | None = None,
+                 until: datetime | None = None,
+                 db: Session = Depends(get_db),
                  _u=Depends(get_current_user)):
-    """Hourly visitor breakdown for today + yesterday-same-time
-    comparison. Includes auto-generated insights (peak / quiet /
-    restock window / staffing recommendation)."""
+    """Hourly visitor breakdown for the given window (defaults to
+    today's business-hours session) + same-window-yesterday
+    comparison. Includes auto-generated insights."""
     from sqlalchemy import extract
     from app.utils.business_hours import todays_session, _store_local_now
     store = db.get(Store, store_id)
@@ -573,8 +577,16 @@ def store_hourly(store_id: int, db: Session = Depends(get_db),
         return _empty_hourly()
 
     now = datetime.now(timezone.utc)
-    session_start, session_end = todays_session(store, now)
     local_now = _store_local_now(store, now)
+    # Active window: explicit since/until override the default
+    # "today's business-hours session". Operators picking
+    # "Yesterday" / "Last week" / etc. on the dashboard get the
+    # range they asked for instead of always seeing today.
+    if since is not None:
+        session_start = since
+        session_end   = until or now
+    else:
+        session_start, session_end = todays_session(store, now)
     open_hr  = session_start.astimezone(local_now.tzinfo).hour
     close_hr = session_end.astimezone(local_now.tzinfo).hour or (open_hr + 12)
     current_hr = local_now.hour
@@ -714,7 +726,7 @@ def _empty_hourly() -> dict:
 
 
 @router.get("/store/{store_id}/behaviour")
-def store_behaviour(store_id: int, db: Session = Depends(get_db),
+def store_behaviour(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                     _u=Depends(get_current_user)):
     """Customer journey + dwell aggregates for the journey-map panel.
 
@@ -732,7 +744,12 @@ def store_behaviour(store_id: int, db: Session = Depends(get_db),
                 "setup_hint": "No cameras attached to this store yet."}
 
     now = datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if since is not None:
+        week_start = since
+        week_end   = until or now
+    else:
+        week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end   = now
     # Staff signatures from the past week — used to filter out staff
     # movement loops from the journey map (the user's complaint:
     # "Dwell time averages include staff movement which skews data").
@@ -953,7 +970,12 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
         return {"zones": [], "setup_hint": "No cameras attached."}
 
     now = datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if since is not None:
+        week_start = since
+        week_end   = until or now
+    else:
+        week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end   = now
 
     zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
     if not zones:
@@ -1042,7 +1064,7 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
 
 @router.get("/store/{store_id}/scorecard")
 @cached_store_endpoint("store-scorecard", ttl=30)
-def store_scorecard(store_id: int, db: Session = Depends(get_db),
+def store_scorecard(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                     _u=Depends(get_current_user)):
     """Daily performance scorecard — today vs target vs yesterday
     with RAG status per metric and an overall 0–100 score."""
@@ -1056,7 +1078,13 @@ def store_scorecard(store_id: int, db: Session = Depends(get_db),
         return {"rows": [], "overall_score": None, "overall_rag": "slate"}
 
     now = datetime.now(timezone.utc)
-    today_open, today_close = todays_session(store, now)
+    if since is not None:
+        # Operator chose an explicit range — use it verbatim, and
+        # the comparison window becomes the prior same-length slice.
+        today_open  = since
+        today_close = until or now
+    else:
+        today_open, today_close = todays_session(store, now)
     today_end = min(now, today_close)
     yest_open  = today_open  - timedelta(days=1)
     yest_close = today_close - timedelta(days=1)
@@ -1417,7 +1445,7 @@ def _parse_iso_safe(s):
 
 @router.get("/store/{store_id}/week-summary")
 @cached_store_endpoint("store-week-summary", ttl=300)
-def store_week_summary(store_id: int, db: Session = Depends(get_db),
+def store_week_summary(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                         _u=Depends(get_current_user)):
     """Powers the dashboard's THIS WEEK section.
 
@@ -1454,9 +1482,14 @@ def store_week_summary(store_id: int, db: Session = Depends(get_db),
                 "detector_activity": []}
 
     now = datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=7)).replace(
-        hour=0, minute=0, second=0, microsecond=0,
-    )
+    if since is not None:
+        week_start = since
+        week_end   = until or now
+    else:
+        week_start = (now - timedelta(days=7)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        week_end   = now
     today_session_open, _ = todays_session(store, now)
 
     # --- 7-day footfall: prefer visitor_count_in; fall back to the
@@ -2593,7 +2626,7 @@ def chain_health_leaderboard(db: Session = Depends(get_db),
 
 
 @router.get("/store/{store_id}/loss-prevention")
-def store_loss_prevention(store_id: int, db: Session = Depends(get_db),
+def store_loss_prevention(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                           _u=Depends(get_current_user)):
     """Daily LP summary: time-of-day pattern, camera hotspots, staff
     correlation. Pure aggregation over DetectionEvent + Alert rows
@@ -2692,7 +2725,7 @@ def store_loss_prevention(store_id: int, db: Session = Depends(get_db),
 
 @router.get("/store/{store_id}/behaviour-trends")
 @cached_store_endpoint("store-behaviour-trends", ttl=600)
-def store_behaviour_trends(store_id: int, db: Session = Depends(get_db),
+def store_behaviour_trends(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                             _u=Depends(get_current_user)):
     """Weekly customer-behaviour trends — avg visit duration, top
     zones this week vs last, conversion-funnel (entered → counter)."""
@@ -2706,16 +2739,26 @@ def store_behaviour_trends(store_id: int, db: Session = Depends(get_db),
         return {"note": "no cameras attached"}
 
     now = datetime.now(timezone.utc)
-    this_week_start = now - timedelta(days=7)
-    last_week_start = now - timedelta(days=14)
+    if since is not None:
+        this_week_start = since
+        this_week_end   = until or now
+        # Comparison: previous same-length window.
+        window_len = this_week_end - this_week_start
+        last_week_start = this_week_start - window_len
+        last_week_end   = this_week_start
+    else:
+        this_week_start = now - timedelta(days=7)
+        this_week_end   = now
+        last_week_start = now - timedelta(days=14)
+        last_week_end   = now - timedelta(days=7)
 
     def _journeys(t0, t1):
         return (db.query(CustomerJourney)
                   .filter(CustomerJourney.store_id == store_id,
                           CustomerJourney.started_at >= t0,
                           CustomerJourney.started_at < t1).all())
-    this = _journeys(this_week_start, now)
-    last = _journeys(last_week_start, this_week_start)
+    this = _journeys(this_week_start, this_week_end)
+    last = _journeys(last_week_start, last_week_end)
 
     def _avg_dur(rows):
         durs = [(j.ended_at - j.started_at).total_seconds()
