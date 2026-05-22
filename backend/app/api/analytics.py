@@ -2625,6 +2625,117 @@ def chain_health_leaderboard(db: Session = Depends(get_db),
     return {"leaderboard": leaderboard}
 
 
+@router.get("/store/{store_id}/customer-flow")
+def store_customer_flow(store_id: int,
+                        since: datetime | None = None,
+                        until: datetime | None = None,
+                        db: Session = Depends(get_db),
+                        _u=Depends(get_current_user)):
+    """Customer movement edges for the heatmap's 'Flow' mode.
+
+    Aggregates over CustomerJourney.zone_sequence_json for the
+    selected window. For every pair of CONSECUTIVE zone visits in a
+    track's path, increments the edge (from_zone → to_zone).
+    Returns:
+      • zones: [{ zone_id, name, cx, cy }]   — centroid in 0..1 norm
+                                               space (matches the
+                                               heatmap PNG coords).
+      • edges: [{ from, to, count }]         — sorted desc by count.
+
+    The frontend draws SVG arrows over the heatmap PNG; arrow
+    thickness scales with edge count.
+
+    Without per-camera coordinate calibration, all zones from all
+    cameras share one normalised 0..1 plane. That's lossy
+    geometrically but operators still get the topological structure
+    (entry → aisle → counter, etc.) which is what they actually want.
+    """
+    from app.models import CustomerJourney, Zone
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return {"zones": [], "edges": [], "total_journeys": 0}
+
+    now = datetime.now(timezone.utc)
+    if since is not None:
+        t0 = since
+        t1 = until or now
+    else:
+        t0 = now - timedelta(days=7)
+        t1 = now
+
+    # Zone metadata — centroid of the polygon for the arrow endpoints.
+    zone_rows = (db.query(Zone)
+                   .filter(Zone.camera_id.in_(cam_ids)).all())
+
+    def _centroid(poly: list) -> tuple[float, float]:
+        """Polygon centroid in normalised image space. Falls back to
+        the arithmetic mean of vertices for non-convex shapes — good
+        enough for arrow endpoints."""
+        if not poly or not isinstance(poly, list) or len(poly) < 1:
+            return (0.5, 0.5)
+        xs = [p[0] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+        ys = [p[1] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if not xs or not ys:
+            return (0.5, 0.5)
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+    zones_out = []
+    zone_centroid: dict[int, tuple[float, float]] = {}
+    for z in zone_rows:
+        cx, cy = _centroid(z.polygon_coords_json or [])
+        zone_centroid[z.id] = (cx, cy)
+        zones_out.append({
+            "zone_id": z.id, "name": z.name,
+            "cx": round(cx, 3), "cy": round(cy, 3),
+        })
+
+    # Journeys in the window.
+    journeys = (db.query(CustomerJourney)
+                  .filter(CustomerJourney.store_id == store_id,
+                          CustomerJourney.started_at >= t0,
+                          CustomerJourney.started_at <  t1)
+                  .limit(5000).all())
+
+    # Edge counts. Each step in zone_sequence_json is the
+    # {zone_id, zone_name, entered_at, exited_at} dict that the
+    # detector writes. Collapse adjacent duplicates first (a track
+    # that re-enters the same zone twice in a row shouldn't make
+    # a self-loop edge).
+    edges: dict[tuple[int, int], int] = {}
+    for j in journeys:
+        seq = j.zone_sequence_json or []
+        if len(seq) < 2:
+            continue
+        ids: list[int] = []
+        for step in seq:
+            if isinstance(step, dict):
+                zid = step.get("zone_id")
+            else:
+                zid = None
+            if zid is None:
+                continue
+            if not ids or ids[-1] != zid:
+                ids.append(zid)
+        for a, b in zip(ids, ids[1:]):
+            edges[(a, b)] = edges.get((a, b), 0) + 1
+
+    edges_out = sorted(
+        ({"from": a, "to": b, "count": n} for (a, b), n in edges.items()),
+        key=lambda e: -e["count"],
+    )[:50]      # cap — drawing more than 50 arrows is unreadable anyway
+
+    return {
+        "zones": zones_out,
+        "edges": edges_out,
+        "total_journeys": len(journeys),
+        "window": {"since": t0.isoformat(), "until": t1.isoformat()},
+    }
+
+
 @router.get("/store/{store_id}/loss-prevention")
 def store_loss_prevention(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),
                           _u=Depends(get_current_user)):

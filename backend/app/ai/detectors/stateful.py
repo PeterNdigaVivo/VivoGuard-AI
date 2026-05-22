@@ -325,7 +325,13 @@ class HeatmapDetector(Detector):
     """
 
     detection_type = "heatmap"
-    GRID = 32
+    # 20×20 grid — 400 cells. Higher than the previous 32×32 in
+    # display-density per camera-frame ratio (cells are larger, easier
+    # to colour-read at thumbnail size) and easier on Redis payload
+    # (400 ints vs 1024). For Vivo retail floorplans the per-cell
+    # resolution maps to roughly 1 m² in a typical 400 m² store,
+    # which is the granularity operators actually act on.
+    GRID = 20
     PUBLISH_INTERVAL = 30   # seconds
     WINDOWS = ("hour", "day", "week")
 
