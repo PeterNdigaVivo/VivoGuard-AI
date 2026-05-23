@@ -77,6 +77,63 @@ def _render_png(grid: list[list[int]], size: int, alpha: float = 0.85) -> bytes:
     return buf.getvalue()
 
 
+GRID_SNAPSHOT_RETENTION_DAYS = 90
+SNAPSHOT_LAYERS = ("traffic", "engagement", "congestion", "paths")
+
+
+@celery_app.task(name="heatmap.snapshot_grids_hourly", ignore_result=True)
+def snapshot_grids_hourly() -> None:
+    """Hourly capture of all four heatmap layers per camera into the
+    `heatmap_grid_snapshots` table. Drives the replay timeline.
+
+    Pulls the DAY-window grids from Redis (which by definition cover
+    the period 00:00 -> now), so the replay shows cumulative state at
+    that hour. 90-day retention enforced inline.
+    """
+    from datetime import datetime, timezone
+    from app.database import SessionLocal
+    from app.models import Camera, HeatmapGridSnapshot
+    r = redis.from_url(settings.redis_url)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=GRID_SNAPSHOT_RETENTION_DAYS)
+
+    with SessionLocal() as db:
+        cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
+        for cam in cams:
+            for layer in SNAPSHOT_LAYERS:
+                key = (f"vg:heatmap:{layer}:day:{cam.id}" if layer != "traffic"
+                       else f"vg:heatmap:day:{cam.id}")
+                raw = r.get(key)
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                if layer == "paths":
+                    grid_data = payload.get("edges") or []
+                    peak = float(max((e["count"] for e in grid_data), default=0))
+                else:
+                    grid = payload.get("grid") or []
+                    grid_data = grid
+                    peak = float(max((max(row) for row in grid), default=0))
+                db.add(HeatmapGridSnapshot(
+                    camera_id=cam.id,
+                    store_id=cam.store_id,
+                    captured_at=now,
+                    hour=now.hour,
+                    layer=layer,
+                    grid_data=grid_data,
+                    peak_value=peak,
+                ))
+        db.commit()
+        # Retention sweep.
+        db.query(HeatmapGridSnapshot).filter(
+            HeatmapGridSnapshot.captured_at < cutoff
+        ).delete(synchronize_session=False)
+        db.commit()
+
+
 @celery_app.task(name="heatmap.snapshot_all", ignore_result=True)
 def snapshot_all() -> None:
     """Snapshot every active camera's heatmap to disk + index in DB."""

@@ -59,6 +59,12 @@ celery_app.conf.update(
             # schedule= form; this fires roughly once per 24h relative
             # to worker boot. Acceptable — we just want one snapshot a day.
         },
+        # Hourly grid snapshots for the replay timeline. 90-day
+        # retention is enforced inside the task itself.
+        "heatmap-grid-snapshots-hourly": {
+            "task": "heatmap.snapshot_grids_hourly",
+            "schedule": 60 * 60.0,
+        },
         # Staff classifier — every 10 minutes, walk today's customer
         # journeys and flag any track that's accumulated >10 min in a
         # counter zone as 'staff'. The analytics endpoints LEFT-JOIN

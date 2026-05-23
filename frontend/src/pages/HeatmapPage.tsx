@@ -44,6 +44,16 @@ export default function HeatmapPage() {
   const [peakLabel, setPeakLabel] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // 4-layer heatmap toggles. Engagement defaults on per spec; paths
+  // is checked too so the customer-flow arrows show by default.
+  const [layers, setLayers] = useState<{ engagement: boolean
+                                          traffic: boolean
+                                          congestion: boolean
+                                          paths: boolean }>({
+    engagement: true, traffic: false, congestion: false, paths: true,
+  })
+  const [paths, setPaths] = useState<{ edges: { from: number[]; to: number[]; count: number }[] } | null>(null)
+
   // Pull the camera + its store up-front so the placeholder reads
   // "Vivo Junction - Camera 3" and the back link knows where to go.
   useEffect(() => {
@@ -70,10 +80,23 @@ export default function HeatmapPage() {
     return windowSel === '3h' ? '3h' : windowSel === 'this_week' ? 'week' : 'day'
   }
 
+  // Active layer for the PNG overlay. Multi-select for engagement +
+  // paths is fine, but only ONE raster layer (engagement / traffic /
+  // congestion) renders as the heatmap PNG underneath — they share
+  // the same colour space. Precedence matches the spec: engagement is
+  // the default lead layer, then traffic, then congestion.
+  function activeRasterLayer(): 'engagement' | 'traffic' | 'congestion' {
+    if (layers.engagement) return 'engagement'
+    if (layers.traffic)    return 'traffic'
+    if (layers.congestion) return 'congestion'
+    return 'engagement'
+  }
+
   function heatmapUrl(forDownload = false): string {
     const params = new URLSearchParams({
       alpha: String(forDownload ? Math.max(0.85, opacity) : opacity),
       window: apiWindow(),
+      layer:  activeRasterLayer(),
     })
     return `/api/analytics/heatmap/${cameraId}/image?${params}`
   }
@@ -95,6 +118,21 @@ export default function HeatmapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId, bust, windowSel])
 
+  // Path edges — only fetched when the Paths layer is on.
+  useEffect(() => {
+    if (!layers.paths) { setPaths(null); return }
+    let cancelled = false
+    api<{ edges: { from: number[]; to: number[]; count: number }[] }>(
+      `/analytics/heatmap/${cameraId}/paths?window=${apiWindow()}`
+    ).then(d => { if (!cancelled) setPaths(d) })
+     .catch(() => { if (!cancelled) setPaths(null) })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, bust, windowSel, layers.paths])
+
+  // Re-fetch the PNG whenever the active raster layer changes too.
+  // (The dependency on `layers` makes the next effect re-run.)
+
   // Heatmap PNG — authed fetch → blob → object URL.
   useEffect(() => {
     let cancelled = false
@@ -114,7 +152,7 @@ export default function HeatmapPage() {
       if (created) URL.revokeObjectURL(created)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, opacity, bust, windowSel])
+  }, [cameraId, opacity, bust, windowSel, layers.engagement, layers.traffic, layers.congestion])
 
   async function download() {
     const tok = localStorage.getItem('vg_access_token') ?? ''
@@ -198,6 +236,26 @@ export default function HeatmapPage() {
             🔥 Busiest period today: {peakLabel}
           </div>
         )}
+        {/* 4-layer toggle — engagement default on. */}
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+          <span className="uppercase tracking-wide text-slate-400">Layers</span>
+          <LayerToggle label="Engagement"  swatch="#ef4444"
+                       on={layers.engagement}
+                       onChange={v => setLayers(s => ({ ...s, engagement: v }))}
+                       hint="Customer interest — aisle/shelf zones, dwell-weighted." />
+          <LayerToggle label="Traffic"     swatch="#3b82f6"
+                       on={layers.traffic}
+                       onChange={v => setLayers(s => ({ ...s, traffic: v }))}
+                       hint="Foot-traffic density — every zone, every person." />
+          <LayerToggle label="Congestion"  swatch="#f59e0b"
+                       on={layers.congestion}
+                       onChange={v => setLayers(s => ({ ...s, congestion: v }))}
+                       hint="Queue / counter dwell — waiting, not interest." />
+          <LayerToggle label="Paths"       swatch="#a78bfa"
+                       on={layers.paths}
+                       onChange={v => setLayers(s => ({ ...s, paths: v }))}
+                       hint="Movement arrows — thickness scales with traffic." />
+        </div>
       </Card>
 
       <Card className="p-3 bg-[#0d1b2a] text-white border-slate-800">
@@ -218,14 +276,19 @@ export default function HeatmapPage() {
               </div>
             </div>
           )}
-          {heatmapObjUrl && (
+          {heatmapObjUrl && (layers.engagement || layers.traffic || layers.congestion) && (
             <img src={heatmapObjUrl} alt=""
                  className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen" />
+          )}
+          {layers.paths && paths && paths.edges && paths.edges.length > 0 && (
+            <PathArrowsOverlay edges={paths.edges} />
           )}
           {heatmapObjUrl && (
             <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/70 text-white text-xs font-semibold
                             animate-pulse pointer-events-none">
-              🔥 Peak activity zone
+              {layers.engagement ? '🔴 High Interest Zone'
+                : layers.congestion ? '⚠️ Bottleneck'
+                : '🔥 Busiest Area'}
             </div>
           )}
         </div>
@@ -259,5 +322,61 @@ export default function HeatmapPage() {
         {error && <div className="text-red-400 text-sm mt-2">{error}</div>}
       </Card>
     </div>
+  )
+}
+
+function LayerToggle({ label, swatch, on, onChange, hint }: {
+  label: string; swatch: string; on: boolean
+  onChange: (v: boolean) => void; hint?: string
+}) {
+  return (
+    <label className="inline-flex items-center gap-1.5 cursor-pointer"
+           title={hint}>
+      <input type="checkbox" checked={on}
+             onChange={e => onChange(e.target.checked)}
+             className="accent-orange-500" />
+      <span className="inline-block w-3 h-3 rounded-sm"
+            style={{ background: swatch }} />
+      <span className={on ? 'text-white' : 'text-slate-400'}>{label}</span>
+    </label>
+  )
+}
+
+// SVG overlay rendering customer-flow arrows from the /paths layer.
+// Edges are in 20×20 grid space; we draw them on a 100% viewBox so
+// they stretch over whatever resolution the snapshot is.
+function PathArrowsOverlay({ edges }: {
+  edges: { from: number[]; to: number[]; count: number }[]
+}) {
+  const GRID = 20
+  const top = edges.slice(0, 60)
+  const max = top.reduce((m, e) => Math.max(m, e.count), 1)
+  // Convert (gy, gx) cell coords → normalised 0..100 viewBox coords
+  // (centre of the cell).
+  const cx = (gx: number) => ((gx + 0.5) / GRID) * 100
+  const cy = (gy: number) => ((gy + 0.5) / GRID) * 100
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none"
+         viewBox="0 0 100 100" preserveAspectRatio="none">
+      <defs>
+        <marker id="path-arrow" viewBox="0 0 10 10" refX="8" refY="5"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" />
+        </marker>
+      </defs>
+      {top.map((e, i) => {
+        const strength = e.count / max
+        return (
+          <line key={i}
+                x1={cx(e.from[1])} y1={cy(e.from[0])}
+                x2={cx(e.to[1])}   y2={cy(e.to[0])}
+                stroke="#a78bfa"
+                strokeOpacity={0.4 + 0.55 * strength}
+                strokeWidth={0.3 + 1.2 * strength}
+                vectorEffect="non-scaling-stroke"
+                markerEnd="url(#path-arrow)" />
+        )
+      })}
+    </svg>
   )
 }

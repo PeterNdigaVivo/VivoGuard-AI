@@ -546,10 +546,127 @@ function StaffTimelineBar({ timeline }: { timeline: StaffPayload['timeline'] }) 
 // PANEL 5 — Visual Merchandising Performance
 
 interface ZonePerformancePayload {
-  zones: { zone_id: number; name: string; engagement_pct: number; avg_dwell_seconds: number; rag: 'green'|'amber'|'red'; rank: number }[]
+  zones: {
+    zone_id: number; name: string;
+    engagement_pct: number; engagement_score?: number;
+    avg_dwell_seconds: number;
+    traffic_count?: number;
+    peak_hour?: string | null;
+    is_bottleneck?: boolean;
+    is_queue_zone?: boolean;
+    recommendation?: string;
+    tags?: string[];
+    rag: 'green'|'amber'|'red';
+    rank: number;
+  }[]
   insights: string[]
   setup_hint?: string
 }
+
+// Zone Intelligence — top-3 / bottom-3 / bottleneck panel for the
+// store dashboard's "Zone intelligence" section. Reuses the same
+// zone-performance endpoint as the merchandising panel but slices it
+// into actionable lists rather than a single bar chart.
+export function ZoneIntelligencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
+  const { data, busy } = useRefresh<ZonePerformancePayload>(
+    withRange(`/analytics/store/${storeId}/zone-performance`, range),
+    [storeId, range?.since, range?.until])
+  return (
+    <PanelShell title="Zone intelligence"
+                subtitle="Top performers, bottlenecks, and actionable recommendations"
+                busy={busy}>
+      {!data ? <SkeletonBlock height={220} /> :
+        (data.zones || []).length === 0
+          ? <EmptyState icon="🗺️" text={data.setup_hint ?? 'Draw zones to unlock zone intelligence.'} />
+          : <ZoneIntelligenceBody zones={data.zones} />}
+    </PanelShell>
+  )
+}
+
+function ZoneIntelligenceBody({ zones }: {
+  zones: ZonePerformancePayload['zones']
+}) {
+  const engagementZones = zones.filter(z => !z.is_queue_zone)
+  const queueZones      = zones.filter(z =>  z.is_queue_zone)
+  const top    = [...engagementZones].sort((a, b) => b.engagement_pct - a.engagement_pct).slice(0, 3)
+  const bottom = [...engagementZones].sort((a, b) => a.engagement_pct - b.engagement_pct).slice(0, 3)
+  const bottlenecks = queueZones.filter(z => z.is_bottleneck)
+  const medals = ['🏆', '🥈', '🥉']
+  return (
+    <div className="space-y-4">
+      {top.length > 0 && (
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+            Top performing zones
+          </div>
+          <div className="space-y-1">
+            {top.map((z, i) => (
+              <div key={z.zone_id} className="text-sm flex flex-wrap items-baseline gap-2">
+                <span>{medals[i] ?? '•'}</span>
+                <span className="font-medium">{z.name}</span>
+                <span className="text-slate-500">
+                  — Score {(z.engagement_score ?? z.engagement_pct / 100).toFixed(2)} ·
+                  {' '}{Math.round(z.avg_dwell_seconds)}s avg dwell ·
+                  {' '}{z.traffic_count ?? 0} visits
+                  {z.peak_hour ? ` · peak ${z.peak_hour}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {bottom.length > 0 && bottom[0].engagement_pct < 40 && (
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+            Low engagement zones
+          </div>
+          <div className="space-y-1.5">
+            {bottom.filter(z => z.engagement_pct < 40).map(z => (
+              <div key={z.zone_id} className="text-sm">
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span>⚠️</span>
+                  <span className="font-medium">{z.name}</span>
+                  <span className="text-slate-500">
+                    — Score {(z.engagement_score ?? z.engagement_pct / 100).toFixed(2)} ·
+                    {' '}{Math.round(z.avg_dwell_seconds)}s avg dwell
+                  </span>
+                </div>
+                {z.recommendation && (
+                  <div className="text-xs text-slate-600 pl-6">→ {z.recommendation}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {bottlenecks.length > 0 && (
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+            Bottleneck alerts
+          </div>
+          <div className="space-y-1.5">
+            {bottlenecks.map(z => (
+              <div key={z.zone_id} className="text-sm">
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span>🚨</span>
+                  <span className="font-medium">{z.name}</span>
+                  <span className="text-slate-500">
+                    — avg {Math.round(z.avg_dwell_seconds / 60)} min wait
+                    {z.peak_hour ? `, peak ${z.peak_hour}` : ''}
+                  </span>
+                </div>
+                {z.recommendation && (
+                  <div className="text-xs text-slate-600 pl-6">→ {z.recommendation}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 export function MerchandisingPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const { data, busy } = useRefresh<ZonePerformancePayload>(withRange(`/analytics/store/${storeId}/zone-performance`, range), [storeId, range?.since, range?.until])
@@ -829,6 +946,7 @@ export default function StoreBIPanels({ storeId, firstCameraId, range }: {
       <StaffPresencePanel         storeId={storeId} range={range} />
       <HeatmapIntelligencePanel   storeId={storeId} range={range} firstCameraId={firstCameraId} />
       <MerchandisingPanel         storeId={storeId} range={range} />
+      <ZoneIntelligencePanel      storeId={storeId} range={range} />
     </div>
   )
 }

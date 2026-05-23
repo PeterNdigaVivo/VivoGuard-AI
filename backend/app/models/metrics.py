@@ -119,6 +119,26 @@ class HeatmapSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class HeatmapGridSnapshot(Base):
+    """Hourly snapshot of one heatmap layer (traffic / engagement /
+    congestion / paths) per camera. Drives the replay timeline so
+    operators can scrub through a day or compare yesterday vs today.
+    90-day retention enforced by the snapshot task.
+    """
+
+    __tablename__ = "heatmap_grid_snapshots"
+
+    id:          Mapped[int]      = mapped_column(primary_key=True)
+    camera_id:   Mapped[int]      = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    store_id:    Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"),
+                                                     nullable=True, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    hour:        Mapped[int]      = mapped_column(Integer)
+    layer:       Mapped[str]      = mapped_column(String(32))
+    grid_data:   Mapped[dict]     = mapped_column(JSON)
+    peak_value:  Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class Campaign(Base):
     """Marketing campaign window for before/after analytics."""
 

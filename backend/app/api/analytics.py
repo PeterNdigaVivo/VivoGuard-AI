@@ -1985,6 +1985,50 @@ def heatmap_paths(camera_id: int, window: str | None = None,
     return payload
 
 
+@router.get("/heatmap/{camera_id}/replay")
+def heatmap_replay(camera_id: int,
+                   day: str | None = None,
+                   layer: str = "traffic",
+                   db: Session = Depends(get_db),
+                   _u=Depends(get_current_user)):
+    """Hourly snapshots of one heatmap layer across a day. Returns
+    24 entries (one per hour, possibly nulls), each {hour, grid_data,
+    peak_value, captured_at}. Default day = today. Used by the
+    HeatmapPage replay slider."""
+    from datetime import datetime, date as date_t, timezone
+    from app.models import HeatmapGridSnapshot
+
+    if layer not in ("traffic", "engagement", "congestion", "paths"):
+        raise HTTPException(400, f"unknown layer: {layer}")
+    try:
+        d = date_t.fromisoformat(day) if day else date_t.today()
+    except ValueError:
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+    day_start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    day_end   = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+
+    rows = (db.query(HeatmapGridSnapshot)
+              .filter(HeatmapGridSnapshot.camera_id == camera_id,
+                      HeatmapGridSnapshot.layer == layer,
+                      HeatmapGridSnapshot.captured_at >= day_start,
+                      HeatmapGridSnapshot.captured_at <= day_end)
+              .order_by(HeatmapGridSnapshot.captured_at).all())
+
+    by_hour: dict[int, dict] = {}
+    for snap in rows:
+        by_hour[int(snap.hour)] = {
+            "hour": int(snap.hour),
+            "grid_data": snap.grid_data,
+            "peak_value": float(snap.peak_value or 0),
+            "captured_at": snap.captured_at.isoformat(),
+        }
+    frames = [by_hour.get(h) or {"hour": h, "grid_data": None,
+                                  "peak_value": 0, "captured_at": None}
+              for h in range(24)]
+    return {"camera_id": camera_id, "day": d.isoformat(),
+            "layer": layer, "frames": frames}
+
+
 def _period_label_for(window: str) -> str:
     """Human-readable label for the current bucket so the frontend
     can show "Last 3h: 14:00–17:00" without re-deriving the
@@ -2046,12 +2090,18 @@ def _heatmap_color(v: float) -> tuple[int, int, int]:
 @router.get("/heatmap/{camera_id}/image")
 def heatmap_image(camera_id: int, alpha: float = 0.85,
                   window: str | None = None,
+                  layer: str = "traffic",
                   _u=Depends(get_current_user)):
     """Render the heatmap as a PNG using the Premier League-style
     navy → blue → orange → red ramp.
 
+    `layer` selects which grid to render:
+      traffic     — foot traffic density (default — existing behaviour)
+      engagement  — customer engagement score (aisle/shelf only)
+      congestion  — checkout / queue dwell (bottleneck heatmap)
+
     `window` selects the time aggregator the inference worker keeps:
-      hour — rolling 60-minute grid (resets each new hour)
+      3h   — rolling 3-hour bucket
       day  — today's grid since local 00:00 (default)
       week — this iso-week, reset Monday 00:00
 
@@ -2063,13 +2113,16 @@ def heatmap_image(camera_id: int, alpha: float = 0.85,
     import io
     from fastapi.responses import StreamingResponse
 
-    payload = _heatmap_payload(camera_id, window)
+    if layer in {"engagement", "congestion"}:
+        payload = _heatmap_layer_payload(camera_id, window, layer)
+    else:
+        payload = _heatmap_payload(camera_id, window)
     if payload is None:
-        raise HTTPException(404, "heatmap not available")
+        raise HTTPException(404, f"{layer} heatmap not available yet")
     grid = payload.get("grid") or []
     n    = payload.get("size") or len(grid) or 32
     if not grid:
-        raise HTTPException(404, "heatmap empty")
+        raise HTTPException(404, f"{layer} heatmap empty")
 
     from PIL import Image
     max_v = max((max(row) for row in grid), default=0) or 1

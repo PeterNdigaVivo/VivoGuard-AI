@@ -12,7 +12,7 @@ from app.models.training  import Dataset, TrainingImage, Annotation, TrainingJob
 from app.models.store     import Store, Shift
 from app.models.metrics   import (
     MetricSnapshot, METRIC_TYPES, VisitorTrack, StockroomAccess,
-    Campaign, HeatmapSnapshot,
+    Campaign, HeatmapSnapshot, HeatmapGridSnapshot,
 )
 from app.models.scheduled import ScheduledReport, CustomerJourney
 from app.models.staff     import StaffTrack
@@ -29,7 +29,7 @@ __all__ = [
     # Retail extension.
     "Store", "Shift",
     "MetricSnapshot", "METRIC_TYPES", "VisitorTrack", "StockroomAccess",
-    "Campaign", "HeatmapSnapshot",
+    "Campaign", "HeatmapSnapshot", "HeatmapGridSnapshot",
     "ScheduledReport", "CustomerJourney",
     "StaffTrack",
 ]
