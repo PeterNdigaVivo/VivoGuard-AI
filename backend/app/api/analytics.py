@@ -961,11 +961,15 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/store/{store_id}/zone-performance")
-def store_zone_performance(store_id: int, db: Session = Depends(get_db),
+def store_zone_performance(store_id: int,
+                            since: datetime | None = None,
+                            until: datetime | None = None,
+                            db: Session = Depends(get_db),
                             _u=Depends(get_current_user)):
     """Per-zone engagement + dwell ranking. Powers the visual-
-    merchandising panel."""
+    merchandising panel + the Zone Intelligence dashboard section."""
     from app.models import Zone
+    from sqlalchemy import extract
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
@@ -1012,22 +1016,73 @@ def store_zone_performance(store_id: int, db: Session = Depends(get_db),
     )
     total_visits = sum(float(v or 0) for v in visit_rows.values()) or 1.0
 
+    # Peak hour per zone — busiest occupancy hour over the window.
+    peak_rows = (db.query(MetricSnapshot.zone_id,
+                          extract("hour", MetricSnapshot.period_start).label("hr"),
+                          func.max(MetricSnapshot.value).label("v"))
+                   .filter(((MetricSnapshot.store_id == store_id)
+                            | MetricSnapshot.camera_id.in_(cam_ids)),
+                           MetricSnapshot.metric_type == "occupancy",
+                           MetricSnapshot.period_start >= week_start,
+                           MetricSnapshot.period_start <  now)
+                   .group_by(MetricSnapshot.zone_id, "hr").all())
+    peak_by_zone: dict[int, tuple[int, float]] = {}
+    for zid, hr, v in peak_rows:
+        if zid is None or v is None:
+            continue
+        cur = peak_by_zone.get(int(zid))
+        if cur is None or float(v) > cur[1]:
+            peak_by_zone[int(zid)] = (int(hr), float(v))
+
     zone_rows: list[dict] = []
     for z in zones:
-        # Skip non-aisle/non-product-display zones (we want
-        # merchandising perf, not the staff counter or checkout).
         tags = z.detection_types_json or []
-        if "aisle" not in tags and "dwell" not in tags and "window" not in tags:
+        is_queue   = "queue"   in tags or "counter" in tags
+        is_engage  = any(t in tags for t in ("aisle", "dwell", "window", "display", "shelf"))
+        # Show queue/counter zones too — they get a different
+        # recommendation ("open second checkout", not "well stocked").
+        if not (is_engage or is_queue):
             continue
         dwell_s = float(dwell_rows.get(z.id) or 0)
         visits  = float(visit_rows.get(z.id) or 0)
         engagement_pct = round(visits / total_visits * 100, 1) if total_visits else 0
+        peak_hr, _peak_v = peak_by_zone.get(z.id, (None, 0.0))
+        # Engagement-score component (0..1) used by the layered
+        # heatmap legend. Aisle/shelf zones score on dwell + visits;
+        # queue/counter zones cap at 0 so they don't inflate the
+        # engagement layer.
+        if is_engage:
+            engagement_score = round(
+                min(1.0, 0.5 * (dwell_s / 120.0) + 0.5 * (engagement_pct / 100.0)),
+                2,
+            )
+        else:
+            engagement_score = 0.0
+        if is_queue:
+            recommendation = (f"⚠️ Bottleneck check — avg {int(dwell_s)}s wait. "
+                              f"Open a second checkout point if sustained.")
+            is_bottleneck = dwell_s > 180
+        elif engagement_pct >= 70:
+            recommendation = "High interest zone — ensure well stocked"
+            is_bottleneck = False
+        elif engagement_pct >= 40:
+            recommendation = "Moderate interest — consider end-cap promotion"
+            is_bottleneck = False
+        else:
+            recommendation = "Low engagement — move slow-selling items or add signage"
+            is_bottleneck = False
         zone_rows.append({
             "zone_id": z.id,
             "name":    z.name,
+            "tags":    tags,
             "engagement_pct": engagement_pct,
+            "engagement_score": engagement_score,
             "avg_dwell_seconds": round(dwell_s, 1),
-            # Plain-English RAG bucket the frontend can colour by.
+            "traffic_count":    int(visits),
+            "peak_hour":        f"{peak_hr:02d}:00" if peak_hr is not None else None,
+            "is_bottleneck":    is_bottleneck,
+            "is_queue_zone":    is_queue,
+            "recommendation":   recommendation,
             "rag": "green" if engagement_pct >= 70
                    else "amber" if engagement_pct >= 40
                    else "red",
@@ -1805,6 +1860,25 @@ def _heatmap_payload(camera_id: int, window: str | None) -> dict | None:
         return None
 
 
+def _heatmap_layer_payload(camera_id: int, window: str | None,
+                            layer: str) -> dict | None:
+    """Read a behavioural heatmap layer (engagement / congestion /
+    paths) from Redis. Layer keys mirror HeatmapDetector._publish."""
+    import json
+    import redis
+    from app.config import settings
+    win = _resolve_window(window)
+    key = f"vg:heatmap:{layer}:{win}:{camera_id}"
+    r = redis.from_url(settings.redis_url)
+    raw = r.get(key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 @router.get("/heatmap/{camera_id}")
 def heatmap_grid(camera_id: int, window: str | None = None,
                  db: Session = Depends(get_db),
@@ -1856,6 +1930,59 @@ def _peak_hour_for(db: Session, camera_id: int, window: str) -> tuple[int | None
         return None, None
     hr = int(row[0])
     return hr, f"{hr:02d}:00–{hr + 1:02d}:00"
+
+
+# ---- Engagement / congestion / paths layers ------------------------
+
+@router.get("/heatmap/{camera_id}/engagement")
+def heatmap_engagement(camera_id: int, window: str | None = None,
+                       _u=Depends(get_current_user)):
+    """Customer-engagement layer — dwell-seconds (×1.5 for repeat
+    visits) on shelf / aisle / window / display zones only. Staff
+    tracks excluded. Returns the same payload shape as
+    /heatmap/{id} so the frontend can use the same renderer."""
+    payload = _heatmap_layer_payload(camera_id, window, "engagement")
+    if payload is None:
+        raise HTTPException(404, "engagement heatmap not available yet")
+    payload["window"] = _resolve_window(window)
+    payload["period_label"] = _period_label_for(payload["window"])
+    return payload
+
+
+@router.get("/heatmap/{camera_id}/traffic")
+def heatmap_traffic(camera_id: int, window: str | None = None,
+                    db: Session = Depends(get_db),
+                    _u=Depends(get_current_user)):
+    """Foot-traffic layer — alias of /heatmap/{id} for symmetry with
+    /engagement and /congestion. Same payload."""
+    return heatmap_grid(camera_id, window, db, _u)
+
+
+@router.get("/heatmap/{camera_id}/congestion")
+def heatmap_congestion(camera_id: int, window: str | None = None,
+                       _u=Depends(get_current_user)):
+    """Congestion layer — dwell on queue / counter zones (waiting,
+    not interest). Use for bottleneck alerts."""
+    payload = _heatmap_layer_payload(camera_id, window, "congestion")
+    if payload is None:
+        raise HTTPException(404, "congestion heatmap not available yet")
+    payload["window"] = _resolve_window(window)
+    payload["period_label"] = _period_label_for(payload["window"])
+    return payload
+
+
+@router.get("/heatmap/{camera_id}/paths")
+def heatmap_paths(camera_id: int, window: str | None = None,
+                  _u=Depends(get_current_user)):
+    """Movement-edge list — `[{from: [gy, gx], to: [gy, gx], count}]`
+    sorted desc by count, capped to 200 strongest edges. Drives the
+    customer-path arrows on the heatmap."""
+    payload = _heatmap_layer_payload(camera_id, window, "paths")
+    if payload is None:
+        raise HTTPException(404, "paths heatmap not available yet")
+    payload["window"] = _resolve_window(window)
+    payload["period_label"] = _period_label_for(payload["window"])
+    return payload
 
 
 def _period_label_for(window: str) -> str:
