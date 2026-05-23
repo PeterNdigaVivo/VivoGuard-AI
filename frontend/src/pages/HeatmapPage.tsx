@@ -36,7 +36,9 @@ export default function HeatmapPage() {
   const [cameraName, setCameraName] = useState<string | null>(null)
   const [storeId, setStoreId] = useState<number | null>(null)
   const [storeName, setStoreName] = useState<string | null>(null)
-  const [heatmapObjUrl, setHeatmapObjUrl] = useState<string | null>(null)
+  // (server-rendered PNG was previously used as an <img> overlay;
+  // we now paint the heatmap client-side from the JSON grid so it
+  // blends properly. The PNG endpoint stays around for downloads.)
   const [opacity, setOpacity] = useState(0.85)
   const [bust, setBust] = useState(0)
   const [windowSel, setWindowSel] = useState<TimeWindow>('3h')
@@ -80,11 +82,9 @@ export default function HeatmapPage() {
     return windowSel === '3h' ? '3h' : windowSel === 'this_week' ? 'week' : 'day'
   }
 
-  // Active layer for the PNG overlay. Multi-select for engagement +
-  // paths is fine, but only ONE raster layer (engagement / traffic /
-  // congestion) renders as the heatmap PNG underneath — they share
-  // the same colour space. Precedence matches the spec: engagement is
-  // the default lead layer, then traffic, then congestion.
+  // Active raster layer (engagement > traffic > congestion). Only
+  // ONE of these renders the colour overlay at a time so the legend
+  // is unambiguous; the Paths layer renders on top independently.
   function activeRasterLayer(): 'engagement' | 'traffic' | 'congestion' {
     if (layers.engagement) return 'engagement'
     if (layers.traffic)    return 'traffic'
@@ -92,6 +92,38 @@ export default function HeatmapPage() {
     return 'engagement'
   }
 
+  // Fetch the JSON grid for the active raster layer. We render the
+  // overlay client-side (SVG with gaussian blur) rather than rely on
+  // the server-rendered PNG — that gives us per-layer colour scales,
+  // proper opacity blending on the snapshot, smooth gaussian blobs
+  // instead of grid squares, and a graceful "empty" baseline.
+  const [gridResp, setGridResp] = useState<HeatmapGridResp | null>(null)
+
+  // Pull the active raster layer's grid + period/peak labels.
+  useEffect(() => {
+    let cancelled = false
+    const layer = activeRasterLayer()
+    const ep = layer === 'traffic'
+      ? `/analytics/heatmap/${cameraId}?window=${apiWindow()}`
+      : `/analytics/heatmap/${cameraId}/${layer}?window=${apiWindow()}`
+    api<HeatmapGridResp>(ep)
+      .then(d => {
+        if (cancelled) return
+        setGridResp(d)
+        setPeriodLabel(d.period_label ?? null)
+        setPeakLabel(d.peak_label ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setGridResp(null); setPeriodLabel(null); setPeakLabel(null)
+        }
+      })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, bust, windowSel, layers.engagement, layers.traffic, layers.congestion])
+
+  // Server-rendered PNG — still used for the Download PNG button so
+  // operators get a high-resolution image they can drop into a deck.
   function heatmapUrl(forDownload = false): string {
     const params = new URLSearchParams({
       alpha: String(forDownload ? Math.max(0.85, opacity) : opacity),
@@ -100,23 +132,6 @@ export default function HeatmapPage() {
     })
     return `/api/analytics/heatmap/${cameraId}/image?${params}`
   }
-
-  // Fetch the JSON grid alongside the image — it carries the
-  // human-readable period label and the busiest-cell hint.
-  useEffect(() => {
-    let cancelled = false
-    api<HeatmapGridResp>(`/analytics/heatmap/${cameraId}?window=${apiWindow()}`)
-      .then(d => {
-        if (cancelled) return
-        setPeriodLabel(d.period_label ?? null)
-        setPeakLabel(d.peak_label ?? null)
-      })
-      .catch(() => {
-        if (!cancelled) { setPeriodLabel(null); setPeakLabel(null) }
-      })
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, bust, windowSel])
 
   // Path edges — only fetched when the Paths layer is on.
   useEffect(() => {
@@ -129,30 +144,6 @@ export default function HeatmapPage() {
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId, bust, windowSel, layers.paths])
-
-  // Re-fetch the PNG whenever the active raster layer changes too.
-  // (The dependency on `layers` makes the next effect re-run.)
-
-  // Heatmap PNG — authed fetch → blob → object URL.
-  useEffect(() => {
-    let cancelled = false
-    let created: string | null = null
-    const tok = localStorage.getItem('vg_access_token') ?? ''
-    fetch(heatmapUrl(),
-          { headers: { Authorization: `Bearer ${tok}` } })
-      .then(res => res.ok ? res.blob() : null)
-      .then(blob => {
-        if (cancelled || !blob) return
-        created = URL.createObjectURL(blob)
-        setHeatmapObjUrl(created)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-      if (created) URL.revokeObjectURL(created)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, opacity, bust, windowSel, layers.engagement, layers.traffic, layers.congestion])
 
   async function download() {
     const tok = localStorage.getItem('vg_access_token') ?? ''
@@ -198,7 +189,7 @@ export default function HeatmapPage() {
           : `Footfall heatmap — camera #${cameraId}`}
         actions={<>
           <Link to="/cameras"><Button variant="ghost">Cameras</Button></Link>
-          <Button onClick={download} disabled={!heatmapObjUrl}>Download PNG</Button>
+          <Button onClick={download}>Download PNG</Button>
         </>}
       />
 
@@ -276,42 +267,36 @@ export default function HeatmapPage() {
               </div>
             </div>
           )}
-          {heatmapObjUrl && (layers.engagement || layers.traffic || layers.congestion) && (
-            <img src={heatmapObjUrl} alt=""
-                 className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen" />
+          {(layers.engagement || layers.traffic || layers.congestion) && (
+            <HeatmapSvgOverlay
+              grid={gridResp?.grid ?? null}
+              layer={activeRasterLayer()}
+              opacity={opacity} />
           )}
           {layers.paths && paths && paths.edges && paths.edges.length > 0 && (
             <PathArrowsOverlay edges={paths.edges} />
           )}
-          {heatmapObjUrl && (
-            <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/70 text-white text-xs font-semibold
-                            animate-pulse pointer-events-none">
-              {layers.engagement ? '🔴 High Interest Zone'
-                : layers.congestion ? '⚠️ Bottleneck'
-                : '🔥 Busiest Area'}
-            </div>
-          )}
+          <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/70 text-white text-xs font-semibold
+                          animate-pulse pointer-events-none">
+            {layers.engagement ? '🔴 High Interest Zone'
+              : layers.congestion ? '⚠️ Bottleneck'
+              : layers.traffic ? '🔥 Busiest Area'
+              : '🧭 Customer flow'}
+          </div>
         </div>
 
-        <div className="mt-3 px-1">
-          <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">
-            Activity intensity
-          </div>
-          <div className="h-3 w-full rounded"
-               style={{
-                 background: 'linear-gradient(90deg, ' +
-                   '#0a1628 0%, ' +
-                   '#1e3a8a 20%, ' +
-                   '#3b82f6 45%, ' +
-                   '#f97316 65%, ' +
-                   '#ea580c 85%, ' +
-                   '#ff4500 100%)',
-               }} />
-          <div className="flex justify-between text-[10px] text-slate-400 mt-1">
-            <span>🔵 Quiet</span>
-            <span>🟠 Active</span>
-            <span>🔥 Hotspot</span>
-          </div>
+        {/* Per-layer legend + peak value */}
+        <HeatmapLegend layer={activeRasterLayer()}
+                       grid={gridResp?.grid ?? null} />
+
+        {/* Interpretation guide — always visible so operators learn
+            what the colours mean without scrolling away. */}
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-1.5 text-[11px] text-slate-300 bg-slate-900/60 rounded px-3 py-2">
+          <div>🔴 <span className="text-slate-200">Red zones:</span> customers spending the most time — prime product placement.</div>
+          <div>🟠 <span className="text-slate-200">Orange zones:</span> high interest — strong candidates for promotions.</div>
+          <div>🟢 <span className="text-slate-200">Green zones:</span> regular foot traffic.</div>
+          <div>🔵 <span className="text-slate-200">Blue zones:</span> quick pass-through areas.</div>
+          <div className="md:col-span-2">⚠️ Toggle the <span className="text-slate-200">Congestion</span> layer for queue / checkout-bottleneck analysis.</div>
         </div>
 
         <div className="text-xs text-slate-400 mt-3">
@@ -339,6 +324,146 @@ function LayerToggle({ label, swatch, on, onChange, hint }: {
             style={{ background: swatch }} />
       <span className={on ? 'text-white' : 'text-slate-400'}>{label}</span>
     </label>
+  )
+}
+
+// Per-layer colour ramps. Each ramp is a list of (stop, "rgb")
+// pairs; intensity is interpolated between adjacent stops in JS.
+// Picking the ramp per layer is the user's request — engagement is
+// the warm cool→hot interest scale; traffic is Premier-League navy
+// blue→orange; congestion is green→amber→red.
+type Ramp = [number, [number, number, number]][]
+const RAMPS: Record<'engagement' | 'traffic' | 'congestion', Ramp> = {
+  engagement: [
+    [0.0, [ 30,  64, 175]],  // blue
+    [0.3, [ 16, 185, 129]],  // green
+    [0.6, [250, 204,  21]],  // yellow
+    [0.8, [249, 115,  22]],  // orange
+    [1.0, [220,  38,  38]],  // red
+  ],
+  traffic: [
+    [0.0, [ 10,  22,  40]],  // deep navy
+    [0.2, [ 30,  58, 138]],  // royal blue
+    [0.45, [ 59, 130, 246]], // sky blue
+    [0.65, [249, 115,  22]], // orange
+    [0.85, [234,  88,  12]], // bright orange
+    [1.0, [255,  69,   0]],  // vivid orange-red
+  ],
+  congestion: [
+    [0.0, [ 16, 185, 129]],  // green
+    [0.5, [245, 158,  11]],  // amber
+    [1.0, [220,  38,  38]],  // red
+  ],
+}
+
+function rampColor(ramp: Ramp, v: number): string {
+  v = Math.max(0, Math.min(1, v))
+  for (let i = 0; i < ramp.length - 1; i++) {
+    const [lo, loC] = ramp[i]
+    const [hi, hiC] = ramp[i + 1]
+    if (v <= hi) {
+      const t = (v - lo) / Math.max(1e-6, hi - lo)
+      const r = Math.round(loC[0] + (hiC[0] - loC[0]) * t)
+      const g = Math.round(loC[1] + (hiC[1] - loC[1]) * t)
+      const b = Math.round(loC[2] + (hiC[2] - loC[2]) * t)
+      return `rgb(${r},${g},${b})`
+    }
+  }
+  const last = ramp[ramp.length - 1][1]
+  return `rgb(${last[0]},${last[1]},${last[2]})`
+}
+
+// SVG-based heat overlay. Each grid cell is rendered as a coloured
+// rect inside a <g> that runs through a gaussian-blur filter, so the
+// hard cell boundaries melt into smooth retail-style blobs. Cells
+// with zero intensity are skipped, but we paint a faint baseline
+// wash over the whole frame so the operator always sees the layer
+// is "live".
+function HeatmapSvgOverlay({ grid, layer, opacity }: {
+  grid: number[][] | null
+  layer: 'engagement' | 'traffic' | 'congestion'
+  opacity: number
+}) {
+  const G = 20
+  const ramp = RAMPS[layer]
+  // Empty-state baseline: faint blue wash so the operator knows the
+  // heatmap is mounted even before any cell has data.
+  const hasData = !!(grid && grid.length && grid.some(r => r.some(v => v > 0)))
+  const max = hasData
+    ? Math.max(...(grid as number[][]).flatMap(r => r))
+    : 1
+  // Clamp opacity so the camera image is always visible beneath.
+  const cellOpacity = Math.min(0.65, Math.max(0.3, opacity))
+
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none"
+         viewBox={`0 0 ${G} ${G}`} preserveAspectRatio="none">
+      <defs>
+        {/* Generous blur so adjacent cells merge into blobs rather
+            than reading as a Minecraft grid. stdDeviation is in
+            viewBox units (i.e. cells), so ~1.5 covers ~3 cells. */}
+        <filter id="heat-blur" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="1.5" />
+        </filter>
+      </defs>
+      {/* Faint baseline so the layer is visibly "on" even at zero. */}
+      <rect x="0" y="0" width={G} height={G}
+            fill="rgb(30,64,175)" opacity={hasData ? 0.05 : 0.12} />
+      {hasData && (
+        <g filter="url(#heat-blur)" opacity={cellOpacity}>
+          {(grid as number[][]).flatMap((row, y) => row.map((v, x) => {
+            if (!v) return null
+            const t = v / max
+            // Sub-cell cells are 1×1 in viewBox; oversize slightly so
+            // neighbours bleed into one continuous blob.
+            return <rect key={`${y}-${x}`}
+                         x={x - 0.2} y={y - 0.2}
+                         width={1.4} height={1.4}
+                         fill={rampColor(ramp, t)}
+                         opacity={0.4 + 0.6 * t} />
+          }))}
+        </g>
+      )}
+    </svg>
+  )
+}
+
+// Per-layer legend strip. Reads max value from the grid so the
+// "Peak" tick shows an actual number, not just "100%".
+function HeatmapLegend({ grid, layer }: {
+  grid: number[][] | null
+  layer: 'engagement' | 'traffic' | 'congestion'
+}) {
+  const ramp = RAMPS[layer]
+  const max = grid && grid.length
+    ? Math.max(...grid.flatMap(r => r))
+    : 0
+  const gradient = ramp
+    .map(([s, c]) => `rgb(${c[0]},${c[1]},${c[2]}) ${Math.round(s * 100)}%`)
+    .join(', ')
+  const unit = layer === 'engagement' ? 'engagement score'
+             : layer === 'congestion' ? 'congestion score'
+             : 'visits'
+  const tick = (frac: number) => layer === 'traffic'
+    ? Math.round(max * frac)
+    : (max * frac).toFixed(1)
+  return (
+    <div className="mt-3 px-1">
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">
+        {layer === 'engagement' ? 'Customer engagement'
+          : layer === 'congestion' ? 'Congestion / wait'
+          : 'Foot-traffic intensity'} · {unit}
+      </div>
+      <div className="h-3 w-full rounded"
+           style={{ background: `linear-gradient(90deg, ${gradient})` }} />
+      <div className="flex justify-between text-[10px] text-slate-300 mt-1 tabular-nums">
+        <span>🔵 Low · 0</span>
+        <span>🟢 Moderate · {tick(0.3)}</span>
+        <span>🟡 Active · {tick(0.6)}</span>
+        <span>🟠 High · {tick(0.8)}</span>
+        <span>🔴 Peak · {tick(1)}</span>
+      </div>
+    </div>
   )
 }
 
