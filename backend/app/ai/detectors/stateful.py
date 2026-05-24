@@ -485,10 +485,12 @@ class HeatmapDetector(Detector):
     def _is_staff(self, ctx: DetectorContext, track_id: int) -> bool:
         """True if the track's signature is in today's staff_tracks
         roster. Best-effort — returns False on any DB hiccup so we
-        never silently drop customer data."""
+        never silently drop customer data. Importantly rolls back on
+        failure so we don't poison the transaction for the rest of
+        the detector chain (InFailedSqlTransaction)."""
+        if ctx.db is None or ctx.store_id is None:
+            return False
         try:
-            if ctx.db is None or ctx.store_id is None:
-                return False
             from app.models.staff import StaffTrack
             from datetime import datetime as _dt
             sig = self._track_signature(ctx.camera_id, track_id)
@@ -499,6 +501,10 @@ class HeatmapDetector(Detector):
                        .first())
             return bool(row and row.classified_as == "staff")
         except Exception:
+            try:
+                ctx.db.rollback()
+            except Exception:
+                pass
             return False
 
     @staticmethod
@@ -521,10 +527,22 @@ class HeatmapDetector(Detector):
         import time as _t
         now_ts = _t.time()
 
-        # Traffic layer — per-cell frame count, every person.
-        for det in ctx.raw_detections:
-            if det["cls"] not in COCO_PERSON:
-                continue
+        # Decide which detection classes count as "activity" for the
+        # heatmap. Default-COCO cameras give us "person" directly. But
+        # cameras assigned a custom AI model (weapons, fire, custom
+        # retail SKUs) won't emit "person" at all — so the heatmap
+        # would stay forever empty on those cameras. Fix: if NONE of
+        # this frame's detections are persons but the frame DID
+        # produce detections, treat every detection as activity. The
+        # heatmap is about "where things are happening" — for retail
+        # cameras the only real moving subjects are customers, so
+        # this is safe in practice.
+        person_dets = [d for d in ctx.raw_detections
+                       if d.get("cls") in COCO_PERSON]
+        activity_dets = person_dets or ctx.raw_detections
+
+        # Traffic layer — per-cell frame count, every active subject.
+        for det in activity_dets:
             cx, cy = bbox_centre(det["bbox_norm"])
             gx = min(self.GRID - 1, max(0, int(cx * self.GRID)))
             gy = min(self.GRID - 1, max(0, int(cy * self.GRID)))
@@ -538,20 +556,22 @@ class HeatmapDetector(Detector):
         # on cell change, which left stationary customers invisible.
         active_track_ids: set[int] = set()
         currently_active_cells: set[tuple[int, int]] = set()
-        # Defence in depth — record every cell with a person in the
+        # Defence in depth — record every cell with activity in the
         # current FRAME from raw_detections too, not just from tracks.
         # If the IOU tracker dropped a frame (low FPS, occlusion) we
         # still want the live-activity boost to light up the cell so
         # the operator sees the heatmap respond.
-        for det in ctx.raw_detections:
-            if det["cls"] not in COCO_PERSON:
-                continue
+        for det in activity_dets:
             cx, cy = bbox_centre(det["bbox_norm"])
             gx = min(self.GRID - 1, max(0, int(cx * self.GRID)))
             gy = min(self.GRID - 1, max(0, int(cy * self.GRID)))
             currently_active_cells.add((gy, gx))
+        # Build a quick lookup of activity-class names so the per-
+        # track loop can mirror the same "person OR fallback-to-all"
+        # rule the traffic loop just used.
+        activity_classes = {d.get("cls") for d in activity_dets}
         for tr, _det in ctx.tracks:
-            if tr.cls not in COCO_PERSON:
+            if tr.cls not in activity_classes:
                 continue
             active_track_ids.add(tr.track_id)
             cx, cy = bbox_centre(tr.bbox_norm)
@@ -617,16 +637,17 @@ class HeatmapDetector(Detector):
 
         if now_ts - self._last_publish.get(ctx.camera_id, 0) >= self.PUBLISH_INTERVAL:
             self._last_publish[ctx.camera_id] = now_ts
-            # Count active cells across the day grid for the debug log.
             day_grid = self.grids.get(ctx.camera_id, {}).get("day") or []
             active = sum(1 for row in day_grid for v in row if v > 0)
-            raw_persons = sum(1 for d in ctx.raw_detections
-                              if d.get("cls") in COCO_PERSON)
             import logging as _l
+            # Diagnostic spread across each stage of the pipeline so
+            # we can immediately see whether a "0 cells active" result
+            # is a YOLO miss, a tracker drop, or a class-name mismatch.
             _l.getLogger(__name__).info(
-                "Heatmap: %d persons (raw=%d), %d cells active, "
-                "writing to vg:heatmap:traffic:%d",
-                len(active_track_ids), raw_persons, active, ctx.camera_id,
+                "Heatmap cam=%d  raw=%d persons=%d activity=%d "
+                "tracks=%d cells_active=%d",
+                ctx.camera_id, len(ctx.raw_detections), len(person_dets),
+                len(activity_dets), len(active_track_ids), active,
             )
             self._publish(ctx.camera_id)
         return []     # heatmap doesn't generate alerts
