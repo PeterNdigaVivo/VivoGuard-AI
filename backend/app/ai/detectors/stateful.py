@@ -342,7 +342,11 @@ class HeatmapDetector(Detector):
 
     detection_type = "heatmap"
     GRID = 20
-    PUBLISH_INTERVAL = 30   # seconds
+    # Publish every 10s so a person who appears on camera shows up on
+    # the heatmap within ~10s — operators were watching empty grids
+    # while their store was visibly busy because the old 30s cadence
+    # was too slow for the "is this thing on?" check.
+    PUBLISH_INTERVAL = 10
     WINDOWS = ("3h", "day", "week")
 
     # Engagement vs congestion zone tags. A zone whose tags include
@@ -527,10 +531,13 @@ class HeatmapDetector(Detector):
             for g in grids:
                 g[gy][gx] += 1
 
-        # Engagement / congestion / paths — track-aware. We iterate
-        # ctx.tracks so a person walking through a cell is counted as
-        # ONE session, not 30 individual frames.
+        # Engagement / congestion / paths — track-aware. We credit
+        # dwell every frame for active tracks (not just on cell
+        # transitions) so the engagement layer fills immediately when
+        # a customer is standing still. Earlier behaviour only flushed
+        # on cell change, which left stationary customers invisible.
         active_track_ids: set[int] = set()
+        currently_active_cells: set[tuple[int, int]] = set()
         for tr, _det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
@@ -538,21 +545,23 @@ class HeatmapDetector(Detector):
             cx, cy = bbox_centre(tr.bbox_norm)
             gx = min(self.GRID - 1, max(0, int(cx * self.GRID)))
             gy = min(self.GRID - 1, max(0, int(cy * self.GRID)))
+            currently_active_cells.add((gy, gx))
             sess_key = (ctx.camera_id, tr.track_id)
             sess = self._sessions.get(sess_key)
             if sess is None:
                 self._sessions[sess_key] = {
                     "cell": (gy, gx),
                     "cell_entered_at": now_ts,
+                    "last_frame_ts": now_ts,
                     "zone_tags": self._zone_tags_at(ctx, tr.bbox_norm),
                     "visited_zones": set(),
                     "last_cell": (gy, gx),
                     "is_staff": self._is_staff(ctx, tr.track_id),
                 }
-            elif sess["cell"] != (gy, gx):
-                # Track moved to a new cell — flush dwell from the
-                # previous cell into the right layer (if ≥3s) and
-                # bump the path edge.
+                continue   # first frame: no dwell delta to credit yet
+            if sess["cell"] != (gy, gx):
+                # Track moved to a new cell. Flush leftover dwell + record
+                # the path edge, then start a fresh cell session.
                 self._flush_cell_dwell(ctx.camera_id, sess, now_ts)
                 from_cell = sess["last_cell"]
                 if from_cell != (gy, gx):
@@ -564,10 +573,21 @@ class HeatmapDetector(Detector):
                 sess["cell"] = (gy, gx)
                 sess["cell_entered_at"] = now_ts
                 sess["zone_tags"] = self._zone_tags_at(ctx, tr.bbox_norm)
+            else:
+                # Same cell — credit the per-frame delta directly into
+                # the engagement / congestion layer so a stationary
+                # customer still produces heat. Still gated by the 3s
+                # threshold so pass-throughs aren't promoted to dwell.
+                if not sess.get("is_staff"):
+                    dwell_so_far = now_ts - sess["cell_entered_at"]
+                    if dwell_so_far >= self.MIN_DWELL_SECONDS:
+                        delta = max(0.0, now_ts - sess["last_frame_ts"])
+                        self._add_dwell_credit(ctx.camera_id, gy, gx,
+                                               sess["zone_tags"], delta)
+            sess["last_frame_ts"] = now_ts
 
-        # Sessions whose track aged out of the IOU tracker — flush
-        # pending dwell so a customer who stood in front of a display
-        # until they left the frame still gets credit.
+        # Sessions whose track aged out — flush leftover dwell so a
+        # customer who left the frame mid-look still gets credit.
         for sess_key in list(self._sessions.keys()):
             cam_id, tid = sess_key
             if cam_id != ctx.camera_id:
@@ -576,10 +596,75 @@ class HeatmapDetector(Detector):
                 self._flush_cell_dwell(cam_id, self._sessions[sess_key], now_ts)
                 self._sessions.pop(sess_key, None)
 
+        # Minimum-visibility boost: any cell with a person RIGHT NOW
+        # gets at least 30% of the grid max in the engagement layer,
+        # and adjacent cells get 15%. This way the operator sees the
+        # heatmap respond instantly to people on screen instead of
+        # staring at an empty grid waiting for the 3-second dwell.
+        self._stamp_live_activity(ctx.camera_id, currently_active_cells)
+
         if now_ts - self._last_publish.get(ctx.camera_id, 0) >= self.PUBLISH_INTERVAL:
             self._last_publish[ctx.camera_id] = now_ts
+            # Count active cells across the day grid for the debug log.
+            day_grid = self.grids.get(ctx.camera_id, {}).get("day") or []
+            active = sum(1 for row in day_grid for v in row if v > 0)
+            import logging as _l
+            _l.getLogger(__name__).info(
+                "Heatmap: %d persons tracked, %d cells active, "
+                "writing to vg:heatmap:traffic:%d",
+                len(active_track_ids), active, ctx.camera_id,
+            )
             self._publish(ctx.camera_id)
         return []     # heatmap doesn't generate alerts
+
+    def _add_dwell_credit(self, camera_id: int, gy: int, gx: int,
+                          tags: set[str], delta: float) -> None:
+        """Add `delta` dwell-seconds into the matching layer(s) for
+        cell (gy, gx). When no zone tags are present, default to the
+        engagement layer so unconfigured cameras still light up — the
+        operator workflow rarely involves zoning every camera before
+        the heatmap is expected to work."""
+        if delta <= 0:
+            return
+        engagement_match = bool(tags & self.ENGAGEMENT_TAGS) or not tags
+        congestion_match = bool(tags & self.CONGESTION_TAGS)
+        for w in self.WINDOWS:
+            if engagement_match:
+                grid = self.engagement[camera_id].get(w)
+                if grid:
+                    grid[gy][gx] += delta
+            if congestion_match:
+                grid = self.congestion[camera_id].get(w)
+                if grid:
+                    grid[gy][gx] += delta
+
+    def _stamp_live_activity(self, camera_id: int,
+                              cells: set[tuple[int, int]]) -> None:
+        """Boost cells with a person currently in frame so the heatmap
+        always shows SOMETHING when the operator can see customers.
+
+        Current cell -> max(value, current_max * 0.3) -> green/active
+        8-neighbours -> max(value, current_max * 0.15) -> faint blue
+        """
+        if not cells:
+            return
+        for w in self.WINDOWS:
+            grid = self.engagement.get(camera_id, {}).get(w)
+            if not grid:
+                continue
+            # Floor of 1.0 means a never-touched grid still gets some
+            # baseline so the boost actually shows colour.
+            current_max = max((max(row) for row in grid), default=0) or 1.0
+            for (gy, gx) in cells:
+                grid[gy][gx] = max(grid[gy][gx], current_max * 0.3)
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = gy + dy, gx + dx
+                        if 0 <= ny < self.GRID and 0 <= nx < self.GRID:
+                            grid[ny][nx] = max(grid[ny][nx],
+                                                current_max * 0.15)
 
     def _flush_cell_dwell(self, camera_id: int, sess: dict, now_ts: float) -> None:
         """Credit a track's accumulated dwell in a cell into the
