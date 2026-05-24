@@ -538,6 +538,18 @@ class HeatmapDetector(Detector):
         # on cell change, which left stationary customers invisible.
         active_track_ids: set[int] = set()
         currently_active_cells: set[tuple[int, int]] = set()
+        # Defence in depth — record every cell with a person in the
+        # current FRAME from raw_detections too, not just from tracks.
+        # If the IOU tracker dropped a frame (low FPS, occlusion) we
+        # still want the live-activity boost to light up the cell so
+        # the operator sees the heatmap respond.
+        for det in ctx.raw_detections:
+            if det["cls"] not in COCO_PERSON:
+                continue
+            cx, cy = bbox_centre(det["bbox_norm"])
+            gx = min(self.GRID - 1, max(0, int(cx * self.GRID)))
+            gy = min(self.GRID - 1, max(0, int(cy * self.GRID)))
+            currently_active_cells.add((gy, gx))
         for tr, _det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
@@ -608,11 +620,13 @@ class HeatmapDetector(Detector):
             # Count active cells across the day grid for the debug log.
             day_grid = self.grids.get(ctx.camera_id, {}).get("day") or []
             active = sum(1 for row in day_grid for v in row if v > 0)
+            raw_persons = sum(1 for d in ctx.raw_detections
+                              if d.get("cls") in COCO_PERSON)
             import logging as _l
             _l.getLogger(__name__).info(
-                "Heatmap: %d persons tracked, %d cells active, "
+                "Heatmap: %d persons (raw=%d), %d cells active, "
                 "writing to vg:heatmap:traffic:%d",
-                len(active_track_ids), active, ctx.camera_id,
+                len(active_track_ids), raw_persons, active, ctx.camera_id,
             )
             self._publish(ctx.camera_id)
         return []     # heatmap doesn't generate alerts

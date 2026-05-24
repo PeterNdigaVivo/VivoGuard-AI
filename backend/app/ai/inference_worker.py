@@ -243,8 +243,33 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         })
                 except Exception as e:
                     log.exception("detector %s failed: %s", det.detection_type, e)
+                    # Postgres aborts the whole transaction on the
+                    # first error — subsequent metric/event writes
+                    # would all fail with InFailedSqlTransaction.
+                    # Roll back so the next detector starts clean.
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
 
-            db.commit()
+            try:
+                db.commit()
+            except Exception as e:
+                # Should be rare now that per-detector rollbacks
+                # happen, but the final commit can still hit a unique
+                # constraint or a connection blip. Roll back and let
+                # the loop move on — we'd rather skip a frame than
+                # crash the worker for this camera.
+                log.warning("camera %s: commit failed (%s) — rolling back",
+                            camera_id, e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # Skip the rest of this frame; the next iteration of
+                # the while loop will refresh the session state.
+                time.sleep(poll_interval)
+                continue
 
             # Bust this store's analytics cache so the dashboard's
             # tile endpoints see fresh data on the next request. One
