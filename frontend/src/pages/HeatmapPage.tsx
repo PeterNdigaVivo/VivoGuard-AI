@@ -327,142 +327,101 @@ function LayerToggle({ label, swatch, on, onChange, hint }: {
   )
 }
 
-// Per-layer colour ramps. Each ramp is a list of (stop, "rgb")
-// pairs; intensity is interpolated between adjacent stops in JS.
-// Picking the ramp per layer is the user's request — engagement is
-// the warm cool→hot interest scale; traffic is Premier-League navy
-// blue→orange; congestion is green→amber→red.
-type Ramp = [number, [number, number, number]][]
-const RAMPS: Record<'engagement' | 'traffic' | 'congestion', Ramp> = {
-  engagement: [
-    [0.0, [ 30,  64, 175]],  // blue
-    [0.3, [ 16, 185, 129]],  // green
-    [0.6, [250, 204,  21]],  // yellow
-    [0.8, [249, 115,  22]],  // orange
-    [1.0, [220,  38,  38]],  // red
-  ],
-  traffic: [
-    [0.0, [ 10,  22,  40]],  // deep navy
-    [0.2, [ 30,  58, 138]],  // royal blue
-    [0.45, [ 59, 130, 246]], // sky blue
-    [0.65, [249, 115,  22]], // orange
-    [0.85, [234,  88,  12]], // bright orange
-    [1.0, [255,  69,   0]],  // vivid orange-red
-  ],
-  congestion: [
-    [0.0, [ 16, 185, 129]],  // green
-    [0.5, [245, 158,  11]],  // amber
-    [1.0, [220,  38,  38]],  // red
-  ],
+// Sharp 5-bucket discrete colour scale — no interpolation, no
+// gradient. Each cell falls into exactly one bucket so the overlay
+// reads as a colour-coded grid instead of a blurred blob. Identical
+// stops across all three raster layers per the operator's request;
+// the layer name only changes the legend wording and unit.
+type Bucket = { upper: number; color: string; label: string; emoji: string }
+const BUCKETS: Bucket[] = [
+  { upper: 0.2, color: '#1e40af', label: 'Low',      emoji: '🔵' },
+  { upper: 0.4, color: '#16a34a', label: 'Moderate', emoji: '🟢' },
+  { upper: 0.6, color: '#ca8a04', label: 'Active',   emoji: '🟡' },
+  { upper: 0.8, color: '#ea580c', label: 'High',     emoji: '🟠' },
+  { upper: 1.0, color: '#dc2626', label: 'Peak',     emoji: '🔴' },
+]
+
+function bucketColor(score: number): string {
+  for (const b of BUCKETS) if (score <= b.upper) return b.color
+  return BUCKETS[BUCKETS.length - 1].color
 }
 
-function rampColor(ramp: Ramp, v: number): string {
-  v = Math.max(0, Math.min(1, v))
-  for (let i = 0; i < ramp.length - 1; i++) {
-    const [lo, loC] = ramp[i]
-    const [hi, hiC] = ramp[i + 1]
-    if (v <= hi) {
-      const t = (v - lo) / Math.max(1e-6, hi - lo)
-      const r = Math.round(loC[0] + (hiC[0] - loC[0]) * t)
-      const g = Math.round(loC[1] + (hiC[1] - loC[1]) * t)
-      const b = Math.round(loC[2] + (hiC[2] - loC[2]) * t)
-      return `rgb(${r},${g},${b})`
-    }
-  }
-  const last = ramp[ramp.length - 1][1]
-  return `rgb(${last[0]},${last[1]},${last[2]})`
-}
-
-// SVG-based heat overlay. Each grid cell is rendered as a coloured
-// rect inside a <g> that runs through a gaussian-blur filter, so the
-// hard cell boundaries melt into smooth retail-style blobs. Cells
-// with zero intensity are skipped, but we paint a faint baseline
-// wash over the whole frame so the operator always sees the layer
-// is "live".
-function HeatmapSvgOverlay({ grid, layer, opacity }: {
+// SVG-based heat overlay. Renders a 20×20 grid of sharp coloured
+// rects on top of the camera snapshot. No blur, no gradient — each
+// non-zero cell is one of the five discrete bucket colours at 0.55
+// opacity, so the snapshot is always visible underneath.
+function HeatmapSvgOverlay({ grid, layer, opacity: _opacity }: {
   grid: number[][] | null
   layer: 'engagement' | 'traffic' | 'congestion'
   opacity: number
 }) {
+  void layer  // colour scale is shared across raster layers now
   const G = 20
-  const ramp = RAMPS[layer]
-  // Empty-state baseline: faint blue wash so the operator knows the
-  // heatmap is mounted even before any cell has data.
   const hasData = !!(grid && grid.length && grid.some(r => r.some(v => v > 0)))
   const max = hasData
     ? Math.max(...(grid as number[][]).flatMap(r => r))
     : 1
-  // Clamp opacity so the camera image is always visible beneath.
-  const cellOpacity = Math.min(0.65, Math.max(0.3, opacity))
-
   return (
     <svg className="absolute inset-0 w-full h-full pointer-events-none"
+         style={{ zIndex: 10 }}
          viewBox={`0 0 ${G} ${G}`} preserveAspectRatio="none">
-      <defs>
-        {/* Generous blur so adjacent cells merge into blobs rather
-            than reading as a Minecraft grid. stdDeviation is in
-            viewBox units (i.e. cells), so ~1.5 covers ~3 cells. */}
-        <filter id="heat-blur" x="-20%" y="-20%" width="140%" height="140%">
-          <feGaussianBlur stdDeviation="1.5" />
-        </filter>
-      </defs>
-      {/* Faint baseline so the layer is visibly "on" even at zero. */}
-      <rect x="0" y="0" width={G} height={G}
-            fill="rgb(30,64,175)" opacity={hasData ? 0.05 : 0.12} />
-      {hasData && (
-        <g filter="url(#heat-blur)" opacity={cellOpacity}>
-          {(grid as number[][]).flatMap((row, y) => row.map((v, x) => {
+      {hasData
+        ? (grid as number[][]).flatMap((row, y) => row.map((v, x) => {
             if (!v) return null
             const t = v / max
-            // Sub-cell cells are 1×1 in viewBox; oversize slightly so
-            // neighbours bleed into one continuous blob.
-            return <rect key={`${y}-${x}`}
-                         x={x - 0.2} y={y - 0.2}
-                         width={1.4} height={1.4}
-                         fill={rampColor(ramp, t)}
-                         opacity={0.4 + 0.6 * t} />
-          }))}
-        </g>
-      )}
+            return (
+              <rect key={`${y}-${x}`}
+                    x={x} y={y} width={1} height={1}
+                    fill={bucketColor(t)}
+                    opacity={0.55} />
+            )
+          }))
+        : null}
     </svg>
   )
 }
 
-// Per-layer legend strip. Reads max value from the grid so the
-// "Peak" tick shows an actual number, not just "100%".
+// Per-layer legend strip — discrete colour chips matching the
+// overlay buckets, plus an "X active zones" cell count so the
+// operator knows how much data is on screen. When there's no data
+// at all we surface the "still accumulating" hint instead.
 function HeatmapLegend({ grid, layer }: {
   grid: number[][] | null
   layer: 'engagement' | 'traffic' | 'congestion'
 }) {
-  const ramp = RAMPS[layer]
-  const max = grid && grid.length
-    ? Math.max(...grid.flatMap(r => r))
-    : 0
-  const gradient = ramp
-    .map(([s, c]) => `rgb(${c[0]},${c[1]},${c[2]}) ${Math.round(s * 100)}%`)
-    .join(', ')
+  const flat = grid && grid.length ? grid.flatMap(r => r) : []
+  const activeCells = flat.filter(v => v > 0).length
+  const max = flat.length ? Math.max(...flat) : 0
   const unit = layer === 'engagement' ? 'engagement score'
              : layer === 'congestion' ? 'congestion score'
              : 'visits'
-  const tick = (frac: number) => layer === 'traffic'
-    ? Math.round(max * frac)
-    : (max * frac).toFixed(1)
   return (
     <div className="mt-3 px-1">
-      <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">
-        {layer === 'engagement' ? 'Customer engagement'
-          : layer === 'congestion' ? 'Congestion / wait'
-          : 'Foot-traffic intensity'} · {unit}
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1.5">
+        <div className="text-[10px] uppercase tracking-wider text-slate-400">
+          {layer === 'engagement' ? 'Customer engagement'
+            : layer === 'congestion' ? 'Congestion / wait'
+            : 'Foot-traffic intensity'} · {unit}
+        </div>
+        <div className="text-[11px] text-slate-300 tabular-nums">
+          Showing {activeCells} active zone{activeCells === 1 ? '' : 's'}
+          {max > 0 ? ` · peak ${layer === 'traffic' ? Math.round(max) : max.toFixed(1)}` : ''}
+        </div>
       </div>
-      <div className="h-3 w-full rounded"
-           style={{ background: `linear-gradient(90deg, ${gradient})` }} />
-      <div className="flex justify-between text-[10px] text-slate-300 mt-1 tabular-nums">
-        <span>🔵 Low · 0</span>
-        <span>🟢 Moderate · {tick(0.3)}</span>
-        <span>🟡 Active · {tick(0.6)}</span>
-        <span>🟠 High · {tick(0.8)}</span>
-        <span>🔴 Peak · {tick(1)}</span>
+      <div className="flex flex-wrap gap-2 text-[11px] text-slate-200">
+        {BUCKETS.map(b => (
+          <span key={b.color} className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-sm"
+                  style={{ background: b.color, opacity: 0.85 }} />
+            <span>{b.emoji} {b.label}</span>
+          </span>
+        ))}
       </div>
+      {activeCells === 0 && (
+        <div className="mt-2 text-xs text-amber-300">
+          Heatmap data accumulating — check back in 15 minutes.
+        </div>
+      )}
     </div>
   )
 }
