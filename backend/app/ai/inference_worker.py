@@ -101,7 +101,10 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
         "heatmap",             # footfall grid
         "unique_visitor",      # daily dedup'd visitors
         "customer_journey",    # zone-sequence path
-        "demographic",         # privacy-compliant aggregate buckets
+        # 'demographic' removed — it requires a trained age/gender
+        # model. Without one, every detection collapsed into the
+        # 'unknown' bucket AND the dims-equality SQL it used crashed
+        # the whole detector chain with InFailedSqlTransaction.
     )
     for t in ALWAYS_ON:
         cfg[t] = {

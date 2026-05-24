@@ -48,9 +48,17 @@ def record(db: Session, metric_type: str, value: float, *,
                    MetricSnapshot.camera_id == camera_id,
                    MetricSnapshot.store_id == store_id,
                    MetricSnapshot.zone_id == zone_id))
-    if dims is not None:
-        q = q.filter(MetricSnapshot.dims == dims)
-    row = q.first()
+    # The `dims` column is declared as JSON (not JSONB), and Postgres
+    # has no `=` operator for the `json` type — pushing the equality
+    # into the WHERE clause aborts the whole transaction with
+    # `operator does not exist: json = json`. We post-filter in
+    # Python instead: the (metric_type, period_start, camera, store,
+    # zone) prefix already narrows the candidate set to at most a
+    # handful of rows per minute, so the cost is negligible.
+    if dims is None:
+        row = q.first()
+    else:
+        row = next((r for r in q.all() if (r.dims or {}) == dims), None)
 
     if row is None:
         db.add(MetricSnapshot(

@@ -139,6 +139,20 @@ class DemographicDetector(Detector):
             return None
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
+        # DISABLED until a real age/gender model is trained.
+        #
+        # Without `age_*_gender_*` class labels in the YOLO output
+        # every detection falls into the "unknown" bucket — so the
+        # dashboard tile carries no information AND the recorder
+        # crashes on a `json = json` comparison Postgres doesn't
+        # support, aborting the whole transaction and taking down
+        # every other detector (most importantly the heatmap).
+        #
+        # Flip this back to `_evaluate_with_model()` once a trained
+        # demographic model is wired up — see the docstring above.
+        return []
+
+    def _evaluate_with_model(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled") or ctx.db is None:
             return []
