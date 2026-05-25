@@ -106,15 +106,15 @@ function EmptyState({ icon, text }: { icon: string; text: string }) {
 
 interface HourlyPayload {
   hours: { hour: number; label: string; visitors: number; intensity: 'high'|'medium'|'low'|'empty'; is_current: boolean }[]
+  // Per-hour visitor count for the same window yesterday (or the
+  // matching window of the prior day). Drives the comparison line.
+  hours_yesterday?: { hour: number; visitors: number }[]
   peak:  { hour: number; visitors: number } | null
   quiet: { hour: number; visitors: number } | null
   busy_hour_range: [number, number] | null
   trend_delta_pct: number | null
   insights: string[]
   open_hour: number; close_hour: number; current_hour: number
-  // Server-computed today total. Optional because older API
-  // containers don't return it — the chart's HourlySummary helper
-  // falls back to summing hours[] client-side when this is missing.
   today_total?: number
   yesterday_so_far?: number
   metric_source?: string | null
@@ -145,76 +145,186 @@ export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range
   )
 }
 
-// Dead-simple line graph. Hardcoded fixed pixel dimensions (NOT
-// viewBox with `preserveAspectRatio="none"`) because the previous
-// approach occasionally rendered as a zero-height pane when the
-// container's responsive layout collapsed. Fixed pixels = guaranteed
-// visible pane on every screen size.
-// Hourly footfall — simple line graph per the May-2026 spec.
-//   X axis: hours
-//   Y axis: visitor count
-//   Single blue line + dot at each data point
-//   "No visitor data yet today" when every bucket is 0
-//   Inline SVG — no external libs, no animation, no fancy markers.
-// Previous variants had peak markers, pulsing rings, gradient fills,
-// and intensity-based dot colours. They kept regressing when the
-// data shape shifted. This is the minimum that always paints.
+// Hourly footfall line graph. Designed to be readable at a glance —
+// even when the day has zero traffic the chart still paints so the
+// operator never wonders "is this panel broken?".
+//
+// Features:
+//   • Canonical 12-point 09:00→20:00 X axis (one tick per hour).
+//   • Solid blue line for today, faint dashed grey line for the same
+//     window yesterday so the comparison is immediate.
+//   • Soft blue area fill below today's line for visual weight.
+//   • Filled dots at every hour; the peak hour gets an orange dot
+//     and a value label above it.
+//   • Current hour marked with a thin vertical sky-blue line + dot.
+//   • Y-axis scaled to max(today, yesterday, 10) so a flat-zero day
+//     still has a visible scale rather than collapsing to the axis.
+//   • Total / peak / current callouts under the chart so the
+//     numbers are reachable without reading dots.
 function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
-  // Always render the canonical 12-point 09:00-20:00 retail window
-  // so the chart never collapses on quiet days. Backend already pads,
-  // but we re-pad client-side too in case an older API is in front.
+  const HOURS = Array.from({ length: 12 }, (_, i) => 9 + i)  // 09..20
+
   const byHour = new Map<number, number>()
   for (const h of (payload.hours || [])) byHour.set(h.hour, h.visitors ?? 0)
-  const HOURS = Array.from({ length: 12 }, (_, i) => 9 + i)  // 09..20
+  const byHourYday = new Map<number, number>()
+  for (const h of (payload.hours_yesterday || [])) byHourYday.set(h.hour, h.visitors ?? 0)
+
   const series = HOURS.map(hr => ({
-    hour: hr, label: `${hr.toString().padStart(2, '0')}:00`,
+    hour: hr,
+    label: `${hr.toString().padStart(2, '0')}:00`,
     visitors: byHour.get(hr) ?? 0,
+    yesterday: byHourYday.get(hr) ?? 0,
   }))
 
-  const W = 600, H = 180, PL = 36, PR = 12, PT = 10, PB = 28
+  const W = 640, H = 240, PL = 40, PR = 16, PT = 24, PB = 36
   const innerW = W - PL - PR
   const innerH = H - PT - PB
   // Floor at 10 so a flat-zero day still has a visible y-axis scale.
-  const max = Math.max(10, ...series.map(s => s.visitors))
+  const max = Math.max(10,
+    ...series.map(s => s.visitors),
+    ...series.map(s => s.yesterday))
+
   const stepX = innerW / (series.length - 1)
   const xAt = (i: number) => PL + i * stepX
   const yAt = (v: number) => PT + innerH - (v / max) * innerH
 
-  // Plain SVG polyline — points="x1,y1 x2,y2 ...". Always 12 points.
-  const points = series
-    .map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.visitors).toFixed(1)}`)
-    .join(' ')
+  const todayPoints = series
+    .map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.visitors).toFixed(1)}`).join(' ')
+  const ydayPoints = series
+    .map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.yesterday).toFixed(1)}`).join(' ')
+  // Closed polygon for the area fill — today's polyline + baseline.
+  const areaPoints = todayPoints +
+    ` ${xAt(series.length - 1).toFixed(1)},${yAt(0).toFixed(1)}` +
+    ` ${xAt(0).toFixed(1)},${yAt(0).toFixed(1)}`
 
-  const yTicks: number[] = [0]
+  // 4-step Y axis. Round nicely so labels read like 0 / 25 / 50 / 75 / 100.
   const step = Math.max(1, Math.ceil(max / 4))
-  for (let v = step; v < max; v += step) yTicks.push(v)
-  yTicks.push(max)
+  const yTicks: number[] = []
+  for (let v = 0; v <= max + 0.001; v += step) yTicks.push(v)
+
+  const peakIdx = series.reduce(
+    (best, s, i) => s.visitors > series[best].visitors ? i : best, 0)
+  const peakHasData = series[peakIdx].visitors > 0
+  const currentIdx = series.findIndex(s => s.hour === payload.current_hour)
+  const todayTotal = payload.today_total ??
+    series.reduce((sum, s) => sum + s.visitors, 0)
+  const yestTotal = (payload.hours_yesterday || [])
+    .reduce((sum, h) => sum + (h.visitors || 0), 0)
+  const hasYesterday = yestTotal > 0
 
   return (
     <div>
-      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}
+           style={{ display: 'block' }}>
+        <defs>
+          <linearGradient id="todayFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stopColor="#3b82f6" stopOpacity="0.28" />
+            <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+
+        {/* Y-axis gridlines + labels. */}
         {yTicks.map((tv, i) => {
           const y = yAt(tv)
           return (
             <g key={i}>
               <line x1={PL} x2={W - PR} y1={y} y2={y}
                     stroke="#e5e7eb" strokeDasharray="2 3" />
-              <text x={PL - 6} y={y + 4} textAnchor="end"
+              <text x={PL - 8} y={y + 4} textAnchor="end"
                     fontSize="11" fill="#64748b">{tv}</text>
             </g>
           )
         })}
-        <polyline points={points} fill="none" stroke="#3b82f6" strokeWidth={2.5}
+
+        {/* Current hour vertical guide. */}
+        {currentIdx >= 0 && (
+          <line x1={xAt(currentIdx)} x2={xAt(currentIdx)}
+                y1={PT} y2={PT + innerH}
+                stroke="#0ea5e9" strokeWidth={1} strokeDasharray="3 3"
+                opacity={0.6} />
+        )}
+
+        {/* Yesterday comparison line — only when there's data. */}
+        {hasYesterday && (
+          <polyline points={ydayPoints} fill="none"
+                    stroke="#94a3b8" strokeWidth={1.5}
+                    strokeDasharray="4 3"
+                    strokeLinejoin="round" strokeLinecap="round" />
+        )}
+
+        {/* Today area fill, then line on top. */}
+        <polygon points={areaPoints} fill="url(#todayFill)" />
+        <polyline points={todayPoints} fill="none"
+                  stroke="#3b82f6" strokeWidth={2.5}
                   strokeLinejoin="round" strokeLinecap="round" />
-        {series.map((s, i) => (
-          <g key={i}>
-            <circle cx={xAt(i)} cy={yAt(s.visitors)} r={3}
-                    fill="#3b82f6" stroke="white" strokeWidth={1.5} />
-            <text x={xAt(i)} y={H - 8} textAnchor="middle"
-                  fontSize="11" fill="#64748b">{s.label}</text>
-          </g>
-        ))}
+
+        {/* Dots + x-axis labels. Peak hour dot painted orange + label. */}
+        {series.map((s, i) => {
+          const isPeak = i === peakIdx && peakHasData
+          return (
+            <g key={i}>
+              <circle cx={xAt(i)} cy={yAt(s.visitors)} r={isPeak ? 5 : 3}
+                      fill={isPeak ? '#f97316' : '#3b82f6'}
+                      stroke="white" strokeWidth={1.5} />
+              {isPeak && (
+                <text x={xAt(i)} y={yAt(s.visitors) - 10} textAnchor="middle"
+                      fontSize="11" fontWeight="600" fill="#ea580c">
+                  {s.visitors}
+                </text>
+              )}
+              <text x={xAt(i)} y={H - 14} textAnchor="middle"
+                    fontSize="11"
+                    fill={i === currentIdx ? '#0284c7' : '#64748b'}
+                    fontWeight={i === currentIdx ? 600 : 400}>
+                {s.label}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Top-right legend. */}
+        <g transform={`translate(${W - PR - 170} ${PT - 14})`}>
+          <rect x="0" y="-10" width="170" height="14" fill="white" opacity="0.7" />
+          <line x1="0" x2="16" y1="-3" y2="-3" stroke="#3b82f6" strokeWidth="2.5" />
+          <text x="22" y="0" fontSize="11" fill="#334155">Today</text>
+          {hasYesterday && (
+            <>
+              <line x1="70" x2="86" y1="-3" y2="-3" stroke="#94a3b8"
+                    strokeWidth="1.5" strokeDasharray="4 3" />
+              <text x="92" y="0" fontSize="11" fill="#64748b">Yesterday</text>
+            </>
+          )}
+        </g>
       </svg>
+
+      {/* Plain-language callouts so the chart is readable even if
+          the SVG is glanced at quickly. */}
+      <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
+        <span><strong className="text-slate-700">Total today:</strong>{' '}
+          <span className="tabular-nums">{Math.round(todayTotal)}</span></span>
+        {peakHasData && (
+          <span>
+            <span className="text-orange-600">●</span>{' '}
+            <strong>Peak:</strong>{' '}
+            {series[peakIdx].label}–{series[peakIdx].hour + 1}:00
+            {' · '}{series[peakIdx].visitors} visitors
+          </span>
+        )}
+        {hasYesterday && (
+          <span className="text-slate-500">
+            <strong>Yesterday total:</strong>{' '}
+            <span className="tabular-nums">{Math.round(yestTotal)}</span>
+            {payload.trend_delta_pct !== null && payload.trend_delta_pct !== undefined && (
+              <span className={'ml-1 ' + (payload.trend_delta_pct > 0
+                ? 'text-emerald-600' : payload.trend_delta_pct < 0
+                ? 'text-red-600' : 'text-slate-500')}>
+                ({payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '▶'}
+                {' '}{Math.abs(payload.trend_delta_pct)}% vs yesterday)
+              </span>
+            )}
+          </span>
+        )}
+      </div>
       <HourlySummary payload={payload} />
     </div>
   )

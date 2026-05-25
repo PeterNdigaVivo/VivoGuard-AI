@@ -691,6 +691,7 @@ def store_hourly(store_id: int,
     chart_open = min(open_hr, 9)
     chart_close = max(close_hr, 21)
     hours = []
+    hours_yesterday = []
     for hr in range(chart_open, max(chart_close, chart_open + 1)):
         v = by_hour.get(hr, 0.0)
         hours.append({
@@ -699,6 +700,10 @@ def store_hourly(store_id: int,
             "visitors": int(round(v)),
             "intensity": _intensity(v),
             "is_current": hr == current_hr,
+        })
+        hours_yesterday.append({
+            "hour": hr,
+            "visitors": int(round(yest_by_hour.get(hr, 0.0))),
         })
 
     today_total = sum(by_hour.values()) or 0
@@ -754,6 +759,7 @@ def store_hourly(store_id: int,
         "current_hour": current_hr,
         "metric_source": metric,
         "hours": hours,
+        "hours_yesterday": hours_yesterday,
         "peak":  {"hour": peak[0],  "visitors": int(peak[1])}  if peak  else None,
         "quiet": {"hour": quiet[0], "visitors": int(quiet[1])} if quiet else None,
         "restock_hour": restock_hour,
@@ -766,8 +772,16 @@ def store_hourly(store_id: int,
 
 
 def _empty_hourly() -> dict:
+    # Pad to the canonical 09:00–21:00 retail window so the chart
+    # always paints — empty stores still show a 12-point flat line
+    # instead of collapsing into "no data" text.
+    hours = [{"hour": h, "label": f"{h:02d}:00", "visitors": 0,
+              "intensity": "empty", "is_current": False}
+             for h in range(9, 21)]
+    hours_yesterday = [{"hour": h, "visitors": 0} for h in range(9, 21)]
     return {
-        "store_id": None, "hours": [], "peak": None, "quiet": None,
+        "store_id": None, "hours": hours, "hours_yesterday": hours_yesterday,
+        "peak": None, "quiet": None,
         "open_hour": 9, "close_hour": 21, "current_hour": 0,
         "metric_source": None, "restock_hour": None,
         "busy_hour_range": None, "today_total": 0,
