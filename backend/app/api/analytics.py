@@ -55,12 +55,36 @@ def metrics(
 
 @router.get("/dashboard/store/{store_id}")
 def store_dashboard(store_id: int, days: int = 7,
+                    since: datetime | None = None,
+                    until: datetime | None = None,
                     db: Session = Depends(get_db), _u=Depends(get_current_user)):
-    """Roll up the most-used KPIs for a single store for the last N days."""
+    """Roll up the most-used KPIs for a single store.
+
+    Window precedence:
+      • Explicit `since`/`until` win (operator picked Yesterday /
+        This week / Last 30 days / custom range).
+      • Otherwise fall back to `days` (legacy 1/7/30 selector).
+    Either way, occupancy_now / queue_now / shutter_now reflect the
+    LATEST sample inside the chosen window — so Yesterday shows
+    yesterday's last reading rather than the live one, and a multi-
+    day window shows the period's most recent sample.
+    """
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    now = datetime.now(timezone.utc)
+    if since is not None:
+        window_since = since
+        window_until = until or now
+    else:
+        window_since = now - timedelta(days=days)
+        window_until = now
+    # Whether the operator asked for a historical window (anything
+    # ending before "now-5min"). When True, "right now" KPIs are
+    # replaced with the last sample inside the window instead of the
+    # actual live reading — Yesterday should show yesterday's end-
+    # of-day state, not the empty current minute.
+    is_historical = (now - window_until).total_seconds() > 300
 
     # JOIN through cameras.store_id rather than filtering
     # MetricSnapshot.store_id directly. Why: a metric row written when
@@ -69,12 +93,14 @@ def store_dashboard(store_id: int, days: int = 7,
     # the dashboard forever. Joining through cameras picks them up
     # automatically.
     def _last(metric: str) -> float | None:
-        row = (db.query(MetricSnapshot)
-                 .join(Camera, Camera.id == MetricSnapshot.camera_id)
-                 .filter(Camera.store_id == store_id,
-                         MetricSnapshot.metric_type == metric)
-                 .order_by(MetricSnapshot.period_start.desc())
-                 .first())
+        q = (db.query(MetricSnapshot)
+               .join(Camera, Camera.id == MetricSnapshot.camera_id)
+               .filter(Camera.store_id == store_id,
+                       MetricSnapshot.metric_type == metric))
+        if is_historical:
+            q = q.filter(MetricSnapshot.period_start >= window_since,
+                         MetricSnapshot.period_start <  window_until)
+        row = q.order_by(MetricSnapshot.period_start.desc()).first()
         return row.value if row else None
 
     def _avg(metric: str) -> float | None:
@@ -82,7 +108,8 @@ def store_dashboard(store_id: int, days: int = 7,
                .join(Camera, Camera.id == MetricSnapshot.camera_id)
                .filter(Camera.store_id == store_id,
                        MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= since)
+                       MetricSnapshot.period_start >= window_since,
+                       MetricSnapshot.period_start <  window_until)
                .scalar())
         return float(v) if v is not None else None
 
@@ -91,24 +118,35 @@ def store_dashboard(store_id: int, days: int = 7,
                .join(Camera, Camera.id == MetricSnapshot.camera_id)
                .filter(Camera.store_id == store_id,
                        MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= since)
+                       MetricSnapshot.period_start >= window_since,
+                       MetricSnapshot.period_start <  window_until)
                .scalar())
         return float(v) if v is not None else None
 
-    # Unique visitors today.
+    # Unique visitors in the window — counts every day that overlaps,
+    # not just "today" (which made the chain dashboard return 0 on
+    # Yesterday / Last week / Last 30 days even with real history).
+    visitors_in_window = (db.query(func.count(VisitorTrack.id))
+                            .filter(VisitorTrack.store_id == store_id,
+                                    VisitorTrack.first_seen >= window_since,
+                                    VisitorTrack.first_seen <  window_until)
+                            .scalar() or 0)
+    # Today figure preserved separately for tiles that need "today
+    # specifically" rather than "the window".
     today = date.today()
     unique_today = (db.query(func.count(VisitorTrack.id))
                       .filter(VisitorTrack.store_id == store_id,
                               VisitorTrack.day == today)
                       .scalar() or 0)
 
-    # Alert volume by type (last `days` days).
+    # Alert volume by type — same window as the KPIs.
     alert_breakdown = dict(
         db.query(DetectionEvent.detection_type, func.count(Alert.id))
           .join(Alert, Alert.event_id == DetectionEvent.id)
           .join(Camera, Camera.id == DetectionEvent.camera_id)
           .filter(Camera.store_id == store_id,
-                  Alert.created_at >= since)
+                  Alert.created_at >= window_since,
+                  Alert.created_at <  window_until)
           .group_by(DetectionEvent.detection_type)
           .all()
     )
@@ -117,8 +155,11 @@ def store_dashboard(store_id: int, days: int = 7,
         "store_id": store.id,
         "store_name": store.name,
         "country": store.country,
-        "as_of": datetime.now(timezone.utc).isoformat(),
+        "as_of": now.isoformat(),
         "window_days": days,
+        "window_since": window_since.isoformat(),
+        "window_until": window_until.isoformat(),
+        "is_historical": is_historical,
         "kpis": {
             "occupancy_now":        _last("occupancy"),
             "occupancy_avg":        _avg("occupancy"),
@@ -126,7 +167,12 @@ def store_dashboard(store_id: int, days: int = 7,
             "queue_length_avg":     _avg("queue_length"),
             "queue_wait_avg_sec":   _avg("queue_wait_seconds"),
             "staff_present_avg":    _avg("staff_present_pct"),
-            "unique_visitors_today": int(unique_today),
+            # `unique_visitors_today` kept for tile compat. For
+            # historical ranges the dashboard reads
+            # `unique_visitors_in_window` instead so Yesterday /
+            # Last 30 days shows the right number.
+            "unique_visitors_today":     int(unique_today),
+            "unique_visitors_in_window": int(visitors_in_window),
             # Directional entry/exit counters (Lumana parity, P1).
             "visitors_in_window":   _sum("visitor_count_in"),
             "visitors_out_window":  _sum("visitor_count_out"),
@@ -2364,7 +2410,9 @@ def report_pdf(since: datetime, until: datetime,
 
 @router.get("/dashboard/multi")
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
-                days: int = 7):
+                days: int = 7,
+                since: datetime | None = None,
+                until: datetime | None = None):
     """Chain-wide aggregate — powers /chain. Adds the May-2026 fields:
 
       • cameras_online / cameras_total per store
@@ -2392,7 +2440,8 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                       "weapon_brandished", "shrinkage", "fire"}
 
     for s in stores:
-        row = store_dashboard(s.id, days=days, db=db, _u=_u)
+        row = store_dashboard(s.id, days=days, since=since, until=until,
+                              db=db, _u=_u)
 
         # Camera liveness — Redis health row within the last 30s.
         store_cams = db.query(Camera).filter(Camera.store_id == s.id).all()
@@ -2459,32 +2508,40 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         })
         rows.append(row)
 
-    visitors_total = sum((r["kpis"]["unique_visitors_today"] or 0) for r in rows)
+    # Per-store visitor totals — pick the window-aware count when the
+    # operator chose a historical range, fall back to "today" for the
+    # default. Without this, the chain hero tile read 0 for Yesterday
+    # / This week / Last 30 days because every store's "today" was 0
+    # for those windows.
+    def _store_visitors(r: dict) -> int:
+        if since is not None:
+            return int(r["kpis"].get("unique_visitors_in_window") or 0)
+        return int(r["kpis"].get("unique_visitors_today") or 0)
+
+    visitors_total = sum(_store_visitors(r) for r in rows)
     alerts_total = sum(sum(r["alerts_breakdown"].values()) for r in rows)
     alerts_critical = sum(r["recent_critical_alerts"] for r in rows)
 
     best_store = None
     if rows:
-        best = max(rows, key=lambda r: r["kpis"]["unique_visitors_today"] or 0)
-        if (best["kpis"]["unique_visitors_today"] or 0) > 0:
+        best = max(rows, key=_store_visitors)
+        if _store_visitors(best) > 0:
             best_store = {
                 "store_id":   best["store_id"],
                 "store_name": best["store_name"],
-                "visitors":   int(best["kpis"]["unique_visitors_today"] or 0),
+                "visitors":   _store_visitors(best),
             }
 
     needs_attention = [r for r in rows if r["rag_status"] in ("red", "amber")]
-    # Reds first, then ambers; within a colour bucket sort by recent
-    # critical alerts then by visitors-today desc — biggest stores
-    # with the most acute trouble surface first.
     needs_attention.sort(key=lambda r: (
         0 if r["rag_status"] == "red" else 1,
         -r["recent_critical_alerts"],
-        -(r["kpis"]["unique_visitors_today"] or 0),
+        -_store_visitors(r),
     ))
 
     totals = {
         "unique_visitors_today": visitors_total,
+        "unique_visitors_in_window": visitors_total,
         "stores":          len(rows),
         "alerts_total":    alerts_total,
         "alerts_critical": alerts_critical,

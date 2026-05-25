@@ -12,15 +12,19 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Card, PageHeader, Select } from '@/components/ui/Primitives'
+import { Card, PageHeader } from '@/components/ui/Primitives'
+import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { analytics } from '@/api/stores'
 import { labelForDetector } from '@/lib/detectorLabels'
 
-const WINDOWS = [1, 7, 30]
 type RAG = 'red' | 'amber' | 'green'
 
 export default function MultiStorePage() {
-  const [days, setDays] = useState(7)
+  // Chain dashboard now supports the full DateRangePicker preset set
+  // (Today / Yesterday / This week / Last 30 days / custom) instead
+  // of the old 1d / 7d / 30d Select. Default = Last 7 days so the
+  // existing "what's been happening" view is preserved.
+  const [range, setRange] = useState<DateRange>(() => rangeFor('last_7_days'))
   const [data, setData] = useState<Awaited<ReturnType<typeof analytics.multiDashboard>> | null>(null)
   const [sortBy, setSortBy] = useState<string>('rag_status')
 
@@ -44,14 +48,14 @@ export default function MultiStorePage() {
     const fetchOnce = () => {
       if (inFlight) return
       inFlight = true
-      analytics.multiDashboard(days)
+      analytics.multiDashboard({ since: range.since, until: range.until })
         .then(setData).catch(console.error)
         .finally(() => { inFlight = false })
     }
     fetchOnce()
     const t = setInterval(fetchOnce, 60_000)
     return () => clearInterval(t)
-  }, [days])
+  }, [range.since, range.until])
 
   // Sort: by RAG status (red→amber→green), then by the chosen column.
   // Operators want troubled stores at the top by default.
@@ -108,8 +112,21 @@ export default function MultiStorePage() {
     )
   }
 
+  // Pick the window-aware visitor count when the operator chose a
+  // historical range (Yesterday / This week / Last 30 days etc.);
+  // otherwise fall back to "today". This applies to every place we
+  // surface a visitor number — hero tile, bar chart, table column.
+  const isHistorical = range.key !== 'today'
+  const storeVisitors = (s: { kpis: { unique_visitors_today: number; unique_visitors_in_window?: number } }) =>
+    (isHistorical ? s.kpis.unique_visitors_in_window : s.kpis.unique_visitors_today) ?? 0
+  const totalVisitors = (isHistorical
+    ? (data.totals.unique_visitors_in_window ?? data.totals.unique_visitors_today)
+    : data.totals.unique_visitors_today) || 0
+  const visitorLabel = isHistorical
+    ? `Chain visitors · ${range.label.toLowerCase()}`
+    : 'Chain visitors today'
   const maxVisitors = Math.max(
-    ...data.stores.map(s => s.kpis.unique_visitors_today || 0), 1,
+    ...data.stores.map(storeVisitors), 1,
   )
 
   return (
@@ -118,11 +135,9 @@ export default function MultiStorePage() {
         title="Chain dashboard"
         actions={
           <div className="flex items-center gap-3">
-            <Select value={days} onChange={e => setDays(Number(e.target.value))}>
-              {WINDOWS.map(d => <option key={d} value={d}>last {d}d</option>)}
-            </Select>
+            <DateRangePicker value={range} onChange={setRange} />
             <span className="text-xs text-slate-500">
-              {data.totals.stores_open} of {data.totals.stores} stores open · updated {new Date(data.as_of).toLocaleTimeString()}
+              Showing <strong>{range.label}</strong> · {data.totals.stores_open} of {data.totals.stores} stores open · updated {new Date(data.as_of).toLocaleTimeString()}
             </span>
           </div>
         }
@@ -130,7 +145,7 @@ export default function MultiStorePage() {
 
       {/* Hero strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Tile label="Chain visitors today" value={String(data.totals.unique_visitors_today)} big />
+        <Tile label={visitorLabel} value={String(totalVisitors)} big />
         <Tile label="Stores needing attention" value={String(data.totals.stores_attention)}
               tone={data.totals.stores_attention > 0 ? 'amber' : 'green'} />
         <Tile label="Critical alerts (1h)" value={String(data.totals.alerts_critical)}
@@ -167,10 +182,12 @@ export default function MultiStorePage() {
 
       {/* Cross-store comparison bar chart */}
       <Card className="p-4">
-        <div className="text-sm font-medium mb-3">Visitors today by store</div>
+        <div className="text-sm font-medium mb-3">
+          Visitors by store · {range.label.toLowerCase()}
+        </div>
         <div className="space-y-1">
           {rows.map(r => {
-            const v = r.kpis.unique_visitors_today || 0
+            const v = storeVisitors(r)
             const width = (v / maxVisitors) * 100
             return (
               <div key={r.store_id} className="flex items-center gap-2 text-sm">
@@ -205,7 +222,9 @@ export default function MultiStorePage() {
               <Th id="store_name"           label="Store"            cur={sortBy} set={setSortBy} />
               <Th id="country"              label="Country"          cur={sortBy} set={setSortBy} />
               <Th id="cameras_online"       label="Cameras live"     cur={sortBy} set={setSortBy} />
-              <Th id="kpis.unique_visitors_today" label="Visitors today" cur={sortBy} set={setSortBy} />
+              <Th id={isHistorical ? "kpis.unique_visitors_in_window" : "kpis.unique_visitors_today"}
+                  label={isHistorical ? "Visitors (range)" : "Visitors today"}
+                  cur={sortBy} set={setSortBy} />
               <Th id="kpis.occupancy_avg"   label="Occupancy avg"    cur={sortBy} set={setSortBy} />
               <Th id="kpis.staff_present_avg" label="Staff %"        cur={sortBy} set={setSortBy} />
               <Th id="recent_critical_alerts" label="Critical (1h)"  cur={sortBy} set={setSortBy} />
@@ -225,7 +244,7 @@ export default function MultiStorePage() {
                   (r.cameras_online === 0 && r.cameras_total > 0 ? 'text-red-600 font-semibold' : '')}>
                   {r.cameras_online}/{r.cameras_total}
                 </td>
-                <td className="p-3 tabular-nums">{r.kpis.unique_visitors_today}</td>
+                <td className="p-3 tabular-nums">{storeVisitors(r)}</td>
                 <td className="p-3 tabular-nums">{fmt(r.kpis.occupancy_avg, 0)}</td>
                 <td className="p-3 tabular-nums">{fmt(r.kpis.staff_present_avg && r.kpis.staff_present_avg * 100, 0, '%')}</td>
                 <td className={'p-3 tabular-nums ' +

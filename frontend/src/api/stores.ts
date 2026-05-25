@@ -43,6 +43,7 @@ export interface StoreDashboard {
     queue_wait_avg_sec: number | null
     staff_present_avg: number | null
     unique_visitors_today: number
+    unique_visitors_in_window?: number
     passersby_avg: number | null
     stop_rate_avg: number | null
     dwell_seconds_avg: number | null
@@ -70,13 +71,20 @@ export const analytics = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
     return api<MetricPoint[]>(`/analytics/metrics?${q}`)
   },
-  storeDashboard: (storeId: number, days = 7) =>
-    api<StoreDashboard>(`/analytics/dashboard/store/${storeId}?days=${days}`),
+  storeDashboard: (storeId: number, daysOrRange: number | { since: string; until: string } = 7) => {
+    const q = new URLSearchParams()
+    if (typeof daysOrRange === 'number') q.set('days', String(daysOrRange))
+    else { q.set('since', daysOrRange.since); q.set('until', daysOrRange.until) }
+    return api<StoreDashboard>(`/analytics/dashboard/store/${storeId}?${q}`)
+  },
   // Chain dashboard payload. The May-2026 redesign adds RAG status
   // per store, a needs_attention list, and a best_store_today field.
   // Old call sites that read .stores / .totals keep working.
-  multiDashboard: (days = 7) =>
-    api<{
+  multiDashboard: (daysOrRange: number | { since: string; until: string } = 7) => {
+    const q = new URLSearchParams()
+    if (typeof daysOrRange === 'number') q.set('days', String(daysOrRange))
+    else { q.set('since', daysOrRange.since); q.set('until', daysOrRange.until) }
+    return api<{
       stores: (StoreDashboard & {
         cameras_online: number
         cameras_total: number
@@ -87,6 +95,7 @@ export const analytics = {
       })[]
       totals: {
         unique_visitors_today: number
+        unique_visitors_in_window?: number
         stores: number
         alerts_total: number
         alerts_critical: number
@@ -101,5 +110,6 @@ export const analytics = {
         cameras_online: number; cameras_total: number
       }[]
       as_of: string
-    }>(`/analytics/dashboard/multi?days=${days}`),
+    }>(`/analytics/dashboard/multi?${q}`)
+  },
 }
