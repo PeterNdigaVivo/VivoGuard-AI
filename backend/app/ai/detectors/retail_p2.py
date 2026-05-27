@@ -168,7 +168,7 @@ class ShutterDetector(Detector):
        higher-confidence detection in the configured zone.
 
     2. Heuristic mode (fallback): the shutter zone's mean luminance is
-       compared against `extra.dark_threshold` (default 50/255).
+       compared against `extra.dark_threshold` (default 40/255).
        Below = closed, above = open. Works for most metal roller
        shutters where the closed state is visibly darker than the open
        store interior.
@@ -177,22 +177,54 @@ class ShutterDetector(Detector):
       open + closed-hours   → "shutter open after hours" (priority high)
       closed + open-hours   → "shutter closed during business hours"
     Writes a `shutter_open` metric (1/0) every sample.
+
+    Accuracy hardening (added when operators reported false closures
+    on cameras with bright daytime interiors):
+
+      • Hysteresis: a new state only commits after CONFIRM_FRAMES
+        consecutive samples agree. A single noisy frame (customer
+        walking past, headlight glare, brief camera glitch) no longer
+        flips the reported state.
+
+      • Tightened heuristic defaults (dark=40, bright=70) so normal
+        retail lighting reads as 'open' reliably instead of falling
+        into the dead band and returning None.
+
+      • Custom-model signals BIAS the heuristic even when below the
+        confidence threshold: e.g. a 0.35 'shutter_open' detection
+        adds +10 to the measured luminance so a borderline frame
+        breaks toward the model's hint rather than to None.
+
+      • Edge logging: every committed transition writes a structured
+        info log so operators can audit "when did the door open?".
     """
 
     detection_type = "shutter"
     needs_tracking = False
 
+    # Number of consecutive samples that must agree before the
+    # reported state is allowed to flip. 3 at the default ~5 fps
+    # heatmap cadence = ~1.5s of consistent evidence, which is
+    # enough to reject single-frame glare / customer-pass-through
+    # without delaying a real door open noticeably.
+    CONFIRM_FRAMES = 3
+
     def __init__(self):
-        self._last_state: dict[int, int] = {}    # camera_id → 1/0
+        # Committed (debounced) state per camera. 1=open, 0=closed.
+        self._last_state: dict[int, int] = {}
+        # Pending state — a candidate flip we're still confirming.
+        # camera_id -> (candidate_state, run_length)
+        self._pending: dict[int, tuple[int, int]] = {}
         self._fired: dict[tuple[int, str], float] = {}
-        # (camera_id, "still_closed_at_opening", "YYYY-MM-DD") → 1
-        # Tracks the once-per-day "shop hasn't opened on time" alert so
-        # the operator gets a single nudge, not a flood.
         self._opening_alerted: dict[tuple[int, str, str], int] = {}
 
     def _detect_state(self, ctx: DetectorContext, zone: dict | None,
                       cfg: dict) -> int | None:
-        # Mode 1: custom-class detections.
+        """Best-guess state for THIS frame. Caller is responsible for
+        debouncing — see _commit_state(). Returns 1=open, 0=closed, or
+        None when both signals are too weak to call."""
+        # Mode 1: custom-class detections at or above the configured
+        # confidence threshold — these always win.
         cls_open   = (cfg.get("extra") or {}).get("class_open",   "shutter_open")
         cls_closed = (cfg.get("extra") or {}).get("class_closed", "shutter_closed")
         open_best  = max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_open),   default=0.0)
@@ -201,31 +233,69 @@ class ShutterDetector(Detector):
         if open_best >= thr or closed_best >= thr:
             return 1 if open_best >= closed_best else 0
 
-        # Mode 2: brightness heuristic. Works without a custom model.
-        # Sample the mean grayscale luminance of the shutter zone polygon
-        # (or the whole frame if no zone is tagged). A closed metal/glass
-        # shutter is reliably darker than the lit interior behind it.
-        #
-        # Tunables via detection_configs.extra:
-        #   dark_threshold       (default 50, range 0..255 — < threshold = closed)
-        #   bright_threshold     (default 90, > threshold = open)
-        # The dead band between them yields `None` (insufficient signal,
-        # don't change state — avoids flapping at dawn/dusk).
+        # Mode 2: brightness heuristic. Defaults tightened (40/70)
+        # because the previous 50/90 spread left typical retail
+        # interiors (60-85 lux on grey concrete) sitting in the dead
+        # band, so the detector spent most of the day returning None
+        # instead of 'open'.
         if ctx.frame_bgr is None:
             return None
-        dark_thr   = float((cfg.get("extra") or {}).get("dark_threshold",   50))
-        bright_thr = float((cfg.get("extra") or {}).get("bright_threshold", 90))
+        dark_thr   = float((cfg.get("extra") or {}).get("dark_threshold",   40))
+        bright_thr = float((cfg.get("extra") or {}).get("bright_threshold", 70))
         lum = self._zone_luminance(
             ctx.frame_bgr,
             (zone or {}).get("polygon_coords_json"),
         )
         if lum is None:
             return None
+
+        # Low-confidence custom-model hints BIAS the luminance reading
+        # so a borderline frame breaks toward the model's vote instead
+        # of falling into the dead band. The bias is small (±10/255)
+        # so high-conf hits still dominate.
+        if open_best > 0 or closed_best > 0:
+            lum += 10 * (open_best - closed_best)
+
         if lum <= dark_thr:
             return 0
         if lum >= bright_thr:
             return 1
         return None
+
+    def _commit_state(self, camera_id: int, observed: int) -> int:
+        """Apply the consecutive-frames hysteresis. Returns the
+        debounced committed state — same as the last one until
+        CONFIRM_FRAMES samples in a row agree on the new value."""
+        committed = self._last_state.get(camera_id)
+        if committed is None:
+            # Cold start — commit immediately on the first observation.
+            self._last_state[camera_id] = observed
+            self._pending.pop(camera_id, None)
+            return observed
+        if observed == committed:
+            # Same as the committed state — clear any pending flip.
+            self._pending.pop(camera_id, None)
+            return committed
+        # Different from committed — accumulate the pending run.
+        candidate, run = self._pending.get(camera_id, (observed, 0))
+        if candidate != observed:
+            candidate, run = observed, 0
+        run += 1
+        if run >= self.CONFIRM_FRAMES:
+            import logging as _l
+            _l.getLogger(__name__).info(
+                "Shutter transition: camera %s %s -> %s "
+                "(confirmed after %d consecutive frames)",
+                camera_id,
+                "open"   if committed == 1 else "closed",
+                "open"   if observed  == 1 else "closed",
+                run,
+            )
+            self._last_state[camera_id] = observed
+            self._pending.pop(camera_id, None)
+            return observed
+        self._pending[camera_id] = (candidate, run)
+        return committed
 
     @staticmethod
     def _zone_luminance(frame_bgr, polygon_norm) -> float | None:
@@ -273,9 +343,18 @@ class ShutterDetector(Detector):
         if zone is None:
             return []
 
-        state = self._detect_state(ctx, zone, cfg)
-        if state is None:
-            return []   # heuristic mode not yet wired; ignore frame
+        observed = self._detect_state(ctx, zone, cfg)
+        if observed is None:
+            # Both signals too weak this frame — leave the committed
+            # state where it is. Reusing the last committed value
+            # keeps the metric write honest instead of skipping the
+            # frame entirely, which previously made the dashboard
+            # show 'shutter unknown' between solid reads.
+            state = self._last_state.get(ctx.camera_id)
+            if state is None:
+                return []
+        else:
+            state = self._commit_state(ctx.camera_id, observed)
 
         # Metric.
         if ctx.db is not None:
