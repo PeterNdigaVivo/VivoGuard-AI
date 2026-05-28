@@ -21,75 +21,11 @@ from app.ai.zone_logic import bbox_in_zone
 
 
 # ---------------------------------------------------------------------------
-# Uniform compliance
+# Uniform compliance — moved to app.ai.detectors.uniform_compliance
 # ---------------------------------------------------------------------------
-
-class UniformComplianceDetector(Detector):
-    """Reads detections of class `uniform_ok` and `uniform_violation`
-    (configurable via detection_configs.extra).
-
-    Train this model in the existing AI Training Studio:
-      1. Create a dataset with classes ["uniform_ok", "uniform_violation"]
-      2. Annotate staff snapshots
-      3. Train + deploy
-      4. Assign the model to the camera that watches the staff area
-
-    Writes:
-      - `uniform_compliance_pct` (rolling, 1.0 if ok else 0.0)
-    Alerts:
-      - One per `uniform_violation` track (deduped per track for 5 min)
-    """
-
-    detection_type = "uniform_compliance"
-    needs_tracking = True
-
-    def __init__(self):
-        self._fired: dict[int, float] = {}
-
-    def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
-        cfg = ctx.config.get(self.detection_type)
-        if not cfg or not cfg.get("enabled"):
-            return []
-        extra = cfg.get("extra") or {}
-        cls_ok        = extra.get("class_ok",        "uniform_ok")
-        cls_violation = extra.get("class_violation", "uniform_violation")
-        thr = float(cfg.get("confidence_threshold", 0.5))
-
-        ok_dets   = [d for d in ctx.raw_detections if d["cls"] == cls_ok        and d["conf"] >= thr]
-        bad_dets  = [d for d in ctx.raw_detections if d["cls"] == cls_violation and d["conf"] >= thr]
-
-        if ctx.db is not None and (ok_dets or bad_dets):
-            from app.analytics import recorder
-            total = len(ok_dets) + len(bad_dets)
-            rate  = (len(ok_dets) / total) if total else 0.0
-            recorder.record(ctx.db, "uniform_compliance_pct", rate,
-                            camera_id=ctx.camera_id, store_id=ctx.store_id,
-                            aggregator="avg")
-
-        out: list[DetectionEvent] = []
-        now = time.time()
-        # Emit one event per violation track (deduped per track for 5 min).
-        for det in bad_dets:
-            # Match to a track for stable dedup.
-            matched_track = None
-            for tr, _ in ctx.tracks:
-                if tr.cls in {cls_ok, cls_violation, "person"}:
-                    # IOU vs the violation bbox to identify the person.
-                    from app.ai.zone_logic import iou
-                    if iou(tr.bbox_norm, det["bbox_norm"]) > 0.3:
-                        matched_track = tr
-                        break
-            tid = matched_track.track_id if matched_track else hash(tuple(det["bbox_norm"]))
-            if now - self._fired.get(tid, 0) < 300:
-                continue
-            self._fired[tid] = now
-            out.append(DetectionEvent(
-                detection_type=self.detection_type, cls=cls_violation,
-                confidence=det["conf"], bbox_norm=det["bbox_norm"],
-                track_id=matched_track.track_id if matched_track else None,
-                extra={"store_id": ctx.store_id, "shift": _shift_label_for(ctx)},
-            ))
-        return out
+# The colour rule-based + model UniformComplianceDetector now lives in
+# its own module. Re-exported here so existing imports keep working.
+from app.ai.detectors.uniform_compliance import UniformComplianceDetector  # noqa: E402,F401
 
 
 def _shift_label_for(ctx: DetectorContext) -> str | None:

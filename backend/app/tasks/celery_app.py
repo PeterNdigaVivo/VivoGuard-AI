@@ -101,5 +101,12 @@ celery_app.conf.update(
             "task": "alerting.camera_health_check",
             "schedule": 60.0,
         },
+        # Uniform-violation manager notification — every 60s scans for
+        # uniform_compliance alerts in the last ~2 min and WhatsApps the
+        # store manager. Deduped per store per 30 min.
+        "uniform-violation-every-60s": {
+            "task": "alerting.uniform_violation_check",
+            "schedule": 60.0,
+        },
     },
 )

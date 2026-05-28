@@ -191,3 +191,64 @@ def camera_health_check() -> None:
             log.info("camera health: %s (%s) offline → %d WhatsApp sent",
                      cam.name, store.name, sent)
             r.set(sent_key, "1", ex=CAMERA_HEALTH_DEDUP_TTL_SECONDS)
+
+
+# ---- Uniform-violation manager notification ---------------------------
+
+UNIFORM_DEDUP_TTL_SECONDS = 30 * 60   # one WhatsApp per store per 30 min
+
+
+@celery_app.task(name="alerting.uniform_violation_check", ignore_result=True)
+def uniform_violation_check() -> None:
+    """Notify the store manager (falling back to the ops number) when a
+    uniform-compliance violation alert fired in the last ~2 minutes.
+    Runs off the inference hot path so the WhatsApp round-trip never
+    stalls a camera loop. Deduped per store per 30 min."""
+    from app.database import SessionLocal
+    from app.models import Alert, Camera, DetectionEvent, Store
+
+    r = _redis()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=130)
+
+    with SessionLocal() as db:
+        rows = (db.query(DetectionEvent, Camera)
+                  .join(Alert, Alert.event_id == DetectionEvent.id)
+                  .join(Camera, Camera.id == DetectionEvent.camera_id)
+                  .filter(DetectionEvent.detection_type == "uniform_compliance",
+                          DetectionEvent.timestamp >= cutoff)
+                  .all())
+        # One notification per store, even if several cameras fired.
+        by_store: dict[int, tuple] = {}
+        for ev, cam in rows:
+            if cam.store_id is not None and cam.store_id not in by_store:
+                by_store[cam.store_id] = (ev, cam)
+
+        for store_id, (ev, cam) in by_store.items():
+            sent_key = f"vg:uniform_alert:sent:{store_id}"
+            if r.get(sent_key):
+                continue
+            store = db.get(Store, store_id)
+            store_name = store.name if store else f"store {store_id}"
+            rule = (ev.extra or {}).get("rule", "uniform_violation")
+            if rule == "no_lanyard":
+                body = (f"🔵 Staff missing name tag at {store_name} "
+                        f"[{cam.name}]")
+            else:
+                body = (f"⚠️ Staff uniform violation at {store_name} "
+                        f"[{cam.name}]")
+                if (ev.extra or {}).get("repeated_today"):
+                    body = (f"🔴 Repeated uniform violations at {store_name} "
+                            f"today [{cam.name}]")
+
+            # Prefer the store manager's number; fall back to ops.
+            recipients = []
+            mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
+            if mgr:
+                recipients.append(mgr)
+            recipients.extend(_dashboard_recipients())
+            recipients = list(dict.fromkeys(recipients))  # dedup, keep order
+
+            sent = _send_whatsapp(recipients, body)
+            log.info("uniform violation: %s [%s] → %d WhatsApp sent",
+                     store_name, cam.name, sent)
+            r.set(sent_key, "1", ex=UNIFORM_DEDUP_TTL_SECONDS)

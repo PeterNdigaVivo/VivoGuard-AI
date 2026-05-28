@@ -989,6 +989,36 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
 
     current_status = "staffed" if sorted_minutes and sorted_minutes[-1][1] else "unstaffed"
 
+    # ---- Uniform compliance (today) --------------------------------
+    # `uniform_compliance_pct` is a [0,1] rolling metric written by the
+    # UniformComplianceDetector. We average it over today's session and
+    # count how many distinct violation alerts fired today.
+    uni_rows = (
+        db.query(func.avg(MetricSnapshot.value))
+          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
+                  MetricSnapshot.metric_type == "uniform_compliance_pct",
+                  MetricSnapshot.period_start >= session_start,
+                  MetricSnapshot.period_start <  session_end)
+          .scalar()
+    )
+    uniform_pct = round(float(uni_rows) * 100, 1) if uni_rows is not None else None
+    uniform_rag = None
+    if uniform_pct is not None:
+        uniform_rag = ("green" if uniform_pct > 95
+                       else "amber" if uniform_pct >= 80 else "red")
+    # Today's uniform violations with timestamps (for the list).
+    viol_rows = (
+        db.query(DetectionEvent.timestamp)
+          .join(Alert, Alert.event_id == DetectionEvent.id)
+          .filter(DetectionEvent.camera_id.in_(cam_ids),
+                  DetectionEvent.detection_type == "uniform_compliance",
+                  DetectionEvent.timestamp >= session_start)
+          .order_by(DetectionEvent.timestamp.desc()).limit(20).all()
+    )
+    uniform_violations = [
+        {"time": r[0].isoformat() if r[0] else None} for r in viol_rows
+    ]
+
     insights: list[str] = []
     if gaps:
         worst = max(gaps, key=lambda g: g["duration_minutes"])
@@ -1017,6 +1047,12 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
             for m, v in sorted_minutes
         ],
         "insights": insights,
+        # Uniform compliance (today). pct is null when the detector
+        # isn't enabled / no staff scored yet.
+        "uniform_compliance_pct": uniform_pct,
+        "uniform_compliance_rag": uniform_rag,
+        "uniform_violations_today": len(uniform_violations),
+        "uniform_violations": uniform_violations,
     }
 
 

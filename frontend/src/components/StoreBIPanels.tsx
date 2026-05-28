@@ -579,6 +579,10 @@ interface StaffPayload {
   gaps: { start: string; end: string | null; duration_minutes: number; ongoing?: boolean }[]
   timeline: { minute: string; staffed: boolean }[]
   insights: string[]
+  uniform_compliance_pct?: number | null
+  uniform_compliance_rag?: 'green' | 'amber' | 'red' | null
+  uniform_violations_today?: number
+  uniform_violations?: { time: string | null }[]
 }
 
 export function StaffPresencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
@@ -591,15 +595,59 @@ export function StaffPresencePanel({ storeId, range }: { storeId: number; range?
         !data.has_data
           ? <EmptyState icon="👥" text={data.setup_hint ?? 'No staff data yet.'} />
           : (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Gauge pct={data.today_pct} />
-              <div className="md:col-span-2">
-                <StaffTimelineBar timeline={data.timeline} />
-                <InsightList insights={data.insights} />
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <Gauge pct={data.today_pct} />
+                <div className="md:col-span-2">
+                  <StaffTimelineBar timeline={data.timeline} />
+                  <InsightList insights={data.insights} />
+                </div>
               </div>
-            </div>
+              {data.uniform_compliance_pct !== null && data.uniform_compliance_pct !== undefined && (
+                <UniformCompliance
+                  pct={data.uniform_compliance_pct}
+                  rag={data.uniform_compliance_rag ?? 'amber'}
+                  violations={data.uniform_violations ?? []}
+                  count={data.uniform_violations_today ?? 0} />
+              )}
+            </>
           )}
     </PanelShell>
+  )
+}
+
+function UniformCompliance({ pct, rag, violations, count }: {
+  pct: number
+  rag: 'green' | 'amber' | 'red'
+  violations: { time: string | null }[]
+  count: number
+}) {
+  const tone = rag === 'green' ? 'text-emerald-600'
+             : rag === 'amber' ? 'text-amber-600' : 'text-red-600'
+  const dot = rag === 'green' ? 'bg-emerald-500'
+            : rag === 'amber' ? 'bg-amber-500' : 'bg-red-500'
+  return (
+    <div className="mt-4 border-t pt-3">
+      <div className="flex items-center gap-2 mb-1">
+        <span className={'inline-block w-2.5 h-2.5 rounded-full ' + dot} />
+        <span className="text-sm font-medium">Uniform compliance today</span>
+        <span className={'text-sm font-semibold ml-auto ' + tone}>{pct}%</span>
+      </div>
+      {count > 0 ? (
+        <div className="text-xs text-slate-600">
+          {count} violation{count === 1 ? '' : 's'} detected today
+          {violations.length > 0 && (
+            <span className="text-slate-400">
+              {' '}— {violations.slice(0, 5)
+                .map(v => v.time ? v.time.substring(11, 16) : '?')
+                .join(', ')}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="text-xs text-slate-500">No violations detected today ✅</div>
+      )}
+    </div>
   )
 }
 

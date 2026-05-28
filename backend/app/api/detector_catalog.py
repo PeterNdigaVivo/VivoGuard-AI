@@ -45,9 +45,13 @@ DETECTOR_CATALOG = {
     "tailgating":          {"status": "active",   "needs_zone": True,  "purpose": None},
     "shelf_change":        {"status": "active",   "needs_zone": True,  "purpose": "shelf"},
 
+    # Uniform compliance works rule-based now (colour analysis of the
+    # upper body in a counter/staff zone) — accuracy improves with a
+    # trained per-store model.
+    "uniform_compliance":  {"status": "active", "needs_zone": True, "purpose": "counter",
+                            "training_hint": "Works out of the box via colour analysis. For best accuracy, collect frames at /training/shutter-style Uniform tab and train a YOLOv8n-cls model (uniform_ok / uniform_violation / no_lanyard / civilian)."},
+
     # --- Training required ------------------------------------------------
-    "uniform_compliance":  {"status": "training_required", "needs_zone": False,
-                            "training_hint": "Train a YOLOv8 model with classes 'uniform_ok' / 'uniform_violation' on photos of Vivo staff."},
     "demographic":         {"status": "training_required", "needs_zone": False,
                             "training_hint": "Train a model emitting 'age_<bucket>_gender_<m|f|u>' classes. Falls back to an 'unknown' aggregate bucket without a model."},
     "face":                {"status": "training_required", "needs_zone": False,
