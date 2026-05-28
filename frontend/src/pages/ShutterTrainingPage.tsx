@@ -25,6 +25,7 @@ interface ShutterCamera {
   camera_name: string
   store_id: number | null
   store_name: string | null
+  has_shutter_zone: boolean
   counts: { open: number; closed: number; partial: number }
 }
 interface Sample {
@@ -60,19 +61,68 @@ export default function ShutterTrainingPage() {
   const [autoCapture, setAutoCapture] = useState(false)
   const autoTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const [train, setTrain] = useState<TrainStatus>({ state: 'idle' })
+  // "" = All stores; otherwise the store_id as a string.
+  const [storeFilter, setStoreFilter] = useState<string>('')
+  // Cameras the operator has added to this collection session
+  // (for the multi-camera progress strip). The currently-selected
+  // camera is always part of the session.
+  const [session, setSession] = useState<number[]>([])
 
   const current = cameras.find(c => c.camera_id === selected) || null
   const storeId = current?.store_id ?? null
+
+  // Stores present in the camera list, for the filter dropdown.
+  const storeOptions = (() => {
+    const seen = new Map<number, string>()
+    for (const c of cameras) {
+      if (c.store_id != null) seen.set(c.store_id, c.store_name || `Store ${c.store_id}`)
+    }
+    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]))
+  })()
+
+  // Cameras after the store filter, grouped by store for the <optgroup>s.
+  const visibleCameras = storeFilter
+    ? cameras.filter(c => String(c.store_id) === storeFilter)
+    : cameras
+  const grouped = (() => {
+    const m = new Map<string, ShutterCamera[]>()
+    for (const c of visibleCameras) {
+      const key = c.store_name || 'Unassigned'
+      if (!m.has(key)) m.set(key, [])
+      m.get(key)!.push(c)
+    }
+    return [...m.entries()]
+  })()
 
   function loadCameras() {
     api<ShutterCamera[]>('/training/shutter/cameras')
       .then(rows => {
         setCameras(rows)
-        if (rows.length && selected === null) setSelected(rows[0].camera_id)
+        setSelected(prev => prev ?? (rows.length ? rows[0].camera_id : null))
       })
       .catch(e => setMsg(String(e)))
   }
   useEffect(loadCameras, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the selected camera in the session, and ensure the selection
+  // is valid for the current store filter.
+  useEffect(() => {
+    if (selected != null) {
+      setSession(prev => prev.includes(selected) ? prev : [...prev, selected])
+    }
+  }, [selected])
+
+  function selectCamera(id: number) {
+    setSelected(id)
+    setSnap(null)
+  }
+  function pickFirstInStore(filter: string) {
+    setStoreFilter(filter)
+    const list = filter ? cameras.filter(c => String(c.store_id) === filter) : cameras
+    if (list.length && !list.some(c => c.camera_id === selected)) {
+      selectCamera(list[0].camera_id)
+    }
+  }
 
   // Live thumbnail of the selected camera, refreshed every 5s.
   useEffect(() => {
@@ -185,32 +235,87 @@ export default function ShutterTrainingPage() {
 
       {cameras.length === 0 ? (
         <Card className="p-6 text-sm text-slate-600">
-          No cameras have a <code>shutter</code> zone yet. Draw a zone tagged
-          “shutter” on a camera that watches the store entrance, then come back
-          here to start collecting OPEN / CLOSED / PARTIAL frames.
+          No AI-enabled cameras found. Enable AI on a camera that watches a
+          store entrance, then come back here to collect OPEN / CLOSED /
+          PARTIAL frames.
         </Card>
       ) : (
         <>
-          {/* Camera picker */}
+          {/* Camera picker — store filter + grouped, all AI cameras. */}
           <Card className="p-3">
             <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Camera</span>
+              <span className="text-xs uppercase tracking-wide text-slate-500">Store</span>
               <select className="border rounded px-2 py-1 text-sm"
-                      value={selected ?? ''}
-                      onChange={e => setSelected(Number(e.target.value))}>
-                {cameras.map(c => (
-                  <option key={c.camera_id} value={c.camera_id}>
-                    {c.store_name ? `${c.store_name} — ` : ''}{c.camera_name}
-                  </option>
+                      value={storeFilter}
+                      onChange={e => pickFirstInStore(e.target.value)}>
+                <option value="">All stores</option>
+                {storeOptions.map(([id, name]) => (
+                  <option key={id} value={String(id)}>{name}</option>
                 ))}
               </select>
+
+              <span className="text-xs uppercase tracking-wide text-slate-500">Camera</span>
+              <select className="border rounded px-2 py-1 text-sm min-w-[220px]"
+                      value={selected ?? ''}
+                      onChange={e => selectCamera(Number(e.target.value))}>
+                {grouped.map(([storeName, cams]) => (
+                  <optgroup key={storeName} label={storeName}>
+                    {cams.map(c => (
+                      <option key={c.camera_id} value={c.camera_id}>
+                        {storeName} - {c.camera_name}
+                        {c.has_shutter_zone ? ' ✅' : ' ⚠️'}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+
               <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
                 <input type="checkbox" checked={autoCapture}
                        onChange={e => setAutoCapture(e.target.checked)} />
                 Auto-capture every 5 min
               </label>
             </div>
+
+            {/* Zone status reminder for the selected camera. */}
+            {current && (
+              <div className={'mt-2 text-xs rounded px-2 py-1 inline-block ' +
+                (current.has_shutter_zone
+                  ? 'bg-emerald-50 text-emerald-700'
+                  : 'bg-amber-50 text-amber-700')}>
+                {current.has_shutter_zone
+                  ? '✅ Shutter zone configured — ready to detect once a model is deployed.'
+                  : '⚠️ No shutter zone yet — remember to draw a “shutter” zone on this camera after training.'}
+              </div>
+            )}
           </Card>
+
+          {/* Multi-camera session progress strip. */}
+          {session.length > 1 && (
+            <Card className="p-3">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                This session
+              </div>
+              <div className="flex flex-wrap gap-3 text-xs">
+                {session.map(id => {
+                  const cam = cameras.find(c => c.camera_id === id)
+                  if (!cam) return null
+                  const tot = Math.min(cam.counts.open, cam.counts.closed, cam.counts.partial)
+                  const done = cam.counts.open >= MIN_PER_CLASS &&
+                               cam.counts.closed >= MIN_PER_CLASS &&
+                               cam.counts.partial >= MIN_PER_CLASS
+                  return (
+                    <button key={id} onClick={() => selectCamera(id)}
+                            className={'rounded px-2 py-1 border ' +
+                              (id === selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200')}>
+                      <span className="font-medium">{cam.camera_name}</span>
+                      {': '}{tot}/{MIN_PER_CLASS} {done ? '✅' : '🔄'}
+                    </button>
+                  )
+                })}
+              </div>
+            </Card>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Live + capture */}

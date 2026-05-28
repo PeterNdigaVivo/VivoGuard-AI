@@ -319,40 +319,51 @@ def _shutter_sample_root(label: str, camera_id: int) -> Path:
 @router.get("/shutter/cameras")
 def shutter_cameras(db: Session = Depends(get_db),
                     _u=Depends(require_role("admin", "operator", "viewer"))):
-    """Cameras that have a 'shutter'-tagged zone — the only ones worth
-    collecting shutter training data on. Returns id, name, store, and
-    the current per-label sample counts so the UI can show progress."""
+    """ALL ai_enabled cameras across all stores, with a flag for
+    whether each already has a 'shutter'-tagged zone and its current
+    per-label sample counts. Operators need to collect frames on
+    cameras that don't have a zone yet (they draw the zone after
+    training), so we no longer filter to shutter-zoned cameras."""
     from app.models import Zone, Store, TrainingSample
     from sqlalchemy import func
-    cam_ids = [
+
+    # Which cameras already have a shutter zone.
+    shutter_cam_ids = {
         z.camera_id for z in db.query(Zone).all()
         if "shutter" in (z.detection_types_json or []) and z.camera_id
-    ]
-    cam_ids = sorted(set(cam_ids))
-    if not cam_ids:
-        return []
+    }
+
+    cams = (db.query(Camera)
+              .filter(Camera.ai_enabled == True)  # noqa: E712
+              .all())
+    cam_ids = [c.id for c in cams]
     counts: dict[tuple[int, str], int] = {}
-    for cam_id, label, n in (
-        db.query(TrainingSample.camera_id, TrainingSample.label, func.count(TrainingSample.id))
-          .filter(TrainingSample.detector_type == "shutter",
-                  TrainingSample.camera_id.in_(cam_ids))
-          .group_by(TrainingSample.camera_id, TrainingSample.label).all()
-    ):
-        counts[(cam_id, label)] = int(n)
+    if cam_ids:
+        for cam_id, label, n in (
+            db.query(TrainingSample.camera_id, TrainingSample.label, func.count(TrainingSample.id))
+              .filter(TrainingSample.detector_type == "shutter",
+                      TrainingSample.camera_id.in_(cam_ids))
+              .group_by(TrainingSample.camera_id, TrainingSample.label).all()
+        ):
+            counts[(cam_id, label)] = int(n)
+
+    store_names = {s.id: s.name for s in db.query(Store).all()}
     out = []
-    for cam in db.query(Camera).filter(Camera.id.in_(cam_ids)).all():
-        store = db.get(Store, cam.store_id) if cam.store_id else None
+    for cam in cams:
         out.append({
             "camera_id": cam.id,
             "camera_name": cam.name,
             "store_id": cam.store_id,
-            "store_name": store.name if store else None,
+            "store_name": store_names.get(cam.store_id) if cam.store_id else None,
+            "has_shutter_zone": cam.id in shutter_cam_ids,
             "counts": {
                 "open":    counts.get((cam.id, "open"), 0),
                 "closed":  counts.get((cam.id, "closed"), 0),
                 "partial": counts.get((cam.id, "partial"), 0),
             },
         })
+    # Sort by store name then camera name so the grouped dropdown is tidy.
+    out.sort(key=lambda c: ((c["store_name"] or "~"), c["camera_name"]))
     return out
 
 
