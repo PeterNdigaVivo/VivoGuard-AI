@@ -55,6 +55,29 @@ class Annotation(Base):
     image = relationship("TrainingImage", back_populates="annotations")
 
 
+class TrainingSample(Base):
+    """A single labelled frame for a CLASSIFICATION detector (one
+    label per whole frame, no bounding box). Used by the shutter /
+    door-status collection workflow where the operator captures a
+    frame and tags it OPEN / CLOSED / PARTIAL.
+
+    Distinct from TrainingImage/Annotation which are for bbox object
+    detection — classification needs neither boxes nor per-object
+    classes, just frame → label.
+    """
+
+    __tablename__ = "training_samples"
+
+    id:            Mapped[int]   = mapped_column(primary_key=True)
+    detector_type: Mapped[str]   = mapped_column(String(32), index=True)  # e.g. "shutter"
+    label:         Mapped[str]   = mapped_column(String(32), index=True)  # open|closed|partial
+    camera_id:     Mapped[int | None] = mapped_column(ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True)
+    store_id:      Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
+    frame_path:    Mapped[str]   = mapped_column(Text)
+    captured_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    labeled_by:    Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
 class TrainingJob(Base):
     __tablename__ = "training_jobs"
 

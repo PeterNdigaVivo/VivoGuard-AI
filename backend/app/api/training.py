@@ -296,3 +296,153 @@ def export_model(model_id: int, payload: ExportModelIn,
     from app.training.exporter import export
     out = export(model_id, payload.format)
     return {"path": out}
+
+
+# ====================================================================
+# Shutter / door-status classification training data collection
+# ====================================================================
+# A classification workflow (one label per whole frame) distinct from
+# the bbox dataset flow above. Operators capture frames from a camera
+# that has a 'shutter' zone and tag each OPEN / CLOSED / PARTIAL. The
+# frames feed the YOLOv8n-cls training pipeline (separate commit).
+
+SHUTTER_LABELS = {"open", "closed", "partial"}
+
+
+def _shutter_sample_root(label: str, camera_id: int) -> Path:
+    from app.config import settings
+    p = Path(settings.datasets_dir).parent / "training" / "shutter" / label
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+@router.get("/shutter/cameras")
+def shutter_cameras(db: Session = Depends(get_db),
+                    _u=Depends(require_role("admin", "operator", "viewer"))):
+    """Cameras that have a 'shutter'-tagged zone — the only ones worth
+    collecting shutter training data on. Returns id, name, store, and
+    the current per-label sample counts so the UI can show progress."""
+    from app.models import Zone, Store, TrainingSample
+    from sqlalchemy import func
+    cam_ids = [
+        z.camera_id for z in db.query(Zone).all()
+        if "shutter" in (z.detection_types_json or []) and z.camera_id
+    ]
+    cam_ids = sorted(set(cam_ids))
+    if not cam_ids:
+        return []
+    counts: dict[tuple[int, str], int] = {}
+    for cam_id, label, n in (
+        db.query(TrainingSample.camera_id, TrainingSample.label, func.count(TrainingSample.id))
+          .filter(TrainingSample.detector_type == "shutter",
+                  TrainingSample.camera_id.in_(cam_ids))
+          .group_by(TrainingSample.camera_id, TrainingSample.label).all()
+    ):
+        counts[(cam_id, label)] = int(n)
+    out = []
+    for cam in db.query(Camera).filter(Camera.id.in_(cam_ids)).all():
+        store = db.get(Store, cam.store_id) if cam.store_id else None
+        out.append({
+            "camera_id": cam.id,
+            "camera_name": cam.name,
+            "store_id": cam.store_id,
+            "store_name": store.name if store else None,
+            "counts": {
+                "open":    counts.get((cam.id, "open"), 0),
+                "closed":  counts.get((cam.id, "closed"), 0),
+                "partial": counts.get((cam.id, "partial"), 0),
+            },
+        })
+    return out
+
+
+@router.post("/shutter/capture")
+async def shutter_capture(camera_id: int, label: str,
+                          db: Session = Depends(get_db),
+                          user=Depends(require_role("admin", "operator"))):
+    """Grab the current frame from `camera_id` and store it tagged
+    `label` (open|closed|partial). Uses the streamer's cached JPEG
+    first, falling back to a one-shot RTSP pull."""
+    import base64
+    from datetime import datetime, timezone
+    from app.models import TrainingSample
+    from app.stream.frame_buffer import FrameBuffer
+
+    label = (label or "").lower().strip()
+    if label not in SHUTTER_LABELS:
+        raise HTTPException(400, f"label must be one of {sorted(SHUTTER_LABELS)}")
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    data = FrameBuffer().latest_jpeg(camera_id)
+    if not data:
+        pw = decrypt(cam.password_encrypted or "")
+        rtsp = build_rtsp_url(brand=cam.brand, host=cam.host, port=cam.rtsp_port,
+                              username=cam.username, password=pw,
+                              channel=cam.channel_number,
+                              override=cam.rtsp_url_override, subtype=0)
+        b64 = await grab_thumbnail(rtsp, timeout=15)
+        if not b64:
+            raise HTTPException(503, "could not grab a frame from this camera")
+        data = base64.b64decode(b64)
+
+    ts = datetime.now(timezone.utc)
+    fname = f"{camera_id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+    path = _shutter_sample_root(label, camera_id) / fname
+    path.write_bytes(data)
+    sample = TrainingSample(
+        detector_type="shutter", label=label,
+        camera_id=camera_id, store_id=cam.store_id,
+        frame_path=str(path), captured_at=ts,
+        labeled_by=getattr(user, "id", None),
+    )
+    db.add(sample); db.commit(); db.refresh(sample)
+    return {"id": sample.id, "label": label, "captured_at": ts.isoformat()}
+
+
+@router.get("/shutter/samples")
+def shutter_samples(camera_id: int, label: str | None = None,
+                    db: Session = Depends(get_db),
+                    _u=Depends(require_role("admin", "operator", "viewer"))):
+    """List captured shutter samples for a camera, newest first."""
+    from app.models import TrainingSample
+    q = (db.query(TrainingSample)
+           .filter(TrainingSample.detector_type == "shutter",
+                   TrainingSample.camera_id == camera_id))
+    if label:
+        q = q.filter(TrainingSample.label == label.lower())
+    return [
+        {"id": s.id, "label": s.label,
+         "captured_at": s.captured_at.isoformat() if s.captured_at else None,
+         "file_url": f"/api/training/shutter/samples/{s.id}/file"}
+        for s in q.order_by(TrainingSample.id.desc()).limit(500).all()
+    ]
+
+
+@router.get("/shutter/samples/{sample_id}/file")
+def shutter_sample_file(sample_id: int, db: Session = Depends(get_db),
+                        _u=Depends(require_role("admin", "operator", "viewer"))):
+    from app.models import TrainingSample
+    s = db.get(TrainingSample, sample_id)
+    if not s:
+        raise HTTPException(404, "sample not found")
+    p = Path(s.frame_path)
+    if not p.exists():
+        raise HTTPException(404, "file missing on disk")
+    return FileResponse(str(p))
+
+
+@router.delete("/shutter/samples/{sample_id}")
+def shutter_sample_delete(sample_id: int, db: Session = Depends(get_db),
+                          _u=Depends(require_role("admin", "operator"))):
+    from app.models import TrainingSample
+    s = db.get(TrainingSample, sample_id)
+    if not s:
+        raise HTTPException(404, "sample not found")
+    try:
+        Path(s.frame_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    db.delete(s); db.commit()
+    return {"deleted": sample_id}
