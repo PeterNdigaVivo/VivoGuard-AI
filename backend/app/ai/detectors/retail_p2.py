@@ -161,106 +161,164 @@ class AisleDwellDetector(Detector):
 # ---------------------------------------------------------------------------
 
 class ShutterDetector(Detector):
-    """Two-mode detector:
+    """Three-state shutter/door detector: OPEN / CLOSED / PARTIAL.
+
+    Two modes:
 
     1. Custom-model mode (preferred): if the configured AI model emits
-       a class label of `shutter_open` or `shutter_closed`, use the
-       higher-confidence detection in the configured zone.
+       class labels `shutter_open` / `shutter_closed` / `shutter_partial`
+       (configurable via extra), the highest-confidence detection wins.
 
-    2. Heuristic mode (fallback): the shutter zone's mean luminance is
-       compared against `extra.dark_threshold` (default 40/255).
-       Below = closed, above = open. Works for most metal roller
-       shutters where the closed state is visibly darker than the open
-       store interior.
+    2. Rule-based mode (works NOW, no training): combines two cheap
+       image features measured inside the shutter zone polygon —
 
-    Emits an alert when the state contradicts business_hours:
-      open + closed-hours   → "shutter open after hours" (priority high)
-      closed + open-hours   → "shutter closed during business hours"
-    Writes a `shutter_open` metric (1/0) every sample.
+         • brightness — mean grayscale (0..255). A closed metal/glass
+           shutter is much darker than the lit interior behind it.
+         • texture    — variance of the Laplacian. A smooth shutter
+           face has near-zero texture; a visible store interior
+           (shelves, signage, people) has high texture.
 
-    Accuracy hardening (added when operators reported false closures
-    on cameras with bright daytime interiors):
+       brightness + texture together separate the three states far
+       more reliably than brightness alone, which is why operators
+       were missing real opens/closes:
 
-      • Hysteresis: a new state only commits after CONFIRM_FRAMES
-        consecutive samples agree. A single noisy frame (customer
-        walking past, headlight glare, brief camera glitch) no longer
-        flips the reported state.
+         dark  + smooth        → CLOSED  (metal shutter, lights off)
+         bright + textured     → OPEN    (interior visible)
+         mid brightness OR
+         brightness/texture
+         disagree              → PARTIAL (mid-roll, or ambiguous)
 
-      • Tightened heuristic defaults (dark=40, bright=70) so normal
-        retail lighting reads as 'open' reliably instead of falling
-        into the dead band and returning None.
-
-      • Custom-model signals BIAS the heuristic even when below the
-        confidence threshold: e.g. a 0.35 'shutter_open' detection
-        adds +10 to the measured luminance so a borderline frame
-        breaks toward the model's hint rather than to None.
-
-      • Edge logging: every committed transition writes a structured
-        info log so operators can audit "when did the door open?".
+    Alert rules:
+      • CLOSED during business hours          → "shutter closed during hours" (high)
+      • OPEN outside business hours           → "shutter open after hours"     (high)
+      • PARTIAL sustained > 5 min             → "shutter stuck partially open"  (high)
+      • Still CLOSED within 30 min of opening → "store not yet open"            (high)
+    Writes a `shutter_open` metric (1.0 open / 0.5 partial / 0.0 closed).
     """
 
     detection_type = "shutter"
     needs_tracking = False
 
-    # Number of consecutive samples that must agree before the
-    # reported state is allowed to flip. 3 at the default ~5 fps
-    # heatmap cadence = ~1.5s of consistent evidence, which is
-    # enough to reject single-frame glare / customer-pass-through
-    # without delaying a real door open noticeably.
+    # State constants. Kept as ints so the hysteresis logic and the
+    # `shutter_open` metric (open=1, partial=0.5, closed=0) stay simple.
+    CLOSED, OPEN, PARTIAL = 0, 1, 2
+    _STATE_NAME = {0: "closed", 1: "open", 2: "partial"}
+    _STATE_METRIC = {0: 0.0, 1: 1.0, 2: 0.5}
+
     CONFIRM_FRAMES = 3
+    # PARTIAL must persist this long before we raise the "stuck" alert.
+    PARTIAL_STUCK_SECONDS = 5 * 60
 
     def __init__(self):
-        # Committed (debounced) state per camera. 1=open, 0=closed.
+        # Committed (debounced) state per camera. 0/1/2.
         self._last_state: dict[int, int] = {}
-        # Pending state — a candidate flip we're still confirming.
-        # camera_id -> (candidate_state, run_length)
+        # Pending candidate flip — camera_id -> (candidate_state, run).
         self._pending: dict[int, tuple[int, int]] = {}
         self._fired: dict[tuple[int, str], float] = {}
         self._opening_alerted: dict[tuple[int, str, str], int] = {}
+        # When the current PARTIAL run started, per camera (epoch).
+        # Cleared whenever the committed state leaves PARTIAL.
+        self._partial_since: dict[int, float] = {}
 
     def _detect_state(self, ctx: DetectorContext, zone: dict | None,
                       cfg: dict) -> int | None:
-        """Best-guess state for THIS frame. Caller is responsible for
-        debouncing — see _commit_state(). Returns 1=open, 0=closed, or
-        None when both signals are too weak to call."""
-        # Mode 1: custom-class detections at or above the configured
-        # confidence threshold — these always win.
-        cls_open   = (cfg.get("extra") or {}).get("class_open",   "shutter_open")
-        cls_closed = (cfg.get("extra") or {}).get("class_closed", "shutter_closed")
-        open_best  = max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_open),   default=0.0)
-        closed_best= max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_closed), default=0.0)
+        """Best-guess state for THIS frame: OPEN / CLOSED / PARTIAL.
+        Caller debounces via _commit_state(). Returns None only when
+        no signal is available at all (no model class, no pixels)."""
+        extra = cfg.get("extra") or {}
+        # Mode 1: custom-class detections at/above the threshold win.
+        cls_open    = extra.get("class_open",    "shutter_open")
+        cls_closed  = extra.get("class_closed",  "shutter_closed")
+        cls_partial = extra.get("class_partial", "shutter_partial")
+        open_best    = max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_open),    default=0.0)
+        closed_best  = max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_closed),  default=0.0)
+        partial_best = max((d["conf"] for d in ctx.raw_detections if d["cls"] == cls_partial), default=0.0)
         thr = float(cfg.get("confidence_threshold", 0.5))
-        if open_best >= thr or closed_best >= thr:
-            return 1 if open_best >= closed_best else 0
+        if max(open_best, closed_best, partial_best) >= thr:
+            best = max((open_best, self.OPEN),
+                       (closed_best, self.CLOSED),
+                       (partial_best, self.PARTIAL))
+            return best[1]
 
-        # Mode 2: brightness heuristic. Defaults tightened (40/70)
-        # because the previous 50/90 spread left typical retail
-        # interiors (60-85 lux on grey concrete) sitting in the dead
-        # band, so the detector spent most of the day returning None
-        # instead of 'open'.
+        # Mode 2: brightness + texture rule-based classifier.
         if ctx.frame_bgr is None:
             return None
-        dark_thr   = float((cfg.get("extra") or {}).get("dark_threshold",   40))
-        bright_thr = float((cfg.get("extra") or {}).get("bright_threshold", 70))
-        lum = self._zone_luminance(
-            ctx.frame_bgr,
-            (zone or {}).get("polygon_coords_json"),
-        )
-        if lum is None:
+        feats = self._zone_features(ctx.frame_bgr,
+                                    (zone or {}).get("polygon_coords_json"))
+        if feats is None:
             return None
+        brightness, texture = feats
 
-        # Low-confidence custom-model hints BIAS the luminance reading
-        # so a borderline frame breaks toward the model's vote instead
-        # of falling into the dead band. The bias is small (±10/255)
-        # so high-conf hits still dominate.
+        dark_thr     = float(extra.get("dark_threshold",     40))   # below → dark
+        bright_thr   = float(extra.get("bright_threshold",   70))   # above → bright
+        texture_low  = float(extra.get("texture_low",       100))   # below → smooth
+        texture_high = float(extra.get("texture_high",      500))   # above → busy interior
+
+        # Low-confidence model hints nudge brightness so a borderline
+        # frame leans toward the model's vote (±10/255).
         if open_best > 0 or closed_best > 0:
-            lum += 10 * (open_best - closed_best)
+            brightness += 10 * (open_best - closed_best)
 
-        if lum <= dark_thr:
-            return 0
-        if lum >= bright_thr:
-            return 1
-        return None
+        # Decisive brightness ends → trust it directly.
+        if brightness <= dark_thr:
+            # Dark AND smooth = definitely a closed shutter. Dark but
+            # textured (rare: dim interior visible) is still closed —
+            # the lights-off interior reads dark.
+            return self.CLOSED
+        if brightness >= bright_thr:
+            # Bright. If the interior texture is also there it's a
+            # confident OPEN; bright-but-smooth (e.g. a lit but blank
+            # roller half-raised) is ambiguous → PARTIAL.
+            return self.OPEN if texture >= texture_low else self.PARTIAL
+
+        # Mid brightness — the old dead band. Use texture to break it
+        # instead of returning None: a visible interior means OPEN, a
+        # smooth face means CLOSED, anything between is a real PARTIAL.
+        if texture >= texture_high:
+            return self.OPEN
+        if texture <= texture_low:
+            return self.CLOSED
+        return self.PARTIAL
+
+    @staticmethod
+    def _zone_features(frame_bgr, polygon_norm) -> tuple[float, float] | None:
+        """(mean_brightness, laplacian_variance) inside the polygon.
+        Brightness 0..255; texture is the variance of the Laplacian —
+        a smooth shutter face is near 0, a busy store interior is high.
+        Returns None if the polygon is invalid or cv2 is unavailable."""
+        try:
+            import numpy as np
+            import cv2
+        except ImportError:
+            return None
+        if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
+            return None
+        h, w = frame_bgr.shape[:2]
+        if not polygon_norm or len(polygon_norm) < 3:
+            # Require an explicit shutter polygon — a global crop fired
+            # false closures on every dim camera at night.
+            return None
+        try:
+            pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in polygon_norm], dtype=np.int32)
+            xs, ys = pts[:, 0], pts[:, 1]
+            x0, x1 = max(0, xs.min()), min(w, xs.max())
+            y0, y1 = max(0, ys.min()), min(h, ys.max())
+            if x1 <= x0 or y1 <= y0:
+                return None
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            # Mask brightness to the polygon; texture on the bbox crop
+            # (Laplacian needs a dense rectangle, not a masked sparse set).
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask, [pts], 255)
+            masked_pixels = gray[mask > 0]
+            if masked_pixels.size == 0:
+                return None
+            brightness = float(masked_pixels.mean())
+            crop = gray[y0:y1, x0:x1]
+            texture = float(cv2.Laplacian(crop, cv2.CV_64F).var())
+            return brightness, texture
+        except Exception:
+            return None
 
     def _commit_state(self, camera_id: int, observed: int) -> int:
         """Apply the consecutive-frames hysteresis. Returns the
@@ -287,8 +345,8 @@ class ShutterDetector(Detector):
                 "Shutter transition: camera %s %s -> %s "
                 "(confirmed after %d consecutive frames)",
                 camera_id,
-                "open"   if committed == 1 else "closed",
-                "open"   if observed  == 1 else "closed",
+                self._STATE_NAME.get(committed, "?"),
+                self._STATE_NAME.get(observed, "?"),
                 run,
             )
             self._last_state[camera_id] = observed
@@ -296,36 +354,6 @@ class ShutterDetector(Detector):
             return observed
         self._pending[camera_id] = (candidate, run)
         return committed
-
-    @staticmethod
-    def _zone_luminance(frame_bgr, polygon_norm) -> float | None:
-        """Mean grayscale luminance (0..255) inside the polygon. Returns
-        None if the polygon is invalid or pixel ops fail (e.g. cv2 missing
-        in a stripped image)."""
-        try:
-            import numpy as np
-            import cv2
-        except ImportError:
-            return None
-        if frame_bgr is None or frame_bgr.size == 0:
-            return None
-        h, w = frame_bgr.shape[:2]
-        if not polygon_norm or len(polygon_norm) < 3:
-            # Bug-fix: do NOT fall back to a global frame region. Earlier
-            # code sampled the bottom third, which produced false closures
-            # at night on every camera. Operators must draw a polygon.
-            return None
-        try:
-            pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in polygon_norm], dtype=np.int32)
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.fillPoly(mask, [pts], 255)
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            pixels = gray[mask > 0]
-            if pixels.size == 0:
-                return None
-            return float(pixels.mean())
-        except Exception:
-            return None
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -356,10 +384,20 @@ class ShutterDetector(Detector):
         else:
             state = self._commit_state(ctx.camera_id, observed)
 
-        # Metric.
+        # Track how long we've been in PARTIAL so the "stuck" rule can
+        # fire after PARTIAL_STUCK_SECONDS. Clear the timer whenever we
+        # leave PARTIAL.
+        now = time.time()
+        if state == self.PARTIAL:
+            self._partial_since.setdefault(ctx.camera_id, now)
+        else:
+            self._partial_since.pop(ctx.camera_id, None)
+
+        # Metric — open=1.0, partial=0.5, closed=0.0.
         if ctx.db is not None:
             from app.analytics import recorder
-            recorder.record(ctx.db, "shutter_open", float(state),
+            recorder.record(ctx.db, "shutter_open",
+                            self._STATE_METRIC.get(state, 0.0),
                             camera_id=ctx.camera_id, store_id=ctx.store_id,
                             zone_id=(zone or {}).get("id"), aggregator="last")
 
@@ -369,10 +407,8 @@ class ShutterDetector(Detector):
             from app.utils.business_hours import is_open, localised_now
             now_local = localised_now(ctx.store_timezone)
             is_open_now = is_open(ctx.business_hours, now_local)
-            mismatch_open_after_hours  = (state == 1 and not is_open_now)
-            mismatch_closed_in_hours   = (state == 0 and is_open_now)
-
-            now = time.time()
+            mismatch_open_after_hours  = (state == self.OPEN and not is_open_now)
+            mismatch_closed_in_hours   = (state == self.CLOSED and is_open_now)
             if mismatch_open_after_hours and now - self._fired.get((ctx.camera_id, "open_after"), 0) > 300:
                 self._fired[(ctx.camera_id, "open_after")] = now
                 out.append(DetectionEvent(
@@ -398,7 +434,7 @@ class ShutterDetector(Detector):
             # Distinct from the generic "closed during hours" rule so
             # the dashboard can flag late openings specifically.
             opening = self._first_opening_today(ctx.business_hours, now_local)
-            if (state == 0 and opening is not None
+            if (state == self.CLOSED and opening is not None
                     and 0 <= (now_local - opening).total_seconds() <= 30 * 60):
                 day_key = now_local.date().isoformat()
                 if not self._opening_alerted.get((ctx.camera_id, "still_closed_at_opening", day_key)):
@@ -412,6 +448,25 @@ class ShutterDetector(Detector):
                                "rule": "still_closed_at_opening",
                                "opening_time": opening.strftime("%H:%M")},
                     ))
+
+        # "Stuck partially open/closed" — independent of business hours
+        # because a half-rolled shutter is a fault any time of day
+        # (jammed motor, obstruction). Fires once per sustained run,
+        # re-arms only after the shutter leaves PARTIAL.
+        partial_since = self._partial_since.get(ctx.camera_id)
+        if (state == self.PARTIAL and partial_since is not None
+                and now - partial_since >= self.PARTIAL_STUCK_SECONDS
+                and now - self._fired.get((ctx.camera_id, "partial_stuck"), 0) > 600):
+            self._fired[(ctx.camera_id, "partial_stuck")] = now
+            mins = int((now - partial_since) / 60)
+            out.append(DetectionEvent(
+                detection_type=self.detection_type, cls="partial_stuck",
+                confidence=1.0, bbox_norm=[0, 0, 1, 1],
+                zone_id=(zone or {}).get("id"),
+                extra={"priority": "high", "shutter_state": "partial",
+                       "store_id": ctx.store_id, "rule": "partial_stuck",
+                       "stuck_minutes": mins},
+            ))
         return out
 
     @staticmethod
