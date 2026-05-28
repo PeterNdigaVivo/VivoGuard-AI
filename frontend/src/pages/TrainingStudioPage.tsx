@@ -32,7 +32,10 @@ export default function TrainingStudioPage() {
   return (
     <div className="p-6">
       <PageHeader title="AI Training Studio"
-        actions={<Link to="/training/shutter"><Button variant="ghost">Shutter training →</Button></Link>} />
+        actions={<div className="flex gap-2">
+          <Link to="/training/shutter"><Button variant="ghost">Shutter training →</Button></Link>
+          <Link to="/training/uniform"><Button variant="ghost">Uniform training →</Button></Link>
+        </div>} />
 
       {/* New dataset form */}
       <Card className="p-4 mb-6">

@@ -521,3 +521,209 @@ def shutter_deploy(model_id: int, camera_ids: list[int],
     model.deployed = True
     db.commit()
     return {"deployed_to": updated, "model_id": model_id}
+
+
+# ====================================================================
+# Uniform-compliance classification training data collection
+# ====================================================================
+# Same frame→label flow as shutter, with four labels and a 'counter'
+# zone for the "already configured" hint. Kept as its own routes for
+# clarity; shares the TrainingSample table (detector_type="uniform").
+
+UNIFORM_LABELS = {"uniform_ok", "uniform_violation", "no_lanyard", "civilian"}
+
+
+def _uniform_sample_root(label: str) -> Path:
+    from app.config import settings
+    p = Path(settings.datasets_dir).parent / "training" / "uniform" / label
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+@router.get("/uniform/cameras")
+def uniform_cameras(db: Session = Depends(get_db),
+                    _u=Depends(require_role("admin", "operator", "viewer"))):
+    """All ai_enabled cameras with a 'counter' zone flag + per-label
+    sample counts for the uniform detector."""
+    from app.models import Zone, Store, TrainingSample
+    from sqlalchemy import func
+
+    counter_cam_ids = {
+        z.camera_id for z in db.query(Zone).all()
+        if ({"counter", "staff"} & set(z.detection_types_json or [])) and z.camera_id
+    }
+    cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
+    cam_ids = [c.id for c in cams]
+    counts: dict[tuple[int, str], int] = {}
+    if cam_ids:
+        for cam_id, label, n in (
+            db.query(TrainingSample.camera_id, TrainingSample.label, func.count(TrainingSample.id))
+              .filter(TrainingSample.detector_type == "uniform",
+                      TrainingSample.camera_id.in_(cam_ids))
+              .group_by(TrainingSample.camera_id, TrainingSample.label).all()
+        ):
+            counts[(cam_id, label)] = int(n)
+    store_names = {s.id: s.name for s in db.query(Store).all()}
+    out = []
+    for cam in cams:
+        out.append({
+            "camera_id": cam.id,
+            "camera_name": cam.name,
+            "store_id": cam.store_id,
+            "store_name": store_names.get(cam.store_id) if cam.store_id else None,
+            "has_counter_zone": cam.id in counter_cam_ids,
+            "counts": {l: counts.get((cam.id, l), 0) for l in UNIFORM_LABELS},
+        })
+    out.sort(key=lambda c: ((c["store_name"] or "~"), c["camera_name"]))
+    return out
+
+
+@router.post("/uniform/capture")
+async def uniform_capture(camera_id: int, label: str,
+                          db: Session = Depends(get_db),
+                          user=Depends(require_role("admin", "operator"))):
+    """Grab the current frame from `camera_id`, store it tagged `label`
+    (uniform_ok|uniform_violation|no_lanyard|civilian)."""
+    import base64
+    from datetime import datetime, timezone
+    from app.models import TrainingSample
+    from app.stream.frame_buffer import FrameBuffer
+
+    label = (label or "").lower().strip()
+    if label not in UNIFORM_LABELS:
+        raise HTTPException(400, f"label must be one of {sorted(UNIFORM_LABELS)}")
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    data = FrameBuffer().latest_jpeg(camera_id)
+    if not data:
+        pw = decrypt(cam.password_encrypted or "")
+        rtsp = build_rtsp_url(brand=cam.brand, host=cam.host, port=cam.rtsp_port,
+                              username=cam.username, password=pw,
+                              channel=cam.channel_number,
+                              override=cam.rtsp_url_override, subtype=0)
+        b64 = await grab_thumbnail(rtsp, timeout=15)
+        if not b64:
+            raise HTTPException(503, "could not grab a frame from this camera")
+        data = base64.b64decode(b64)
+
+    ts = datetime.now(timezone.utc)
+    fname = f"{camera_id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+    path = _uniform_sample_root(label) / fname
+    path.write_bytes(data)
+    sample = TrainingSample(
+        detector_type="uniform", label=label,
+        camera_id=camera_id, store_id=cam.store_id,
+        frame_path=str(path), captured_at=ts,
+        labeled_by=getattr(user, "id", None),
+    )
+    db.add(sample); db.commit(); db.refresh(sample)
+    return {"id": sample.id, "label": label, "captured_at": ts.isoformat()}
+
+
+@router.get("/uniform/samples")
+def uniform_samples(camera_id: int, label: str | None = None,
+                    db: Session = Depends(get_db),
+                    _u=Depends(require_role("admin", "operator", "viewer"))):
+    from app.models import TrainingSample
+    q = (db.query(TrainingSample)
+           .filter(TrainingSample.detector_type == "uniform",
+                   TrainingSample.camera_id == camera_id))
+    if label:
+        q = q.filter(TrainingSample.label == label.lower())
+    return [
+        {"id": s.id, "label": s.label,
+         "captured_at": s.captured_at.isoformat() if s.captured_at else None,
+         "file_url": f"/api/training/uniform/samples/{s.id}/file"}
+        for s in q.order_by(TrainingSample.id.desc()).limit(500).all()
+    ]
+
+
+@router.get("/uniform/samples/{sample_id}/file")
+def uniform_sample_file(sample_id: int, db: Session = Depends(get_db),
+                        _u=Depends(require_role("admin", "operator", "viewer"))):
+    from app.models import TrainingSample
+    s = db.get(TrainingSample, sample_id)
+    if not s:
+        raise HTTPException(404, "sample not found")
+    p = Path(s.frame_path)
+    if not p.exists():
+        raise HTTPException(404, "file missing on disk")
+    return FileResponse(str(p))
+
+
+@router.delete("/uniform/samples/{sample_id}")
+def uniform_sample_delete(sample_id: int, db: Session = Depends(get_db),
+                          _u=Depends(require_role("admin", "operator"))):
+    from app.models import TrainingSample
+    s = db.get(TrainingSample, sample_id)
+    if not s:
+        raise HTTPException(404, "sample not found")
+    try:
+        Path(s.frame_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    db.delete(s); db.commit()
+    return {"deleted": sample_id}
+
+
+@router.post("/uniform/train")
+def uniform_train_start(store_id: int, camera_id: int | None = None,
+                        db: Session = Depends(get_db),
+                        _u=Depends(require_role("admin", "operator"))):
+    """Kick off YOLOv8n-cls uniform training for a store. Requires >=30
+    frames per class."""
+    from sqlalchemy import func
+    from app.models import TrainingSample
+    rows = dict(
+        db.query(TrainingSample.label, func.count(TrainingSample.id))
+          .filter(TrainingSample.detector_type == "uniform",
+                  TrainingSample.store_id == store_id)
+          .group_by(TrainingSample.label).all()
+    )
+    labels = ("uniform_ok", "uniform_violation", "no_lanyard", "civilian")
+    short = {l: int(rows.get(l, 0)) for l in labels if int(rows.get(l, 0)) < 30}
+    if short:
+        raise HTTPException(
+            400, "Need >=30 frames per class. Short: " +
+            ", ".join(f"{k}={v}" for k, v in short.items()))
+    from app.tasks.uniform_training import train_uniform_model
+    train_uniform_model.delay(store_id, camera_id)
+    return {"started": True, "store_id": store_id}
+
+
+@router.get("/uniform/train/status")
+def uniform_train_status(store_id: int,
+                         _u=Depends(require_role("admin", "operator", "viewer"))):
+    import json
+    import redis
+    from app.config import settings
+    r = redis.from_url(settings.redis_url, decode_responses=True)
+    raw = r.get(f"vg:uniform_train:status:{store_id}")
+    if not raw:
+        return {"state": "idle"}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"state": "idle"}
+
+
+@router.post("/uniform/deploy")
+def uniform_deploy(model_id: int, camera_ids: list[int],
+                   db: Session = Depends(get_db),
+                   _u=Depends(require_role("admin", "operator"))):
+    """Assign a trained uniform model to the given cameras so the
+    UniformComplianceDetector uses it instead of the colour rules."""
+    model = db.get(AIModel, model_id)
+    if not model:
+        raise HTTPException(404, "model not found")
+    updated = []
+    for cid in camera_ids:
+        cam = db.get(Camera, cid)
+        if cam:
+            cam.ai_model_id = model_id
+            updated.append(cid)
+    model.deployed = True
+    db.commit()
+    return {"deployed_to": updated, "model_id": model_id}
