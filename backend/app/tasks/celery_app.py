@@ -30,6 +30,7 @@ celery_app = Celery(
         "app.tasks.staff_classifier",
         "app.tasks.briefings",
         "app.tasks.alerting",
+        "app.tasks.shutter_training",
     ],
 )
 celery_app.conf.update(

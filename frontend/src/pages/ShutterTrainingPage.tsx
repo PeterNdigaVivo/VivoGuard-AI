@@ -33,6 +33,21 @@ interface Sample {
   captured_at: string | null
   file_url: string
 }
+interface TrainStatus {
+  state: 'idle' | 'preparing' | 'training' | 'done' | 'failed'
+  message?: string
+  epoch?: number
+  total_epochs?: number
+  model_id?: number
+  candidate_cameras?: number[]
+  report?: {
+    accuracy: number | null
+    precision_macro?: number
+    recall_macro?: number
+    per_class?: Record<string, { precision: number; recall: number }>
+    recommendation?: string
+  }
+}
 
 export default function ShutterTrainingPage() {
   const [cameras, setCameras] = useState<ShutterCamera[]>([])
@@ -44,8 +59,10 @@ export default function ShutterTrainingPage() {
   const [msg, setMsg] = useState<string | null>(null)
   const [autoCapture, setAutoCapture] = useState(false)
   const autoTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [train, setTrain] = useState<TrainStatus>({ state: 'idle' })
 
   const current = cameras.find(c => c.camera_id === selected) || null
+  const storeId = current?.store_id ?? null
 
   function loadCameras() {
     api<ShutterCamera[]>('/training/shutter/cameras')
@@ -115,10 +132,49 @@ export default function ShutterTrainingPage() {
     return () => { if (autoTimer.current) clearInterval(autoTimer.current) }
   }, [autoCapture, selected])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Poll training status for the selected store while a job is live.
+  useEffect(() => {
+    if (storeId === null) return
+    let alive = true
+    const poll = () => {
+      api<TrainStatus>(`/training/shutter/train/status?store_id=${storeId}`)
+        .then(s => { if (alive) setTrain(s) })
+        .catch(() => {})
+    }
+    poll()
+    const t = setInterval(poll, 4_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [storeId])
+
+  async function startTraining() {
+    if (storeId === null) return
+    setMsg(null)
+    try {
+      await api(`/training/shutter/train?store_id=${storeId}`, { method: 'POST' })
+      setTrain({ state: 'preparing', message: 'Queued…' })
+    } catch (e) {
+      setMsg(`Could not start training: ${e}`)
+    }
+  }
+
+  async function deploy() {
+    if (!train.model_id || !train.candidate_cameras?.length) return
+    try {
+      await api('/training/shutter/deploy', {
+        method: 'POST',
+        body: { model_id: train.model_id, camera_ids: train.candidate_cameras },
+      })
+      setMsg(`Deployed model #${train.model_id} to ${train.candidate_cameras.length} camera(s).`)
+    } catch (e) {
+      setMsg(`Deploy failed: ${e}`)
+    }
+  }
+
   const counts = current?.counts ?? { open: 0, closed: 0, partial: 0 }
   const ready = counts.open >= MIN_PER_CLASS &&
                 counts.closed >= MIN_PER_CLASS &&
                 counts.partial >= MIN_PER_CLASS
+  const training = train.state === 'preparing' || train.state === 'training'
 
   return (
     <div className="p-6 space-y-4">
@@ -209,8 +265,57 @@ export default function ShutterTrainingPage() {
               <div className={'mt-3 text-sm rounded px-3 py-2 ' +
                 (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600')}>
                 {ready
-                  ? '✅ Enough frames to train — head to the training pipeline.'
+                  ? '✅ Enough frames to train.'
                   : `Collect at least ${MIN_PER_CLASS} frames per class to enable training.`}
+              </div>
+
+              {/* Training control + live progress + report. */}
+              <div className="mt-3 border-t pt-3">
+                <div className="flex items-center gap-3">
+                  <Button onClick={startTraining} disabled={!ready || training}>
+                    {training ? 'Training…' : 'Start training'}
+                  </Button>
+                  {train.state === 'training' && train.total_epochs ? (
+                    <span className="text-xs text-slate-600">
+                      Epoch {train.epoch ?? 0}/{train.total_epochs}
+                    </span>
+                  ) : train.state === 'preparing' ? (
+                    <span className="text-xs text-slate-600">{train.message ?? 'Preparing…'}</span>
+                  ) : null}
+                </div>
+
+                {train.state === 'training' && train.total_epochs ? (
+                  <div className="h-2 bg-slate-100 rounded mt-2">
+                    <div className="h-2 rounded bg-blue-500"
+                         style={{ width: `${Math.max(2, ((train.epoch ?? 0) / train.total_epochs) * 100)}%` }} />
+                  </div>
+                ) : null}
+
+                {train.state === 'failed' && (
+                  <div className="text-xs text-red-600 mt-2">{train.message}</div>
+                )}
+
+                {train.state === 'done' && train.report && (
+                  <div className="mt-3 text-sm bg-slate-50 rounded p-3">
+                    <div className="font-medium mb-1">Training complete</div>
+                    <div className="text-xs space-y-0.5 text-slate-700">
+                      {train.report.accuracy !== null && (
+                        <div>Accuracy: <strong>{Math.round((train.report.accuracy ?? 0) * 100)}%</strong></div>
+                      )}
+                      {train.report.per_class && Object.entries(train.report.per_class).map(([l, pc]) => (
+                        <div key={l} className="capitalize">
+                          {l}: {Math.round(pc.precision * 100)}% precision · {Math.round(pc.recall * 100)}% recall
+                        </div>
+                      ))}
+                      <div className="mt-1 text-slate-600">{train.report.recommendation}</div>
+                    </div>
+                    {train.model_id && train.candidate_cameras?.length ? (
+                      <Button className="mt-2" onClick={deploy}>
+                        Deploy to {train.candidate_cameras.length} camera(s)
+                      </Button>
+                    ) : null}
+                  </div>
+                )}
               </div>
             </Card>
           </div>

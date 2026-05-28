@@ -446,3 +446,67 @@ def shutter_sample_delete(sample_id: int, db: Session = Depends(get_db),
         pass
     db.delete(s); db.commit()
     return {"deleted": sample_id}
+
+
+@router.post("/shutter/train")
+def shutter_train_start(store_id: int, camera_id: int | None = None,
+                        db: Session = Depends(get_db),
+                        _u=Depends(require_role("admin", "operator"))):
+    """Kick off YOLOv8n-cls training for a store's shutter samples.
+    Requires ≥50 frames per class. Runs as a background Celery task;
+    poll /shutter/train/status."""
+    from sqlalchemy import func
+    from app.models import TrainingSample
+    rows = dict(
+        db.query(TrainingSample.label, func.count(TrainingSample.id))
+          .filter(TrainingSample.detector_type == "shutter",
+                  TrainingSample.store_id == store_id)
+          .group_by(TrainingSample.label).all()
+    )
+    short = {l: int(rows.get(l, 0)) for l in ("open", "closed", "partial")
+             if int(rows.get(l, 0)) < 50}
+    if short:
+        raise HTTPException(
+            400,
+            f"Need ≥50 frames per class. Short: " +
+            ", ".join(f"{k}={v}" for k, v in short.items()))
+    from app.tasks.shutter_training import train_shutter_model
+    train_shutter_model.delay(store_id, camera_id)
+    return {"started": True, "store_id": store_id}
+
+
+@router.get("/shutter/train/status")
+def shutter_train_status(store_id: int,
+                         _u=Depends(require_role("admin", "operator", "viewer"))):
+    """Latest training status for a store (polled by the UI)."""
+    import json
+    import redis
+    from app.config import settings
+    r = redis.from_url(settings.redis_url, decode_responses=True)
+    raw = r.get(f"vg:shutter_train:status:{store_id}")
+    if not raw:
+        return {"state": "idle"}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"state": "idle"}
+
+
+@router.post("/shutter/deploy")
+def shutter_deploy(model_id: int, camera_ids: list[int],
+                   db: Session = Depends(get_db),
+                   _u=Depends(require_role("admin", "operator"))):
+    """Assign a trained shutter model to the given cameras so the
+    ShutterDetector uses it instead of the rule-based path."""
+    model = db.get(AIModel, model_id)
+    if not model:
+        raise HTTPException(404, "model not found")
+    updated = []
+    for cid in camera_ids:
+        cam = db.get(Camera, cid)
+        if cam:
+            cam.ai_model_id = model_id
+            updated.append(cid)
+    model.deployed = True
+    db.commit()
+    return {"deployed_to": updated, "model_id": model_id}
