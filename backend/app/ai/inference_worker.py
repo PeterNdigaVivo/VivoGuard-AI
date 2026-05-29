@@ -136,11 +136,12 @@ _SKIP_ALERT_TYPES: set[str] = {
 
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
-                   camera_name: str | None = None) -> int:
+                   camera_name: str | None = None,
+                   suppress_alert: bool = False) -> int:
     # Capture an annotated snapshot for the alert-worthy detector types
     # so the Alerts page can show the picture, not just the label.
     thumb_path = None
-    if ev.detection_type in SNAPSHOT_TYPES and frame_bgr is not None:
+    if ev.detection_type in SNAPSHOT_TYPES and frame_bgr is not None and not suppress_alert:
         from app.ai.snapshot import capture_alert_snapshot
         thumb_path = capture_alert_snapshot(
             frame_bgr, ev.bbox_norm, ev.detection_type, camera_id,
@@ -158,13 +159,42 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     db.add(rec)
     db.flush()
     # Operator-visible alert — only for detectors NOT in the silent
-    # metric set. The DetectionEvent itself is still persisted so the
-    # detector activity table and ML-feedback paths see every event.
-    if ev.detection_type not in _SKIP_ALERT_TYPES:
+    # metric set, and not explicitly suppressed by the caller. The
+    # DetectionEvent itself is still persisted so the detector activity
+    # table and ML-feedback paths see every event.
+    if ev.detection_type not in _SKIP_ALERT_TYPES and not suppress_alert:
         db.add(Alert(event_id=rec.id, status="new"))
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
     return rec.id
+
+
+# Zone tags that make a bare "person" detection alert-worthy even
+# during business hours — these are areas people shouldn't be in.
+_PERSON_RESTRICTED_TAGS = {"restricted", "intrusion", "trespass", "high_value", "stockroom"}
+
+
+def _person_alert_warranted(ev, zones: list[dict], business_hours, store_tz: str) -> bool:
+    """A plain person detection only deserves an alert when it's
+    genuinely notable: after hours, OR inside a restricted/staff-only
+    zone. During business hours in a normal customer area it's just a
+    customer — noise — so we persist the metric but skip the alert."""
+    # Restricted-zone check — find the event's zone among the list.
+    if ev.zone_id is not None:
+        for z in zones:
+            if z.get("id") == ev.zone_id:
+                if _PERSON_RESTRICTED_TAGS & set(z.get("detection_types_json") or []):
+                    return True
+                break
+    # After-hours check.
+    try:
+        from app.utils.business_hours import is_open, localised_now
+        if business_hours is not None and store_tz:
+            return not is_open(business_hours, localised_now(store_tz))
+    except Exception:
+        pass
+    # No business hours configured → treat as notable (safer to alert).
+    return business_hours is None
 
 
 def run_for_camera(camera_id: int, *, max_seconds: int = 0,
@@ -246,9 +276,18 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                     continue
                 try:
                     for ev in det.evaluate(ctx):
+                        # A bare person detection during business hours
+                        # in a normal customer zone is just a customer —
+                        # persist the metric but don't raise an alert.
+                        suppress = (ev.detection_type == "person" and
+                                    not _person_alert_warranted(
+                                        ev, zones, business_hours, store_tz))
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
-                                             camera_name=cam.name)
+                                             camera_name=cam.name,
+                                             suppress_alert=suppress)
+                        if suppress:
+                            continue  # not an operator-facing event
                         events_emitted.append({
                             "id": eid,
                             "camera_id": camera_id,

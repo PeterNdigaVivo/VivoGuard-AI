@@ -80,7 +80,18 @@ _SEVERITY_LABEL: dict[str, str] = {
 }
 
 
-def _severity_label(detection_type: str | None) -> str:
+def _severity_label(detection_type: str | None,
+                    event: DetectionEvent | None = None,
+                    zone: Zone | None = None, store=None) -> str:
+    # Person detection is context-aware: customer = INFO, after-hours
+    # or restricted-zone = URGENT. When called without context (e.g.
+    # the summary count), a persisted person ALERT is always URGENT —
+    # the worker only creates one when after-hours or restricted.
+    if detection_type == "person":
+        if event is not None:
+            ctxt = _person_context(event, zone, store)
+            return "INFO" if ctxt == "customer" else "URGENT"
+        return "URGENT"
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
 
 
@@ -108,9 +119,16 @@ _PLAIN_TITLES: dict[str, str] = {
 }
 
 
-def _plain_title(event: DetectionEvent) -> str:
+def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) -> str:
     dt = event.detection_type or "alert"
     extra = event.extra or {}
+    if dt == "person":
+        ctxt = _person_context(event, zone, store)
+        if ctxt == "restricted":
+            return "Unauthorised Person in Staff Area"
+        if ctxt == "after_hours":
+            return "Person Detected After Hours"
+        return "Customer in Store"
     if dt == "shutter":
         rule = extra.get("rule", "")
         state = extra.get("shutter_state", "")
@@ -178,8 +196,22 @@ _WHAT_TO_DO: dict[str, list[str]] = {
 }
 
 
-def _what_to_do(event: DetectionEvent, store) -> list[str]:
-    steps = _WHAT_TO_DO.get(event.detection_type or "")
+def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[str]:
+    dt = event.detection_type or ""
+    if dt == "person":
+        ctxt = _person_context(event, zone, store)
+        if ctxt == "customer":
+            return []   # no action — it's just a customer
+        if ctxt == "restricted":
+            steps = ["Check who is in the staff area",
+                     "Ask the person to leave if unauthorised",
+                     "Mark resolved when the area is clear"]
+        else:  # after_hours
+            steps = ["Check the live camera now",
+                     "Call building security: {security_phone}",
+                     "Do not enter the store alone"]
+    else:
+        steps = _WHAT_TO_DO.get(dt)
     if not steps:
         return ["Check the live camera",
                 "Decide whether action is needed",
@@ -233,13 +265,64 @@ def _extract(extra: dict | None, *keys, default=None):
     return default
 
 
-def _title(event: DetectionEvent, camera: Camera | None) -> str:
+# Zone tags that make a person detection "restricted" (staff-only).
+_PERSON_RESTRICTED_TAGS = {"restricted", "intrusion", "trespass", "high_value", "stockroom"}
+
+
+def _zone_restricted(zone: Zone | None) -> bool:
+    if zone is None:
+        return False
+    return bool(_PERSON_RESTRICTED_TAGS & set(zone.detection_types_json or []))
+
+
+def _is_after_hours(event: DetectionEvent, store) -> bool:
+    """True if the event happened outside the store's business hours.
+    Falls back to True (notable) when hours aren't configured."""
+    bh = getattr(store, "business_hours_json", None) if store else None
+    if not bh:
+        return store is None or bh is None  # no hours → treat as notable
+    try:
+        from app.utils.business_hours import is_open
+        from zoneinfo import ZoneInfo
+        tz = getattr(store, "timezone", None) or "Africa/Nairobi"
+        ts = event.timestamp
+        if ts is not None:
+            if ts.tzinfo is None:
+                from datetime import timezone as _tz
+                ts = ts.replace(tzinfo=_tz.utc)
+            local = ts.astimezone(ZoneInfo(tz))
+            return not is_open(bh, local)
+    except Exception:
+        pass
+    return False
+
+
+def _person_context(event: DetectionEvent, zone: Zone | None, store) -> str:
+    """Classify a person detection: 'restricted' | 'after_hours' |
+    'customer'. Drives the context-aware title/body/severity."""
+    if _zone_restricted(zone):
+        return "restricted"
+    if _is_after_hours(event, store):
+        return "after_hours"
+    return "customer"
+
+
+def _title(event: DetectionEvent, camera: Camera | None,
+           zone: Zone | None = None, store=None) -> str:
     """Human-readable title for an alert. Embeds the camera name so
     operators triaging a long feed know WHICH camera fired."""
     cam = camera.name if camera else "unknown camera"
     dt = event.detection_type or "alert"
     extra = event.extra or {}
     icon = _icon(dt)
+
+    if dt == "person":
+        ctxt = _person_context(event, zone, store)
+        if ctxt == "restricted":
+            return f"🚨 Unauthorised Person in Staff Area — {cam}"
+        if ctxt == "after_hours":
+            return f"🚨 Person Detected After Hours — {cam}"
+        return f"👤 Customer in Store — {cam}"
 
     if dt == "staff_present":
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
@@ -289,13 +372,31 @@ def _title(event: DetectionEvent, camera: Camera | None) -> str:
     return f"{icon} {label} — {cam}"
 
 
-def _body(event: DetectionEvent, zone: Zone | None) -> str:
+def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
     """One-sentence description with the relevant operational
     implication. These are the bits store managers actually need to
     decide whether to act."""
     dt = event.detection_type or ""
     extra = event.extra or {}
     zone_name = zone.name if zone else None
+
+    if dt == "person":
+        ctxt = _person_context(event, zone, store)
+        when = ""
+        try:
+            if event.timestamp is not None:
+                when = " at " + event.timestamp.strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            pass
+        store_name = (getattr(store, "name", None) or "the store")
+        if ctxt == "restricted":
+            return (f"Someone was detected in a staff-only area{when}. "
+                    f"This area is restricted to staff members only.")
+        if ctxt == "after_hours":
+            return (f"Someone was seen inside {store_name}{when}, "
+                    f"outside opening hours. Please check immediately.")
+        return (f"A customer was detected in {store_name}{when}. "
+                f"This is normal during business hours.")
 
     if dt == "staff_present":
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
@@ -459,11 +560,11 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.zone_name      = zone.name if zone else None
     item.thumbnail_path = event.thumbnail_path
     item.severity       = _severity(event.detection_type)
-    item.severity_label = _severity_label(event.detection_type)
-    item.title          = _title(event, camera)
-    item.plain_title    = _plain_title(event)
-    item.body           = _body(event, zone)
-    item.what_to_do     = _what_to_do(event, store)
+    item.severity_label = _severity_label(event.detection_type, event, zone, store)
+    item.title          = _title(event, camera, zone, store)
+    item.plain_title    = _plain_title(event, zone, store)
+    item.body           = _body(event, zone, store)
+    item.what_to_do     = _what_to_do(event, store, zone)
     item.time_range     = _time_range(event, store)
     item.snapshot_url   = _snapshot_url(alert.id, event)
     return item
