@@ -46,6 +46,14 @@ export const alerts = {
   // Resolved is the everyday "I handled it" action — distinct from
   // confirm (which also feeds ML training as a true positive).
   resolve: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/resolve`, { method: 'POST' }),
+  // Bulk-resolve every still-new alert in the window. Mirrors the
+  // server-side filters the list uses so the operator clears exactly
+  // what's on screen, not the whole database.
+  resolveAll: (params: { store_id?: string | number; since?: string; until?: string } = {}) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
+    return api<{ resolved: number }>(`/alerts/resolve-all${q.toString() ? `?${q}` : ''}`, { method: 'POST' })
+  },
   // Append an investigation note. Server timestamps + author-stamps
   // each entry so the trail reads chronologically.
   addNote: (id: number, note: string) =>

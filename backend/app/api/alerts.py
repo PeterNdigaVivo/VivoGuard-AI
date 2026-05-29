@@ -824,6 +824,37 @@ def resolve(alert_id: int, db: Session = Depends(get_db),
     return AlertActionOut(id=a.id, status=a.status)
 
 
+@router.post("/resolve-all")
+def resolve_all(db: Session = Depends(get_db),
+                user: User = Depends(require_role("admin", "operator")),
+                store_id: Optional[int] = Query(None),
+                since: Optional[datetime] = Query(None),
+                until: Optional[datetime] = Query(None)):
+    """Bulk-mark every currently-NEW alert in the window (and optional
+    store filter) as resolved. Mirrors the per-alert /resolve action.
+    Returns the count actually flipped."""
+    q = (db.query(Alert)
+           .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .filter(Alert.status == "new"))
+    if store_id is not None:
+        q = q.filter(Camera.store_id == store_id)
+    if since:
+        q = q.filter(DetectionEvent.timestamp >= since)
+    if until:
+        q = q.filter(DetectionEvent.timestamp <= until)
+    now = datetime.now(timezone.utc)
+    n = 0
+    for a in q.all():
+        a.status = "confirmed"   # same bucket the per-alert /resolve uses
+        a.assigned_to = user.id
+        a.acknowledged_at = now
+        a.resolved_at = now
+        n += 1
+    db.commit()
+    return {"resolved": n}
+
+
 @router.post("/{alert_id}/note", response_model=AlertOut)
 def add_note(alert_id: int, body: AlertNoteIn,
              db: Session = Depends(get_db),

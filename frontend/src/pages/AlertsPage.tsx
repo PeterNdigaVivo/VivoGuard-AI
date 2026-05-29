@@ -57,6 +57,28 @@ export default function AlertsPage() {
 
   // Excel export — fetch with the bearer header (an <a href> can't
   // carry it) and trigger a download of the returned .xlsx blob.
+  async function resolveAll() {
+    // Use whatever filter the user can see — store + date window —
+    // so the bulk action mirrors the visible list, not the whole DB.
+    const newCount = items.filter(a => a.status === 'new').length
+    if (newCount === 0) { alert('There are no unresolved alerts to clear.'); return }
+    const label = storeId
+      ? stores.find(s => String(s.id) === storeId)?.name ?? 'this store'
+      : 'all stores'
+    if (!confirm(`Mark ${newCount} unresolved alert${newCount === 1 ? '' : 's'} `
+                 + `for ${label} (${range.label.toLowerCase()}) as resolved?`)) return
+    try {
+      const { resolved } = await alertsApi.resolveAll({
+        store_id: storeId || undefined,
+        since: range.since, until: range.until,
+      })
+      alert(`Resolved ${resolved} alert${resolved === 1 ? '' : 's'}.`)
+      reload()
+    } catch (e) {
+      alert(`Could not resolve: ${e}`)
+    }
+  }
+
   async function exportExcel() {
     const q = new URLSearchParams()
     if (storeId) q.set('store_id', storeId)
@@ -80,6 +102,10 @@ export default function AlertsPage() {
       <PageHeader title="Alerts" actions={
         <div className="flex items-center gap-2">
           <DateRangePicker value={range} onChange={setRange} />
+          <button onClick={resolveAll}
+                  className="px-3 py-1.5 rounded bg-slate-700 text-white text-sm hover:bg-slate-600">
+            ✅ Resolve all
+          </button>
           <button onClick={exportExcel}
                   className="px-3 py-1.5 rounded bg-emerald-600 text-white text-sm hover:bg-emerald-500">
             📊 Export to Excel
