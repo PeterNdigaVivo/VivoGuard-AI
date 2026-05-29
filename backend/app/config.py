@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     # ops team wanted a single number that gets every high-priority
     # nudge from the dashboard.
     dashboard_alert_to: str = "whatsapp:+25441418586"
+    # Phone numbers surfaced in the "What to do" alert steps so the
+    # guidance is actionable. Blank = the card shows a generic phrase
+    # ("building security", "IT support", "the store").
+    security_phone: str = ""
+    it_support_phone: str = ""
+    store_default_phone: str = ""
     webhook_url: str = ""
     webhook_auth_header: str = ""
 

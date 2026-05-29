@@ -74,11 +74,17 @@ const SEVERITY_BADGE: Record<'critical' | 'warning' | 'info' | 'default', string
   info:     'bg-sky-100 text-sky-700',
   default:  'bg-slate-100 text-slate-600',
 }
+// Traffic-light labels non-technical managers understand. Prefer the
+// server's `severity_label` (URGENT/ATTENTION/INFO); fall back to the
+// technical severity for older API responses.
 const SEVERITY_LABEL: Record<'critical' | 'warning' | 'info' | 'default', string> = {
-  critical: '🔴 Critical',
-  warning:  '🟡 Warning',
-  info:     '🔵 Info',
-  default:  'Info',
+  critical: '🔴 URGENT',
+  warning:  '🟡 ATTENTION',
+  info:     '🔵 INFO',
+  default:  '🔵 INFO',
+}
+const LABEL_FROM_SERVER: Record<string, string> = {
+  URGENT: '🔴 URGENT', ATTENTION: '🟡 ATTENTION', INFO: '🔵 INFO',
 }
 
 function sevKey(s: string | null): 'critical' | 'warning' | 'info' | 'default' {
@@ -132,11 +138,16 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
         {/* Left: title + body + actions */}
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1">
-            <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ' +
+            <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ' +
               SEVERITY_BADGE[sev]}>
-              {SEVERITY_LABEL[sev]}
+              {alert.severity_label
+                ? (LABEL_FROM_SERVER[alert.severity_label] ?? alert.severity_label)
+                : SEVERITY_LABEL[sev]}
             </span>
             <span className="text-xs text-slate-500">{formatTime(alert.created_at)}</span>
+            {alert.camera_name && (
+              <span className="text-xs text-slate-500">· {alert.camera_name}</span>
+            )}
             {alert.status !== 'new' && (
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
                 {alert.status}
@@ -149,11 +160,21 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
               </button>
             )}
           </div>
-          <div className="font-semibold text-slate-800">
-            {alert.title ?? (alert.detection_type ?? 'Alert')}
+          <div className="font-semibold text-slate-800 text-base">
+            {alert.plain_title ?? alert.title ?? (alert.detection_type ?? 'Alert')}
           </div>
           {alert.body && (
             <div className="text-sm text-slate-600 mt-1">{alert.body}</div>
+          )}
+
+          {/* What to do — plain-English steps for non-technical staff. */}
+          {alert.what_to_do && alert.what_to_do.length > 0 && (
+            <div className="mt-2 bg-slate-50 rounded p-2">
+              <div className="text-xs font-semibold text-slate-700 mb-1">What to do:</div>
+              <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-0.5">
+                {alert.what_to_do.map((s, i) => <li key={i}>{s}</li>)}
+              </ol>
+            </div>
           )}
           {/* When-it-happened line. Server-rendered in the camera's
               store-local timezone so it always reads as wall-clock
@@ -191,26 +212,22 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
               <>
                 <ActionBtn onClick={() => act(() => alertsApi.resolve(alert.id))}
                            tone="emerald" disabled={busy}>
-                  ✅ Resolved
-                </ActionBtn>
-                <ActionBtn onClick={() => act(() => alertsApi.confirm(alert.id))}
-                           tone="slate" disabled={busy}>
-                  Confirm (true)
+                  ✅ I handled this
                 </ActionBtn>
                 <ActionBtn onClick={() => act(() => alertsApi.dismiss(alert.id))}
                            tone="slate" disabled={busy}>
-                  Dismiss
+                  Not a problem
                 </ActionBtn>
               </>
             )}
             {alert.camera_id && (
               <Link to={`/live`}
                     className="px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">
-                👁️ View camera
+                📹 See Live Camera
               </Link>
             )}
             <ActionBtn onClick={() => setNoteOpen(o => !o)} tone="slate" disabled={busy}>
-              📋 Add note
+              📋 Write a note
             </ActionBtn>
             <ActionBtn onClick={() => setClipModal(true)} tone="slate" disabled={busy}>
               📹 View clip

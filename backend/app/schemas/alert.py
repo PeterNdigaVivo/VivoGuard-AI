@@ -31,8 +31,16 @@ class AlertOut(BaseModel):
     # we send. Keeps the SAME translation logic across the per-store
     # feed AND the chain /alerts page.
     severity: str | None = None        # 'critical' | 'warning' | 'info'
+    # Non-technical traffic-light label for store managers:
+    # 'URGENT' (red) | 'ATTENTION' (amber) | 'INFO' (blue).
+    severity_label: str | None = None
     title:    str | None = None        # "⚠️ Counter Unstaffed — Vivo Runda Cam 3"
+    # Plain-English heading with NO camera suffix, for the big card
+    # title ("Someone in Store After Hours").
+    plain_title: str | None = None
     body:     str | None = None        # plain-English description with context
+    # Up to 3 plain-English "what to do" steps for non-technical staff.
+    what_to_do: list[str] | None = None
     # Human-readable when-it-happened line. Duration-style events
     # render as "🕒 Between 9:30 PM and 9:55 PM (25 min)"; point-in-
     # time events as "🕒 Detected at 9:30 PM". Always in the camera's

@@ -16,8 +16,14 @@ export interface Alert {
   // frontend stops translating detection_type strings; it just
   // renders these.
   severity: 'critical' | 'warning' | 'info' | null
+  // Non-technical traffic-light label: 'URGENT' | 'ATTENTION' | 'INFO'.
+  severity_label: 'URGENT' | 'ATTENTION' | 'INFO' | null
   title: string | null
+  // Plain-English heading with no camera suffix ("Staff Not in Uniform").
+  plain_title: string | null
   body:  string | null
+  // Up to 3 plain-English "what to do" steps.
+  what_to_do: string[] | null
   // "🕒 Between 9:30 PM and 9:55 PM (25 min)" for duration events;
   // "🕒 Detected at 9:30 PM" for point-in-time events. Formatted in
   // the camera's store-local timezone.

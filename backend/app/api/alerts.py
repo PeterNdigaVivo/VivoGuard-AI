@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
@@ -61,6 +62,134 @@ _SEVERITY: dict[str, str] = {
 
 def _severity(detection_type: str | None) -> str:
     return _SEVERITY.get(detection_type or "", "info")
+
+
+# Non-technical traffic-light labels. Spec Part 3 mapping:
+#   URGENT (red)    — act now
+#   ATTENTION (amber) — act within ~15 min
+#   INFO (blue)     — for the record
+_SEVERITY_LABEL: dict[str, str] = {
+    "fight": "URGENT", "intrusion": "URGENT", "weapon": "URGENT",
+    "weapon_brandished": "URGENT", "fall": "URGENT", "trespass": "URGENT",
+    "fire": "URGENT", "smoke": "URGENT", "shrinkage": "URGENT",
+    "uniform_compliance": "ATTENTION", "shutter": "ATTENTION",
+    "queue": "ATTENTION", "queue_length": "ATTENTION",
+    "staff_present": "ATTENTION", "crowd": "ATTENTION",
+    "abandoned_object": "ATTENTION", "loitering": "ATTENTION",
+    "tailgating": "ATTENTION", "camera_offline": "ATTENTION",
+}
+
+
+def _severity_label(detection_type: str | None) -> str:
+    return _SEVERITY_LABEL.get(detection_type or "", "INFO")
+
+
+# Plain-English card heading (no camera suffix) — the big title a
+# non-technical manager reads first. Mirrors spec Part 2.
+_PLAIN_TITLES: dict[str, str] = {
+    "uniform_compliance": "Staff Not in Uniform",
+    "intrusion":          "Someone in Store After Hours",
+    "fight":              "Incident Detected — Check Immediately",
+    "crowd":              "Too Many People in One Area",
+    "trespass":           "Unauthorised Person in Staff Area",
+    "shrinkage":          "Suspicious Activity Near Products",
+    "fall":               "Person May Have Fallen — Check Now",
+    "queue":              "Long Queue at Checkout",
+    "queue_length":       "Long Queue at Checkout",
+    "staff_present":      "Counter Left Unattended",
+    "abandoned_object":   "Unattended Item Found",
+    "camera_offline":     "Camera Not Working",
+    "loitering":          "Person Lingering in One Area",
+    "weapon":             "Weapon Detected — Call Security",
+    "weapon_brandished":  "Weapon Detected — Call Security",
+    "fire":               "Possible Fire — Check Now",
+    "smoke":              "Possible Smoke — Check Now",
+    "tailgating":         "Two People Entered Together",
+}
+
+
+def _plain_title(event: DetectionEvent) -> str:
+    dt = event.detection_type or "alert"
+    extra = event.extra or {}
+    if dt == "shutter":
+        rule = extra.get("rule", "")
+        state = extra.get("shutter_state", "")
+        if rule == "still_closed_at_opening" or state == "closed":
+            return "Store Door Still Closed"
+        if rule == "open_after_hours" or state == "open":
+            return "Store Door Open After Hours"
+        if rule == "partial_stuck":
+            return "Store Door Stuck Part-Open"
+        return "Store Door Issue"
+    if dt == "uniform_compliance" and extra.get("rule") == "no_lanyard":
+        return "Staff Missing Name Tag"
+    return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
+
+
+# "What to do" steps per alert type — max 3, plain action words.
+# {placeholders} fill from settings so head office can wire real
+# numbers without code changes.
+_WHAT_TO_DO: dict[str, list[str]] = {
+    "intrusion": ["Check the live camera now",
+                  "Call building security: {security_phone}",
+                  "Do not enter the store alone"],
+    "trespass": ["Check the live camera now",
+                 "Call building security: {security_phone}",
+                 "Do not approach alone"],
+    "uniform_compliance": ["Remind the staff member to wear their uniform and name tag",
+                           "Check if it is a new staff member needing a uniform",
+                           "Mark as resolved once sorted"],
+    "shutter": ["Call the store: {store_phone}",
+                "Check if staff are on their way",
+                "Mark resolved when the store opens"],
+    "queue": ["Open a second till if available",
+              "Call a free staff member to help",
+              "Let waiting customers know"],
+    "queue_length": ["Open a second till if available",
+                     "Call a free staff member to help",
+                     "Let waiting customers know"],
+    "staff_present": ["Ask nearby staff to cover the counter",
+                      "Check if the staff member is on a break",
+                      "Make sure the counter is always covered"],
+    "camera_offline": ["Check the camera power cable is connected",
+                       "Restart the camera from the NVR",
+                       "Call IT support if still offline: {it_phone}"],
+    "fight": ["Check the live camera now",
+              "Send staff to the scene",
+              "Call building security: {security_phone}"],
+    "fall": ["Check the live camera now",
+             "Send help to the person",
+             "Call an ambulance if they are hurt"],
+    "crowd": ["Check the area on the live camera",
+              "Send a staff member to manage the crowd",
+              "Watch for safety and blocked exits"],
+    "shrinkage": ["Review the footage",
+                  "Send a staff member to the area discreetly",
+                  "Follow your loss-prevention steps"],
+    "abandoned_object": ["Check the live camera",
+                         "Send a staff member to inspect the item",
+                         "Call security if it looks suspicious"],
+    "weapon": ["Call building security immediately: {security_phone}",
+               "Keep staff and customers away from the area",
+               "Do not approach"],
+    "weapon_brandished": ["Call building security immediately: {security_phone}",
+                          "Keep staff and customers away from the area",
+                          "Do not approach"],
+}
+
+
+def _what_to_do(event: DetectionEvent, store) -> list[str]:
+    steps = _WHAT_TO_DO.get(event.detection_type or "")
+    if not steps:
+        return ["Check the live camera",
+                "Decide whether action is needed",
+                "Mark resolved when handled"]
+    store_phone = (getattr(store, "manager_phone", None)
+                   or getattr(settings, "store_default_phone", "") or "the store")
+    security_phone = getattr(settings, "security_phone", "") or "building security"
+    it_phone = getattr(settings, "it_support_phone", "") or "IT support"
+    return [s.format(store_phone=store_phone, security_phone=security_phone,
+                     it_phone=it_phone) for s in steps]
 
 
 # Per-type emoji prefix for the title — the spec called these out
@@ -330,8 +459,11 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.zone_name      = zone.name if zone else None
     item.thumbnail_path = event.thumbnail_path
     item.severity       = _severity(event.detection_type)
+    item.severity_label = _severity_label(event.detection_type)
     item.title          = _title(event, camera)
+    item.plain_title    = _plain_title(event)
     item.body           = _body(event, zone)
+    item.what_to_do     = _what_to_do(event, store)
     item.time_range     = _time_range(event, store)
     item.snapshot_url   = _snapshot_url(alert.id, event)
     return item

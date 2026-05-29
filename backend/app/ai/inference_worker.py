@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.detectors import DetectorRegistry
 from app.ai.detectors.base import DetectorContext
+from app.ai.snapshot import SNAPSHOT_TYPES
 from app.ai.tracker import IOUTracker
 from app.ai.yolov8_runner import infer
 from app.config import settings
@@ -133,7 +134,17 @@ _SKIP_ALERT_TYPES: set[str] = {
 }
 
 
-def _persist_event(db: Session, camera_id: int, ev, model_id: int | None) -> int:
+def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
+                   *, frame_bgr=None, store_name: str | None = None,
+                   camera_name: str | None = None) -> int:
+    # Capture an annotated snapshot for the alert-worthy detector types
+    # so the Alerts page can show the picture, not just the label.
+    thumb_path = None
+    if ev.detection_type in SNAPSHOT_TYPES and frame_bgr is not None:
+        from app.ai.snapshot import capture_alert_snapshot
+        thumb_path = capture_alert_snapshot(
+            frame_bgr, ev.bbox_norm, ev.detection_type, camera_id,
+            store_name=store_name, camera_name=camera_name)
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=ev.zone_id,
@@ -142,6 +153,7 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None) -> int
         bbox_json=ev.bbox_norm,
         extra=ev.extra or None,
         model_id=model_id,
+        thumbnail_path=thumb_path,
     )
     db.add(rec)
     db.flush()
@@ -210,11 +222,13 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             store_id = cam.store_id
             business_hours = None
             store_tz = "UTC"
+            store_name = None
             if store_id is not None:
                 store = db.get(Store, store_id)
                 if store:
                     business_hours = store.business_hours_json
                     store_tz = store.timezone or "UTC"
+                    store_name = store.name
 
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
@@ -232,7 +246,9 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                     continue
                 try:
                     for ev in det.evaluate(ctx):
-                        eid = _persist_event(db, camera_id, ev, cam.ai_model_id)
+                        eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
+                                             frame_bgr=frame, store_name=store_name,
+                                             camera_name=cam.name)
                         events_emitted.append({
                             "id": eid,
                             "camera_id": camera_id,
