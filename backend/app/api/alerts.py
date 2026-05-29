@@ -277,24 +277,23 @@ def _zone_restricted(zone: Zone | None) -> bool:
 
 def _is_after_hours(event: DetectionEvent, store) -> bool:
     """True if the event happened outside the store's business hours.
-    Falls back to True (notable) when hours aren't configured."""
-    bh = getattr(store, "business_hours_json", None) if store else None
-    if not bh:
-        return store is None or bh is None  # no hours → treat as notable
+
+    Uses is_store_open(), which defaults the timezone to Africa/Nairobi
+    (EAT, UTC+3) when the store's tz column is NULL and applies a
+    permissive 09:00-21:00 daily default when business_hours_json is
+    missing — so a store with no configured hours is NEVER treated as
+    "always after hours" (that was the 9:57 AM false-alarm bug)."""
+    if store is None:
+        return False   # unknown store → don't cry wolf
     try:
-        from app.utils.business_hours import is_open
-        from zoneinfo import ZoneInfo
-        tz = getattr(store, "timezone", None) or "Africa/Nairobi"
+        from app.utils.business_hours import is_store_open
         ts = event.timestamp
-        if ts is not None:
-            if ts.tzinfo is None:
-                from datetime import timezone as _tz
-                ts = ts.replace(tzinfo=_tz.utc)
-            local = ts.astimezone(ZoneInfo(tz))
-            return not is_open(bh, local)
+        if ts is not None and ts.tzinfo is None:
+            from datetime import timezone as _tz
+            ts = ts.replace(tzinfo=_tz.utc)
+        return not is_store_open(store, ts)
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _person_context(event: DetectionEvent, zone: Zone | None, store) -> str:
@@ -577,18 +576,29 @@ def alerts_summary(db: Session = Depends(get_db),
                    _u: User = Depends(get_current_user),
                    store_id: Optional[int] = Query(None)):
     """Quick counts for the alerts page header + the sidebar badge.
-    Today (store-local-ish, UTC midnight) urgent / attention / resolved,
-    plus unread_urgent (new + URGENT) which drives the red badge."""
+    Today (since UTC midnight) urgent / attention / resolved, plus
+    unread_urgent (still-new + URGENT) which drives the red badge.
+
+    Joins Store + Zone so the person-context severity is computed
+    correctly — a customer-during-hours person alert counts as INFO,
+    not URGENT, so the badge isn't flooded by routine detections."""
+    from app.models import Store as _Store
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    q = (db.query(Alert, DetectionEvent)
+    q = (db.query(Alert, DetectionEvent, _Store)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .outerjoin(_Store, Camera.store_id == _Store.id)
            .filter(DetectionEvent.timestamp >= today))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
+    rows = q.all()
+    zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
+    zones_by_id = ({z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()}
+                   if zone_ids else {})
     urgent = attention = resolved = unread_urgent = 0
-    for alert, ev in q.all():
-        label = _severity_label(ev.detection_type)
+    for alert, ev, store in rows:
+        zone = zones_by_id.get(ev.zone_id) if ev.zone_id else None
+        label = _severity_label(ev.detection_type, ev, zone, store)
         is_resolved = alert.status in ("resolved", "dismissed")
         if is_resolved:
             resolved += 1

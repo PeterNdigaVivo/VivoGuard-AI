@@ -57,8 +57,9 @@ export default function Layout() {
               <span>{item.label}</span>
               {item.to === '/alerts' && urgentBadge > 0 && (
                 <span className="ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5
-                                 rounded-full bg-red-600 text-white text-[11px] font-bold">
-                  {urgentBadge}
+                                 rounded-full bg-red-600 text-white text-[11px] font-bold"
+                      title="Unresolved urgent alerts">
+                  {urgentBadge > 99 ? '99+' : urgentBadge}
                 </span>
               )}
             </NavLink>

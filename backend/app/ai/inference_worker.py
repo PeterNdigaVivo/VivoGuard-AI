@@ -174,11 +174,17 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
 _PERSON_RESTRICTED_TAGS = {"restricted", "intrusion", "trespass", "high_value", "stockroom"}
 
 
-def _person_alert_warranted(ev, zones: list[dict], business_hours, store_tz: str) -> bool:
+def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
     """A plain person detection only deserves an alert when it's
     genuinely notable: after hours, OR inside a restricted/staff-only
     zone. During business hours in a normal customer area it's just a
-    customer — noise — so we persist the metric but skip the alert."""
+    customer — noise — so we persist the metric but skip the alert.
+
+    Business hours are evaluated via is_store_open(), which defaults to
+    Africa/Nairobi (EAT) when the store tz is NULL and to a permissive
+    09:00-21:00 daily window when business_hours_json is missing. A
+    store with no configured hours is therefore treated as OPEN during
+    the day, NOT as always-after-hours."""
     # Restricted-zone check — find the event's zone among the list.
     if ev.zone_id is not None:
         for z in zones:
@@ -186,15 +192,13 @@ def _person_alert_warranted(ev, zones: list[dict], business_hours, store_tz: str
                 if _PERSON_RESTRICTED_TAGS & set(z.get("detection_types_json") or []):
                     return True
                 break
-    # After-hours check.
+    if store is None:
+        return False   # no store context → treat as a normal customer
     try:
-        from app.utils.business_hours import is_open, localised_now
-        if business_hours is not None and store_tz:
-            return not is_open(business_hours, localised_now(store_tz))
+        from app.utils.business_hours import is_store_open
+        return not is_store_open(store)
     except Exception:
-        pass
-    # No business hours configured → treat as notable (safer to alert).
-    return business_hours is None
+        return False
 
 
 def run_for_camera(camera_id: int, *, max_seconds: int = 0,
@@ -251,13 +255,14 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             # Store metadata — cached per-frame so detectors don't each hit Postgres.
             store_id = cam.store_id
             business_hours = None
-            store_tz = "UTC"
+            store_tz = "Africa/Nairobi"
             store_name = None
+            store = None
             if store_id is not None:
                 store = db.get(Store, store_id)
                 if store:
                     business_hours = store.business_hours_json
-                    store_tz = store.timezone or "UTC"
+                    store_tz = store.timezone or "Africa/Nairobi"
                     store_name = store.name
 
             ctx = DetectorContext(
@@ -280,8 +285,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         # in a normal customer zone is just a customer —
                         # persist the metric but don't raise an alert.
                         suppress = (ev.detection_type == "person" and
-                                    not _person_alert_warranted(
-                                        ev, zones, business_hours, store_tz))
+                                    not _person_alert_warranted(ev, zones, store))
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name,
