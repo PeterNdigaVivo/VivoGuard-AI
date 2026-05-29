@@ -55,10 +55,36 @@ export default function AlertsPage() {
 
   const groups = groupAlerts(filtered)
 
+  // Excel export — fetch with the bearer header (an <a href> can't
+  // carry it) and trigger a download of the returned .xlsx blob.
+  async function exportExcel() {
+    const q = new URLSearchParams()
+    if (storeId) q.set('store_id', storeId)
+    q.set('since', range.since); q.set('until', range.until)
+    const tok = localStorage.getItem('vg_access_token') ?? ''
+    const res = await fetch(`/api/alerts/export.xlsx?${q}`, {
+      headers: { Authorization: `Bearer ${tok}` },
+    })
+    if (!res.ok) { alert('Export failed — rebuild the api container if this persists.'); return }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `vivoguard_alerts_${range.key}.xlsx`
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
   return (
     <div className="p-6">
       <PageHeader title="Alerts" actions={
-        <DateRangePicker value={range} onChange={setRange} />
+        <div className="flex items-center gap-2">
+          <DateRangePicker value={range} onChange={setRange} />
+          <button onClick={exportExcel}
+                  className="px-3 py-1.5 rounded bg-emerald-600 text-white text-sm hover:bg-emerald-500">
+            📊 Export to Excel
+          </button>
+        </div>
       } />
 
       {/* Quick stats */}

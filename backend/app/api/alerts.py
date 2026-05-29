@@ -504,6 +504,77 @@ def alerts_summary(db: Session = Depends(get_db),
     }
 
 
+@router.get("/export.xlsx")
+def export_alerts_xlsx(
+    db: Session = Depends(get_db),
+    _u: User = Depends(get_current_user),
+    store_id: Optional[int] = Query(None),
+    detection_type: Optional[str] = Query(None),
+    since: Optional[datetime] = Query(None),
+    until: Optional[datetime] = Query(None),
+):
+    """Alert history as an .xlsx for manager review. Honours the same
+    date / store / type filters as the list. Capped at 5000 rows so a
+    careless 90-day pull doesn't OOM the API."""
+    import io
+    from fastapi.responses import StreamingResponse
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError:
+        raise HTTPException(503, "Excel export not available — rebuild the api image")
+
+    from app.models import Store as _Store
+    q = (db.query(Alert, DetectionEvent, Camera, _Store)
+           .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .outerjoin(_Store, Camera.store_id == _Store.id))
+    if store_id is not None:
+        q = q.filter(Camera.store_id == store_id)
+    if detection_type:
+        q = q.filter(DetectionEvent.detection_type == detection_type)
+    if since:
+        q = q.filter(DetectionEvent.timestamp >= since)
+    if until:
+        q = q.filter(DetectionEvent.timestamp <= until)
+    rows = q.order_by(desc(Alert.created_at)).limit(5000).all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Alerts"
+    headers = ["Date & Time", "Store", "Camera", "Alert", "Priority",
+               "Status", "Notes"]
+    ws.append(headers)
+    head_fill = PatternFill("solid", fgColor="1E293B")
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = head_fill
+    for alert, ev, cam, store in rows:
+        ts = ev.timestamp.strftime("%Y-%m-%d %H:%M") if ev.timestamp else ""
+        ws.append([
+            ts,
+            store.name if store else "",
+            cam.name if cam else "",
+            _plain_title(ev),
+            _severity_label(ev.detection_type),
+            alert.status,
+            (alert.notes or "").replace("\n", " | "),
+        ])
+    widths = [18, 18, 18, 32, 12, 12, 40]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"vivoguard_alerts_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("", response_model=list[AlertOut])
 def list_alerts(
     db: Session = Depends(get_db),

@@ -48,6 +48,12 @@ celery_app.conf.update(
             "task": "maintenance.refresh_ddns",
             "schedule": 300.0,
         },
+        # Alert history retention — prune alerts + snapshots older than
+        # 90 days once a day (relative to worker boot).
+        "prune-alerts-daily": {
+            "task": "maintenance.prune_alerts",
+            "schedule": 24 * 60 * 60.0,
+        },
         "scheduled-reports-dispatcher": {
             "task": "reports.dispatch_due",
             "schedule": 300.0,    # 5 min — granular enough for daily/weekly

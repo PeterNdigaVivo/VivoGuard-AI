@@ -33,6 +33,37 @@ def prune_clips(retention_days: int = 30) -> None:
     log.info("prune_clips retention_days=%s (stub — no-op)", retention_days)
 
 
+@celery_app.task(name="maintenance.prune_alerts", ignore_result=True)
+def prune_alerts(retention_days: int = 90) -> None:
+    """Delete alerts + their detection_events (and snapshot files)
+    older than `retention_days`. Keeps the alert history at a 90-day
+    window for manager review without unbounded growth."""
+    import os
+    from datetime import datetime, timezone, timedelta
+    from app.database import SessionLocal
+    from app.models import Alert, DetectionEvent
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    removed = 0
+    with SessionLocal() as db:
+        old = (db.query(Alert, DetectionEvent)
+                 .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+                 .filter(DetectionEvent.timestamp < cutoff)
+                 .limit(5000).all())
+        for alert, ev in old:
+            # Best-effort snapshot file cleanup.
+            if ev.thumbnail_path:
+                try:
+                    os.remove(ev.thumbnail_path)
+                except OSError:
+                    pass
+            db.delete(alert)
+            removed += 1
+        db.commit()
+    log.info("prune_alerts: removed %d alerts older than %d days",
+             removed, retention_days)
+
+
 @celery_app.task(name="maintenance.bootstrap_buckets", ignore_result=True)
 def bootstrap_buckets() -> None:
     """Ensure MinIO buckets exist."""

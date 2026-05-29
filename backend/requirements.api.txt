@@ -34,3 +34,6 @@ Pillow>=10
 # PDF report generation for retail analytics (P4). reportlab has no
 # system dependencies so it works in the slim API image without bloat.
 reportlab>=4.0
+# Excel export for the alert-history report (manager review). Pure
+# Python, no system deps.
+openpyxl>=3.1
