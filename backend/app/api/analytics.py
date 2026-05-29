@@ -1019,6 +1019,19 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
         {"time": r[0].isoformat() if r[0] else None} for r in viol_rows
     ]
 
+    # ---- Staff identified today — by uniform vs by counter-dwell ----
+    from app.models import StaffTrack
+    today_date = datetime.now(timezone.utc).date()
+    staff_rows = (db.query(StaffTrack.source, func.count(StaffTrack.id))
+                    .filter(StaffTrack.store_id == store_id,
+                            StaffTrack.day == today_date,
+                            StaffTrack.classified_as == "staff")
+                    .group_by(StaffTrack.source).all())
+    staff_by_source = {(s or "zone"): int(n) for s, n in staff_rows}
+    staff_by_uniform = staff_by_source.get("uniform", 0)
+    staff_by_zone = staff_by_source.get("zone", 0)
+    staff_identified_total = staff_by_uniform + staff_by_zone
+
     insights: list[str] = []
     if gaps:
         worst = max(gaps, key=lambda g: g["duration_minutes"])
@@ -1053,6 +1066,10 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
         "uniform_compliance_rag": uniform_rag,
         "uniform_violations_today": len(uniform_violations),
         "uniform_violations": uniform_violations,
+        # Staff identified today, split by how they were recognised.
+        "staff_identified_total": staff_identified_total,
+        "staff_by_uniform": staff_by_uniform,
+        "staff_by_zone": staff_by_zone,
     }
 
 

@@ -118,6 +118,9 @@ class UniformComplianceDetector(Detector):
         self._state_since: dict[int, tuple[str, float]] = {}
         # store_id -> {"day": iso, "count": n} for the repeat-day rule.
         self._violations_today: dict[int, dict] = {}
+        # (store_id, day, signature) already written to staff_tracks —
+        # avoids re-querying/writing every frame for the same track.
+        self._staff_marked: set[tuple[int, str, str]] = set()
 
     # ---- public ----------------------------------------------------
 
@@ -154,6 +157,15 @@ class UniformComplianceDetector(Detector):
                 ok_like += 1
 
             tid = self._match_track(ctx, det)
+            # Staff exclusion — a uniformed staff member (compliant OR
+            # missing-lanyard) works here, so exclude them from the
+            # visitor / dwell counts by marking their track in the
+            # staff_tracks roster the analytics endpoints LEFT-JOIN
+            # against. OK and NO_LANYARD both count as staff; only a
+            # no-uniform person (VIOLATION) stays a potential customer.
+            if state in (OK, NO_LANYARD):
+                self._mark_staff_track(ctx, tid)
+
             evt = self._maybe_alert(ctx, det, tid, state, now)
             if evt is not None:
                 out.append(evt)
@@ -263,6 +275,51 @@ class UniformComplianceDetector(Detector):
             has_lanyard = 1.0 if (orange > 0.01 or dark > 0.10) else 0.0
 
         return 0.50 * correct_colour + 0.30 * has_lanyard + 0.20 * has_nametag
+
+    # ---- staff exclusion -------------------------------------------
+
+    def _mark_staff_track(self, ctx: DetectorContext, tid: int) -> None:
+        """Record this track as staff for today so the analytics
+        endpoints exclude it from visitor / dwell counts. Writes to the
+        same staff_tracks roster the counter-dwell classifier uses,
+        with a `cam{cam}:tr{tid}` signature that matches the
+        UniqueVisitorDetector's VisitorTrack signature, and a source of
+        'uniform' so the dashboard can show uniform- vs zone-identified
+        staff separately. Deduped per session via an in-memory set."""
+        if ctx.db is None or ctx.store_id is None:
+            return
+        from datetime import date, datetime, timezone
+        today = date.today()
+        signature = f"cam{ctx.camera_id}:tr{tid}"
+        key = (ctx.store_id, today.isoformat(), signature)
+        if key in self._staff_marked:
+            return
+        self._staff_marked.add(key)
+        try:
+            from app.models import StaffTrack
+            row = (ctx.db.query(StaffTrack)
+                       .filter(StaffTrack.store_id == ctx.store_id,
+                               StaffTrack.day == today,
+                               StaffTrack.track_signature == signature)
+                       .first())
+            now = datetime.now(timezone.utc)
+            if row is None:
+                ctx.db.add(StaffTrack(
+                    store_id=ctx.store_id, day=today,
+                    track_signature=signature,
+                    first_seen=now, last_seen=now,
+                    classified_as="staff", source="uniform",
+                ))
+            else:
+                row.last_seen = now
+                row.classified_as = "staff"
+                row.source = "uniform"
+            ctx.db.flush()
+        except Exception:
+            try:
+                ctx.db.rollback()
+            except Exception:
+                pass
 
     # ---- alerting --------------------------------------------------
 

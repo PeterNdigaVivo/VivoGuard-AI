@@ -214,6 +214,24 @@ export default function UniformTrainingPage() {
         </ul>
       </Card>
 
+      {/* How staff identification works — so operators know what this unlocks. */}
+      <Card className="p-3 bg-slate-50 text-sm text-slate-700">
+        👔 <strong>How staff identification works</strong>
+        <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
+          <li>A person in a <strong>counter / staff zone</strong> wearing a Vivo
+              uniform (black or burgundy) + lanyard + name tag is treated as
+              <strong> staff</strong> and excluded from the customer count.</li>
+          <li>In uniform but missing the lanyard / name tag → still staff, but an
+              <strong> INFO</strong> "missing name tag" reminder after 5 minutes.</li>
+          <li>At the counter with no uniform → <strong>ATTENTION</strong>
+              "unidentified person at counter" after 2 minutes.</li>
+          <li>Works out of the box on colour rules. Collecting frames here and
+              training a model makes it far more accurate for your cameras.</li>
+          <li>Remember to draw a <strong>counter</strong> zone on the camera —
+              that's how the system knows where staff stand.</li>
+        </ul>
+      </Card>
+
       {cameras.length === 0 ? (
         <Card className="p-6 text-sm text-slate-600">
           No AI-enabled cameras found. Enable AI on a camera that watches the

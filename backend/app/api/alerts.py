@@ -92,6 +92,11 @@ def _severity_label(detection_type: str | None,
             ctxt = _person_context(event, zone, store)
             return "INFO" if ctxt == "customer" else "URGENT"
         return "URGENT"
+    # Uniform compliance: a missing name tag is just INFO (gentle
+    # nudge); a person at the counter with no uniform at all is
+    # ATTENTION (could be an unidentified person).
+    if detection_type == "uniform_compliance" and event is not None:
+        return "INFO" if (event.extra or {}).get("rule") == "no_lanyard" else "ATTENTION"
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
 
 
@@ -139,8 +144,13 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "partial_stuck":
             return "Store Door Stuck Part-Open"
         return "Store Door Issue"
-    if dt == "uniform_compliance" and extra.get("rule") == "no_lanyard":
-        return "Staff Missing Name Tag"
+    if dt == "uniform_compliance":
+        rule = extra.get("rule", "")
+        if rule == "no_lanyard":
+            return "Staff Missing Name Tag"
+        # No uniform at all on a person at the counter — could be an
+        # unidentified person, not just an out-of-uniform staffer.
+        return "Unidentified Person at Service Counter"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
 
 
@@ -210,6 +220,15 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Call building security: {security_phone}",
                      "Do not enter the store alone"]
+    elif dt == "uniform_compliance":
+        if (event.extra or {}).get("rule") == "no_lanyard":
+            steps = ["Remind the staff member to wear their name tag",
+                     "Check if it is a new staff member needing one",
+                     "Mark resolved once sorted"]
+        else:
+            steps = ["Check the live camera now",
+                     "Confirm whether they are a staff member",
+                     "Ask them to leave the counter if unauthorised"]
     else:
         steps = _WHAT_TO_DO.get(dt)
     if not steps:
@@ -396,6 +415,16 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                     f"outside opening hours. Please check immediately.")
         return (f"A customer was detected in {store_name}{when}. "
                 f"This is normal during business hours.")
+
+    if dt == "uniform_compliance":
+        store_name = (getattr(store, "name", None) or "the store")
+        if extra.get("rule") == "no_lanyard":
+            return (f"A staff member at the {store_name} counter has been "
+                    f"without a visible lanyard or name tag. Please remind "
+                    f"them to wear it.")
+        return (f"A person at the {store_name} service counter is not in "
+                f"uniform. Check whether they are a new staff member or "
+                f"someone who shouldn't be behind the counter.")
 
     if dt == "staff_present":
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)

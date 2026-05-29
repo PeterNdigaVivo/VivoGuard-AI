@@ -583,6 +583,9 @@ interface StaffPayload {
   uniform_compliance_rag?: 'green' | 'amber' | 'red' | null
   uniform_violations_today?: number
   uniform_violations?: { time: string | null }[]
+  staff_identified_total?: number
+  staff_by_uniform?: number
+  staff_by_zone?: number
 }
 
 export function StaffPresencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
@@ -603,6 +606,15 @@ export function StaffPresencePanel({ storeId, range }: { storeId: number; range?
                   <InsightList insights={data.insights} />
                 </div>
               </div>
+              {(data.staff_identified_total ?? 0) > 0 && (
+                <div className="mt-3 text-sm text-slate-600 flex flex-wrap gap-x-4">
+                  <span>👔 Staff identified today: <strong>{data.staff_identified_total}</strong>
+                    {' '}<span className="text-slate-400">
+                      ({data.staff_by_uniform ?? 0} by uniform · {data.staff_by_zone ?? 0} by counter)
+                    </span>
+                  </span>
+                </div>
+              )}
               {data.uniform_compliance_pct !== null && data.uniform_compliance_pct !== undefined && (
                 <UniformCompliance
                   pct={data.uniform_compliance_pct}
