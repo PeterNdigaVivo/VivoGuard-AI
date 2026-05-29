@@ -145,7 +145,8 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         from app.ai.snapshot import capture_alert_snapshot
         thumb_path = capture_alert_snapshot(
             frame_bgr, ev.bbox_norm, ev.detection_type, camera_id,
-            store_name=store_name, camera_name=camera_name)
+            store_name=store_name, camera_name=camera_name,
+            boxes=(ev.extra or {}).get("boxes"))
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=ev.zone_id,

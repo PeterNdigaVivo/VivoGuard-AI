@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 SNAPSHOT_TYPES: set[str] = {
     "uniform_compliance", "intrusion", "shutter", "fight", "crowd",
     "trespass", "shrinkage", "fall", "abandoned_object", "weapon",
-    "weapon_brandished",
+    "weapon_brandished", "staff_present",
 }
 
 # Plain-English titles, mirrored on the frontend. Kept here so the
@@ -46,12 +46,26 @@ def _snapshot_root() -> Path:
     return p
 
 
+# BGR colours for the per-person snapshot boxes.
+_BOX_COLORS = {
+    "green": (0, 200, 0),     # staff
+    "blue":  (235, 130, 0),   # customer (BGR → orange-blue)
+    "red":   (0, 0, 255),     # empty / detection
+}
+
+
 def capture_alert_snapshot(frame_bgr, bbox_norm, alert_type: str,
                            camera_id: int, *, store_name: str | None = None,
-                           camera_name: str | None = None) -> str | None:
-    """Draw the box + caption on a copy of `frame_bgr` and save it.
+                           camera_name: str | None = None,
+                           boxes: list[dict] | None = None) -> str | None:
+    """Draw the box(es) + caption on a copy of `frame_bgr` and save it.
     Returns the on-disk path, or None if pixels/cv2 weren't available
-    (best-effort — a missing snapshot must never block the alert)."""
+    (best-effort — a missing snapshot must never block the alert).
+
+    When `boxes` is given (list of {bbox, color, label}) we draw each
+    one in its colour — green=staff, blue=customer, red=empty — instead
+    of a single red box. Used by the counter-unattended alert so the
+    manager sees exactly what the AI classified."""
     try:
         import numpy as np
         import cv2
@@ -63,13 +77,24 @@ def capture_alert_snapshot(frame_bgr, bbox_norm, alert_type: str,
         img = frame_bgr.copy()
         h, w = img.shape[:2]
 
-        # Red detection box.
-        if bbox_norm and len(bbox_norm) == 4:
-            x1, y1, x2, y2 = bbox_norm
+        def _draw(bb, color_bgr, label=None):
+            x1, y1, x2, y2 = bb
             p1 = (int(max(0, x1) * w), int(max(0, y1) * h))
             p2 = (int(min(1, x2) * w), int(min(1, y2) * h))
             if p2[0] > p1[0] and p2[1] > p1[1]:
-                cv2.rectangle(img, p1, p2, (0, 0, 255), 3)
+                cv2.rectangle(img, p1, p2, color_bgr, 3)
+                if label:
+                    cv2.putText(img, label, (p1[0], max(12, p1[1] - 5)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2, cv2.LINE_AA)
+
+        if boxes:
+            for b in boxes:
+                bb = b.get("bbox")
+                if bb and len(bb) == 4:
+                    _draw(bb, _BOX_COLORS.get(b.get("color", "red"), (0, 0, 255)),
+                          b.get("label"))
+        elif bbox_norm and len(bbox_norm) == 4:
+            _draw(bbox_norm, (0, 0, 255))
 
         # Caption banner along the top.
         title = PLAIN_TITLES.get(alert_type, alert_type.replace("_", " ").title())

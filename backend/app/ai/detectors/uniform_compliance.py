@@ -54,6 +54,59 @@ REPEAT_THRESHOLD = 3
 STAFF_ZONE_TAGS = {"counter", "staff"}
 
 
+def uniform_colour_score(frame_bgr, bbox_norm) -> float | None:
+    """Standalone Vivo-uniform colour score (0..1) for one person bbox.
+    Shared by the StaffPresenceDetector to tell staff from customers at
+    the counter. Returns None when pixels/cv2 aren't available.
+
+    Score = 0.50*correct_colour + 0.30*has_lanyard + 0.20*has_nametag,
+    where correct_colour matches Vivo BLACK or BURGUNDY tops."""
+    try:
+        import numpy as np
+        import cv2
+    except ImportError:
+        return None
+    if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0 or not bbox_norm:
+        return None
+    try:
+        h, w = frame_bgr.shape[:2]
+        x1, y1, x2, y2 = bbox_norm
+        px1, py1 = int(max(0, x1) * w), int(max(0, y1) * h)
+        px2, py2 = int(min(1, x2) * w), int(min(1, y2) * h)
+        if px2 <= px1 or py2 <= py1:
+            return None
+        bh = py2 - py1
+        ub = frame_bgr[py1:py1 + int(bh * 0.40), px1:px2]
+        if ub.size == 0:
+            return None
+        hsv = cv2.cvtColor(ub, cv2.COLOR_BGR2HSV)
+        H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        total = H.size or 1
+        black = ((S < 60) & (V < 70)).sum() / total
+        red_h = ((H <= 10) | (H >= 160))
+        burgundy = (red_h & (S > 100) & (V > 40) & (V < 170)).sum() / total
+        correct_colour = 1.0 if max(black, burgundy) >= 0.35 else \
+                         (0.5 if max(black, burgundy) >= 0.20 else 0.0)
+        cy1 = py1 + int(bh * 0.30); cy2 = py1 + int(bh * 0.60)
+        cw = px2 - px1
+        cx1 = px1 + int(cw * 0.30); cx2 = px1 + int(cw * 0.70)
+        chest = frame_bgr[cy1:cy2, cx1:cx2]
+        has_lanyard = has_nametag = 0.0
+        if chest.size > 0:
+            chsv = cv2.cvtColor(chest, cv2.COLOR_BGR2HSV)
+            cH, cS, cV = chsv[:, :, 0], chsv[:, :, 1], chsv[:, :, 2]
+            ct = cH.size or 1
+            white = ((cV > 180) & (cS < 50)).sum() / ct
+            has_nametag = 1.0 if white > 0.02 else 0.0
+            orange = (((cH >= 5) & (cH <= 25) & (cS > 100) & (cV > 90)).sum() / ct)
+            dark = ((cV < 50).sum() / ct)
+            has_lanyard = 1.0 if (orange > 0.01 or dark > 0.10) else 0.0
+        return 0.50 * correct_colour + 0.30 * has_lanyard + 0.20 * has_nametag
+    except Exception:
+        return None
+
+
+
 class UniformComplianceDetector(Detector):
     detection_type = "uniform_compliance"
     needs_tracking = True

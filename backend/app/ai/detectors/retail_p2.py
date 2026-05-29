@@ -23,29 +23,49 @@ from app.ai.zone_logic import bbox_in_zone
 # ---------------------------------------------------------------------------
 
 class StaffPresenceDetector(Detector):
-    """For every zone tagged `counter`, check if at least one person is
-    present. Emits an alert when the counter has been *unstaffed* for
-    `dwell_time_seconds` consecutively. Always writes the
-    `staff_present_pct` metric (0/1 each frame, the dashboard averages
-    over the period).
+    """For every zone tagged `counter`, fire "Counter Left Unattended"
+    only when no STAFF MEMBER (uniformed) has been present for a
+    sustained window.
 
-    Operators tag any number of zones with `counter` to enable this.
+    Staff vs customer: a person in the counter zone is treated as staff
+    when their Vivo-uniform colour score (black/burgundy top + lanyard
+    + name tag) clears STAFF_SCORE_MIN. A customer being served at the
+    counter no longer counts as "attended". When uniform assessment
+    isn't possible (no frame/cv2), we fall back to "anyone present =
+    attended" so we never cry wolf on a camera that can't see colour.
+
+    Suppression — no alert when:
+      • a uniformed staff was seen in the last GRACE_SECONDS (nipped out), or
+      • within the first 30 min after opening (setting up), or
+      • within the last 15 min before closing (winding down).
+
+    Always writes the `staff_present_pct` metric (1 staffed / 0 not).
     """
 
     detection_type = "staff_present"
     needs_tracking = False
 
+    # Uniform score above which a person counts as staff.
+    STAFF_SCORE_MIN = 0.6
+    # Grace after the last uniformed sighting before we call it empty.
+    GRACE_SECONDS = 5 * 60
+    OPENING_GRACE_SECONDS = 30 * 60
+    CLOSING_GRACE_SECONDS = 15 * 60
+
     def __init__(self):
         # zone_id → t_unstaffed_since (None when currently staffed)
         self._empty_since: dict[int, float | None] = {}
         self._fired: dict[int, float] = {}
+        # zone_id → epoch a uniformed staff was last seen.
+        self._last_staff_seen: dict[int, float] = {}
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
-        thr_conf = float(cfg.get("confidence_threshold", 0.5))
-        dwell    = int(cfg.get("dwell_time_seconds") or 120)
+        thr_conf = float(cfg.get("confidence_threshold", 0.6))
+        # Minimum continuous unstaffed time — default 5 min per spec.
+        dwell    = int(cfg.get("dwell_time_seconds") or 300)
 
         zones = [z for z in ctx.zones
                  if "counter" in (z.get("detection_types_json") or [])
@@ -58,32 +78,119 @@ class StaffPresenceDetector(Detector):
         out: list[DetectionEvent] = []
         now = time.time()
 
-        for z in zones:
-            present = any(bbox_in_zone(p["bbox_norm"], z["polygon_coords_json"]) for p in people)
+        # Opening/closing suppression windows for today.
+        in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
 
-            # Metric: 1 when staffed, 0 when not. Dashboard avg = staffed %.
+        from app.ai.detectors.uniform_compliance import uniform_colour_score
+
+        for z in zones:
+            in_zone = [p for p in people
+                       if bbox_in_zone(p["bbox_norm"], z["polygon_coords_json"])]
+
+            # Classify each person in the zone as staff vs customer.
+            # uniform_assessable is False when we couldn't read pixels
+            # for ANY person — in that case fall back to "anyone present
+            # = attended" rather than risk a false unattended alert.
+            staff_boxes, customer_boxes = [], []
+            uniform_assessable = ctx.frame_bgr is not None
+            for p in in_zone:
+                score = uniform_colour_score(ctx.frame_bgr, p["bbox_norm"])
+                if score is None:
+                    uniform_assessable = False
+                    customer_boxes.append(p["bbox_norm"])
+                elif score >= self.STAFF_SCORE_MIN:
+                    staff_boxes.append(p["bbox_norm"])
+                else:
+                    customer_boxes.append(p["bbox_norm"])
+
+            if uniform_assessable:
+                staffed = len(staff_boxes) > 0
+            else:
+                # Can't tell uniforms apart → treat any presence as staffed.
+                staffed = len(in_zone) > 0
+
+            if staffed:
+                self._last_staff_seen[z["id"]] = now
+
+            # Metric: 1 when staffed, 0 when not.
             if ctx.db is not None:
                 from app.analytics import recorder
-                recorder.record(ctx.db, "staff_present_pct", 1.0 if present else 0.0,
+                recorder.record(ctx.db, "staff_present_pct", 1.0 if staffed else 0.0,
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=z["id"], aggregator="last")
 
-            if present:
+            if staffed:
                 self._empty_since[z["id"]] = None
                 continue
 
-            t_since = self._empty_since.get(z["id"]) or now
+            # Unstaffed this frame — start/extend the empty timer.
             self._empty_since.setdefault(z["id"], now)
+            t_since = self._empty_since.get(z["id"]) or now
             unstaffed_for = now - t_since
-            if unstaffed_for >= dwell and now - self._fired.get(z["id"], 0) > 120:
+
+            # Suppression gates.
+            if in_opening_grace or in_closing_grace:
+                continue
+            last_staff = self._last_staff_seen.get(z["id"])
+            if last_staff is not None and (now - last_staff) < self.GRACE_SECONDS:
+                continue
+
+            if unstaffed_for >= dwell and now - self._fired.get(z["id"], 0) > 300:
                 self._fired[z["id"]] = now
+                # Per-person boxes for the annotated snapshot: green =
+                # staff, blue = customer, red = the empty counter zone.
+                boxes = [{"bbox": b, "color": "green", "label": "Staff"} for b in staff_boxes]
+                boxes += [{"bbox": b, "color": "blue", "label": "Customer"} for b in customer_boxes]
+                if not in_zone:
+                    poly = z.get("polygon_coords_json") or []
+                    if poly:
+                        xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
+                        boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
+                                      "color": "red", "label": "Counter empty"})
                 out.append(DetectionEvent(
                     detection_type=self.detection_type, cls="counter_unstaffed",
                     confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=z["id"],
                     extra={"unstaffed_seconds": int(unstaffed_for),
-                           "store_id": ctx.store_id},
+                           "unstaffed_minutes": int(unstaffed_for / 60),
+                           "store_id": ctx.store_id, "boxes": boxes,
+                           "customers_present": len(customer_boxes)},
                 ))
         return out
+
+    def _opening_closing_grace(self, ctx: DetectorContext,
+                               now: float) -> tuple[bool, bool]:
+        """(within_30min_of_open, within_15min_of_close) for today,
+        in the store's local timezone. (False, False) when hours
+        aren't available."""
+        if not ctx.business_hours or not ctx.store_timezone:
+            return False, False
+        try:
+            from app.utils.business_hours import localised_now
+            now_local = localised_now(ctx.store_timezone)
+            weekday_keys = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+            windows = ctx.business_hours.get(weekday_keys[now_local.weekday()]) or []
+            opens, closes = [], []
+            from datetime import datetime as _dt
+            for win in windows:
+                try:
+                    a, b = win.split("-")
+                    ha, ma = (int(x) for x in a.split(":"))
+                    hb, mb = (int(x) for x in b.split(":"))
+                    opens.append(_dt(now_local.year, now_local.month, now_local.day,
+                                     ha, ma, tzinfo=now_local.tzinfo))
+                    closes.append(_dt(now_local.year, now_local.month, now_local.day,
+                                      hb, mb, tzinfo=now_local.tzinfo))
+                except Exception:
+                    continue
+            if not opens:
+                return False, False
+            earliest_open = min(opens)
+            latest_close = max(closes)
+            opening = 0 <= (now_local - earliest_open).total_seconds() <= self.OPENING_GRACE_SECONDS
+            closing = 0 <= (latest_close - now_local).total_seconds() <= self.CLOSING_GRACE_SECONDS
+            return opening, closing
+        except Exception:
+            return False, False
 
 
 # ---------------------------------------------------------------------------
