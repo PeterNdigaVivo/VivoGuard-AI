@@ -2,93 +2,102 @@
 // May-2026 redesign: same card component as the per-store dashboard
 // feed so titles, severity colours, and action buttons match exactly.
 
-import { useEffect, useState } from 'react'
-import { Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
+import { useEffect, useMemo, useState } from 'react'
+import { Card, PageHeader } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
+import { stores as storesApi, type Store } from '@/api/stores'
+
+// Simple quick-filter buttons non-technical staff understand.
+type Quick = 'urgent' | 'attention' | 'resolved' | 'all'
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
-  const [filters, setFilters] = useState({
-    status: '', detection_type: '', camera_id: '',
-  })
+  const [quick, setQuick] = useState<Quick>('all')
+  const [storeId, setStoreId] = useState<string>('')
+  const [search, setSearch] = useState('')
+  const [stores, setStores] = useState<Store[]>([])
+  const [summary, setSummary] = useState({ urgent: 0, attention: 0, resolved_today: 0, unread_urgent: 0 })
 
-  const reload = () => alertsApi.list({
-    status: filters.status || undefined,
-    detection_type: filters.detection_type || undefined,
-    camera_id: filters.camera_id || undefined,
-    since: range.since,
-    until: range.until,
-  }).then(setItems)
-  useEffect(() => { reload() },
-    [filters.status, filters.detection_type, filters.camera_id,
-     range.since, range.until])
+  useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
 
-  // Real-time prepend: when /ws/alerts pushes a new event, refetch.
-  useEffect(() => alertsApi.subscribe(() => reload()), [])
-
-  // `groups` collapses repeat-of-same-thing alerts into one row each
-  // (e.g. "Counter Unstaffed ×7 today") to keep the feed scannable.
-  const groups = groupAlerts(items)
-
-  function exportCSV() {
-    const rows = [
-      ['id', 'camera', 'type', 'confidence', 'status', 'created_at'].join(','),
-      ...items.map(a => [a.id, a.camera_name, a.detection_type, a.confidence, a.status, a.created_at]
-        .map(v => JSON.stringify(v ?? '')).join(',')),
-    ]
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob); a.download = 'alerts.csv'; a.click()
+  const reload = () => {
+    alertsApi.list({
+      store_id: storeId || undefined,
+      since: range.since,
+      until: range.until,
+      limit: 500,
+    }).then(setItems)
+    alertsApi.summary(storeId ? Number(storeId) : undefined).then(setSummary).catch(() => {})
   }
+  useEffect(() => { reload() }, [storeId, range.since, range.until])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Real-time: when /ws/alerts pushes a new event, refetch.
+  useEffect(() => alertsApi.subscribe(() => reload()), [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Client-side quick-filter + search over the loaded window.
+  const filtered = useMemo(() => {
+    let rows = items
+    if (quick === 'urgent')     rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
+    else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
+    else if (quick === 'resolved')  rows = rows.filter(a => a.status === 'resolved' || a.status === 'dismissed')
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      rows = rows.filter(a =>
+        (a.plain_title ?? a.title ?? '').toLowerCase().includes(q) ||
+        (a.camera_name ?? '').toLowerCase().includes(q) ||
+        (a.detection_type ?? '').toLowerCase().includes(q))
+    }
+    return rows
+  }, [items, quick, search])
+
+  const groups = groupAlerts(filtered)
 
   return (
     <div className="p-6">
       <PageHeader title="Alerts" actions={
-        <>
-          <DateRangePicker value={range} onChange={setRange} />
-          <Button variant="ghost" onClick={exportCSV}>Export CSV</Button>
-        </>
+        <DateRangePicker value={range} onChange={setRange} />
       } />
 
-      <Card className="p-3 mb-4 flex flex-wrap gap-3 items-end">
-        <Filter label="Status">
-          <Select value={filters.status} onChange={e => setFilters({ ...filters, status: e.target.value })}>
-            <option value="">all</option>
-            <option value="new">new</option>
-            <option value="confirmed">confirmed</option>
-            <option value="dismissed">dismissed</option>
-          </Select>
-        </Filter>
-        <Filter label="Detection type">
-          <Input value={filters.detection_type}
-                 onChange={e => setFilters({ ...filters, detection_type: e.target.value })}
-                 placeholder="person, fire, …" />
-        </Filter>
-        <Filter label="Camera ID">
-          <Input value={filters.camera_id}
-                 onChange={e => setFilters({ ...filters, camera_id: e.target.value })} />
-        </Filter>
-        <div className="text-xs text-slate-500 ml-auto">
-          Showing <strong>{range.label}</strong> · {items.length} result{items.length === 1 ? '' : 's'}
-        </div>
+      {/* Quick stats */}
+      <div className="text-sm text-slate-600 mb-3">
+        Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
+        {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
+        {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
+      </div>
+
+      {/* Simple filter bar */}
+      <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
+        <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>🔴 Urgent</QuickBtn>
+        <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>🟡 Needs Attention</QuickBtn>
+        <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>✅ Resolved</QuickBtn>
+        <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>📋 All</QuickBtn>
+
+        <select className="border rounded px-2 py-1 text-sm ml-2"
+                value={storeId} onChange={e => setStoreId(e.target.value)}>
+          <option value="">All Stores</option>
+          {stores.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+        </select>
+
+        <input value={search} onChange={e => setSearch(e.target.value)}
+               placeholder="Search alerts…"
+               className="border rounded px-2 py-1 text-sm flex-1 min-w-[160px]" />
+
+        <span className="text-xs text-slate-500">
+          {range.label} · {filtered.length} shown
+        </span>
       </Card>
 
       <div className="space-y-2">
         {groups.length === 0 ? (
-          <Card className="p-8 text-center text-slate-500">
-            No alerts in this window.
-          </Card>
+          <Card className="p-8 text-center text-slate-500">No alerts to show.</Card>
         ) : (
           groups.map(g => (
-            <AlertCard key={g.head.id}
-                       alert={g.head}
-                       groupCount={g.count}
-                       groupLast={g.last}
-                       groupSiblings={g.siblings}
-                       onChanged={reload} />
+            <AlertCard key={g.head.id} alert={g.head}
+                       groupCount={g.count} groupLast={g.last}
+                       groupSiblings={g.siblings} onChanged={reload} />
           ))
         )}
       </div>
@@ -96,11 +105,14 @@ export default function AlertsPage() {
   )
 }
 
-function Filter({ label, children }: { label: string; children: React.ReactNode }) {
+function QuickBtn({ active, onClick, children }: {
+  active: boolean; onClick: () => void; children: React.ReactNode
+}) {
   return (
-    <label className="text-sm">
-      <div className="text-xs text-slate-500 mb-1">{label}</div>
+    <button onClick={onClick}
+            className={'px-3 py-1.5 rounded text-sm font-medium ' +
+              (active ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200')}>
       {children}
-    </label>
+    </button>
   )
 }

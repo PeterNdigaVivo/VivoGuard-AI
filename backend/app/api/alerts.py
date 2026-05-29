@@ -471,6 +471,39 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
 
 # ---- Endpoints -----------------------------------------------------
 
+@router.get("/summary")
+def alerts_summary(db: Session = Depends(get_db),
+                   _u: User = Depends(get_current_user),
+                   store_id: Optional[int] = Query(None)):
+    """Quick counts for the alerts page header + the sidebar badge.
+    Today (store-local-ish, UTC midnight) urgent / attention / resolved,
+    plus unread_urgent (new + URGENT) which drives the red badge."""
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    q = (db.query(Alert, DetectionEvent)
+           .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .filter(DetectionEvent.timestamp >= today))
+    if store_id is not None:
+        q = q.filter(Camera.store_id == store_id)
+    urgent = attention = resolved = unread_urgent = 0
+    for alert, ev in q.all():
+        label = _severity_label(ev.detection_type)
+        is_resolved = alert.status in ("resolved", "dismissed")
+        if is_resolved:
+            resolved += 1
+            continue
+        if label == "URGENT":
+            urgent += 1
+            if alert.status == "new":
+                unread_urgent += 1
+        elif label == "ATTENTION":
+            attention += 1
+    return {
+        "urgent": urgent, "attention": attention,
+        "resolved_today": resolved, "unread_urgent": unread_urgent,
+    }
+
+
 @router.get("", response_model=list[AlertOut])
 def list_alerts(
     db: Session = Depends(get_db),

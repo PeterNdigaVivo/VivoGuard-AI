@@ -1,7 +1,9 @@
 // Shared shell — sidebar nav + top bar. Used by every authenticated page.
 
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
+import { alerts as alertsApi } from '@/api/alerts'
 
 const NAV = [
   { to: '/chain',    label: 'Chain' },
@@ -25,6 +27,20 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const nav = useNavigate()
 
+  // Unread-urgent badge on the Alerts nav item. Polls every 30s and
+  // also refreshes whenever a new alert is pushed over the websocket.
+  const [urgentBadge, setUrgentBadge] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const refresh = () => alertsApi.summary()
+      .then(s => { if (alive) setUrgentBadge(s.unread_urgent) })
+      .catch(() => {})
+    refresh()
+    const t = setInterval(refresh, 30_000)
+    const unsub = alertsApi.subscribe(() => refresh())
+    return () => { alive = false; clearInterval(t); unsub() }
+  }, [])
+
   return (
     <div className="h-full flex">
       {/* Sidebar */}
@@ -36,9 +52,15 @@ export default function Layout() {
           {NAV.map(item => (
             <NavLink key={item.to} to={item.to}
               className={({ isActive }) =>
-                'block rounded px-3 py-2 text-sm ' +
+                'flex items-center justify-between rounded px-3 py-2 text-sm ' +
                 (isActive ? 'bg-sky-700 text-white' : 'hover:bg-slate-800')}>
-              {item.label}
+              <span>{item.label}</span>
+              {item.to === '/alerts' && urgentBadge > 0 && (
+                <span className="ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5
+                                 rounded-full bg-red-600 text-white text-[11px] font-bold">
+                  {urgentBadge}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>

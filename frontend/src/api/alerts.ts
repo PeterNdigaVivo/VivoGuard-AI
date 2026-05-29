@@ -37,6 +37,10 @@ export const alerts = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
     return api<Alert[]>(`/alerts${q.toString() ? `?${q}` : ''}`)
   },
+  // Quick counts for the header stats + sidebar badge.
+  summary: (storeId?: number) =>
+    api<{ urgent: number; attention: number; resolved_today: number; unread_urgent: number }>(
+      `/alerts/summary${storeId ? `?store_id=${storeId}` : ''}`),
   confirm: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/confirm`, { method: 'POST' }),
   dismiss: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/dismiss`, { method: 'POST' }),
   // Resolved is the everyday "I handled it" action — distinct from
