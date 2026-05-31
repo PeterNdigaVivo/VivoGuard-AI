@@ -1105,6 +1105,236 @@ function RagDot({ rag, big }: { rag: 'green'|'amber'|'red'|'slate'; big?: boolea
 // Default export: all six panels stacked. Caller drops this into the
 // store dashboard and the panels self-fetch.
 
+// ---------------------------------------------------------------------------
+// PANEL — Queue Intelligence
+//
+// Two stacked sub-views in one panel: a LIVE snapshot table (refreshed
+// every 30s) on top, and a DAILY summary underneath with the
+// executive paragraph, key-metrics table, hourly bars and the three
+// staffing recommendations. Plain English everywhere — non-technical
+// managers are the audience.
+
+interface QueueSnapshotPayload {
+  taken_at: string
+  active_counters: number
+  customers_in_queue: { position: number; wait_seconds: number; status: 'GREEN'|'AMBER'|'RED' }[]
+  summary: {
+    avg_wait?: string; peak_wait?: string; shortest_wait?: string
+    red_count?: number; amber_count?: number; green_count?: number
+    sla_target?: string
+  }
+  has_data?: boolean
+  note?: string
+}
+interface QueueIntelPayload {
+  store_name: string
+  date: string
+  generated_at: string
+  summary: {
+    avg_wait_seconds: number; peak_wait_seconds: number; shortest_wait_seconds: number
+    avg_queue_length: number; peak_queue_length: number; total_snapshots: number
+  } | null
+  sla: {
+    target_max_wait_seconds: number; target_max_queue_length: number
+    breaches: number; breach_pct: number
+    status: 'OK' | 'AT RISK' | 'BREACHING'
+  } | null
+  status_breakdown: { green_pct: number; amber_pct: number; red_pct: number } | null
+  hourly_breakdown: { hour: string; avg_wait: number; avg_queue: number;
+                      status: 'GREEN'|'AMBER'|'RED'; snapshots: number }[]
+  peak_hour: string | null
+  quietest_hour: string | null
+  trend: 'IMPROVING' | 'STABLE' | 'WORSENING'
+  staffing_recommendation: string | null
+  recommendations: string[]
+  executive_summary: string
+}
+
+function mmss(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
+
+const STATUS_BG: Record<'GREEN'|'AMBER'|'RED', string> = {
+  GREEN: 'bg-emerald-100 text-emerald-800',
+  AMBER: 'bg-amber-100 text-amber-800',
+  RED:   'bg-red-100 text-red-800',
+}
+const STATUS_DOT: Record<'GREEN'|'AMBER'|'RED', string> = {
+  GREEN: '🟢 FINE', AMBER: '🟡 OK', RED: '🔴 LONG',
+}
+const STATUS_ACTION: Record<'GREEN'|'AMBER'|'RED', string> = {
+  GREEN: 'No action needed',
+  AMBER: 'Getting there',
+  RED:   'Serve immediately',
+}
+
+export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
+  const { data: snap, busy: snapBusy } = useRefresh<QueueSnapshotPayload>(
+    `/analytics/store/${storeId}/queue-snapshot`, [storeId])
+  const { data: intel, busy: intelBusy } = useRefresh<QueueIntelPayload>(
+    `/analytics/store/${storeId}/queue-intelligence`, [storeId], 5 * 60_000)
+
+  return (
+    <PanelShell title="Queue intelligence"
+                subtitle="Live checkout status + today's performance report"
+                busy={snapBusy || intelBusy}>
+      {/* LIVE snapshot */}
+      {!snap ? <SkeletonBlock height={160} /> : !snap.has_data ? (
+        <EmptyState icon="🏪" text="No queue activity right now. Draw a 'queue' zone on the checkout camera if you haven't already." />
+      ) : (
+        <div>
+          <div className="text-xs text-slate-500 mb-2">
+            {snap.active_counters} counter{snap.active_counters === 1 ? '' : 's'} open ·
+            {' '}snapshot at {new Date(snap.taken_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </div>
+          <div className="overflow-hidden rounded border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600 text-xs">
+                <tr>
+                  <th className="text-left p-2">Customer</th>
+                  <th className="text-left p-2">Waiting</th>
+                  <th className="text-left p-2">Status</th>
+                  <th className="text-left p-2">Action needed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snap.customers_in_queue.map(c => (
+                  <tr key={c.position} className="border-t">
+                    <td className="p-2 font-medium">#{c.position}</td>
+                    <td className="p-2 tabular-nums">{mmss(c.wait_seconds)}</td>
+                    <td className="p-2">
+                      <span className={'inline-block px-2 py-0.5 rounded text-xs font-semibold ' + STATUS_BG[c.status]}>
+                        {STATUS_DOT[c.status]}
+                      </span>
+                    </td>
+                    <td className="p-2 text-slate-600">{STATUS_ACTION[c.status]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs mt-2 text-slate-600">
+            <span>Avg wait: <strong>{snap.summary.avg_wait ?? '—'}</strong></span>
+            <span>Peak: <strong>{snap.summary.peak_wait ?? '—'}</strong></span>
+            {snap.summary.sla_target && <span>Target: under <strong>{snap.summary.sla_target}</strong></span>}
+          </div>
+          {snap.note && <div className="text-[11px] text-slate-400 mt-1">{snap.note}</div>}
+        </div>
+      )}
+
+      {/* DAILY summary */}
+      {intel && intel.summary && intel.sla && (
+        <div className="mt-5 border-t pt-4 space-y-3">
+          <div className="text-sm text-slate-700">{intel.executive_summary}</div>
+
+          {/* Key metrics table */}
+          <div className="overflow-hidden rounded border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600 text-xs">
+                <tr>
+                  <th className="text-left p-2">Metric</th>
+                  <th className="text-left p-2">Today</th>
+                  <th className="text-left p-2">Target</th>
+                  <th className="text-left p-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <MetricRow label="Avg Wait Time" today={mmss(intel.summary.avg_wait_seconds)}
+                           target={`< ${mmss(intel.sla.target_max_wait_seconds)}`}
+                           ok={intel.summary.avg_wait_seconds <= intel.sla.target_max_wait_seconds} />
+                <MetricRow label="Longest Wait Today" today={mmss(intel.summary.peak_wait_seconds)}
+                           target={`< ${mmss(intel.sla.target_max_wait_seconds + 60)}`}
+                           ok={intel.summary.peak_wait_seconds <= intel.sla.target_max_wait_seconds + 60} />
+                <MetricRow label="SLA Breaches" today={`${intel.sla.breach_pct}%`}
+                           target="< 10%"
+                           ok={intel.sla.breach_pct < 10} />
+                <MetricRow label="Peak Queue" today={`${intel.summary.peak_queue_length} ppl`}
+                           target={`< ${intel.sla.target_max_queue_length}`}
+                           ok={intel.summary.peak_queue_length < intel.sla.target_max_queue_length} />
+                <MetricRow label="Quietest Period" today={intel.quietest_hour ?? '—'} target="—" ok />
+              </tbody>
+            </table>
+          </div>
+
+          {/* Hourly bars */}
+          {intel.hourly_breakdown.length > 0 && (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                Avg wait by hour
+              </div>
+              <HourlyWaitBars hours={intel.hourly_breakdown}
+                              sla={intel.sla.target_max_wait_seconds} />
+            </div>
+          )}
+
+          {intel.staffing_recommendation && (
+            <div className="bg-amber-50 text-amber-800 rounded px-3 py-2 text-sm">
+              📋 Add one more staff member at checkout between{' '}
+              <strong>{intel.staffing_recommendation}</strong>.
+            </div>
+          )}
+
+          {intel.recommendations.length > 0 && (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                Recommendations
+              </div>
+              <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-1">
+                {intel.recommendations.map((r, i) => <li key={i}>{r}</li>)}
+              </ol>
+            </div>
+          )}
+
+          <div className="text-[11px] text-slate-400">
+            Generated {new Date(intel.generated_at).toLocaleString()} · trend{' '}
+            <strong>{intel.trend.toLowerCase()}</strong>
+          </div>
+        </div>
+      )}
+    </PanelShell>
+  )
+}
+
+function MetricRow({ label, today, target, ok }: {
+  label: string; today: string; target: string; ok: boolean
+}) {
+  return (
+    <tr className="border-t">
+      <td className="p-2">{label}</td>
+      <td className="p-2 font-medium tabular-nums">{today}</td>
+      <td className="p-2 text-slate-500">{target}</td>
+      <td className="p-2">{ok ? '🟢' : '🔴'}</td>
+    </tr>
+  )
+}
+
+function HourlyWaitBars({ hours, sla }: {
+  hours: { hour: string; avg_wait: number; status: 'GREEN'|'AMBER'|'RED' }[]
+  sla: number
+}) {
+  const max = Math.max(sla * 2, ...hours.map(h => h.avg_wait), 60)
+  return (
+    <div className="space-y-1">
+      {hours.map(h => {
+        const pct = Math.min(100, (h.avg_wait / max) * 100)
+        const fill = h.status === 'GREEN' ? 'bg-emerald-500'
+                   : h.status === 'AMBER' ? 'bg-amber-500' : 'bg-red-500'
+        return (
+          <div key={h.hour} className="flex items-center gap-2 text-xs">
+            <span className="w-12 text-slate-500 tabular-nums">{h.hour}</span>
+            <div className="flex-1 h-3 bg-slate-100 rounded">
+              <div className={'h-3 rounded ' + fill} style={{ width: `${Math.max(2, pct)}%` }} />
+            </div>
+            <span className="w-12 text-right tabular-nums">{mmss(h.avg_wait)}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+
 export default function StoreBIPanels({ storeId, firstCameraId, range }: {
   storeId: number; firstCameraId: number | null; range?: RangeProp
 }) {
@@ -1112,6 +1342,7 @@ export default function StoreBIPanels({ storeId, firstCameraId, range }: {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <HourlyFootfallPanel        storeId={storeId} range={range} />
       <ScorecardPanel             storeId={storeId} range={range} />
+      <QueueIntelligencePanel     storeId={storeId} />
       <JourneyMapPanel            storeId={storeId} range={range} />
       <StaffPresencePanel         storeId={storeId} range={range} />
       <HeatmapIntelligencePanel   storeId={storeId} range={range} firstCameraId={firstCameraId} />
