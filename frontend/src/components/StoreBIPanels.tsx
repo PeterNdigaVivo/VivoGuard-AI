@@ -1160,30 +1160,47 @@ const STATUS_BG: Record<'GREEN'|'AMBER'|'RED', string> = {
   AMBER: 'bg-amber-100 text-amber-800',
   RED:   'bg-red-100 text-red-800',
 }
+// Plain-English status labels — operators see these, not GREEN/AMBER/RED.
 const STATUS_DOT: Record<'GREEN'|'AMBER'|'RED', string> = {
-  GREEN: '🟢 FINE', AMBER: '🟡 OK', RED: '🔴 LONG',
+  GREEN: '🟢 Fine',
+  AMBER: '🟡 Getting there',
+  RED:   '🔴 Waiting too long',
 }
-const STATUS_ACTION: Record<'GREEN'|'AMBER'|'RED', string> = {
-  GREEN: 'No action needed',
-  AMBER: 'Getting there',
-  RED:   'Serve immediately',
+// SLA badge in the "Live queue" footer.
+const SLA_BADGE: Record<'OK'|'AT RISK'|'BREACHING', string> = {
+  'OK':         '🟢 On target',
+  'AT RISK':    '🟡 At risk',
+  'BREACHING':  '🔴 Over target',
 }
 
 export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
+  // 5-minute refresh on the live snapshot per the operator brief —
+  // managers don't need second-by-second updates, and Postgres reads
+  // were the main cost driver at chain scale.
   const { data: snap, busy: snapBusy } = useRefresh<QueueSnapshotPayload>(
-    `/analytics/store/${storeId}/queue-snapshot`, [storeId])
+    `/analytics/store/${storeId}/queue-snapshot`, [storeId], 300_000)
   const { data: intel, busy: intelBusy } = useRefresh<QueueIntelPayload>(
     `/analytics/store/${storeId}/queue-intelligence`, [storeId], 5 * 60_000)
 
   return (
-    <PanelShell title="Queue intelligence"
-                subtitle="Live checkout status + today's performance report"
+    <PanelShell title="Checkout Queue — Today's Performance"
+                subtitle="Live checkout status + plain-English daily report"
                 busy={snapBusy || intelBusy}>
-      {/* LIVE snapshot */}
+      {/* Executive paragraph first so a manager reads it before the table. */}
+      {intel?.executive_summary && (
+        <div className="text-sm text-slate-700 italic mb-3">
+          “{intel.executive_summary}”
+        </div>
+      )}
+
+      {/* LIVE snapshot — refreshed every 5 minutes. */}
       {!snap ? <SkeletonBlock height={160} /> : !snap.has_data ? (
         <EmptyState icon="🏪" text="No queue activity right now. Draw a 'queue' zone on the checkout camera if you haven't already." />
       ) : (
         <div>
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+            Live queue right now
+          </div>
           <div className="text-xs text-slate-500 mb-2">
             {snap.active_counters} counter{snap.active_counters === 1 ? '' : 's'} open ·
             {' '}snapshot at {new Date(snap.taken_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -1194,8 +1211,7 @@ export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
                 <tr>
                   <th className="text-left p-2">Customer</th>
                   <th className="text-left p-2">Waiting</th>
-                  <th className="text-left p-2">Status</th>
-                  <th className="text-left p-2">Action needed</th>
+                  <th className="text-left p-2">How are they doing?</th>
                 </tr>
               </thead>
               <tbody>
@@ -1208,16 +1224,22 @@ export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
                         {STATUS_DOT[c.status]}
                       </span>
                     </td>
-                    <td className="p-2 text-slate-600">{STATUS_ACTION[c.status]}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs mt-2 text-slate-600">
-            <span>Avg wait: <strong>{snap.summary.avg_wait ?? '—'}</strong></span>
-            <span>Peak: <strong>{snap.summary.peak_wait ?? '—'}</strong></span>
+            <span>Average wait: <strong>{snap.summary.avg_wait ?? '—'}</strong></span>
             {snap.summary.sla_target && <span>Target: under <strong>{snap.summary.sla_target}</strong></span>}
+            {intel?.sla?.status && (
+              <span className={
+                intel.sla.status === 'OK' ? 'text-emerald-700'
+                : intel.sla.status === 'AT RISK' ? 'text-amber-700'
+                : 'text-red-700'}>
+                {SLA_BADGE[intel.sla.status]}
+              </span>
+            )}
           </div>
           {snap.note && <div className="text-[11px] text-slate-400 mt-1">{snap.note}</div>}
         </div>
@@ -1226,45 +1248,51 @@ export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
       {/* DAILY summary */}
       {intel && intel.summary && intel.sla && (
         <div className="mt-5 border-t pt-4 space-y-3">
-          <div className="text-sm text-slate-700">{intel.executive_summary}</div>
+          <div className="text-xs uppercase tracking-wide text-slate-500">Today's summary</div>
 
-          {/* Key metrics table */}
+          {/* Key metrics table — plain-English row labels. */}
           <div className="overflow-hidden rounded border border-slate-200">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-600 text-xs">
                 <tr>
-                  <th className="text-left p-2">Metric</th>
+                  <th className="text-left p-2">What we measured</th>
                   <th className="text-left p-2">Today</th>
                   <th className="text-left p-2">Target</th>
                   <th className="text-left p-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                <MetricRow label="Avg Wait Time" today={mmss(intel.summary.avg_wait_seconds)}
+                <MetricRow label="Average wait time" today={mmss(intel.summary.avg_wait_seconds)}
                            target={`< ${mmss(intel.sla.target_max_wait_seconds)}`}
                            ok={intel.summary.avg_wait_seconds <= intel.sla.target_max_wait_seconds} />
-                <MetricRow label="Longest Wait Today" today={mmss(intel.summary.peak_wait_seconds)}
+                <MetricRow label="Longest wait today" today={mmss(intel.summary.peak_wait_seconds)}
                            target={`< ${mmss(intel.sla.target_max_wait_seconds + 60)}`}
                            ok={intel.summary.peak_wait_seconds <= intel.sla.target_max_wait_seconds + 60} />
-                <MetricRow label="SLA Breaches" today={`${intel.sla.breach_pct}%`}
+                <MetricRow label="Customers over limit" today={`${intel.sla.breach_pct}%`}
                            target="< 10%"
                            ok={intel.sla.breach_pct < 10} />
-                <MetricRow label="Peak Queue" today={`${intel.summary.peak_queue_length} ppl`}
+                <MetricRow label="Biggest queue seen" today={`${intel.summary.peak_queue_length} ppl`}
                            target={`< ${intel.sla.target_max_queue_length}`}
                            ok={intel.summary.peak_queue_length < intel.sla.target_max_queue_length} />
-                <MetricRow label="Quietest Period" today={intel.quietest_hour ?? '—'} target="—" ok />
+                <MetricRow label="Best time of day"
+                           today={intel.quietest_hour ?? '—'} target="—" ok
+                           statusOverride="✅" />
+                <MetricRow label="Busiest time of day"
+                           today={intel.peak_hour ?? '—'} target="—"
+                           ok={(intel.sla.status === 'OK')}
+                           statusOverride="⚠️" />
               </tbody>
             </table>
           </div>
 
-          {/* Hourly bars */}
-          {intel.hourly_breakdown.length > 0 && (
+          {intel.recommendations.length > 0 && (
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
-                Avg wait by hour
+                What this means for your store
               </div>
-              <HourlyWaitBars hours={intel.hourly_breakdown}
-                              sla={intel.sla.target_max_wait_seconds} />
+              <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-1.5">
+                {intel.recommendations.map((r, i) => <li key={i}>{r}</li>)}
+              </ol>
             </div>
           )}
 
@@ -1275,16 +1303,16 @@ export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
             </div>
           )}
 
-          {intel.recommendations.length > 0 && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
-                Recommendations
-              </div>
-              <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-1">
-                {intel.recommendations.map((r, i) => <li key={i}>{r}</li>)}
-              </ol>
+          {/* Hourly breakdown — padded to the canonical 09:00-21:00
+              retail window so the chart always reads at the same scale. */}
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+              Hourly breakdown
             </div>
-          )}
+            <HourlyWaitBars hours={intel.hourly_breakdown}
+                            sla={intel.sla.target_max_wait_seconds}
+                            busiest={intel.peak_hour} />
+          </div>
 
           <div className="text-[11px] text-slate-400">
             Generated {new Date(intel.generated_at).toLocaleString()} · trend{' '}
@@ -1296,15 +1324,16 @@ export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
   )
 }
 
-function MetricRow({ label, today, target, ok }: {
+function MetricRow({ label, today, target, ok, statusOverride }: {
   label: string; today: string; target: string; ok: boolean
+  statusOverride?: string
 }) {
   return (
     <tr className="border-t">
       <td className="p-2">{label}</td>
       <td className="p-2 font-medium tabular-nums">{today}</td>
       <td className="p-2 text-slate-500">{target}</td>
-      <td className="p-2">{ok ? '🟢' : '🔴'}</td>
+      <td className="p-2">{statusOverride ?? (ok ? '🟢' : '🔴')}</td>
     </tr>
   )
 }
@@ -1312,21 +1341,46 @@ function MetricRow({ label, today, target, ok }: {
 function HourlyWaitBars({ hours, sla }: {
   hours: { hour: string; avg_wait: number; status: 'GREEN'|'AMBER'|'RED' }[]
   sla: number
+  busiest?: string | null
 }) {
-  const max = Math.max(sla * 2, ...hours.map(h => h.avg_wait), 60)
+  // Pad to the canonical 09:00-21:00 retail window so the chart is
+  // always the same length and a quiet morning still reads as quiet,
+  // not absent.
+  const byHour = new Map<string, { avg_wait: number; status: 'GREEN'|'AMBER'|'RED' }>()
+  for (const h of hours) byHour.set(h.hour, { avg_wait: h.avg_wait, status: h.status })
+  const HOURS = Array.from({ length: 12 }, (_, i) => `${String(9 + i).padStart(2, '0')}:00`)
+  const series = HOURS.map(hr => {
+    const e = byHour.get(hr)
+    return { hour: hr, avg_wait: e?.avg_wait ?? 0,
+             status: e?.status ?? ('GREEN' as const) }
+  })
+  const max = Math.max(sla * 2, ...series.map(s => s.avg_wait), 60)
+  // Label hours as "9AM", "2PM" etc to match the spec's screenshot.
+  const label = (hr: string) => {
+    const h = parseInt(hr, 10)
+    const period = h >= 12 ? 'PM' : 'AM'
+    const display = h === 0 ? 12 : h > 12 ? h - 12 : h
+    return `${display}${period}`
+  }
   return (
     <div className="space-y-1">
-      {hours.map(h => {
+      {series.map(h => {
         const pct = Math.min(100, (h.avg_wait / max) * 100)
         const fill = h.status === 'GREEN' ? 'bg-emerald-500'
                    : h.status === 'AMBER' ? 'bg-amber-500' : 'bg-red-500'
+        const emoji = h.status === 'GREEN' ? '✅'
+                    : h.status === 'AMBER' ? '🟡' : '🔴'
+        const isBusiest = busiest === h.hour
         return (
           <div key={h.hour} className="flex items-center gap-2 text-xs">
-            <span className="w-12 text-slate-500 tabular-nums">{h.hour}</span>
+            <span className="w-12 text-slate-500 tabular-nums">{label(h.hour)}</span>
             <div className="flex-1 h-3 bg-slate-100 rounded">
-              <div className={'h-3 rounded ' + fill} style={{ width: `${Math.max(2, pct)}%` }} />
+              <div className={'h-3 rounded ' + fill}
+                   style={{ width: `${Math.max(2, pct)}%` }} />
             </div>
-            <span className="w-12 text-right tabular-nums">{mmss(h.avg_wait)}</span>
+            <span className="w-14 text-right tabular-nums">{mmss(h.avg_wait)}</span>
+            <span className="w-5 text-center">{emoji}</span>
+            {isBusiest && <span className="text-red-600 font-semibold">← BUSIEST</span>}
           </div>
         )
       })}
