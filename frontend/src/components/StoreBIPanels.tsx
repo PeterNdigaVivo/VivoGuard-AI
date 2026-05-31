@@ -1173,14 +1173,16 @@ const SLA_BADGE: Record<'OK'|'AT RISK'|'BREACHING', string> = {
   'BREACHING':  '🔴 Over target',
 }
 
-export function QueueIntelligencePanel({ storeId }: { storeId: number }) {
-  // 5-minute refresh on the live snapshot per the operator brief —
-  // managers don't need second-by-second updates, and Postgres reads
-  // were the main cost driver at chain scale.
+export function QueueIntelligencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
+  // Live snapshot is always RIGHT NOW — the date range doesn't apply
+  // to "who is currently in the queue". 5-minute refresh per brief.
   const { data: snap, busy: snapBusy } = useRefresh<QueueSnapshotPayload>(
     `/analytics/store/${storeId}/queue-snapshot`, [storeId], 300_000)
+  // The daily / range report honours the dashboard's date picker —
+  // Yesterday, This week, Last 30 days etc all flow through.
   const { data: intel, busy: intelBusy } = useRefresh<QueueIntelPayload>(
-    `/analytics/store/${storeId}/queue-intelligence`, [storeId], 5 * 60_000)
+    withRange(`/analytics/store/${storeId}/queue-intelligence`, range),
+    [storeId, range?.since, range?.until], 5 * 60_000)
 
   return (
     <PanelShell title="Checkout Queue — Today's Performance"
@@ -1396,7 +1398,7 @@ export default function StoreBIPanels({ storeId, firstCameraId, range }: {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <HourlyFootfallPanel        storeId={storeId} range={range} />
       <ScorecardPanel             storeId={storeId} range={range} />
-      <QueueIntelligencePanel     storeId={storeId} />
+      <QueueIntelligencePanel     storeId={storeId} range={range} />
       <JourneyMapPanel            storeId={storeId} range={range} />
       <StaffPresencePanel         storeId={storeId} range={range} />
       <HeatmapIntelligencePanel   storeId={storeId} range={range} firstCameraId={firstCameraId} />

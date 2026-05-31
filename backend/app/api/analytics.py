@@ -1277,13 +1277,21 @@ def _trend_label(today_avg: float, prev_avg: float) -> str:
 @router.get("/store/{store_id}/queue-intelligence")
 def store_queue_intelligence(store_id: int,
                              date: str | None = None,
+                             since: datetime | None = None,
+                             until: datetime | None = None,
                              db: Session = Depends(get_db),
                              _u=Depends(get_current_user)):
-    """Plain-English queue performance report for a store + date.
-    Defaults to today (store-local). Aggregates queue_length and
-    queue_wait_seconds metric_snapshots into a summary, SLA status,
-    hourly breakdown, trend vs yesterday, and three recommendations
-    a non-technical manager can act on."""
+    """Plain-English queue performance report for a store + window.
+
+    Window precedence:
+      • explicit `since`/`until` (the DateRangePicker on the dashboard
+        sends these) — used as-is
+      • `date=YYYY-MM-DD` — that single calendar day (UTC)
+      • neither — today (UTC midnight → now)
+
+    Trend is computed against the immediately preceding window of the
+    same length, so Yesterday vs day-before-yesterday, Last 7 vs the
+    7 before that, etc."""
     from sqlalchemy import extract
     from datetime import datetime as _dt, date as date_t, timedelta
 
@@ -1291,13 +1299,25 @@ def store_queue_intelligence(store_id: int,
     if not store:
         raise HTTPException(404, "store not found")
 
-    try:
-        target_date = date_t.fromisoformat(date) if date else _dt.now(timezone.utc).date()
-    except ValueError:
-        raise HTTPException(400, "date must be YYYY-MM-DD")
-    day_start = _dt(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
-    day_end   = day_start + timedelta(days=1)
-    prev_start = day_start - timedelta(days=1)
+    if since is not None:
+        day_start = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        day_end   = (until if until and until.tzinfo else
+                     (until.replace(tzinfo=timezone.utc) if until else _dt.now(timezone.utc)))
+        target_date_label = day_start.date().isoformat()
+        if day_start.date() != (day_end - timedelta(seconds=1)).date():
+            target_date_label = (f"{day_start.date().isoformat()} → "
+                                 f"{(day_end - timedelta(seconds=1)).date().isoformat()}")
+    else:
+        try:
+            target_date = date_t.fromisoformat(date) if date else _dt.now(timezone.utc).date()
+        except ValueError:
+            raise HTTPException(400, "date must be YYYY-MM-DD")
+        day_start = _dt(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
+        day_end   = day_start + timedelta(days=1)
+        target_date_label = target_date.isoformat()
+    window_len = day_end - day_start
+    prev_start = day_start - window_len
+    prev_end   = day_start
 
     cam_ids = [c.id for c in db.query(Camera).filter(Camera.store_id == store_id).all()]
     sla_seconds = int(getattr(store, "queue_sla_seconds", 180) or 180)
@@ -1305,7 +1325,7 @@ def store_queue_intelligence(store_id: int,
 
     if not cam_ids:
         return {
-            "store_name": store.name, "date": target_date.isoformat(),
+            "store_name": store.name, "date": target_date_label,
             "generated_at": _dt.now(timezone.utc).isoformat(),
             "summary": None, "sla": None, "status_breakdown": None,
             "hourly_breakdown": [],
@@ -1331,15 +1351,15 @@ def store_queue_intelligence(store_id: int,
 
     if not waits and not lengths:
         return {
-            "store_name": store.name, "date": target_date.isoformat(),
+            "store_name": store.name, "date": target_date_label,
             "generated_at": _dt.now(timezone.utc).isoformat(),
             "summary": None, "sla": None, "status_breakdown": None,
             "hourly_breakdown": [],
             "peak_hour": None, "quietest_hour": None, "trend": "STABLE",
             "staffing_recommendation": None,
-            "recommendations": ["No queue activity recorded today.",
+            "recommendations": ["No queue activity recorded in this period.",
                                 "Draw a 'queue' zone on the checkout camera if you haven't already."],
-            "executive_summary": "No queue activity recorded today.",
+            "executive_summary": "No queue activity recorded in this period.",
         }
 
     wait_values = [float(v or 0) for _, v in waits]
@@ -1394,12 +1414,13 @@ def store_queue_intelligence(store_id: int,
                          key=lambda h: h["avg_wait"])["hour"]
                      if hourly else None)
 
-    # Trend vs yesterday — same metric, same window.
+    # Trend vs the prior same-length window — yesterday for a single
+    # day, last-7 vs the 7 before for a weekly range, etc.
     prev_waits = (db.query(func.avg(MetricSnapshot.value))
                     .filter(MetricSnapshot.camera_id.in_(cam_ids),
                             MetricSnapshot.metric_type == "queue_wait_seconds",
                             MetricSnapshot.period_start >= prev_start,
-                            MetricSnapshot.period_start <  day_start)
+                            MetricSnapshot.period_start <  prev_end)
                     .scalar() or 0)
     trend = _trend_label(avg_wait, float(prev_waits))
 
@@ -1467,7 +1488,7 @@ def store_queue_intelligence(store_id: int,
 
     return {
         "store_name": store.name,
-        "date": target_date.isoformat(),
+        "date": target_date_label,
         "generated_at": _dt.now(timezone.utc).isoformat(),
         "summary": {
             "avg_wait_seconds": int(round(avg_wait)),
