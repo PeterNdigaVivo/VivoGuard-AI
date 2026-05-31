@@ -386,7 +386,7 @@ async def shutter_capture(camera_id: int, label: str,
     if not cam:
         raise HTTPException(404, "camera not found")
 
-    data = FrameBuffer().latest_jpeg(camera_id)
+    data = FrameBuffer().latest_jpeg(camera_id, prefer_overlay=False)
     if not data:
         pw = decrypt(cam.password_encrypted or "")
         rtsp = build_rtsp_url(brand=cam.brand, host=cam.host, port=cam.rtsp_port,
@@ -596,7 +596,7 @@ async def uniform_capture(camera_id: int, label: str,
     if not cam:
         raise HTTPException(404, "camera not found")
 
-    data = FrameBuffer().latest_jpeg(camera_id)
+    data = FrameBuffer().latest_jpeg(camera_id, prefer_overlay=False)
     if not data:
         pw = decrypt(cam.password_encrypted or "")
         rtsp = build_rtsp_url(brand=cam.brand, host=cam.host, port=cam.rtsp_port,

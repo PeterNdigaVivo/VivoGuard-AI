@@ -78,7 +78,19 @@ class FrameBuffer:
         self.r.set(key, json.dumps(current).encode(), ex=HEALTH_TTL_SECONDS)
 
     # ----- read path (api / inference) -----
-    def latest_jpeg(self, camera_id: int) -> bytes | None:
+    def latest_jpeg(self, camera_id: int, *,
+                    prefer_overlay: bool = True) -> bytes | None:
+        """Return the latest JPEG. When `prefer_overlay` is True (the
+        default for the snapshot / Live View paths) we serve the
+        annotated `vg:frame_overlay:{id}` frame when one is fresh —
+        that's where the QueueDetector writes the numbered-box + flow-
+        line overlay — falling back to the raw `vg:frame:{id}` the
+        streamer publishes. Inference reads should pass
+        prefer_overlay=False so they detect on pristine pixels."""
+        if prefer_overlay:
+            overlay = self.r.get(f"vg:frame_overlay:{camera_id}".encode())
+            if overlay:
+                return overlay
         return self.r.get(f"vg:frame:{camera_id}".encode())
 
     def health(self, camera_id: int) -> dict | None:

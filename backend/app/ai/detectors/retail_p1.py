@@ -34,10 +34,26 @@ class QueueDetector(Detector):
     Wait time is computed by the tracker: for any person track that
     sits inside the queue zone, the dwell duration is averaged and
     pushed to `queue_wait_seconds`.
+
+    Also renders a Lumana-style queue overlay onto the latest frame —
+    numbered colour-coded boxes (🟢/🟡/🔴 by wait), per-person wait
+    labels, a dashed flow line from #1 to #N, and a summary banner at
+    the bottom — and publishes it to vg:frame_overlay:{camera_id} for
+    the Live View and snapshot endpoints to prefer over the raw frame.
     """
 
     detection_type = "queue"
     needs_tracking = True
+
+    # BGR (OpenCV order). Spec values.
+    _RED   = (0,   0,   255)
+    _AMBER = (0,   165, 255)
+    _GREEN = (0,   255, 0)
+    _WHITE = (255, 255, 255)
+    _BLACK = (0,   0,   0)
+    # Wait-time bands in seconds.
+    _GREEN_MAX = 120   # < 2 min
+    _AMBER_MAX = 240   # 2-4 min → amber, > 4 min → red
 
     def __init__(self):
         self._entered: dict[tuple[int, int, int], float] = {}   # (cam, track, zone) → t0
@@ -62,11 +78,15 @@ class QueueDetector(Detector):
 
         out: list[DetectionEvent] = []
         now = time.time()
+        # Per-person queue entries across ALL queue zones — used to
+        # render the overlay once at the end of the loop.
+        queue_entries: list[dict] = []
         for z in zones:
             in_zone = [p for p in people if bbox_in_zone(p["bbox_norm"], z["polygon_coords_json"])]
             count = len(in_zone)
 
-            # Track-level dwell to estimate wait time.
+            # Track-level dwell to estimate wait time + collect per-
+            # person bbox/wait for the overlay.
             track_dwells: list[float] = []
             for tr, _det in ctx.tracks:
                 if tr.cls not in COCO_PERSON:
@@ -76,7 +96,12 @@ class QueueDetector(Detector):
                     continue
                 key = (ctx.camera_id, tr.track_id, z["id"])
                 t0 = self._entered.setdefault(key, now)
-                track_dwells.append(max(0.0, now - t0))
+                wait = max(0.0, now - t0)
+                track_dwells.append(wait)
+                queue_entries.append({
+                    "track_id": tr.track_id, "bbox": tr.bbox_norm,
+                    "wait": wait, "t0": t0, "zone_id": z["id"],
+                })
 
             avg_wait = (sum(track_dwells) / len(track_dwells)) if track_dwells else 0.0
 
@@ -103,7 +128,131 @@ class QueueDetector(Detector):
                     extra={"count": count, "threshold": threshold,
                            "avg_wait_seconds": round(avg_wait, 1)},
                 ))
+
+        # Render + publish the queue overlay. Best-effort — a failed
+        # render must not break the detection chain.
+        if queue_entries and ctx.frame_bgr is not None:
+            try:
+                self._publish_overlay(ctx, queue_entries, len(zones))
+            except Exception:
+                import logging as _l
+                _l.getLogger(__name__).exception(
+                    "queue overlay render failed for camera %s", ctx.camera_id)
         return out
+
+    # ---- Overlay rendering ----------------------------------------
+
+    def _band_colour(self, wait: float) -> tuple[int, int, int]:
+        if wait < self._GREEN_MAX:
+            return self._GREEN
+        if wait < self._AMBER_MAX:
+            return self._AMBER
+        return self._RED
+
+    @staticmethod
+    def _mmss(seconds: float) -> str:
+        s = int(round(max(0.0, seconds)))
+        return f"{s // 60:02d}:{s % 60:02d}"
+
+    def _publish_overlay(self, ctx: DetectorContext, entries: list[dict],
+                         active_counters: int) -> None:
+        """Draw numbered boxes + dashed flow line + summary banner on
+        the current frame and stash it under vg:frame_overlay:{cam}
+        for the snapshot/Live View endpoints."""
+        import cv2
+        import numpy as np
+        import redis as _redis
+        from app.config import settings
+
+        # Sort longest-waiting first → that's queue position #1.
+        ordered = sorted(entries, key=lambda e: e["t0"])
+        img = ctx.frame_bgr.copy()
+        h, w = img.shape[:2]
+
+        # Centroids in pixel space, used both for the dashed line and
+        # for the box-corner label.
+        centroids: list[tuple[int, int]] = []
+
+        for i, e in enumerate(ordered, start=1):
+            x1, y1, x2, y2 = e["bbox"]
+            p1 = (int(max(0, x1) * w), int(max(0, y1) * h))
+            p2 = (int(min(1, x2) * w), int(min(1, y2) * h))
+            if p2[0] <= p1[0] or p2[1] <= p1[1]:
+                continue
+            cx = (p1[0] + p2[0]) // 2
+            cy = (p1[1] + p2[1]) // 2
+            centroids.append((cx, cy))
+
+            colour = self._band_colour(e["wait"])
+            cv2.rectangle(img, p1, p2, colour, 3)
+            label = f"#{i} | {self._mmss(e['wait'])}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            # Label badge: filled box just above the bbox so the white
+            # text reads on any background.
+            ly = max(0, p1[1] - th - 6)
+            cv2.rectangle(img, (p1[0], ly), (p1[0] + tw + 8, ly + th + 6),
+                          self._BLACK, -1)
+            cv2.rectangle(img, (p1[0], ly), (p1[0] + tw + 8, ly + th + 6),
+                          colour, 1)
+            cv2.putText(img, label, (p1[0] + 4, ly + th + 1),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, self._WHITE, 2, cv2.LINE_AA)
+
+        # Dashed flow line #1 → #2 → … → #N with an arrowhead at the end.
+        if len(centroids) >= 2:
+            for a, b in zip(centroids, centroids[1:]):
+                self._dashed_line(img, a, b, self._WHITE, thickness=2, dash=14, gap=8)
+            # Arrowhead on the final segment so direction reads instantly.
+            cv2.arrowedLine(img, centroids[-2], centroids[-1],
+                            self._WHITE, 2, tipLength=0.20)
+
+        # Bottom summary banner.
+        waits = [e["wait"] for e in ordered]
+        avg = sum(waits) / len(waits)
+        peak = max(waits)
+        peak_emoji = ("🔴" if peak >= self._AMBER_MAX
+                      else "🟡" if peak >= self._GREEN_MAX else "🟢")
+        summary = (f"Queue: {len(ordered)} people | "
+                   f"Avg wait: {self._mmss(avg)} | "
+                   f"Longest: {self._mmss(peak)} {peak_emoji} | "
+                   f"Counter: {active_counters} active")
+        bar_h = max(28, h // 22)
+        overlay = img.copy()
+        cv2.rectangle(overlay, (0, h - bar_h), (w, h), self._BLACK, -1)
+        cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+        scale = max(0.5, min(0.9, w / 1400))
+        cv2.putText(img, summary, (10, h - int(bar_h * 0.28)),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, self._WHITE,
+                    max(1, int(scale * 2)), cv2.LINE_AA)
+
+        # Encode + publish. 30s TTL matches the streamer's vg:frame
+        # TTL so a stale overlay never lingers when the queue empties.
+        ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return
+        r = _redis.from_url(settings.redis_url)
+        r.set(f"vg:frame_overlay:{ctx.camera_id}".encode(),
+              jpg.tobytes(), ex=30)
+
+    @staticmethod
+    def _dashed_line(img, p1, p2, colour, thickness=2, dash=14, gap=8) -> None:
+        """OpenCV has no native dashed line — step along the segment
+        and draw short solid pieces with gaps between them."""
+        import numpy as np
+        x1, y1 = p1; x2, y2 = p2
+        dx, dy = x2 - x1, y2 - y1
+        length = float(np.hypot(dx, dy))
+        if length < 1:
+            return
+        ux, uy = dx / length, dy / length
+        period = dash + gap
+        steps = int(length // period)
+        for k in range(steps + 1):
+            s = k * period
+            e = min(length, s + dash)
+            sx, sy = int(x1 + ux * s), int(y1 + uy * s)
+            ex, ey = int(x1 + ux * e), int(y1 + uy * e)
+            import cv2 as _cv2
+            _cv2.line(img, (sx, sy), (ex, ey), colour, thickness, _cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------

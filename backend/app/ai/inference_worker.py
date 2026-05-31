@@ -223,7 +223,10 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 log.info("camera %s gone or disabled", camera_id)
                 return
 
-            jpeg = buffer.latest_jpeg(camera_id)
+            # Detect on pristine pixels — never read the overlay frame
+            # the QueueDetector writes back, or YOLO would re-detect on
+            # its own drawn boxes / labels.
+            jpeg = buffer.latest_jpeg(camera_id, prefer_overlay=False)
             if not jpeg:
                 time.sleep(poll_interval)
                 continue
