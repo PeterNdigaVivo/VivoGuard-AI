@@ -11,6 +11,7 @@ export default function LoginPage() {
 
   const [email, setEmail] = useState('admin@example.com')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -40,8 +41,18 @@ export default function LoginPage() {
         </label>
         <label className="block mb-4">
           <div className="text-sm mb-1">Password</div>
-          <input className="w-full bg-slate-700 px-3 py-2 rounded outline-none focus:ring-2 ring-sky-500"
-                 type="password" value={password} onChange={e => setPassword(e.target.value)} required />
+          <div className="relative">
+            <input className="w-full bg-slate-700 px-3 py-2 pr-10 rounded outline-none focus:ring-2 ring-sky-500"
+                   type={showPassword ? 'text' : 'password'}
+                   value={password} onChange={e => setPassword(e.target.value)} required />
+            <button type="button"
+                    onClick={() => setShowPassword(s => !s)}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute inset-y-0 right-0 px-3 text-slate-300 hover:text-white">
+              {showPassword ? '🙈' : '👁️'}
+            </button>
+          </div>
         </label>
 
         {error && <div className="text-red-400 text-sm mb-3">{error}</div>}
