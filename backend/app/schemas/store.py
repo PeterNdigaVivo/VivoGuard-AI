@@ -17,6 +17,9 @@ class StoreIn(BaseModel):
     manager_name:  str | None = None
     manager_phone: str | None = None
     default_rtsp_port: int | None = None
+    # Queue SLA targets used by the Queue Intelligence report.
+    queue_sla_seconds: int | None = None
+    queue_sla_length:  int | None = None
     is_active: bool = True
 
 
@@ -37,6 +40,8 @@ class StoreOut(BaseModel):
     manager_name:  str | None = None
     manager_phone: str | None = None
     default_rtsp_port: int | None = None
+    queue_sla_seconds: int | None = None
+    queue_sla_length:  int | None = None
     is_active: bool = True
     created_at: datetime
 

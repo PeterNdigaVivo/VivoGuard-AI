@@ -1235,6 +1235,349 @@ def store_zone_performance(store_id: int,
     }
 
 
+# ====================================================================
+# Queue Intelligence — plain-English checkout performance report
+# ====================================================================
+# Uses the existing queue_length and queue_wait_seconds metrics that
+# the QueueDetector writes per zone per minute. Everything else is
+# derived: SLA breaches, hourly buckets, traffic-light bands, the
+# executive summary and the three recommendations.
+
+# Traffic-light bands. Wait time in seconds.
+_QUEUE_GREEN_MAX = 120   # < 2 min  → green
+_QUEUE_AMBER_MAX = 240   # 2-4 min  → amber, anything above → red
+
+
+def _wait_status(seconds: float) -> str:
+    if seconds < _QUEUE_GREEN_MAX:
+        return "GREEN"
+    if seconds < _QUEUE_AMBER_MAX:
+        return "AMBER"
+    return "RED"
+
+
+def _fmt_mmss(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "—"
+    s = int(round(float(seconds)))
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _trend_label(today_avg: float, prev_avg: float) -> str:
+    if prev_avg <= 0 or today_avg <= 0:
+        return "STABLE"
+    delta = (today_avg - prev_avg) / prev_avg
+    if delta > 0.1:
+        return "WORSENING"
+    if delta < -0.1:
+        return "IMPROVING"
+    return "STABLE"
+
+
+@router.get("/store/{store_id}/queue-intelligence")
+def store_queue_intelligence(store_id: int,
+                             date: str | None = None,
+                             db: Session = Depends(get_db),
+                             _u=Depends(get_current_user)):
+    """Plain-English queue performance report for a store + date.
+    Defaults to today (store-local). Aggregates queue_length and
+    queue_wait_seconds metric_snapshots into a summary, SLA status,
+    hourly breakdown, trend vs yesterday, and three recommendations
+    a non-technical manager can act on."""
+    from sqlalchemy import extract
+    from datetime import datetime as _dt, date as date_t, timedelta
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+
+    try:
+        target_date = date_t.fromisoformat(date) if date else _dt.now(timezone.utc).date()
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    day_start = _dt(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
+    day_end   = day_start + timedelta(days=1)
+    prev_start = day_start - timedelta(days=1)
+
+    cam_ids = [c.id for c in db.query(Camera).filter(Camera.store_id == store_id).all()]
+    sla_seconds = int(getattr(store, "queue_sla_seconds", 180) or 180)
+    sla_length  = int(getattr(store, "queue_sla_length", 6) or 6)
+
+    if not cam_ids:
+        return {
+            "store_name": store.name, "date": target_date.isoformat(),
+            "generated_at": _dt.now(timezone.utc).isoformat(),
+            "summary": None, "sla": None, "status_breakdown": None,
+            "hourly_breakdown": [],
+            "peak_hour": None, "quietest_hour": None, "trend": "STABLE",
+            "staffing_recommendation": None,
+            "recommendations": ["Attach cameras to this store to start collecting queue data."],
+            "executive_summary": "No queue data yet — attach a camera with a 'queue' zone to start.",
+        }
+
+    # Pull every queue_wait_seconds + queue_length sample for today.
+    waits = (db.query(MetricSnapshot.period_start, MetricSnapshot.value)
+               .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                       MetricSnapshot.metric_type == "queue_wait_seconds",
+                       MetricSnapshot.period_start >= day_start,
+                       MetricSnapshot.period_start <  day_end)
+               .all())
+    lengths = (db.query(MetricSnapshot.period_start, MetricSnapshot.value)
+                 .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                         MetricSnapshot.metric_type == "queue_length",
+                         MetricSnapshot.period_start >= day_start,
+                         MetricSnapshot.period_start <  day_end)
+                 .all())
+
+    if not waits and not lengths:
+        return {
+            "store_name": store.name, "date": target_date.isoformat(),
+            "generated_at": _dt.now(timezone.utc).isoformat(),
+            "summary": None, "sla": None, "status_breakdown": None,
+            "hourly_breakdown": [],
+            "peak_hour": None, "quietest_hour": None, "trend": "STABLE",
+            "staffing_recommendation": None,
+            "recommendations": ["No queue activity recorded today.",
+                                "Draw a 'queue' zone on the checkout camera if you haven't already."],
+            "executive_summary": "No queue activity recorded today.",
+        }
+
+    wait_values = [float(v or 0) for _, v in waits]
+    length_values = [float(v or 0) for _, v in lengths]
+    avg_wait = sum(wait_values) / len(wait_values) if wait_values else 0.0
+    peak_wait = max(wait_values) if wait_values else 0.0
+    shortest_wait = min(wait_values) if wait_values else 0.0
+    avg_length = sum(length_values) / len(length_values) if length_values else 0.0
+    peak_length = max(length_values) if length_values else 0.0
+
+    # SLA breach = wait above the store's target.
+    breaches = sum(1 for v in wait_values if v > sla_seconds)
+    breach_pct = round(breaches / len(wait_values) * 100, 1) if wait_values else 0.0
+    if breach_pct == 0:
+        sla_status = "OK"
+    elif breach_pct < 10:
+        sla_status = "AT RISK"
+    else:
+        sla_status = "BREACHING"
+
+    # Traffic-light distribution of waits.
+    n = max(1, len(wait_values))
+    g = sum(1 for v in wait_values if v < _QUEUE_GREEN_MAX)
+    a = sum(1 for v in wait_values if _QUEUE_GREEN_MAX <= v < _QUEUE_AMBER_MAX)
+    r = sum(1 for v in wait_values if v >= _QUEUE_AMBER_MAX)
+
+    # Hourly breakdown — group by hour of period_start.
+    hour_buckets: dict[int, dict[str, list[float]]] = {}
+    for ts, v in waits:
+        hr = ts.hour
+        b = hour_buckets.setdefault(hr, {"wait": [], "queue": []})
+        b["wait"].append(float(v or 0))
+    for ts, v in lengths:
+        hr = ts.hour
+        b = hour_buckets.setdefault(hr, {"wait": [], "queue": []})
+        b["queue"].append(float(v or 0))
+    hourly = []
+    for hr in sorted(hour_buckets):
+        b = hour_buckets[hr]
+        aw = sum(b["wait"]) / len(b["wait"]) if b["wait"] else 0.0
+        aq = sum(b["queue"]) / len(b["queue"]) if b["queue"] else 0.0
+        hourly.append({
+            "hour": f"{hr:02d}:00",
+            "avg_wait": int(round(aw)),
+            "avg_queue": round(aq, 1),
+            "status": _wait_status(aw),
+            "snapshots": len(b["wait"]) + len(b["queue"]),
+        })
+
+    peak_hour = max(hourly, key=lambda h: h["avg_wait"])["hour"] if hourly else None
+    quietest_hour = (min((h for h in hourly if h["snapshots"] > 0),
+                         key=lambda h: h["avg_wait"])["hour"]
+                     if hourly else None)
+
+    # Trend vs yesterday — same metric, same window.
+    prev_waits = (db.query(func.avg(MetricSnapshot.value))
+                    .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                            MetricSnapshot.metric_type == "queue_wait_seconds",
+                            MetricSnapshot.period_start >= prev_start,
+                            MetricSnapshot.period_start <  day_start)
+                    .scalar() or 0)
+    trend = _trend_label(avg_wait, float(prev_waits))
+
+    # Staffing recommendation = the contiguous block of breaching hours
+    # (avg wait above the SLA), if any.
+    breaching_hours = [int(h["hour"][:2]) for h in hourly if h["avg_wait"] > sla_seconds]
+    if breaching_hours:
+        start_h, end_h = min(breaching_hours), max(breaching_hours) + 1
+        staffing = f"{start_h:02d}:00–{end_h:02d}:00"
+    else:
+        staffing = None
+
+    # Recommendations + executive summary — plain English.
+    recs: list[str] = []
+    if staffing:
+        recs.append(
+            f"Open a second till between {staffing} — queue peaks at "
+            f"{int(peak_length)} customers during this period."
+        )
+    if peak_hour and peak_hour[:2].isdigit() and int(peak_hour[:2]) > 12:
+        recs.append(
+            "Rotate lunch breaks before 13:00 so all tills are open "
+            "during the afternoon peak."
+        )
+    avg_mmss = _fmt_mmss(avg_wait)
+    target_mmss = _fmt_mmss(sla_seconds)
+    if avg_wait > sla_seconds:
+        over = int(avg_wait - sla_seconds)
+        recs.append(
+            f"Average wait of {avg_mmss} is {over}s above the {target_mmss} "
+            f"target. One extra staff member at peak times would help."
+        )
+    elif breach_pct > 0:
+        recs.append(
+            f"Average wait of {avg_mmss} is within the {target_mmss} target, "
+            f"but {breach_pct}% of customers still waited longer than that."
+        )
+    else:
+        recs.append(
+            f"Average wait of {avg_mmss} is comfortably within the "
+            f"{target_mmss} target — keep doing what you're doing."
+        )
+    while len(recs) < 3:
+        recs.append("Keep an eye on the busiest hour and add a till there if waits creep up.")
+
+    if breach_pct >= 10 and peak_hour:
+        exec_sum = (
+            f"{store.name} handled checkout well in quieter hours but saw "
+            f"pressure build around {peak_hour}. {breach_pct}% of customers "
+            f"waited more than {target_mmss} — above the SLA target. "
+            f"Adding staff during {staffing or 'peak hours'} would bring waits "
+            f"back in line."
+        )
+    elif breach_pct > 0:
+        exec_sum = (
+            f"{store.name} stayed close to target today. {breach_pct}% of "
+            f"customers waited longer than {target_mmss}, mostly around "
+            f"{peak_hour or 'peak'}. A small staffing tweak would clear it."
+        )
+    else:
+        exec_sum = (
+            f"{store.name} kept every customer within the {target_mmss} target "
+            f"today. No staffing changes needed."
+        )
+
+    return {
+        "store_name": store.name,
+        "date": target_date.isoformat(),
+        "generated_at": _dt.now(timezone.utc).isoformat(),
+        "summary": {
+            "avg_wait_seconds": int(round(avg_wait)),
+            "peak_wait_seconds": int(round(peak_wait)),
+            "shortest_wait_seconds": int(round(shortest_wait)),
+            "avg_queue_length": round(avg_length, 1),
+            "peak_queue_length": int(peak_length),
+            "total_snapshots": len(waits) + len(lengths),
+        },
+        "sla": {
+            "target_max_wait_seconds": sla_seconds,
+            "target_max_queue_length": sla_length,
+            "breaches": breaches,
+            "breach_pct": breach_pct,
+            "status": sla_status,
+        },
+        "status_breakdown": {
+            "green_pct": round(g / n * 100, 1),
+            "amber_pct": round(a / n * 100, 1),
+            "red_pct":   round(r / n * 100, 1),
+        },
+        "hourly_breakdown": hourly,
+        "peak_hour": peak_hour,
+        "quietest_hour": quietest_hour,
+        "trend": trend,
+        "staffing_recommendation": staffing,
+        "recommendations": recs[:3],
+        "executive_summary": exec_sum,
+    }
+
+
+@router.get("/store/{store_id}/queue-snapshot")
+def store_queue_snapshot(store_id: int,
+                         db: Session = Depends(get_db),
+                         _u=Depends(get_current_user)):
+    """Live queue snapshot for the dashboard table. Reads the latest
+    queue_length + queue_wait_seconds samples (last 2 min) and
+    synthesises one row per customer in the queue, with descending
+    wait times anchored on the measured average."""
+    from datetime import datetime as _dt, timedelta
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cam_ids = [c.id for c in db.query(Camera).filter(Camera.store_id == store_id).all()]
+    if not cam_ids:
+        return {"taken_at": _dt.now(timezone.utc).isoformat(),
+                "active_counters": 0, "customers_in_queue": [],
+                "summary": {}, "has_data": False}
+
+    cutoff = _dt.now(timezone.utc) - timedelta(minutes=2)
+    # Latest queue_length sample per (camera, zone).
+    rows = (db.query(MetricSnapshot)
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.metric_type == "queue_length",
+                      MetricSnapshot.period_start >= cutoff)
+              .order_by(MetricSnapshot.period_start.desc()).all())
+    latest_lengths: dict[tuple[int, int], MetricSnapshot] = {}
+    for m in rows:
+        k = (m.camera_id or 0, m.zone_id or 0)
+        if k not in latest_lengths:
+            latest_lengths[k] = m
+    queue_count = int(sum(int(m.value or 0) for m in latest_lengths.values()))
+
+    # Latest avg wait across the same zones.
+    wait_rows = (db.query(MetricSnapshot.value)
+                   .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                           MetricSnapshot.metric_type == "queue_wait_seconds",
+                           MetricSnapshot.period_start >= cutoff)
+                   .all())
+    avg_wait = (sum(float(v or 0) for (v,) in wait_rows) / len(wait_rows)
+                if wait_rows else 0.0)
+
+    # Synthesise per-customer rows. We don't track individuals — only
+    # aggregate counts — so we spread waits linearly from peak (the
+    # front of the queue, ~1.6× avg) down to a short tail (~0.3× avg).
+    customers = []
+    if queue_count > 0 and avg_wait > 0:
+        peak = avg_wait * 1.6
+        tail = max(30.0, avg_wait * 0.3)
+        for i in range(queue_count):
+            t = i / max(1, queue_count - 1)
+            wait = peak - (peak - tail) * t
+            customers.append({
+                "position": i + 1,
+                "wait_seconds": int(round(wait)),
+                "status": _wait_status(wait),
+            })
+
+    waits = [c["wait_seconds"] for c in customers]
+    summary = {
+        "avg_wait": _fmt_mmss(sum(waits) / len(waits)) if waits else "—",
+        "peak_wait": _fmt_mmss(max(waits)) if waits else "—",
+        "shortest_wait": _fmt_mmss(min(waits)) if waits else "—",
+        "red_count":   sum(1 for c in customers if c["status"] == "RED"),
+        "amber_count": sum(1 for c in customers if c["status"] == "AMBER"),
+        "green_count": sum(1 for c in customers if c["status"] == "GREEN"),
+        "sla_target": _fmt_mmss(int(getattr(store, "queue_sla_seconds", 180) or 180)),
+    }
+    return {
+        "taken_at": _dt.now(timezone.utc).isoformat(),
+        "active_counters": len(latest_lengths),
+        "customers_in_queue": customers,
+        "summary": summary,
+        "has_data": bool(customers),
+        # Honesty note for the dashboard footer.
+        "note": "Per-customer waits are estimated from the measured queue length and average wait.",
+    }
+
+
 @router.get("/store/{store_id}/scorecard")
 @cached_store_endpoint("store-scorecard", ttl=30)
 def store_scorecard(store_id: int, since: datetime | None = None, until: datetime | None = None, db: Session = Depends(get_db),

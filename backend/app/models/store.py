@@ -46,6 +46,14 @@ class Store(Base):
     # re-typing per camera.
     default_rtsp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Queue SLA targets used by the Queue Intelligence dashboard and
+    # the daily WhatsApp report. queue_sla_seconds = the max wait time
+    # a customer should see at the till before it counts as a breach
+    # (default 3 min). queue_sla_length = the max queue length before
+    # it counts as too long (default 6).
+    queue_sla_seconds: Mapped[int] = mapped_column(Integer, default=180, server_default="180")
+    queue_sla_length:  Mapped[int] = mapped_column(Integer, default=6,   server_default="6")
+
     is_active: Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
