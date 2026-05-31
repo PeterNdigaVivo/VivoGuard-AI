@@ -1338,7 +1338,7 @@ function MetricRow({ label, today, target, ok, statusOverride }: {
   )
 }
 
-function HourlyWaitBars({ hours, sla }: {
+function HourlyWaitBars({ hours, sla, busiest }: {
   hours: { hour: string; avg_wait: number; status: 'GREEN'|'AMBER'|'RED' }[]
   sla: number
   busiest?: string | null
