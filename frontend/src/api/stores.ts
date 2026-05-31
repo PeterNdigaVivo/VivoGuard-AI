@@ -13,6 +13,11 @@ export interface Store {
   // inherit this in the Add Camera wizard. Null = no default; use
   // brand default (Dahua=7000, others=554).
   default_rtsp_port: number | null
+  // Queue Intelligence SLA targets (per-store overrides). Defaults
+  // 180 / 6 if the migration backfilled them, but the API also
+  // accepts nulls for older payloads.
+  queue_sla_seconds?: number | null
+  queue_sla_length?: number | null
   is_active: boolean
   created_at: string
 }

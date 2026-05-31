@@ -23,6 +23,8 @@ type FormState = {
   address: string; timezone: string; capacity: string
   manager_name: string; manager_phone: string
   default_rtsp_port: string   // empty = use brand default
+  queue_sla_seconds: string   // wait-time target — seconds
+  queue_sla_length: string    // max queue length target
   business_hours: Record<string, { open: boolean; start: string; end: string }>
 }
 
@@ -78,6 +80,10 @@ export default function StoreForm({
     manager_phone: initial?.manager_phone ?? '',
     default_rtsp_port: initial?.default_rtsp_port
       ? String(initial.default_rtsp_port) : '',
+    queue_sla_seconds: initial?.queue_sla_seconds
+      ? String(initial.queue_sla_seconds) : '180',
+    queue_sla_length: initial?.queue_sla_length
+      ? String(initial.queue_sla_length) : '6',
     business_hours: parseBusinessHours(initial?.business_hours_json ?? null),
   })
   const [busy, setBusy] = useState(false)
@@ -101,6 +107,10 @@ export default function StoreForm({
         manager_phone: form.manager_phone || null,
         default_rtsp_port: form.default_rtsp_port
           ? Number(form.default_rtsp_port) : null,
+        queue_sla_seconds: form.queue_sla_seconds
+          ? Number(form.queue_sla_seconds) : 180,
+        queue_sla_length: form.queue_sla_length
+          ? Number(form.queue_sla_length) : 6,
         business_hours_json: serialiseBusinessHours(form.business_hours),
       })
     } catch (e) {
@@ -169,6 +179,34 @@ export default function StoreForm({
             Sarit and most others in the Vivo fleet).
           </div>
         </Field>
+      </div>
+
+      {/* Queue SLA targets — used by the Queue Intelligence report. */}
+      <div className="mt-6">
+        <div className="text-sm font-medium mb-2">Checkout queue targets</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Field label="Max wait time (minutes)">
+            <Input type="number" min={1} max={30}
+                   value={form.queue_sla_seconds ? String(Math.round(Number(form.queue_sla_seconds) / 60)) : ''}
+                   onChange={e => setForm({
+                     ...form,
+                     queue_sla_seconds: String((Number(e.target.value) || 3) * 60),
+                   })}
+                   placeholder="3" />
+            <div className="text-xs text-slate-500 mt-1">
+              Default 3 minutes. Waits longer than this count as an SLA breach.
+            </div>
+          </Field>
+          <Field label="Max queue length (people)">
+            <Input type="number" min={1} max={50}
+                   value={form.queue_sla_length}
+                   onChange={upd('queue_sla_length')}
+                   placeholder="6" />
+            <div className="text-xs text-slate-500 mt-1">
+              Default 6 people. Peaks above this show as a 🔴 on the dashboard.
+            </div>
+          </Field>
+        </div>
       </div>
 
       {/* Business hours per day */}

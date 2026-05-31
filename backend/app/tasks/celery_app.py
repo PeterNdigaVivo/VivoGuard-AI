@@ -32,6 +32,7 @@ celery_app = Celery(
         "app.tasks.alerting",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
+        "app.tasks.queue_report",
     ],
 )
 celery_app.conf.update(
@@ -114,6 +115,12 @@ celery_app.conf.update(
         "uniform-violation-every-60s": {
             "task": "alerting.uniform_violation_check",
             "schedule": 60.0,
+        },
+        # Daily Queue Intelligence report — fires once per store after
+        # 21:00 store-local. 5-min beat tick + per-store Redis dedup.
+        "queue-report-every-5min": {
+            "task": "queue_report.fire_due",
+            "schedule": 300.0,
         },
     },
 )
