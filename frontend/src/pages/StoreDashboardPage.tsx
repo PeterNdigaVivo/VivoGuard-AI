@@ -15,6 +15,8 @@ import {
 } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { api } from '@/api/client'
+import { stores as storesApi, type Store } from '@/api/stores'
+import StoreForm from '@/components/StoreForm'
 import { labelForDetector } from '@/lib/detectorLabels'
 // Heavy chart bundles — lazy-loaded so the dashboard's critical
 // "Right Now" tiles paint before the chart code is even fetched.
@@ -65,6 +67,27 @@ export default function StoreDashboardPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
+  // Store details for the edit modal — opening hours, manager phone,
+  // queue SLA, etc. Loaded lazily when the pen icon is clicked so we
+  // don't pay the round-trip on every dashboard render.
+  const [editing, setEditing] = useState(false)
+  const [storeForEdit, setStoreForEdit] = useState<Store | null>(null)
+  const [editBusy, setEditBusy] = useState(false)
+  async function openEdit() {
+    setEditing(true)
+    if (!storeForEdit) {
+      try { setStoreForEdit(await storesApi.get(storeId)) }
+      catch { /* surfaced in the modal */ }
+    }
+  }
+  async function saveEdit(patch: Partial<Store>) {
+    setEditBusy(true)
+    try {
+      const updated = await storesApi.update(storeId, patch)
+      setStoreForEdit(updated)
+      setEditing(false)
+    } finally { setEditBusy(false) }
+  }
   // Wall-clock time of the last successful refresh — drives the
   // "Last updated: Xs ago" pill via a 1Hz re-render below.
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
@@ -169,6 +192,13 @@ export default function StoreDashboardPage() {
         title={data.store_name}
         actions={
           <div className="flex items-center gap-3">
+            <button onClick={openEdit}
+                    title="Edit store details — opening hours, manager phone, queue targets"
+                    aria-label="Edit store details"
+                    className="text-slate-500 hover:text-slate-900 px-2 py-1 rounded
+                               hover:bg-slate-100 text-base">
+              ✏️
+            </button>
             <DateRangePicker value={range} onChange={setRange} />
             {data.status_light && <StatusLight value={data.status_light} />}
             {freshness}
@@ -286,6 +316,26 @@ export default function StoreDashboardPage() {
           </Suspense>
         </section>
       </ScrollMounted>
+
+      {/* Edit-store modal — opens from the pen icon next to the title.
+          Reuses the same StoreForm as /stores, so opening hours, manager
+          phone, queue SLA, default RTSP port etc. are all editable in
+          one place. */}
+      {editing && (
+        <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-6 overflow-auto"
+             onClick={() => !editBusy && setEditing(false)}>
+          <div onClick={e => e.stopPropagation()} className="w-full max-w-3xl">
+            {storeForEdit ? (
+              <StoreForm initial={storeForEdit}
+                         submitLabel={editBusy ? 'Saving…' : 'Save store'}
+                         onSubmit={saveEdit}
+                         onCancel={() => setEditing(false)} />
+            ) : (
+              <Card className="p-6 text-sm text-slate-600">Loading store details…</Card>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
