@@ -24,20 +24,29 @@ from app.ai.zone_logic import bbox_in_zone
 
 class StaffPresenceDetector(Detector):
     """For every zone tagged `counter`, fire "Counter Left Unattended"
-    only when no STAFF MEMBER (uniformed) has been present for a
-    sustained window.
+    only when no person has been at the counter for a sustained window.
 
-    Staff vs customer: a person in the counter zone is treated as staff
-    when their Vivo-uniform colour score (black/burgundy top + lanyard
-    + name tag) clears STAFF_SCORE_MIN. A customer being served at the
-    counter no longer counts as "attended". When uniform assessment
-    isn't possible (no frame/cv2), we fall back to "anyone present =
-    attended" so we never cry wolf on a camera that can't see colour.
+    NOTE: we deliberately do NOT try to distinguish staff from customer
+    here. The HSV uniform-colour rule was unreliable at typical camera
+    angles / lighting / distances and produced more false unattended
+    alerts than it prevented (a uniformed staffer in shadow read as
+    "customer", so the counter looked empty). Until a trained uniform
+    classifier is deployed on a camera, the simple rule is the
+    correct one:
+
+        Counter is ATTENDED while any person is detected in the zone.
+        Counter is UNATTENDED when no person is detected for >5 min.
+
+    The UniformComplianceDetector still does its own job in parallel:
+    it scores uniforms and raises uniform_violation / no_lanyard alerts
+    independently. Those are separate signals and do NOT affect the
+    counter-attended status here.
 
     Suppression — no alert when:
-      • a uniformed staff was seen in the last GRACE_SECONDS (nipped out), or
+      • any person was seen at the counter in the last GRACE_SECONDS, or
       • within the first 30 min after opening (setting up), or
-      • within the last 15 min before closing (winding down).
+      • within the last 15 min before closing (winding down), or
+      • the store is currently closed (outside business hours).
 
     Always writes the `staff_present_pct` metric (1 staffed / 0 not).
     """
@@ -45,9 +54,7 @@ class StaffPresenceDetector(Detector):
     detection_type = "staff_present"
     needs_tracking = False
 
-    # Uniform score above which a person counts as staff.
-    STAFF_SCORE_MIN = 0.6
-    # Grace after the last uniformed sighting before we call it empty.
+    # Grace after the last sighting before we call the counter empty.
     GRACE_SECONDS = 5 * 60
     OPENING_GRACE_SECONDS = 30 * 60
     CLOSING_GRACE_SECONDS = 15 * 60
@@ -56,8 +63,8 @@ class StaffPresenceDetector(Detector):
         # zone_id → t_unstaffed_since (None when currently staffed)
         self._empty_since: dict[int, float | None] = {}
         self._fired: dict[int, float] = {}
-        # zone_id → epoch a uniformed staff was last seen.
-        self._last_staff_seen: dict[int, float] = {}
+        # zone_id → epoch a person was last seen at the counter.
+        self._last_person_seen: dict[int, float] = {}
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -78,39 +85,25 @@ class StaffPresenceDetector(Detector):
         out: list[DetectionEvent] = []
         now = time.time()
 
+        # Closed-store suppression: never alert when the shop is shut.
+        if ctx.business_hours and ctx.store_timezone:
+            try:
+                from app.utils.business_hours import is_open, localised_now
+                if not is_open(ctx.business_hours, localised_now(ctx.store_timezone)):
+                    return []
+            except Exception:
+                pass
+
         # Opening/closing suppression windows for today.
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
-
-        from app.ai.detectors.uniform_compliance import uniform_colour_score
 
         for z in zones:
             in_zone = [p for p in people
                        if bbox_in_zone(p["bbox_norm"], z["polygon_coords_json"])]
-
-            # Classify each person in the zone as staff vs customer.
-            # uniform_assessable is False when we couldn't read pixels
-            # for ANY person — in that case fall back to "anyone present
-            # = attended" rather than risk a false unattended alert.
-            staff_boxes, customer_boxes = [], []
-            uniform_assessable = ctx.frame_bgr is not None
-            for p in in_zone:
-                score = uniform_colour_score(ctx.frame_bgr, p["bbox_norm"])
-                if score is None:
-                    uniform_assessable = False
-                    customer_boxes.append(p["bbox_norm"])
-                elif score >= self.STAFF_SCORE_MIN:
-                    staff_boxes.append(p["bbox_norm"])
-                else:
-                    customer_boxes.append(p["bbox_norm"])
-
-            if uniform_assessable:
-                staffed = len(staff_boxes) > 0
-            else:
-                # Can't tell uniforms apart → treat any presence as staffed.
-                staffed = len(in_zone) > 0
+            staffed = len(in_zone) > 0   # ANY person = attended
 
             if staffed:
-                self._last_staff_seen[z["id"]] = now
+                self._last_person_seen[z["id"]] = now
 
             # Metric: 1 when staffed, 0 when not.
             if ctx.db is not None:
@@ -131,29 +124,27 @@ class StaffPresenceDetector(Detector):
             # Suppression gates.
             if in_opening_grace or in_closing_grace:
                 continue
-            last_staff = self._last_staff_seen.get(z["id"])
-            if last_staff is not None and (now - last_staff) < self.GRACE_SECONDS:
+            last_seen = self._last_person_seen.get(z["id"])
+            if last_seen is not None and (now - last_seen) < self.GRACE_SECONDS:
                 continue
 
             if unstaffed_for >= dwell and now - self._fired.get(z["id"], 0) > 300:
                 self._fired[z["id"]] = now
-                # Per-person boxes for the annotated snapshot: green =
-                # staff, blue = customer, red = the empty counter zone.
-                boxes = [{"bbox": b, "color": "green", "label": "Staff"} for b in staff_boxes]
-                boxes += [{"bbox": b, "color": "blue", "label": "Customer"} for b in customer_boxes]
-                if not in_zone:
-                    poly = z.get("polygon_coords_json") or []
-                    if poly:
-                        xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
-                        boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
-                                      "color": "red", "label": "Counter empty"})
+                # Snapshot annotation: just a red box around the empty
+                # counter zone — no staff/customer split since we no
+                # longer try to tell them apart here.
+                boxes: list[dict] = []
+                poly = z.get("polygon_coords_json") or []
+                if poly:
+                    xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
+                    boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
+                                  "color": "red", "label": "Counter empty"})
                 out.append(DetectionEvent(
                     detection_type=self.detection_type, cls="counter_unstaffed",
                     confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=z["id"],
                     extra={"unstaffed_seconds": int(unstaffed_for),
                            "unstaffed_minutes": int(unstaffed_for / 60),
-                           "store_id": ctx.store_id, "boxes": boxes,
-                           "customers_present": len(customer_boxes)},
+                           "store_id": ctx.store_id, "boxes": boxes},
                 ))
         return out
 
