@@ -28,6 +28,12 @@ ZONE_PURPOSES = {
         "types": ["counter"],
         "description": "Polygon around the till. Alerts when unstaffed > N seconds.",
     },
+    "staff_zone":        {
+        "label": "Staff Area (Behind Counter)",
+        "shape": "polygon",
+        "types": ["staff_zone"],
+        "description": "Staff-only area behind the service counter. Alerts when a non-uniformed person enters.",
+    },
     "product_aisle":     {
         "label": "Watch product aisle",
         "shape": "polygon",

@@ -28,6 +28,7 @@ export const DETECTOR_LABELS: Record<string, string> = {
   // Zone-based detectors
   queue:               'Checkout Queue',
   staff_present:       'Counter Staffing',
+  staff_zone:          'Staff Area (Behind Counter)',
   dwell:               'Product Interest Time',
   entry_exit:          'Entry / Exit Counter',
   passersby:           'Window Passersby',
