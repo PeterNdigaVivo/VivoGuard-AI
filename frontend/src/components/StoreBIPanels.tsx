@@ -586,6 +586,9 @@ interface StaffPayload {
   staff_identified_total?: number
   staff_by_uniform?: number
   staff_by_zone?: number
+  staff_zone_breaches_today?: number
+  nametag_violations_today?: number
+  compliance_verdict?: 'Good' | 'Needs attention' | 'Poor'
 }
 
 export function StaffPresencePanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
@@ -621,6 +624,15 @@ export function StaffPresencePanel({ storeId, range }: { storeId: number; range?
                   rag={data.uniform_compliance_rag ?? 'amber'}
                   violations={data.uniform_violations ?? []}
                   count={data.uniform_violations_today ?? 0} />
+              )}
+              {(data.compliance_verdict ||
+                (data.staff_zone_breaches_today ?? 0) > 0 ||
+                (data.nametag_violations_today ?? 0) > 0) && (
+                <ComplianceSummary
+                  uniformPct={data.uniform_compliance_pct ?? null}
+                  nametagViolations={data.nametag_violations_today ?? 0}
+                  unauthorisedAccess={data.staff_zone_breaches_today ?? 0}
+                  verdict={data.compliance_verdict ?? 'Good'} />
               )}
             </>
           )}
@@ -659,6 +671,34 @@ function UniformCompliance({ pct, rag, violations, count }: {
       ) : (
         <div className="text-xs text-slate-500">No violations detected today ✅</div>
       )}
+    </div>
+  )
+}
+
+function ComplianceSummary({ uniformPct, nametagViolations, unauthorisedAccess, verdict }: {
+  uniformPct: number | null
+  nametagViolations: number
+  unauthorisedAccess: number
+  verdict: 'Good' | 'Needs attention' | 'Poor'
+}) {
+  const tone = verdict === 'Good' ? 'text-emerald-700 bg-emerald-50'
+             : verdict === 'Needs attention' ? 'text-amber-800 bg-amber-50'
+             : 'text-red-800 bg-red-50'
+  const emoji = verdict === 'Good' ? '✅'
+              : verdict === 'Needs attention' ? '⚠️' : '🔴'
+  return (
+    <div className="mt-4 border-t pt-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+        Staff compliance today
+      </div>
+      <ul className="text-sm text-slate-700 space-y-0.5">
+        {uniformPct !== null && <li>Uniform compliance: <strong>{uniformPct}%</strong></li>}
+        <li>Name-tag violations: <strong>{nametagViolations}</strong> today</li>
+        <li>Unauthorised access alerts: <strong>{unauthorisedAccess}</strong> today</li>
+      </ul>
+      <div className={'mt-2 inline-block text-xs font-semibold rounded px-2 py-0.5 ' + tone}>
+        {emoji} Overall: {verdict}
+      </div>
     </div>
   )
 }

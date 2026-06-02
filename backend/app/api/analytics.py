@@ -1019,6 +1019,24 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
         {"time": r[0].isoformat() if r[0] else None} for r in viol_rows
     ]
 
+    # ---- Staff-zone (behind-counter) alerts today --------------------
+    # Counts split by rule so the dashboard can show how often the
+    # behind-counter area was breached today.
+    sz_rows = (db.query(DetectionEvent.extra)
+                 .join(Alert, Alert.event_id == DetectionEvent.id)
+                 .filter(DetectionEvent.camera_id.in_(cam_ids),
+                         DetectionEvent.detection_type == "staff_zone",
+                         DetectionEvent.timestamp >= session_start)
+                 .all())
+    staff_zone_breaches = 0   # urgent: unidentified person / customer in staff area
+    nametag_violations  = 0   # info: in uniform but no lanyard/tag
+    for (extra,) in sz_rows:
+        rule = (extra or {}).get("rule") if isinstance(extra, dict) else None
+        if rule == "missing_nametag":
+            nametag_violations += 1
+        else:
+            staff_zone_breaches += 1
+
     # ---- Staff identified today — by uniform vs by counter-dwell ----
     from app.models import StaffTrack
     today_date = datetime.now(timezone.utc).date()
@@ -1070,6 +1088,15 @@ def store_staff_timeline(store_id: int, db: Session = Depends(get_db),
         "staff_identified_total": staff_identified_total,
         "staff_by_uniform": staff_by_uniform,
         "staff_by_zone": staff_by_zone,
+        # Behind-counter compliance (staff_zone detector).
+        "staff_zone_breaches_today": staff_zone_breaches,
+        "nametag_violations_today":  nametag_violations,
+        "compliance_verdict": (
+            "Poor"           if staff_zone_breaches > 2 or (uniform_pct is not None and uniform_pct < 70)
+            else "Needs attention" if staff_zone_breaches > 0 or nametag_violations > 2
+                                       or (uniform_pct is not None and uniform_pct < 90)
+            else "Good"
+        ),
     }
 
 

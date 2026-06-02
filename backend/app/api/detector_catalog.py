@@ -48,6 +48,9 @@ DETECTOR_CATALOG = {
     # Uniform compliance works rule-based now (colour analysis of the
     # upper body in a counter/staff zone) — accuracy improves with a
     # trained per-store model.
+    "staff_zone":          {"status": "active", "needs_zone": True, "purpose": "staff_zone",
+                            "label": "Staff Area (Behind Counter)",
+                            "description": "Staff-only area behind the service counter. Alerts when a non-uniformed person enters."},
     "uniform_compliance":  {"status": "active", "needs_zone": True, "purpose": "counter",
                             "training_hint": "Works out of the box via colour analysis. For best accuracy, collect frames at /training/shutter-style Uniform tab and train a YOLOv8n-cls model (uniform_ok / uniform_violation / no_lanyard / civilian)."},
 

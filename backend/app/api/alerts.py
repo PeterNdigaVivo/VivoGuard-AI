@@ -72,6 +72,7 @@ _SEVERITY_LABEL: dict[str, str] = {
     "fight": "URGENT", "intrusion": "URGENT", "weapon": "URGENT",
     "weapon_brandished": "URGENT", "fall": "URGENT", "trespass": "URGENT",
     "fire": "URGENT", "smoke": "URGENT", "shrinkage": "URGENT",
+    "staff_zone":         "URGENT",     # default; per-rule override below
     "uniform_compliance": "ATTENTION", "shutter": "ATTENTION",
     "queue": "ATTENTION", "queue_length": "ATTENTION",
     "staff_present": "ATTENTION", "crowd": "ATTENTION",
@@ -97,6 +98,10 @@ def _severity_label(detection_type: str | None,
     # ATTENTION (could be an unidentified person).
     if detection_type == "uniform_compliance" and event is not None:
         return "INFO" if (event.extra or {}).get("rule") == "no_lanyard" else "ATTENTION"
+    # Staff-only zone: missing name tag is INFO, anything else
+    # (unauthorised / customer in staff area) is URGENT.
+    if detection_type == "staff_zone" and event is not None:
+        return "INFO" if (event.extra or {}).get("rule") == "missing_nametag" else "URGENT"
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
 
 
@@ -151,6 +156,13 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         # No uniform at all on a person at the counter — could be an
         # unidentified person, not just an out-of-uniform staffer.
         return "Unidentified Person at Service Counter"
+    if dt == "staff_zone":
+        rule = extra.get("rule", "")
+        if rule == "customer_in_staff_zone":
+            return "Customer in Staff-Only Area"
+        if rule == "missing_nametag":
+            return "Staff Member Missing Name Tag"
+        return "Unidentified Person Behind Counter"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
 
 
@@ -229,6 +241,18 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Confirm whether they are a staff member",
                      "Ask them to leave the counter if unauthorised"]
+    elif dt == "staff_zone":
+        rule = (event.extra or {}).get("rule", "")
+        if rule == "customer_in_staff_zone":
+            steps = ["Check the live camera now",
+                     "Politely guide the customer back to the customer area"]
+        elif rule == "missing_nametag":
+            steps = ["Remind staff to wear their name tag",
+                     "Check if it is a new staff member"]
+        else:
+            steps = ["Check the live camera now",
+                     "Ask the person to identify themselves",
+                     "Guide customers back to the customer area if needed"]
     else:
         steps = _WHAT_TO_DO.get(dt)
     if not steps:
@@ -425,6 +449,24 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return (f"A person at the {store_name} service counter is not in "
                 f"uniform. Check whether they are a new staff member or "
                 f"someone who shouldn't be behind the counter.")
+
+    if dt == "staff_zone":
+        store_name = (getattr(store, "name", None) or "the store")
+        mins = _extract(extra, "duration_minutes", default=None)
+        secs = _extract(extra, "duration_seconds", default=None)
+        when = (f"for {int(mins)} minute{'s' if int(mins) != 1 else ''}"
+                if mins and int(mins) >= 1
+                else f"for {int(secs)} seconds" if secs else "")
+        rule = extra.get("rule", "")
+        if rule == "customer_in_staff_zone":
+            return (f"A customer has entered the staff area at {store_name}. "
+                    f"Please guide them back to the customer area.")
+        if rule == "missing_nametag":
+            return (f"A staff member at {store_name} has been working without "
+                    f"a visible name tag {when}.").strip()
+        return (f"Someone without a staff uniform has been behind the "
+                f"service counter at {store_name} {when}. Please check "
+                f"immediately.").strip()
 
     if dt == "staff_present":
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)

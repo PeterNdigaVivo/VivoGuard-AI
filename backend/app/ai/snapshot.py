@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 SNAPSHOT_TYPES: set[str] = {
     "uniform_compliance", "intrusion", "shutter", "fight", "crowd",
     "trespass", "shrinkage", "fall", "abandoned_object", "weapon",
-    "weapon_brandished", "staff_present",
+    "weapon_brandished", "staff_present", "staff_zone",
 }
 
 # Plain-English titles, mirrored on the frontend. Kept here so the
@@ -37,6 +37,7 @@ PLAIN_TITLES: dict[str, str] = {
     "abandoned_object":   "Unattended Item",
     "weapon":             "Weapon Detected",
     "weapon_brandished":  "Weapon Detected",
+    "staff_zone":         "Behind-counter Compliance",
 }
 
 

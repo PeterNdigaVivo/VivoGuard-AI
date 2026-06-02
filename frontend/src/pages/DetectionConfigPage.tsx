@@ -20,6 +20,9 @@ const DETECTION_TYPES = [
   'uniform_compliance', 'demographic', 'shrinkage', 'stockroom_access',
   // P4.
   'passersby', 'window_engagement',
+  // Vivo P5 — Staff Area (Behind Counter). Tagging a zone with this
+  // tells the StaffZoneDetector to watch it for unauthorised access.
+  'staff_zone',
 ]
 
 interface Cfg {

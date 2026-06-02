@@ -23,6 +23,8 @@ DETECTION_TYPES = (
     "passersby", "window_engagement",
     # Lumana parity.
     "entry_exit", "fight", "shelf_change",
+    # Vivo P5 — staff-only behind-counter compliance.
+    "staff_zone",
 )
 
 

@@ -35,6 +35,7 @@ from app.ai.detectors.retail_entry_exit import EntryExitDetector
 from app.ai.detectors.retail_fight import FightDetector
 from app.ai.detectors.retail_shelf import ShelfChangeDetector
 from app.ai.detectors.retail_journey import CustomerJourneyDetector
+from app.ai.detectors.staff_zone import StaffZoneDetector
 
 
 # Stateless — one shared instance per type. Written as an explicit
@@ -89,6 +90,8 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     "shelf_change":       ShelfChangeDetector,
     # Vivo differentiator P3.
     "customer_journey":   CustomerJourneyDetector,
+    # Vivo P5 — behind-counter compliance.
+    "staff_zone":         StaffZoneDetector,
 }
 
 
