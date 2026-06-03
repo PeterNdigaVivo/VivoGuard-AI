@@ -32,6 +32,7 @@ celery_app = Celery(
         "app.tasks.alerting",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
+        "app.tasks.chain_training",
         "app.tasks.queue_report",
     ],
 )

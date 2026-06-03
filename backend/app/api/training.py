@@ -835,6 +835,207 @@ async def uniform_upload(label: str = Form(...),
     return {"saved": len(out), "samples": out, "errors": errors}
 
 
+# ====================================================================
+# Chain-wide training (P5 overhaul)
+# ====================================================================
+# Pool approved samples from EVERY store and train one chain model per
+# detector. The Celery task lives in app.tasks.chain_training and writes
+# status to vg:chain_train:status:{detector_type}. Deploy fans the model
+# out to every camera that has the matching zone tag.
+
+CHAIN_DETECTOR_TYPES = {"shutter", "uniform"}
+
+
+def _chain_camera_targets(db: Session, detector_type: str) -> list[int]:
+    """Camera ids whose zones tag them as a target for this detector.
+    Shutter → any zone with detection_type 'shutter'.
+    Uniform → any zone with detection_type 'counter', 'staff' or
+              'staff_zone'."""
+    from app.models import Zone
+    if detector_type == "shutter":
+        tag_set = {"shutter"}
+    elif detector_type == "uniform":
+        tag_set = {"counter", "staff", "staff_zone"}
+    else:
+        return []
+    cam_ids: set[int] = set()
+    for z in db.query(Zone).all():
+        if not z.camera_id:
+            continue
+        if tag_set & set(z.detection_types_json or []):
+            cam_ids.add(z.camera_id)
+    return sorted(cam_ids)
+
+
+@router.get("/chain/dataset-summary")
+def chain_dataset_summary(db: Session = Depends(get_db),
+                          _u=Depends(require_role("admin", "operator", "viewer"))):
+    """Per-detector breakdown of the chain training dataset.
+    Shows what would be fed to the trainer if we kicked it off now:
+    counts by label, contributing stores, ready-to-train flag."""
+    from sqlalchemy import func, or_
+    from app.models import Store, TrainingSample
+    from app.tasks.chain_training import (
+        MIN_PER_LABEL, UNIFORM_LABELS, SHUTTER_LABELS, UNIFORM_ALIASES,
+    )
+
+    store_names = {s.id: s.name for s in db.query(Store).all()}
+    summary: dict[str, dict] = {}
+    for detector_type, labels in (("shutter", SHUTTER_LABELS),
+                                   ("uniform", UNIFORM_LABELS)):
+        rows = (db.query(TrainingSample.label,
+                         TrainingSample.store_id,
+                         func.count(TrainingSample.id))
+                  .filter(TrainingSample.detector_type == detector_type,
+                          or_(TrainingSample.approved.is_(True),
+                              TrainingSample.approved.is_(None)),
+                          TrainingSample.source.in_(
+                              ("capture", "upload", "camera_crop")))
+                  .group_by(TrainingSample.label, TrainingSample.store_id)
+                  .all())
+        by_label: dict[str, int] = {l: 0 for l in labels}
+        by_store: dict[int, dict] = {}
+        stores_contributing: set[int] = set()
+        total = 0
+        for label, store_id, n in rows:
+            lbl = (label or "").lower().strip()
+            if detector_type == "uniform":
+                lbl = UNIFORM_ALIASES.get(lbl, lbl)
+            if lbl not in by_label:
+                continue
+            n = int(n)
+            by_label[lbl] += n
+            total += n
+            if store_id is not None:
+                stores_contributing.add(int(store_id))
+                bucket = by_store.setdefault(
+                    int(store_id),
+                    {"store_id": int(store_id),
+                     "store_name": store_names.get(int(store_id)),
+                     "total": 0, "by_label": {l: 0 for l in labels}})
+                bucket["total"] += n
+                bucket["by_label"][lbl] += n
+        ready = all(by_label[l] >= MIN_PER_LABEL for l in labels)
+        short = {l: by_label[l] for l in labels if by_label[l] < MIN_PER_LABEL}
+        summary[detector_type] = {
+            "detector_type": detector_type,
+            "labels": list(labels),
+            "total_samples": total,
+            "by_label": by_label,
+            "by_store": sorted(by_store.values(),
+                               key=lambda x: -x["total"]),
+            "stores_contributing": sorted(stores_contributing),
+            "min_per_label": MIN_PER_LABEL,
+            "min_samples_met": ready,
+            "ready_to_train": ready,
+            "short_labels": short,
+        }
+    return summary
+
+
+@router.post("/chain/train")
+def chain_train_start(detector_type: str,
+                      db: Session = Depends(get_db),
+                      _u=Depends(require_role("admin", "operator"))):
+    """Kick off the chain training task for one detector. The task
+    pools every store's approved samples, applies quality filters and
+    trains YOLOv8s-cls. Poll /training/chain/status/{detector_type}."""
+    detector_type = (detector_type or "").lower().strip()
+    if detector_type not in CHAIN_DETECTOR_TYPES:
+        raise HTTPException(
+            400, f"detector_type must be one of {sorted(CHAIN_DETECTOR_TYPES)}")
+    from app.tasks.chain_training import train_chain_model
+    async_result = train_chain_model.delay(detector_type)
+    return {
+        "started": True,
+        "detector_type": detector_type,
+        "task_id": getattr(async_result, "id", None),
+    }
+
+
+@router.get("/chain/status/{detector_type}")
+def chain_train_status(detector_type: str,
+                       _u=Depends(require_role("admin", "operator", "viewer"))):
+    import json
+    import redis
+    from app.config import settings
+    detector_type = (detector_type or "").lower().strip()
+    if detector_type not in CHAIN_DETECTOR_TYPES:
+        raise HTTPException(
+            400, f"detector_type must be one of {sorted(CHAIN_DETECTOR_TYPES)}")
+    r = redis.from_url(settings.redis_url, decode_responses=True)
+    raw = r.get(f"vg:chain_train:status:{detector_type}")
+    if not raw:
+        return {"state": "idle"}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"state": "idle"}
+
+
+@router.get("/chain/models")
+def chain_models(detector_type: str | None = None,
+                 db: Session = Depends(get_db),
+                 _u=Depends(require_role("admin", "operator", "viewer"))):
+    """List chain models in the registry, newest first."""
+    q = db.query(AIModel).filter(AIModel.is_chain_model == True)  # noqa: E712
+    if detector_type:
+        q = q.filter(AIModel.detector_type == detector_type.lower().strip())
+    out = []
+    for m in q.order_by(AIModel.id.desc()).all():
+        out.append({
+            "id": m.id, "name": m.name, "version": m.version,
+            "detector_type": m.detector_type,
+            "sample_count": m.sample_count,
+            "trained_on_stores": m.trained_on_stores or [],
+            "accuracy": m.map50,
+            "precision": m.precision, "recall": m.recall,
+            "deployed": bool(m.deployed),
+            "weights_path": m.weights_path,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        })
+    return out
+
+
+@router.post("/chain/deploy")
+def chain_deploy(detector_type: str, model_id: int,
+                 db: Session = Depends(get_db),
+                 _u=Depends(require_role("admin", "operator"))):
+    """Set ai_model_id on every camera whose zones target this
+    detector. Marks the model deployed=True and undeploys the previous
+    chain model for the same detector."""
+    detector_type = (detector_type or "").lower().strip()
+    if detector_type not in CHAIN_DETECTOR_TYPES:
+        raise HTTPException(
+            400, f"detector_type must be one of {sorted(CHAIN_DETECTOR_TYPES)}")
+    model = db.get(AIModel, model_id)
+    if not model:
+        raise HTTPException(404, "model not found")
+    if not (model.is_chain_model and model.detector_type == detector_type):
+        raise HTTPException(
+            400, "model is not a chain model for this detector_type")
+
+    cam_ids = _chain_camera_targets(db, detector_type)
+    cams = db.query(Camera).filter(Camera.id.in_(cam_ids)).all() if cam_ids else []
+    for cam in cams:
+        cam.ai_model_id = model_id
+
+    # Mark prior chain models for this detector as undeployed.
+    (db.query(AIModel)
+       .filter(AIModel.is_chain_model == True,  # noqa: E712
+               AIModel.detector_type == detector_type,
+               AIModel.id != model_id)
+       .update({AIModel.deployed: False}, synchronize_session=False))
+    model.deployed = True
+    db.commit()
+    return {
+        "model_id": model_id,
+        "detector_type": detector_type,
+        "deployed_to": [c.id for c in cams],
+        "camera_count": len(cams),
+    }
+
+
 @router.post("/shutter/upload")
 async def shutter_upload(label: str = Form(...),
                          camera_id: int | None = Form(None),

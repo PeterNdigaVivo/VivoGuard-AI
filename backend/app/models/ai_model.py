@@ -26,6 +26,15 @@ class AIModel(Base):
 
     deployed:     Mapped[bool]  = mapped_column(Boolean, default=False)
     is_base:      Mapped[bool]  = mapped_column(Boolean, default=False)  # bundled YOLOv8 weights
+    # Chain-training metadata. is_chain_model=True flags a model
+    # trained on pooled samples from every store (see commit 1 of the
+    # P5 overhaul). detector_type narrows it to one detector
+    # ('uniform', 'shutter'); trained_on_stores lists the store ids
+    # whose samples contributed; sample_count is the dataset size.
+    is_chain_model:    Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    detector_type:     Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    trained_on_stores: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    sample_count:      Mapped[int | None] = mapped_column(Integer, nullable=True)
     training_job_id: Mapped[int | None] = mapped_column(ForeignKey("training_jobs.id", ondelete="SET NULL"), nullable=True)
 
     created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
