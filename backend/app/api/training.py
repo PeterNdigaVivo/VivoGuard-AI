@@ -530,7 +530,21 @@ def shutter_deploy(model_id: int, camera_ids: list[int],
 # zone for the "already configured" hint. Kept as its own routes for
 # clarity; shares the TrainingSample table (detector_type="uniform").
 
-UNIFORM_LABELS = {"uniform_ok", "uniform_violation", "no_lanyard", "civilian"}
+# P5 6-class label set. Legacy 4-class names kept as accepted aliases
+# so older clients (and the camera-crop harvester) still work — they
+# map to the closest new bucket.
+UNIFORM_LABELS = {
+    "full_compliant", "partial_compliant", "color_only",
+    "non_compliant",  "customer", "uncertain",
+    # legacy aliases
+    "uniform_ok", "no_lanyard", "uniform_violation", "civilian",
+}
+UNIFORM_LABEL_ALIASES = {
+    "uniform_ok":        "full_compliant",
+    "no_lanyard":        "partial_compliant",
+    "uniform_violation": "non_compliant",
+    "civilian":          "customer",
+}
 
 
 def _uniform_sample_root(label: str) -> Path:
@@ -589,7 +603,8 @@ async def uniform_capture(camera_id: int, label: str,
     from app.models import TrainingSample
     from app.stream.frame_buffer import FrameBuffer
 
-    label = (label or "").lower().strip()
+    label = UNIFORM_LABEL_ALIASES.get((label or "").lower().strip(),
+                                        (label or "").lower().strip())
     if label not in UNIFORM_LABELS:
         raise HTTPException(400, f"label must be one of {sorted(UNIFORM_LABELS)}")
     cam = db.get(Camera, camera_id)
@@ -682,7 +697,11 @@ def uniform_train_start(store_id: int, camera_id: int | None = None,
                   TrainingSample.store_id == store_id)
           .group_by(TrainingSample.label).all()
     )
-    labels = ("uniform_ok", "uniform_violation", "no_lanyard", "civilian")
+    # Validate the new 6-class spec; legacy 4-class counts still feed
+    # the matching modern bucket via UNIFORM_LABEL_ALIASES at write
+    # time, so the threshold check uses the canonical six.
+    labels = ("full_compliant", "partial_compliant", "color_only",
+              "non_compliant", "customer", "uncertain")
     short = {l: int(rows.get(l, 0)) for l in labels if int(rows.get(l, 0)) < 30}
     if short:
         raise HTTPException(
@@ -784,7 +803,8 @@ async def uniform_upload(label: str = Form(...),
                          user=Depends(require_role("admin", "operator"))):
     """Upload one or more phone photos / screenshots for the uniform
     classifier, all tagged with the same `label`. Up to ~5 MB per file."""
-    label = (label or "").lower().strip()
+    label = UNIFORM_LABEL_ALIASES.get((label or "").lower().strip(),
+                                        (label or "").lower().strip())
     if label not in UNIFORM_LABELS:
         raise HTTPException(400, f"label must be one of {sorted(UNIFORM_LABELS)}")
     if not files:

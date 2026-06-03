@@ -11,19 +11,33 @@ import { Link } from 'react-router-dom'
 import { Button, Card, PageHeader } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
 
-type Label = 'uniform_ok' | 'uniform_violation' | 'no_lanyard' | 'civilian'
-const LABELS: Label[] = ['uniform_ok', 'uniform_violation', 'no_lanyard', 'civilian']
+// P5 six-class label set. Mirrors the backend's UNIFORM_LABELS.
+type Label =
+  | 'full_compliant'    // ✅ Black or maroon top + lanyard + nametag
+  | 'partial_compliant' // ⚠️ Right top + lanyard, no visible nametag
+  | 'color_only'        // 🎨 Right top, no lanyard
+  | 'non_compliant'     // ❌ Wrong / no uniform top
+  | 'customer'          // 👤 Customer (not staff)
+  | 'uncertain'         // ❓ Blurry / occluded / bad angle
+const LABELS: Label[] = [
+  'full_compliant', 'partial_compliant', 'color_only',
+  'non_compliant', 'customer', 'uncertain',
+]
 const LABEL_TEXT: Record<Label, string> = {
-  uniform_ok: '✅ Uniform OK',
-  uniform_violation: '❌ Violation',
-  no_lanyard: '⚠️ No lanyard',
-  civilian: '👤 Customer',
+  full_compliant:    '✅ Full Uniform',
+  partial_compliant: '⚠️ Has Uniform, No Nametag',
+  color_only:        '🎨 Right Color Only',
+  non_compliant:     '❌ Wrong/No Uniform',
+  customer:          '👤 Customer',
+  uncertain:         '❓ Unclear Image',
 }
 const LABEL_STYLE: Record<Label, string> = {
-  uniform_ok:        'bg-emerald-600 hover:bg-emerald-700',
-  uniform_violation: 'bg-red-600 hover:bg-red-700',
-  no_lanyard:        'bg-amber-500 hover:bg-amber-600',
-  civilian:          'bg-slate-500 hover:bg-slate-600',
+  full_compliant:    'bg-emerald-600 hover:bg-emerald-700',
+  partial_compliant: 'bg-amber-500 hover:bg-amber-600',
+  color_only:        'bg-amber-400 hover:bg-amber-500',
+  non_compliant:     'bg-red-600 hover:bg-red-700',
+  customer:          'bg-slate-500 hover:bg-slate-600',
+  uncertain:         'bg-slate-400 hover:bg-slate-500',
 }
 const MIN_PER_CLASS = 30
 
@@ -60,7 +74,7 @@ export default function UniformTrainingPage() {
   const [selected, setSelected] = useState<number | null>(null)
   const [snap, setSnap] = useState<string | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
-  const [reviewLabel, setReviewLabel] = useState<Label>('uniform_ok')
+  const [reviewLabel, setReviewLabel] = useState<Label>('full_compliant')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [autoCapture, setAutoCapture] = useState(false)
@@ -195,9 +209,9 @@ export default function UniformTrainingPage() {
   useEffect(() => {
     if (autoTimer.current) { clearInterval(autoTimer.current); autoTimer.current = null }
     if (!autoCapture || selected === null) return
-    // Passive build: grab a frame every 10 min tagged civilian; the
+    // Passive build: grab a frame every 10 min tagged "customer"; the
     // operator re-tags from the review grid.
-    autoTimer.current = setInterval(() => { capture('civilian') }, 10 * 60_000)
+    autoTimer.current = setInterval(() => { capture('customer') }, 10 * 60_000)
     return () => { if (autoTimer.current) clearInterval(autoTimer.current) }
   }, [autoCapture, selected])  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -221,7 +235,10 @@ export default function UniformTrainingPage() {
     } catch (e) { setMsg(`Deploy failed: ${e}`) }
   }
 
-  const counts = current?.counts ?? { uniform_ok: 0, uniform_violation: 0, no_lanyard: 0, civilian: 0 }
+  const counts: Record<Label, number> = current?.counts ?? {
+    full_compliant: 0, partial_compliant: 0, color_only: 0,
+    non_compliant: 0, customer: 0, uncertain: 0,
+  }
   const ready = LABELS.every(l => counts[l] >= MIN_PER_CLASS)
   const training = train.state === 'preparing' || train.state === 'training'
 
@@ -490,10 +507,10 @@ function UploadDropZone({ busy, onDrop }: {
   onDrop: (label: Label, files: FileList | File[]) => void
 }) {
   // Drag-target picks the LAST-used label automatically; that matches
-  // the operator's flow ("drop a folder of OK photos, then switch
-  // label and drop another"). Default = uniform_ok.
+  // the operator's flow ("drop a folder of Full-Uniform photos, then
+  // switch label and drop another"). Default = full_compliant.
   const [dragging, setDragging] = useState(false)
-  const [lastLabel, setLastLabel] = useState<Label>('uniform_ok')
+  const [lastLabel, setLastLabel] = useState<Label>('full_compliant')
   return (
     <div
       onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -508,8 +525,7 @@ function UploadDropZone({ busy, onDrop }: {
       📥 Drop images here — they'll be saved as{' '}
       <select value={lastLabel} onChange={e => setLastLabel(e.target.value as Label)}
               className="border rounded px-1 py-0.5 text-xs">
-        {(['uniform_ok', 'uniform_violation', 'no_lanyard', 'civilian'] as Label[])
-          .map(l => <option key={l} value={l}>{LABEL_TEXT[l]}</option>)}
+        {LABELS.map(l => <option key={l} value={l}>{LABEL_TEXT[l]}</option>)}
       </select>
     </div>
   )

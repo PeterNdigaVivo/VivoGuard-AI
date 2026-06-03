@@ -52,16 +52,26 @@ class StaffPresenceDetector(Detector):
     """
 
     detection_type = "staff_present"
-    needs_tracking = False
+    # We need tracking to measure per-customer service time at the
+    # counter (from the moment the track enters the zone to the
+    # moment it leaves). The presence rule itself stays simple.
+    needs_tracking = True
 
     # Grace after the last sighting before we call the counter empty.
     GRACE_SECONDS = 5 * 60
     OPENING_GRACE_SECONDS = 30 * 60
     CLOSING_GRACE_SECONDS = 15 * 60
+    # Service-time alert threshold (seconds). 5 min per spec; ignored
+    # for tracks shorter than 30 s (lookers, not customers).
+    SERVICE_TIME_ALERT_SECONDS = 5 * 60
+    SERVICE_TIME_MIN_SECONDS   = 30
 
     def __init__(self):
         # zone_id → t_unstaffed_since (None when currently staffed)
         self._empty_since: dict[int, float | None] = {}
+        # (track_id, zone_id) -> epoch the track entered. Pops when the
+        # track leaves and we write the service_time metric.
+        self._counter_entries: dict[tuple[int, int], float] = {}
         self._fired: dict[int, float] = {}
         # zone_id → epoch a person was last seen at the counter.
         self._last_person_seen: dict[int, float] = {}
@@ -96,6 +106,43 @@ class StaffPresenceDetector(Detector):
 
         # Opening/closing suppression windows for today.
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
+
+        # Per-track presence at each counter zone — used both for the
+        # presence rule and the service-time metric.
+        active_track_zones: set[tuple[int, int]] = set()
+        for tr, _det in ctx.tracks:
+            if tr.cls not in COCO_PERSON:
+                continue
+            for z in zones:
+                if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                    key = (tr.track_id, z["id"])
+                    active_track_zones.add(key)
+                    self._counter_entries.setdefault(key, now)
+        # Tracks that LEFT the counter this frame → close the timer
+        # and emit the service_time metric (counter dwell).
+        for key in list(self._counter_entries.keys()):
+            if key in active_track_zones:
+                continue
+            t0 = self._counter_entries.pop(key)
+            duration = max(0.0, now - t0)
+            if duration < self.SERVICE_TIME_MIN_SECONDS:
+                continue
+            zone_id = key[1]
+            if ctx.db is not None:
+                from app.analytics import recorder
+                recorder.record(ctx.db, "service_time", float(duration),
+                                camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                zone_id=zone_id, aggregator="avg")
+            # Long service alert — gentle warning, not URGENT.
+            if duration >= self.SERVICE_TIME_ALERT_SECONDS:
+                out.append(DetectionEvent(
+                    detection_type=self.detection_type, cls="long_service",
+                    confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=zone_id,
+                    extra={"priority": "info", "store_id": ctx.store_id,
+                           "service_seconds": int(duration),
+                           "service_minutes": int(duration / 60),
+                           "rule": "long_service"},
+                ))
 
         for z in zones:
             in_zone = [p for p in people
