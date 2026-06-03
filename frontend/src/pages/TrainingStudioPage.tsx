@@ -33,6 +33,7 @@ export default function TrainingStudioPage() {
     <div className="p-6">
       <PageHeader title="AI Training Studio"
         actions={<div className="flex gap-2">
+          <Link to="/training/chain"><Button>Chain-wide training →</Button></Link>
           <Link to="/training/shutter"><Button variant="ghost">Shutter training →</Button></Link>
           <Link to="/training/uniform"><Button variant="ghost">Uniform training →</Button></Link>
         </div>} />
