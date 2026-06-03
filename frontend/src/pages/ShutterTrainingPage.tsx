@@ -162,6 +162,31 @@ export default function ShutterTrainingPage() {
     }
   }
 
+  async function uploadFiles(label: Label, files: FileList | File[]) {
+    if (selected === null) { setMsg('Pick a camera first.'); return }
+    setBusy(true); setMsg(null)
+    const form = new FormData()
+    form.append('label', label)
+    form.append('camera_id', String(selected))
+    if (current?.store_id != null) form.append('store_id', String(current.store_id))
+    for (const f of Array.from(files)) form.append('files', f, f.name)
+    try {
+      const tok = localStorage.getItem('vg_access_token') ?? ''
+      const res = await fetch('/api/training/shutter/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}` },
+        body: form,
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const r = await res.json()
+      const errs = (r.errors || []).length
+      setMsg(`Uploaded ${r.saved} ${label.toUpperCase()} image${r.saved === 1 ? '' : 's'}`
+             + (errs ? ` · ${errs} rejected (size/type)` : ''))
+      loadCameras()
+      if (label === reviewLabel) loadSamples()
+    } catch (e) { setMsg(`Upload failed: ${e}`) } finally { setBusy(false) }
+  }
+
   async function del(id: number) {
     try {
       await api(`/training/shutter/samples/${id}`, { method: 'DELETE' })
@@ -340,6 +365,35 @@ export default function ShutterTrainingPage() {
                 ))}
               </div>
               {msg && <div className="text-xs text-slate-500 mt-2">{msg}</div>}
+
+              {/* Image upload — phone photos / screenshots / WhatsApp.
+                  JPG/PNG, 5 MB cap per file. */}
+              <div className="mt-3 border-t pt-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                  Upload training images
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {LABELS.map(l => (
+                    <label key={l}
+                           className={'text-white rounded py-2 text-xs font-medium cursor-pointer text-center '
+                                      + (busy ? 'opacity-50 cursor-not-allowed ' : '')
+                                      + LABEL_STYLE[l].split(' ')[0]}>
+                      📤 {l.toUpperCase()}
+                      <input type="file" multiple accept="image/jpeg,image/jpg,image/png"
+                             className="hidden" disabled={busy}
+                             onChange={e => {
+                               if (e.target.files && e.target.files.length) {
+                                 uploadFiles(l, e.target.files)
+                                 e.target.value = ''
+                               }
+                             }} />
+                    </label>
+                  ))}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  JPG / PNG · up to 5 MB each · phone photos welcome
+                </div>
+              </div>
             </Card>
 
             {/* Progress */}

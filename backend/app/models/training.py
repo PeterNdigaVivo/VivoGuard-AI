@@ -76,6 +76,19 @@ class TrainingSample(Base):
     frame_path:    Mapped[str]   = mapped_column(Text)
     captured_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     labeled_by:    Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # How the sample arrived in the dataset. 'capture' = grabbed live
+    # from a camera; 'upload' = uploaded by an operator from their
+    # phone/computer; 'auto' = the every-10-min auto-capture loop.
+    source:        Mapped[str]   = mapped_column(String(16), default="capture",
+                                                  server_default="capture")
+    # When True the sample is part of the chain-wide shared dataset
+    # (commit 2). Default True — opting in is the desirable behaviour.
+    shared:        Mapped[bool]  = mapped_column(Boolean, default=True, server_default="true")
+    # Quality-control gate (commit 3). NULL = pending, True = approved,
+    # False = rejected. Only approved samples feed the chain trainer.
+    approved:      Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    approved_by:   Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at:   Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TrainingJob(Base):

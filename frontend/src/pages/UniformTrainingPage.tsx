@@ -154,6 +154,36 @@ export default function UniformTrainingPage() {
     } catch (e) { setMsg(`Capture failed: ${e}`) } finally { setBusy(false) }
   }
 
+  async function uploadFiles(label: Label, files: FileList | File[]) {
+    if (selected === null) {
+      setMsg('Pick a camera first so we know which store the uploads belong to.')
+      return
+    }
+    setBusy(true); setMsg(null)
+    const form = new FormData()
+    form.append('label', label)
+    form.append('camera_id', String(selected))
+    if (current?.store_id != null) form.append('store_id', String(current.store_id))
+    for (const f of Array.from(files)) form.append('files', f, f.name)
+    try {
+      const tok = localStorage.getItem('vg_access_token') ?? ''
+      const res = await fetch('/api/training/uniform/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}` },
+        body: form,
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const r = await res.json()
+      const errs = (r.errors || []).length
+      setMsg(`Uploaded ${r.saved} ${LABEL_TEXT[label]} image${r.saved === 1 ? '' : 's'}`
+             + (errs ? ` · ${errs} rejected (size/type)` : ''))
+      loadCameras()
+      if (label === reviewLabel) loadSamples()
+    } catch (e) {
+      setMsg(`Upload failed: ${e}`)
+    } finally { setBusy(false) }
+  }
+
   async function del(id: number) {
     try {
       await api(`/training/uniform/samples/${id}`, { method: 'DELETE' })
@@ -317,6 +347,38 @@ export default function UniformTrainingPage() {
                 ))}
               </div>
               {msg && <div className="text-xs text-slate-500 mt-2">{msg}</div>}
+
+              {/* Image upload — drag a folder of phone photos in or pick
+                  files with the label-tagged buttons. JPG/PNG only, 5 MB
+                  max per file. */}
+              <div className="mt-3 border-t pt-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                  Upload training images
+                </div>
+                <UploadDropZone busy={busy} onDrop={uploadFiles} />
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {LABELS.map(l => (
+                    <label key={l}
+                           className={'text-white rounded py-2 text-xs font-medium cursor-pointer text-center '
+                                      + (busy ? 'opacity-50 cursor-not-allowed ' : '')
+                                      + LABEL_STYLE[l]}>
+                      📤 Upload as {LABEL_TEXT[l]}
+                      <input type="file" multiple accept="image/jpeg,image/jpg,image/png"
+                             className="hidden" disabled={busy}
+                             onChange={e => {
+                               if (e.target.files && e.target.files.length) {
+                                 uploadFiles(l, e.target.files)
+                                 e.target.value = ''
+                               }
+                             }} />
+                    </label>
+                  ))}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  JPG / PNG · up to 5 MB each · phone photos, screenshots,
+                  WhatsApp images all work
+                </div>
+              </div>
             </Card>
 
             <Card className="p-3">
@@ -419,6 +481,36 @@ export default function UniformTrainingPage() {
           </Card>
         </>
       )}
+    </div>
+  )
+}
+
+function UploadDropZone({ busy, onDrop }: {
+  busy: boolean
+  onDrop: (label: Label, files: FileList | File[]) => void
+}) {
+  // Drag-target picks the LAST-used label automatically; that matches
+  // the operator's flow ("drop a folder of OK photos, then switch
+  // label and drop another"). Default = uniform_ok.
+  const [dragging, setDragging] = useState(false)
+  const [lastLabel, setLastLabel] = useState<Label>('uniform_ok')
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); setDragging(true) }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={e => {
+        e.preventDefault(); setDragging(false)
+        if (!busy && e.dataTransfer.files.length) onDrop(lastLabel, e.dataTransfer.files)
+      }}
+      className={'rounded border-2 border-dashed px-3 py-4 text-center text-xs transition-colors '
+                 + (dragging ? 'border-blue-400 bg-blue-50 text-blue-700'
+                             : 'border-slate-300 text-slate-500')}>
+      📥 Drop images here — they'll be saved as{' '}
+      <select value={lastLabel} onChange={e => setLastLabel(e.target.value as Label)}
+              className="border rounded px-1 py-0.5 text-xs">
+        {(['uniform_ok', 'uniform_violation', 'no_lanyard', 'civilian'] as Label[])
+          .map(l => <option key={l} value={l}>{LABEL_TEXT[l]}</option>)}
+      </select>
     </div>
   )
 }

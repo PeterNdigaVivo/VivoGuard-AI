@@ -727,3 +727,134 @@ def uniform_deploy(model_id: int, camera_ids: list[int],
     model.deployed = True
     db.commit()
     return {"deployed_to": updated, "model_id": model_id}
+
+
+# ====================================================================
+# Image upload — uniform + shutter (Vivo P5)
+# ====================================================================
+# Operators upload phone photos / screenshots / WhatsApp images from
+# their devices. Each upload is per-label (the form picks the label
+# before the file lands so the operator can drag a folder of
+# OK-uniform photos in one shot, then switch label and drop another
+# folder).
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024   # 5 MB per spec
+ALLOWED_MIME = {"image/jpeg", "image/jpg", "image/png"}
+ALLOWED_EXT  = {".jpg", ".jpeg", ".png"}
+
+
+def _save_uploaded(detector: str, label: str, camera_id: int | None,
+                   store_id: int | None, user_id: int | None,
+                   data: bytes, original_name: str,
+                   root_fn) -> "TrainingSample":
+    """Common write path for /uniform/upload + /shutter/upload."""
+    from datetime import datetime, timezone
+    from app.models import TrainingSample
+
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"file too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
+    ext = Path(original_name).suffix.lower()
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(415, f"unsupported file type — must be one of {sorted(ALLOWED_EXT)}")
+
+    ts = datetime.now(timezone.utc)
+    safe_name = "".join(c for c in Path(original_name).stem
+                        if c.isalnum() or c in "-_") or "upload"
+    fname = f"upload_{ts.strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}{ext}"
+    # `_shutter_sample_root` takes (label, camera_id); _uniform_sample_root
+    # takes (label). Call uniformly via the closure caller passes in.
+    path = root_fn(label) / fname
+    path.write_bytes(data)
+    sample = TrainingSample(
+        detector_type=detector, label=label,
+        camera_id=camera_id, store_id=store_id,
+        frame_path=str(path), captured_at=ts,
+        labeled_by=user_id,
+        source="upload",
+    )
+    return sample
+
+
+@router.post("/uniform/upload")
+async def uniform_upload(label: str = Form(...),
+                         camera_id: int | None = Form(None),
+                         store_id: int | None = Form(None),
+                         files: list[UploadFile] = File(...),
+                         db: Session = Depends(get_db),
+                         user=Depends(require_role("admin", "operator"))):
+    """Upload one or more phone photos / screenshots for the uniform
+    classifier, all tagged with the same `label`. Up to ~5 MB per file."""
+    label = (label or "").lower().strip()
+    if label not in UNIFORM_LABELS:
+        raise HTTPException(400, f"label must be one of {sorted(UNIFORM_LABELS)}")
+    if not files:
+        raise HTTPException(400, "no files in upload")
+
+    out: list[dict] = []
+    errors: list[dict] = []
+    for f in files:
+        try:
+            data = await f.read()
+            sample = _save_uploaded(
+                "uniform", label, camera_id, store_id,
+                getattr(user, "id", None), data, f.filename or "upload.jpg",
+                _uniform_sample_root,
+            )
+            db.add(sample); db.flush()
+            out.append({
+                "sample_id": sample.id,
+                "filename":  f.filename,
+                "label":     sample.label,
+                "preview_url": f"/api/training/uniform/samples/{sample.id}/file",
+            })
+        except HTTPException as e:
+            errors.append({"filename": f.filename, "error": e.detail})
+        except Exception as e:
+            errors.append({"filename": f.filename, "error": str(e)})
+    db.commit()
+    return {"saved": len(out), "samples": out, "errors": errors}
+
+
+@router.post("/shutter/upload")
+async def shutter_upload(label: str = Form(...),
+                         camera_id: int | None = Form(None),
+                         store_id: int | None = Form(None),
+                         files: list[UploadFile] = File(...),
+                         db: Session = Depends(get_db),
+                         user=Depends(require_role("admin", "operator"))):
+    """Upload one or more images for the shutter classifier
+    (open / closed / partial)."""
+    label = (label or "").lower().strip()
+    if label not in SHUTTER_LABELS:
+        raise HTTPException(400, f"label must be one of {sorted(SHUTTER_LABELS)}")
+    if not files:
+        raise HTTPException(400, "no files in upload")
+
+    # _shutter_sample_root needs (label, camera_id); curry camera_id in.
+    cam_for_root = camera_id or 0
+    def _root(lbl):
+        return _shutter_sample_root(lbl, cam_for_root)
+
+    out: list[dict] = []
+    errors: list[dict] = []
+    for f in files:
+        try:
+            data = await f.read()
+            sample = _save_uploaded(
+                "shutter", label, camera_id, store_id,
+                getattr(user, "id", None), data, f.filename or "upload.jpg",
+                _root,
+            )
+            db.add(sample); db.flush()
+            out.append({
+                "sample_id": sample.id,
+                "filename":  f.filename,
+                "label":     sample.label,
+                "preview_url": f"/api/training/shutter/samples/{sample.id}/file",
+            })
+        except HTTPException as e:
+            errors.append({"filename": f.filename, "error": e.detail})
+        except Exception as e:
+            errors.append({"filename": f.filename, "error": str(e)})
+    db.commit()
+    return {"saved": len(out), "samples": out, "errors": errors}
