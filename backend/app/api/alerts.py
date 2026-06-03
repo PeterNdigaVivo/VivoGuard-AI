@@ -666,13 +666,20 @@ def alerts_summary(db: Session = Depends(get_db),
     zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
     zones_by_id = ({z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()}
                    if zone_ids else {})
-    urgent = attention = resolved = unread_urgent = 0
+    urgent = attention = resolved = dismissed = unread_urgent = 0
     for alert, ev, store in rows:
         zone = zones_by_id.get(ev.zone_id) if ev.zone_id else None
         label = _severity_label(ev.detection_type, ev, zone, store)
-        is_resolved = alert.status in ("resolved", "dismissed")
-        if is_resolved:
+        # Resolved = the operator-acted-on states. The /resolve
+        # endpoint still uses 'confirmed' as its closure status, so
+        # we treat it the same as 'resolved'. Dismissed is reported
+        # separately so the dashboard can show "3 resolved · 2
+        # dismissed" rather than rolling them together.
+        if alert.status in ("resolved", "confirmed"):
             resolved += 1
+            continue
+        if alert.status == "dismissed":
+            dismissed += 1
             continue
         if label == "URGENT":
             urgent += 1
@@ -682,7 +689,9 @@ def alerts_summary(db: Session = Depends(get_db),
             attention += 1
     return {
         "urgent": urgent, "attention": attention,
-        "resolved_today": resolved, "unread_urgent": unread_urgent,
+        "resolved_today": resolved,
+        "dismissed_today": dismissed,
+        "unread_urgent": unread_urgent,
     }
 
 

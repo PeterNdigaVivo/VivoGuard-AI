@@ -140,8 +140,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
     try {
       await alertsApi.resolve(alert.id)
       // Tell the sidebar badge + AlertsPage stats to refresh now,
-      // without waiting for the 30s poll.
-      window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { id: alert.id } }))
+      // without waiting for the 30s poll. The action tag lets the
+      // page decide which counter to bump (resolved vs dismissed).
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
+        { detail: { id: alert.id, action: 'resolve' } }))
       onChanged?.()
     } catch (e) {
       setLocal(incoming)   // rollback
@@ -154,7 +156,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                resolved_at: new Date().toISOString() })
     try {
       await alertsApi.dismiss(alert.id)
-      window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { id: alert.id } }))
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
+        { detail: { id: alert.id, action: 'dismiss' } }))
       onChanged?.()
     } catch (e) {
       setLocal(incoming)

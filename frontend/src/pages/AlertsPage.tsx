@@ -19,7 +19,11 @@ export default function AlertsPage() {
   const [storeId, setStoreId] = useState<string>('')
   const [search, setSearch] = useState('')
   const [stores, setStores] = useState<Store[]>([])
-  const [summary, setSummary] = useState({ urgent: 0, attention: 0, resolved_today: 0, unread_urgent: 0 })
+  const [summary, setSummary] = useState({
+    urgent: 0, attention: 0,
+    resolved_today: 0, dismissed_today: 0,
+    unread_urgent: 0,
+  })
   // Bottom-right toast for the "resolved" confirmation. Auto-clears
   // after 4s. Use this for any user-facing success/error message
   // instead of window.alert() so the operator's flow isn't blocked.
@@ -52,7 +56,9 @@ export default function AlertsPage() {
   // The /summary fetch fired by reload() then reconciles the truth.
   useEffect(() => {
     function onResolved(e: Event) {
-      const id = (e as CustomEvent).detail?.id
+      const detail = (e as CustomEvent).detail || {}
+      const id = detail.id
+      const action: 'resolve' | 'dismiss' = detail.action === 'dismiss' ? 'dismiss' : 'resolve'
       const closed = items.find(a => a.id === id)
       if (!closed) return
       setSummary(s => ({
@@ -61,7 +67,10 @@ export default function AlertsPage() {
         attention: closed.severity_label === 'ATTENTION' ? Math.max(0, s.attention - 1) : s.attention,
         unread_urgent: closed.severity_label === 'URGENT' && closed.status === 'new'
           ? Math.max(0, s.unread_urgent - 1) : s.unread_urgent,
-        resolved_today: s.resolved_today + 1,
+        // Split resolved vs dismissed so the header reflects what the
+        // operator actually clicked.
+        resolved_today:  action === 'resolve' ? s.resolved_today + 1  : s.resolved_today,
+        dismissed_today: action === 'dismiss' ? s.dismissed_today + 1 : s.dismissed_today,
       }))
     }
     window.addEventListener('vg:alert-resolved', onResolved)
@@ -108,7 +117,7 @@ export default function AlertsPage() {
       })
       // Toast with the count from the server — never lies about what
       // actually flipped.
-      setToast(`✅ ${resolved} alert${resolved === 1 ? '' : 's'} resolved`)
+      setToast(`✅ ${resolved} alert${resolved === 1 ? '' : 's'} resolved successfully`)
       // Decrement summary immediately so the page header reflects it
       // before the network reload returns.
       setSummary(s => ({
@@ -162,13 +171,21 @@ export default function AlertsPage() {
         Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
         {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
         {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
+        {' · '}<strong className="text-slate-600">{summary.dismissed_today} dismissed</strong>
       </div>
 
-      {/* Simple filter bar */}
+      {/* Simple filter bar. Each button shows a live count so the
+          operator sees at a glance how much is in each bucket. */}
       <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
-        <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>🔴 Urgent</QuickBtn>
-        <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>🟡 Needs Attention</QuickBtn>
-        <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>✅ Resolved</QuickBtn>
+        <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
+          🔴 Urgent ({summary.urgent})
+        </QuickBtn>
+        <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>
+          🟡 Needs Attention ({summary.attention})
+        </QuickBtn>
+        <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>
+          ✅ Resolved ({summary.resolved_today + summary.dismissed_today})
+        </QuickBtn>
         <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>📋 All</QuickBtn>
 
         <select className="border rounded px-2 py-1 text-sm ml-2"
