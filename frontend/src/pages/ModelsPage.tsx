@@ -1,7 +1,8 @@
 // Model registry page. Lists trained models, lets you deploy to cameras,
 // roll back, or export to ONNX/TorchScript/TensorRT.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Select } from '@/components/ui/Primitives'
 import { training, type AIModel } from '@/api/training'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
@@ -34,9 +35,70 @@ export default function ModelsPage() {
     alert(`Exported to: ${r.path}`)
   }
 
+  const chainModels = useMemo(
+    () => models.filter(m => m.is_chain_model),
+    [models],
+  )
+  const otherModels = useMemo(
+    () => models.filter(m => !m.is_chain_model),
+    [models],
+  )
+
   return (
     <div className="p-6">
-      <PageHeader title="Models" />
+      <PageHeader title="Models"
+        actions={<Link to="/training/chain"><Button>Chain training →</Button></Link>} />
+
+      {/* Chain models — surfaced first because they're the fleet-wide
+          default. Legacy per-store models follow in the standard table. */}
+      {chainModels.length > 0 && (
+        <Card className="p-4 mb-4">
+          <div className="font-medium mb-3">
+            🌐 Chain models <span className="text-slate-500 text-sm font-normal">
+              — pooled from every store, deploy fleet-wide</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="text-left p-2">Detector</th>
+                  <th className="text-left p-2">Version</th>
+                  <th className="text-right p-2">Samples</th>
+                  <th className="text-right p-2">Stores</th>
+                  <th className="text-right p-2">Accuracy</th>
+                  <th className="text-left p-2">Status</th>
+                  <th className="text-left p-2">Trained</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chainModels.map(m => (
+                  <tr key={m.id} className="border-t">
+                    <td className="p-2"><Badge color="sky">{m.detector_type ?? '—'}</Badge></td>
+                    <td className="p-2 font-medium">{m.version}</td>
+                    <td className="p-2 text-right tabular-nums">{m.sample_count ?? '—'}</td>
+                    <td className="p-2 text-right tabular-nums">{(m.trained_on_stores ?? []).length}</td>
+                    <td className="p-2 text-right tabular-nums">
+                      {m.map50 != null ? `${(m.map50 * 100).toFixed(1)}%` : '—'}
+                    </td>
+                    <td className="p-2">
+                      {m.deployed
+                        ? <Badge color="green">Live fleet-wide</Badge>
+                        : <Badge color="slate">Archived</Badge>}
+                    </td>
+                    <td className="p-2 text-slate-600">
+                      {new Date(m.created_at).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            Manage chain models from <Link to="/training/chain" className="text-sky-600 hover:underline">
+            Training → Chain</Link>.
+          </div>
+        </Card>
+      )}
 
       <Card>
         <table className="w-full text-sm">
@@ -51,7 +113,7 @@ export default function ModelsPage() {
             </tr>
           </thead>
           <tbody>
-            {models.map(m => {
+            {otherModels.map(m => {
               const targetIds = pendingDeploy[m.id] ?? []
               return (
                 <tr key={m.id} className="border-t align-top">
@@ -96,9 +158,10 @@ export default function ModelsPage() {
                 </tr>
               )
             })}
-            {!models.length && (
+            {!otherModels.length && (
               <tr><td colSpan={6} className="p-6 text-center text-slate-500">
-                No models yet. Train one in the AI Studio.
+                No per-store models yet. Train one in the AI Studio,
+                or use the chain trainer to build a fleet-wide model.
               </td></tr>
             )}
           </tbody>

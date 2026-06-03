@@ -92,6 +92,12 @@ class AIModelOut(BaseModel):
     is_base: bool
     training_job_id: int | None
     created_at: datetime
+    # Chain-training metadata (P5). Nullable so legacy per-store models
+    # serialise without changes.
+    is_chain_model: bool = False
+    detector_type: str | None = None
+    trained_on_stores: list[int] | None = None
+    sample_count: int | None = None
 
 
 class CaptureFromCameraIn(BaseModel):

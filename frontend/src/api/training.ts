@@ -18,6 +18,11 @@ export interface AIModel {
   map50: number | null; map50_95: number | null; precision: number | null; recall: number | null
   weights_path: string; export_format: string | null; deployed: boolean; is_base: boolean
   training_job_id: number | null; created_at: string
+  // Chain-training metadata (NULL on legacy per-store models).
+  is_chain_model?: boolean
+  detector_type?: string | null
+  trained_on_stores?: number[] | null
+  sample_count?: number | null
 }
 
 export const training = {

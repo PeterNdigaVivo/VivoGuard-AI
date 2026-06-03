@@ -123,5 +123,12 @@ celery_app.conf.update(
             "task": "queue_report.fire_due",
             "schedule": 300.0,
         },
+        # Weekly chain auto-retrain — 5-min beat tick. Fires Monday
+        # 02:00 Africa/Nairobi when the chain dataset has grown since
+        # the last trained chain model. iso-week marker for dedup.
+        "chain-retrain-every-5min": {
+            "task": "training.chain_retrain_due",
+            "schedule": 300.0,
+        },
     },
 )

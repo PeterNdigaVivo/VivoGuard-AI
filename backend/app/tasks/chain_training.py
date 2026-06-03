@@ -404,3 +404,99 @@ def train_chain_model(self, detector_type: str) -> None:
         log.exception("chain training %s failed: %s", detector_type, e)
         _set_status(detector_type, {"state": "failed", "message": str(e)})
         raise
+
+
+# ----------------------------------------------------------------------
+# Weekly auto-retrain dispatcher
+# ----------------------------------------------------------------------
+# Fires every 5 minutes from celery beat. On Monday 02:00–02:05 chain
+# time (Africa/Nairobi) it kicks off training for every detector whose
+# dataset has the minimum samples + has grown since the last training
+# run, then arms an iso-week marker in Redis so duplicates are ignored.
+
+AUTO_RETRAIN_HOUR = 2          # 02:00 chain-time Monday
+AUTO_RETRAIN_WEEKDAY = 0       # Monday
+
+def _chain_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(settings.app_timezone)
+    except Exception:
+        from datetime import timezone as _tz
+        return _tz.utc
+
+
+def _has_grown_since_last_train(detector_type: str) -> bool:
+    """True if the approved-sample count for this detector exceeds the
+    sample_count baked into the latest chain model for the same
+    detector. If no chain model exists yet, treat as grown."""
+    from sqlalchemy import or_, func
+    from app.database import SessionLocal
+    from app.models import AIModel, TrainingSample
+
+    with SessionLocal() as db:
+        latest = (db.query(AIModel)
+                    .filter(AIModel.is_chain_model == True,            # noqa: E712
+                            AIModel.detector_type == detector_type)
+                    .order_by(AIModel.id.desc()).first())
+        current = (db.query(func.count(TrainingSample.id))
+                     .filter(TrainingSample.detector_type == detector_type,
+                             or_(TrainingSample.approved.is_(True),
+                                 TrainingSample.approved.is_(None)),
+                             TrainingSample.source.in_(
+                                 ("capture", "upload", "camera_crop")))
+                     .scalar() or 0)
+        if latest is None or latest.sample_count is None:
+            return current > 0
+        return int(current) > int(latest.sample_count)
+
+
+@celery_app.task(name="training.chain_retrain_due", ignore_result=True)
+def chain_retrain_due() -> None:
+    """5-min beat tick. Fires the chain trainer on Monday 02:00 EAT
+    when the dataset has grown. Per-detector iso-week dedup."""
+    now_local = datetime.now(timezone.utc).astimezone(_chain_tz())
+    if now_local.weekday() != AUTO_RETRAIN_WEEKDAY:
+        return
+    if now_local.hour != AUTO_RETRAIN_HOUR:
+        return
+
+    iso_year, iso_week, _ = now_local.isocalendar()
+    marker = f"{iso_year}-W{iso_week:02d}"
+    try:
+        r = _redis()
+    except Exception:
+        return
+
+    for detector_type in ("uniform", "shutter"):
+        key = f"vg:chain_train:auto:{detector_type}:week"
+        try:
+            if r.get(key) == marker:
+                continue
+            if not _has_grown_since_last_train(detector_type):
+                # No new samples — skip retrain but still set the marker
+                # so we don't keep checking all morning.
+                r.set(key, marker, ex=14 * 24 * 3600)
+                continue
+            train_chain_model.delay(detector_type)
+            r.set(key, marker, ex=14 * 24 * 3600)
+            _notify_auto_retrain_started(detector_type)
+            log.info("chain auto-retrain queued for %s (%s)",
+                     detector_type, marker)
+        except Exception as e:
+            log.warning("auto-retrain dispatch failed for %s: %s",
+                        detector_type, e)
+
+
+def _notify_auto_retrain_started(detector_type: str) -> None:
+    try:
+        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
+        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
+        if to:
+            _send_whatsapp([to], (
+                f"🔁 Weekly chain retrain started — {detector_type}.\n"
+                "Pooled samples from every store. You'll get another "
+                "WhatsApp when training completes with accuracy stats."
+            ))
+    except Exception:
+        pass
