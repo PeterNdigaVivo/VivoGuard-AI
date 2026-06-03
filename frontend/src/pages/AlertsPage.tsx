@@ -20,6 +20,15 @@ export default function AlertsPage() {
   const [search, setSearch] = useState('')
   const [stores, setStores] = useState<Store[]>([])
   const [summary, setSummary] = useState({ urgent: 0, attention: 0, resolved_today: 0, unread_urgent: 0 })
+  // Bottom-right toast for the "resolved" confirmation. Auto-clears
+  // after 4s. Use this for any user-facing success/error message
+  // instead of window.alert() so the operator's flow isn't blocked.
+  const [toast, setToast] = useState<string | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
 
@@ -37,12 +46,37 @@ export default function AlertsPage() {
   // Real-time: when /ws/alerts pushes a new event, refetch.
   useEffect(() => alertsApi.subscribe(() => reload()), [])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Instant-feedback: any time a card fires the resolve/dismiss
+  // event, locally decrement the urgent/attention count so the header
+  // tally + sidebar badge update without waiting for the next poll.
+  // The /summary fetch fired by reload() then reconciles the truth.
+  useEffect(() => {
+    function onResolved(e: Event) {
+      const id = (e as CustomEvent).detail?.id
+      const closed = items.find(a => a.id === id)
+      if (!closed) return
+      setSummary(s => ({
+        ...s,
+        urgent:    closed.severity_label === 'URGENT'    ? Math.max(0, s.urgent - 1)    : s.urgent,
+        attention: closed.severity_label === 'ATTENTION' ? Math.max(0, s.attention - 1) : s.attention,
+        unread_urgent: closed.severity_label === 'URGENT' && closed.status === 'new'
+          ? Math.max(0, s.unread_urgent - 1) : s.unread_urgent,
+        resolved_today: s.resolved_today + 1,
+      }))
+    }
+    window.addEventListener('vg:alert-resolved', onResolved)
+    return () => window.removeEventListener('vg:alert-resolved', onResolved)
+  }, [items])
+
   // Client-side quick-filter + search over the loaded window.
   const filtered = useMemo(() => {
     let rows = items
     if (quick === 'urgent')     rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
     else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
-    else if (quick === 'resolved')  rows = rows.filter(a => a.status === 'resolved' || a.status === 'dismissed')
+    // 'confirmed' covers alerts the /resolve endpoint flipped (it
+    // re-uses that bucket as a "handled" state). 'dismissed' covers
+    // "Not a problem".
+    else if (quick === 'resolved')  rows = rows.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status))
     if (search.trim()) {
       const q = search.toLowerCase()
       rows = rows.filter(a =>
@@ -61,7 +95,7 @@ export default function AlertsPage() {
     // Use whatever filter the user can see — store + date window —
     // so the bulk action mirrors the visible list, not the whole DB.
     const newCount = items.filter(a => a.status === 'new').length
-    if (newCount === 0) { alert('There are no unresolved alerts to clear.'); return }
+    if (newCount === 0) { setToast('There are no unresolved alerts to clear.'); return }
     const label = storeId
       ? stores.find(s => String(s.id) === storeId)?.name ?? 'this store'
       : 'all stores'
@@ -72,10 +106,20 @@ export default function AlertsPage() {
         store_id: storeId || undefined,
         since: range.since, until: range.until,
       })
-      alert(`Resolved ${resolved} alert${resolved === 1 ? '' : 's'}.`)
+      // Toast with the count from the server — never lies about what
+      // actually flipped.
+      setToast(`✅ ${resolved} alert${resolved === 1 ? '' : 's'} resolved`)
+      // Decrement summary immediately so the page header reflects it
+      // before the network reload returns.
+      setSummary(s => ({
+        ...s,
+        urgent: 0, attention: 0, unread_urgent: 0,
+        resolved_today: s.resolved_today + resolved,
+      }))
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { bulk: resolved } }))
       reload()
     } catch (e) {
-      alert(`Could not resolve: ${e}`)
+      setToast(`Could not resolve: ${e}`)
     }
   }
 
@@ -153,6 +197,14 @@ export default function AlertsPage() {
           ))
         )}
       </div>
+
+      {/* Toast — bottom-right, auto-dismiss after 4s. */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 bg-slate-800 text-white text-sm
+                        rounded shadow-lg px-4 py-2 z-50">
+          {toast}
+        </div>
+      )}
     </div>
   )
 }

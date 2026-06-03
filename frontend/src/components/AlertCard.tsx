@@ -104,8 +104,19 @@ export interface AlertCardProps {
   onChanged?: () => void
 }
 
-export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChanged }: AlertCardProps) {
+export function AlertCard({ alert: incoming, groupCount, groupLast, groupSiblings, onChanged }: AlertCardProps) {
+  // Local copy of the alert so we can reflect a resolve / dismiss
+  // immediately without waiting for the parent's reload — feels
+  // instantaneous and never flashes back to "new".
+  const [alert, setLocal] = useState(incoming)
+  useEffect(() => { setLocal(incoming) }, [incoming])
   const sev = sevKey(alert.severity)
+  // "Resolved" covers the three terminal statuses the API can set:
+  // resolved (everyday "I handled it") + confirmed (legacy alias the
+  // /resolve endpoint still uses) + dismissed ("not a problem").
+  const isResolved  = ['resolved', 'confirmed'].includes(alert.status)
+  const isDismissed = alert.status === 'dismissed'
+  const isClosed    = isResolved || isDismissed
   const [lightbox, setLightbox] = useState(false)
   const [snapFailed, setSnapFailed] = useState(false)
   const [clipModal, setClipModal] = useState(false)
@@ -120,6 +131,37 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
     finally { setBusy(false) }
   }
 
+  async function resolveOne() {
+    if (!confirm('Mark this alert as resolved?')) return
+    // Optimistic update: flip the badge BEFORE the network round-trip
+    // so the operator sees instant feedback.
+    setLocal({ ...alert, status: 'confirmed',
+               resolved_at: new Date().toISOString() })
+    try {
+      await alertsApi.resolve(alert.id)
+      // Tell the sidebar badge + AlertsPage stats to refresh now,
+      // without waiting for the 30s poll.
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { id: alert.id } }))
+      onChanged?.()
+    } catch (e) {
+      setLocal(incoming)   // rollback
+      window.alert('Could not resolve. ' + e)
+    }
+  }
+
+  async function dismissOne() {
+    setLocal({ ...alert, status: 'dismissed',
+               resolved_at: new Date().toISOString() })
+    try {
+      await alertsApi.dismiss(alert.id)
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { id: alert.id } }))
+      onChanged?.()
+    } catch (e) {
+      setLocal(incoming)
+      window.alert('Could not dismiss. ' + e)
+    }
+  }
+
   async function submitNote() {
     if (!noteText.trim()) return
     await act(() => alertsApi.addNote(alert.id, noteText.trim()))
@@ -130,28 +172,38 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
   const { src: snapUrl, failed: snapAuthFailed } = useSnapshot(alert.id, alert.snapshot_url)
 
   return (
-    <div className="relative bg-white rounded border border-slate-200 overflow-hidden">
-      {/* Severity colour bar */}
-      <div className={'absolute left-0 top-0 bottom-0 w-1 ' + SEVERITY_BAR[sev]} />
+    <div className={'relative bg-white rounded border border-slate-200 overflow-hidden transition-opacity '
+                    + (isClosed ? 'opacity-60' : '')}>
+      {/* Severity colour bar — greyed when resolved/dismissed. */}
+      <div className={'absolute left-0 top-0 bottom-0 w-1 '
+                      + (isClosed ? 'bg-slate-300' : SEVERITY_BAR[sev])} />
 
       <div className="pl-4 pr-3 py-3 flex flex-col sm:flex-row gap-3">
         {/* Left: title + body + actions */}
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1">
-            <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ' +
-              SEVERITY_BADGE[sev]}>
-              {alert.severity_label
-                ? (LABEL_FROM_SERVER[alert.severity_label] ?? alert.severity_label)
-                : SEVERITY_LABEL[sev]}
-            </span>
+            {/* When still new, show the traffic-light severity badge.
+                When resolved/dismissed, show the closure badge instead
+                so the operator sees its state at a glance. */}
+            {isResolved ? (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800">
+                ✅ RESOLVED
+              </span>
+            ) : isDismissed ? (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-slate-200 text-slate-700">
+                ◯ DISMISSED
+              </span>
+            ) : (
+              <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ' +
+                SEVERITY_BADGE[sev]}>
+                {alert.severity_label
+                  ? (LABEL_FROM_SERVER[alert.severity_label] ?? alert.severity_label)
+                  : SEVERITY_LABEL[sev]}
+              </span>
+            )}
             <span className="text-xs text-slate-500">{formatTime(alert.created_at)}</span>
             {alert.camera_name && (
               <span className="text-xs text-slate-500">· {alert.camera_name}</span>
-            )}
-            {alert.status !== 'new' && (
-              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                {alert.status}
-              </span>
             )}
             {groupCount && groupCount > 1 && (
               <button onClick={() => setGroupExpanded(g => !g)}
@@ -206,16 +258,22 @@ export function AlertCard({ alert, groupCount, groupLast, groupSiblings, onChang
             </details>
           )}
 
+          {/* Closure footer — shown only when already resolved or dismissed. */}
+          {isClosed && (
+            <div className="mt-2 text-xs text-slate-500">
+              {isResolved ? 'Resolved' : 'Dismissed'}
+              {alert.resolved_at ? ` at ${formatTime(alert.resolved_at)}` : ''}
+            </div>
+          )}
+
           {/* Action row */}
           <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
             {alert.status === 'new' && (
               <>
-                <ActionBtn onClick={() => act(() => alertsApi.resolve(alert.id))}
-                           tone="emerald" disabled={busy}>
+                <ActionBtn onClick={resolveOne} tone="emerald" disabled={busy}>
                   ✅ I handled this
                 </ActionBtn>
-                <ActionBtn onClick={() => act(() => alertsApi.dismiss(alert.id))}
-                           tone="slate" disabled={busy}>
+                <ActionBtn onClick={dismissOne} tone="slate" disabled={busy}>
                   Not a problem
                 </ActionBtn>
               </>

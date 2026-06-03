@@ -27,8 +27,10 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const nav = useNavigate()
 
-  // Unread-urgent badge on the Alerts nav item. Polls every 30s and
-  // also refreshes whenever a new alert is pushed over the websocket.
+  // Unread-urgent badge on the Alerts nav item. Polls every 30s,
+  // refreshes on every websocket push, AND listens for the local
+  // `vg:alert-resolved` event so clicking "I handled this" / "Resolve
+  // all" decrements the badge before the next poll lands.
   const [urgentBadge, setUrgentBadge] = useState(0)
   useEffect(() => {
     let alive = true
@@ -38,7 +40,18 @@ export default function Layout() {
     refresh()
     const t = setInterval(refresh, 30_000)
     const unsub = alertsApi.subscribe(() => refresh())
-    return () => { alive = false; clearInterval(t); unsub() }
+    const onResolved = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      const bulk = typeof detail?.bulk === 'number' ? detail.bulk : 1
+      setUrgentBadge(b => Math.max(0, b - bulk))
+      // Re-fetch in 2s to reconcile with the server's view.
+      setTimeout(refresh, 2000)
+    }
+    window.addEventListener('vg:alert-resolved', onResolved)
+    return () => {
+      alive = false; clearInterval(t); unsub()
+      window.removeEventListener('vg:alert-resolved', onResolved)
+    }
   }, [])
 
   return (
