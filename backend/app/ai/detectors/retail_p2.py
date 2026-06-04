@@ -253,69 +253,350 @@ class StaffPresenceDetector(Detector):
 # ---------------------------------------------------------------------------
 
 class AisleDwellDetector(Detector):
-    """For every zone tagged `aisle`, track each person's entry time and
-    emit the dwell duration (seconds) when they leave. Also writes a
-    rolling-average `dwell_seconds` metric per zone."""
+    """Browse-time + sales-floor coverage detector for `aisle` /
+    `dwell` zones (Product Interest Intelligence + Sales Floor
+    Coverage panels in the dashboard).
+
+    Per-track per-zone:
+      - Entry timestamp; on exit emit a per-track dwell event when
+        the visit was ≥ MIN_BROWSE_SECONDS (pass-throughs ignored).
+      - Visit count — every fresh entry to a zone in the same
+        session bumps the per-(track, zone) counter for the
+        repeat-visit metric.
+
+    Per-zone, every frame batch:
+      - Staff vs customer split via app.ai.detectors.staff_identity
+        (uniform colour + ≥5 min dwell). Staff in an aisle counts
+        toward floor coverage; their dwell does NOT count as
+        browsing.
+      - dwell_seconds (avg of in-progress dwells)         — rolling avg
+      - browse_time_seconds (alias)                        — rolling avg
+      - dwell_count (customers ≥3 s in zone right now)    — last
+      - dwell_repeat_rate (% with visits > 1, this period) — last
+      - staff_present (1 when ≥1 staff in zone, else 0)   — last
+      - staff_customer_ratio (staff / max(1, customers))  — last
+      - aisle_unattended_seconds (continuous run, 0 when staffed
+        or below threshold)                              — last
+
+    Alerts:
+      sales_floor_unattended — ≥UNATTENDED_CUSTOMERS customers in
+                               the zone, NO staff, for ≥UNATTENDED_
+                               SECONDS. Dedup once per UNATTENDED_
+                               DEDUP_SECONDS. Suppressed in the
+                               first / last 30 min of trading.
+
+    Heatmap integration (writes per evaluate, debounced):
+      vg:heatmap:dwell:{camera_id}
+        { zones: { zone_id: { avg_seconds, count, hot_spot,
+                              repeat_rate } }, updated_at }
+      The traffic + engagement heatmaps come from HeatmapDetector;
+      this key is the dedicated dwell-time toggle layer.
+    """
 
     detection_type = "dwell"
     needs_tracking = True
 
+    # ─ Sustained-duration knobs ────────────────────────────────────
+    # Quick pass-throughs are filtered out — only browses ≥3 s count.
+    MIN_BROWSE_SECONDS  = 3.0
+    UNATTENDED_CUSTOMERS = 8         # ≥N customers + no staff = alert
+    UNATTENDED_MIN_CUSTOMERS = 5     # below this, never alert
+    UNATTENDED_SECONDS   = 3 * 60    # sustained gap before alert
+    UNATTENDED_DEDUP_SECONDS = 10 * 60
+    STAFF_LEFT_GRACE_SECONDS = 2 * 60   # staff just left → don't alert
+    # Repeat-visit clock — bumping the counter for the same zone
+    # within REVISIT_DEBOUNCE_SECONDS is treated as the same visit
+    # (the tracker briefly lost the person between shelves).
+    REVISIT_DEBOUNCE_SECONDS = 30
+    HEATMAP_PUBLISH_SECONDS = 30
+    OPENING_GRACE_SECONDS = 30 * 60
+    CLOSING_GRACE_SECONDS = 30 * 60
+
     def __init__(self):
         # (camera, track, zone) → entry timestamp
         self._entered: dict[tuple[int, int, int], float] = {}
+        # (camera, track, zone) → visit_count (resets when track ages out)
+        self._visits: dict[tuple[int, int, int], int] = {}
+        # (camera, track, zone) → last exit timestamp (for revisit debounce)
+        self._last_exit: dict[tuple[int, int, int], float] = {}
+        # (camera, zone) → epoch sales-floor-unattended started
+        self._unattended_since: dict[tuple[int, int], float] = {}
+        # (camera, zone) → last alert epoch
+        self._unattended_fired: dict[tuple[int, int], float] = {}
+        # (camera, zone) → last staff-seen epoch (drives the grace)
+        self._last_staff_seen: dict[tuple[int, int], float] = {}
+        # camera_id → last heatmap publish ts
+        self._last_heatmap_publish: dict[int, float] = {}
+
+    # -----------------------------------------------------------------
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
+        # 'aisle' is the canonical tag; 'dwell' is the legacy alias —
+        # accept both so older zone configs keep feeding metrics.
         zones = [z for z in ctx.zones
-                 if "aisle" in (z.get("detection_types_json") or [])]
+                 if {"aisle", "dwell"} & set(z.get("detection_types_json") or [])]
         if not zones:
             return []
 
         out: list[DetectionEvent] = []
         now = time.time()
-        per_zone_dwells: dict[int, list[float]] = {z["id"]: [] for z in zones}
+        in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
 
-        active_track_ids = {tr.track_id for tr, _ in ctx.tracks if tr.cls in COCO_PERSON}
+        active_track_ids = {tr.track_id for tr, _ in ctx.tracks
+                            if tr.cls in COCO_PERSON}
 
+        # Per-zone in-progress dwells + visit-count snapshot for this
+        # frame batch. We classify each track as staff/customer once
+        # via staff_identity so the per-zone counts stay consistent.
+        per_zone_dwells:    dict[int, list[float]]   = {z["id"]: [] for z in zones}
+        per_zone_customers: dict[int, set[int]]      = {z["id"]: set() for z in zones}
+        per_zone_staff:     dict[int, set[int]]      = {z["id"]: set() for z in zones}
+        per_zone_revisits:  dict[int, list[int]]     = {z["id"]: [] for z in zones}
+
+        # Walk tracker frames first — pick up entries/exits and update
+        # the per-track per-zone bookkeeping.
         for tr, det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
+            # Staff classification is per track, not per zone — a single
+            # call decides whether the person should count as staff
+            # everywhere they appear in this frame.
+            verdict = staff_identity.classify(
+                ctx, {"bbox_norm": tr.bbox_norm}, tr.track_id, now)
+            is_staff = verdict["level"] in ("high", "medium")
+
             for z in zones:
                 key = (ctx.camera_id, tr.track_id, z["id"])
-                if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
-                    self._entered.setdefault(key, now)
-                    per_zone_dwells[z["id"]].append(max(0.0, now - self._entered[key]))
+                in_zone = bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"])
+                if in_zone:
+                    # Track is currently in the zone. First sighting in
+                    # this visit increments the per-zone visit counter.
+                    if key not in self._entered:
+                        last_exit = self._last_exit.get(key, 0.0)
+                        if now - last_exit > self.REVISIT_DEBOUNCE_SECONDS:
+                            self._visits[key] = self._visits.get(key, 0) + 1
+                        self._entered[key] = now
+                    elapsed = max(0.0, now - self._entered[key])
+                    if is_staff:
+                        per_zone_staff[z["id"]].add(tr.track_id)
+                        self._last_staff_seen[(ctx.camera_id, z["id"])] = now
+                    elif elapsed >= self.MIN_BROWSE_SECONDS:
+                        per_zone_customers[z["id"]].add(tr.track_id)
+                        per_zone_dwells[z["id"]].append(elapsed)
+                        per_zone_revisits[z["id"]].append(self._visits.get(key, 1))
                 else:
-                    # Person just left the zone — emit a per-track dwell event.
+                    # Track left this zone — emit the dwell event for
+                    # customers (staff dwells don't model browsing).
                     if key in self._entered:
                         dwell = max(0.0, now - self._entered.pop(key))
-                        if dwell >= 2.0:    # ignore quick flybys
+                        self._last_exit[key] = now
+                        if not is_staff and dwell >= self.MIN_BROWSE_SECONDS:
                             out.append(DetectionEvent(
                                 detection_type=self.detection_type,
                                 cls="aisle_dwell",
                                 confidence=1.0,
                                 bbox_norm=tr.bbox_norm,
                                 track_id=tr.track_id, zone_id=z["id"],
-                                extra={"dwell_seconds": round(dwell, 1)},
+                                extra={
+                                    "dwell_seconds": round(dwell, 1),
+                                    "browse_time_seconds": round(dwell, 1),
+                                    "visit_count": self._visits.get(key, 1),
+                                    "store_id": ctx.store_id,
+                                },
                             ))
 
-        # Reap entries for tracks that fully aged out.
+        # Reap entries / counters for tracks that have fully aged out.
         for k in list(self._entered):
             if k[1] not in active_track_ids:
                 self._entered.pop(k, None)
+        for k in list(self._visits):
+            if k[1] not in active_track_ids:
+                self._visits.pop(k, None)
+                self._last_exit.pop(k, None)
 
-        # Per-zone rolling avg metric.
+        # ── per-zone metrics + sales-floor-unattended logic ─────────
         if ctx.db is not None:
             from app.analytics import recorder
-            for zid, dwells in per_zone_dwells.items():
-                if not dwells:
-                    continue
-                recorder.record(ctx.db, "dwell_seconds", float(mean(dwells)),
+            for z in zones:
+                zid = z["id"]
+                dwells = per_zone_dwells[zid]
+                customers = per_zone_customers[zid]
+                staff = per_zone_staff[zid]
+                revisits = per_zone_revisits[zid]
+                avg_s = float(mean(dwells)) if dwells else 0.0
+                repeat_rate = (
+                    sum(1 for v in revisits if v > 1) / len(revisits)
+                    if revisits else 0.0)
+                staff_present = 1.0 if staff else 0.0
+                staff_cust_ratio = (
+                    len(staff) / max(1, len(customers)) if customers else 0.0)
+
+                # Legacy + new metric names (same value) so existing
+                # dashboards keep rendering while the new UI rolls out.
+                if dwells:
+                    recorder.record(ctx.db, "dwell_seconds", avg_s,
+                                    camera_id=ctx.camera_id,
+                                    store_id=ctx.store_id,
+                                    zone_id=zid, aggregator="avg")
+                    recorder.record(ctx.db, "browse_time_seconds", avg_s,
+                                    camera_id=ctx.camera_id,
+                                    store_id=ctx.store_id,
+                                    zone_id=zid, aggregator="avg")
+                recorder.record(ctx.db, "dwell_count", float(len(customers)),
+                                camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                zone_id=zid, aggregator="last")
+                recorder.record(ctx.db, "dwell_repeat_rate", float(repeat_rate),
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=zid, aggregator="avg")
+                recorder.record(ctx.db, "staff_present", staff_present,
+                                camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                zone_id=zid, aggregator="last")
+                recorder.record(ctx.db, "staff_customer_ratio",
+                                float(staff_cust_ratio),
+                                camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                zone_id=zid, aggregator="avg")
+
+                # ── sales-floor-unattended ────────────────────────
+                gap_key = (ctx.camera_id, zid)
+                staff_recently = (
+                    now - self._last_staff_seen.get(gap_key, 0.0)
+                    < self.STAFF_LEFT_GRACE_SECONDS)
+                qualifies = (len(customers) >= self.UNATTENDED_CUSTOMERS
+                             and not staff
+                             and not staff_recently
+                             and len(customers) >= self.UNATTENDED_MIN_CUSTOMERS)
+                if qualifies:
+                    self._unattended_since.setdefault(gap_key, now)
+                else:
+                    self._unattended_since.pop(gap_key, None)
+
+                unattended_for = (
+                    now - self._unattended_since[gap_key]
+                    if gap_key in self._unattended_since else 0.0)
+                recorder.record(ctx.db, "aisle_unattended_seconds",
+                                float(unattended_for),
+                                camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                zone_id=zid, aggregator="last")
+
+                if (qualifies
+                        and not in_opening_grace and not in_closing_grace
+                        and unattended_for >= self.UNATTENDED_SECONDS
+                        and now - self._unattended_fired.get(gap_key, 0.0)
+                                >= self.UNATTENDED_DEDUP_SECONDS):
+                    self._unattended_fired[gap_key] = now
+                    boxes: list[dict] = []
+                    poly = z.get("polygon_coords_json") or []
+                    if poly:
+                        xs = [pt[0] for pt in poly]
+                        ys = [pt[1] for pt in poly]
+                        boxes.append({
+                            "bbox": [min(xs), min(ys), max(xs), max(ys)],
+                            "color": "amber",
+                            "label": f"{len(customers)} customers, no staff",
+                        })
+                    out.append(DetectionEvent(
+                        detection_type=self.detection_type,
+                        cls="sales_floor_unattended",
+                        confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=zid,
+                        extra={
+                            "priority": "warning",
+                            "store_id": ctx.store_id,
+                            "rule": "sales_floor_unattended",
+                            "customer_count": len(customers),
+                            "unattended_seconds": int(unattended_for),
+                            "unattended_minutes": int(unattended_for / 60),
+                            "zone_name": z.get("name"),
+                            "boxes": boxes,
+                        },
+                    ))
+
+        # Publish the dwell heatmap layer at most every
+        # HEATMAP_PUBLISH_SECONDS. Keeps Redis writes cheap on busy
+        # cameras while still feeling live to the operator.
+        if (now - self._last_heatmap_publish.get(ctx.camera_id, 0)
+                >= self.HEATMAP_PUBLISH_SECONDS):
+            self._last_heatmap_publish[ctx.camera_id] = now
+            self._publish_dwell_heatmap(ctx, zones, per_zone_dwells,
+                                        per_zone_customers, per_zone_revisits,
+                                        now)
         return out
+
+    # -----------------------------------------------------------------
+
+    def _publish_dwell_heatmap(self, ctx: DetectorContext, zones: list[dict],
+                               per_zone_dwells: dict[int, list[float]],
+                               per_zone_customers: dict[int, set[int]],
+                               per_zone_revisits: dict[int, list[int]],
+                               now: float) -> None:
+        """Write per-zone dwell aggregates to
+        vg:heatmap:dwell:{camera_id}. The map UI uses this for the
+        "Dwell Time View" toggle — red = highest avg, blue = quick
+        pass-through."""
+        try:
+            import json
+            import redis
+            from app.config import settings
+            r = redis.from_url(settings.redis_url)
+            payload = {"camera_id": ctx.camera_id,
+                       "updated_at": now,
+                       "zones": {}}
+            for z in zones:
+                zid = z["id"]
+                dwells = per_zone_dwells.get(zid, [])
+                customers = per_zone_customers.get(zid, set())
+                revisits = per_zone_revisits.get(zid, [])
+                avg_s = float(mean(dwells)) if dwells else 0.0
+                payload["zones"][str(zid)] = {
+                    "zone_name": z.get("name"),
+                    "polygon":   z.get("polygon_coords_json") or [],
+                    "avg_seconds": round(avg_s, 1),
+                    "count":       len(customers),
+                    "repeat_rate": (
+                        round(sum(1 for v in revisits if v > 1)
+                              / len(revisits), 3)
+                        if revisits else 0.0),
+                }
+            r.set(f"vg:heatmap:dwell:{ctx.camera_id}",
+                  json.dumps(payload), ex=24 * 3600)
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------
+
+    def _opening_closing_grace(self, ctx: DetectorContext,
+                               now: float) -> tuple[bool, bool]:
+        if not ctx.business_hours or not ctx.store_timezone:
+            return False, False
+        try:
+            from app.utils.business_hours import localised_now
+            from datetime import datetime as _dt
+            now_local = localised_now(ctx.store_timezone)
+            weekday_keys = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+            windows = ctx.business_hours.get(weekday_keys[now_local.weekday()]) or []
+            opens, closes = [], []
+            for win in windows:
+                try:
+                    a, b = win.split("-")
+                    ha, ma = (int(x) for x in a.split(":"))
+                    hb, mb = (int(x) for x in b.split(":"))
+                    opens.append(_dt(now_local.year, now_local.month,
+                                     now_local.day, ha, ma,
+                                     tzinfo=now_local.tzinfo))
+                    closes.append(_dt(now_local.year, now_local.month,
+                                      now_local.day, hb, mb,
+                                      tzinfo=now_local.tzinfo))
+                except Exception:
+                    continue
+            if not opens:
+                return False, False
+            opening = 0 <= (now_local - min(opens)).total_seconds() <= self.OPENING_GRACE_SECONDS
+            closing = 0 <= (max(closes) - now_local).total_seconds() <= self.CLOSING_GRACE_SECONDS
+            return opening, closing
+        except Exception:
+            return False, False
 
 
 # ---------------------------------------------------------------------------
