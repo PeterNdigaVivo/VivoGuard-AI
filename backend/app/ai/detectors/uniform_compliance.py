@@ -120,13 +120,22 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
         hsv = cv2.cvtColor(ub, cv2.COLOR_BGR2HSV)
         H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
         total = H.size or 1
-        # Spec values, scaled to OpenCV's 0..179 H / 0..255 S,V.
-        maroon = (((H >= 160) | (H <= 5)) & (S >= 128) & (S <= 255)
-                  & (V >= 76)  & (V <= 204)).sum() / total
-        black  = ((S <= 102) & (V <= 153)).sum() / total
-        # 25% of the upper-body pixels matching either band is enough
-        # to call it the uniform colour — accounts for shadows + skin.
-        top_ok = max(maroon, black) >= 0.25
+        # Widened maroon/burgundy band — overhead store cameras see a
+        # darker, less-saturated version of the uniform than the original
+        # spec values caught (false "Unauthorised Person" alerts at Vivo
+        # Junction, June 2026). H in OpenCV is 0..179 so the spec's
+        # 0..15° and 340..360° map to H ≤ 7 and H ≥ 170; we widen further
+        # to H ≤ 8 and H ≥ 160 to cover red-brown lighting drift. S and V
+        # floors are dropped so dark, dim-light maroon still scores.
+        maroon = (((H >= 160) | (H <= 8))
+                  & (S >= 90) & (S <= 255)
+                  & (V >= 40) & (V <= 220)).sum() / total
+        # Black uniform — wider S/V envelope for shadows from overhead.
+        black  = ((S <= 110) & (V <= 165)).sum() / total
+        # 20% of the upper-body pixels matching either band is enough
+        # to call it the uniform colour — accounts for shadows + skin
+        # + the smaller apparent top area from overhead angles.
+        top_ok = max(maroon, black) >= 0.20
         top_share = float(max(maroon, black))
 
         # Lanyard zone — top 15..65%, centre 30..70% width.
@@ -156,11 +165,14 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             has_nametag = bool(white >= 0.015)
 
         # Confidence proxy — how strongly the top read as a Vivo colour
-        # tells the caller whether to trust the call at all (UNCERTAIN
-        # fallback when nothing matched cleanly).
-        confidence = min(1.0, top_share / 0.45)
+        # tells the caller whether to trust the call at all. We tie the
+        # 1.0 mark to the new 40% share so the borderline band (10-20%)
+        # lands well under the "confident" threshold and the caller can
+        # route those cases to UNCERTAIN rather than NON_COMPLIANT.
+        confidence = min(1.0, top_share / 0.40)
         return {
             "top_ok":      bool(top_ok),
+            "top_share":   top_share,
             "has_lanyard": has_lanyard,
             "has_nametag": has_nametag,
             "confidence":  confidence,
@@ -328,11 +340,21 @@ class UniformComplianceDetector(Detector):
 
         # Mode 2: colour rule-based, six-state decision tree.
         feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
-        if feats is None or feats["confidence"] < 0.15:
+        if feats is None or feats["confidence"] < 0.25:
             # Pixels missing or top didn't match anything cleanly — let
-            # the caller skip (no alert) rather than false-alarm.
+            # the caller skip (no alert) rather than false-alarm. The
+            # 0.25 floor (top_share ≥ ~0.10) lets borderline overhead
+            # shots fall into UNCERTAIN instead of NON_COMPLIANT.
             return UNCERTAIN
         if not feats["top_ok"]:
+            # Borderline colour read — a non-trivial fraction matched
+            # the uniform band but didn't cross the top_ok floor. Treat
+            # as UNCERTAIN so we don't fire a violation on someone the
+            # camera can't read reliably (typical for overhead angles
+            # + low light). Only call NON_COMPLIANT when the share is
+            # decisively low.
+            if feats.get("top_share", 0.0) >= 0.10:
+                return UNCERTAIN
             return NON_COMPLIANT
         if feats["has_lanyard"] and feats["has_nametag"]:
             return FULL_COMPLIANT

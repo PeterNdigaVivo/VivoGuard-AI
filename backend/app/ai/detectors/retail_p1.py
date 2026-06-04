@@ -430,9 +430,16 @@ class IntrusionDetector(Detector):
                     # via the staff_tracks roster, not an alert.
                     tid = staff_identity.match_track(ctx, det)
                     verdict = staff_identity.classify(ctx, det, tid, now)
-                    if verdict["level"] in ("high", "medium") or verdict["top_ok"]:
-                        staff_identity.mark_staff_track(
-                            ctx, tid, source="opening_closing")
+                    # Suppress the intrusion alert when the person is
+                    # identified staff, OR when the colour read is just
+                    # uncertain (typical for overhead cameras in low
+                    # light — we'd rather miss an intruder ping than
+                    # WhatsApp a manager about their own staff).
+                    if (verdict["level"] in ("high", "medium", "uncertain")
+                            or verdict["top_ok"]):
+                        if verdict["level"] in ("high", "medium"):
+                            staff_identity.mark_staff_track(
+                                ctx, tid, source="opening_closing")
                         break
                     zid = z.get("id") or -1
                     if now - self._fired.get(zid, 0) < 30:

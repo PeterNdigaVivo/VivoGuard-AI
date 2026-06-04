@@ -105,7 +105,17 @@ class StaffZoneDetector(Detector):
                         ctx, det, tid, "missing_nametag", elapsed, "info"))
                 continue
 
+            # UNCERTAIN — the colour rule couldn't read the uniform
+            # cleanly (overhead angle, dim light, occlusion). Never
+            # fire the unauthorised-person alert; staff who happen to
+            # be in a hard-to-read pose must not be flagged.
+            if verdict["level"] == "uncertain":
+                continue
+
             # UNKNOWN → potential intruder / customer in staff area.
+            # Hard 2-minute grace period — no staff_zone alert fires
+            # for anyone who's been in the zone for less than 2 min,
+            # regardless of how confident the rule is they aren't staff.
             if elapsed >= UNAUTHORISED_SECONDS:
                 rule = "unauthorised_person"
                 if now - self._fired.get((tid, rule), 0) >= DEDUP_SECONDS:

@@ -54,7 +54,14 @@ WRONG_UNIFORM_CONFIRM_SECONDS = 5 * 60
 TRACK_TTL_SECONDS = 15 * 60
 
 
-Level = Literal["high", "medium", "unknown"]
+Level = Literal["high", "medium", "uncertain", "unknown"]
+
+# Below this uniform_features confidence we can't reliably tell what
+# colour the top is — typical for overhead cameras and dim shop
+# lighting. Suppress unauthorised-person alerts so the operator
+# doesn't get false "intruder behind counter" pings for staff the
+# camera simply can't read.
+UNCERTAIN_CONFIDENCE = 0.40
 
 
 # (camera_id, track_id) → {zone_tag: first_seen_epoch}
@@ -127,12 +134,14 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
     top_ok      = bool(feats["top_ok"])      if feats else None
     has_lanyard = bool(feats["has_lanyard"]) if feats else None
     has_nametag = bool(feats["has_nametag"]) if feats else None
+    confidence  = float(feats.get("confidence", 0.0)) if feats else 0.0
     elapsed = time_in_any_staff_zone(ctx.camera_id, track_id, now)
 
     # HIGH confidence: correct uniform AND (lanyard visible OR long dwell)
     if top_ok and (has_lanyard or elapsed >= TIME_BASED_STAFF_SECONDS):
         return {"level": "high", "top_ok": top_ok,
                 "has_lanyard": has_lanyard, "has_nametag": has_nametag,
+                "confidence": confidence,
                 "time_in_staff_zone_s": elapsed,
                 "reason": "uniform+lanyard" if has_lanyard else "uniform+dwell"}
 
@@ -140,6 +149,7 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
     if elapsed >= TIME_BASED_STAFF_SECONDS:
         return {"level": "medium", "top_ok": top_ok,
                 "has_lanyard": has_lanyard, "has_nametag": has_nametag,
+                "confidence": confidence,
                 "time_in_staff_zone_s": elapsed, "reason": "dwell≥5min"}
 
     # MEDIUM confidence: uniform colour but not yet long enough for HIGH.
@@ -148,10 +158,23 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
     if top_ok:
         return {"level": "medium", "top_ok": top_ok,
                 "has_lanyard": has_lanyard, "has_nametag": has_nametag,
+                "confidence": confidence,
                 "time_in_staff_zone_s": elapsed, "reason": "uniform-only"}
+
+    # UNCERTAIN: pixels unreadable (frame missed, occluded, overhead
+    # angle, low light). Distinct from "unknown" — the caller treats
+    # uncertain as "no alert" so we don't false-alarm on a uniform
+    # the camera literally can't see clearly.
+    if feats is None or confidence < UNCERTAIN_CONFIDENCE:
+        return {"level": "uncertain", "top_ok": top_ok,
+                "has_lanyard": has_lanyard, "has_nametag": has_nametag,
+                "confidence": confidence,
+                "time_in_staff_zone_s": elapsed,
+                "reason": "low-confidence-pixels"}
 
     return {"level": "unknown", "top_ok": top_ok,
             "has_lanyard": has_lanyard, "has_nametag": has_nametag,
+            "confidence": confidence,
             "time_in_staff_zone_s": elapsed, "reason": "no-uniform"}
 
 
