@@ -5,18 +5,23 @@ BEHIND the service counter where only uniformed staff should be.
 This is distinct from the customer-facing `counter` zone the
 QueueDetector and StaffPresenceDetector watch.
 
-Three rules, each gated on sustained-duration + dedup:
+Logic is now centralised in app.ai.detectors.staff_identity which
+classifies each person as high / medium / unknown staff confidence
+based on uniform colour + lanyard + time-in-zone. Alerts:
 
-  1. Unidentified person behind counter (no uniform) — URGENT
-       sustained 2 min → "Unidentified Person Behind Counter"
-  2. Staff in uniform but missing lanyard/name tag — ATTENTION
-       sustained 5 min → "Staff Member Missing Name Tag"
-  3. Customer (no uniform) entered the staff area — URGENT
-       fires within 30 s of first sighting → "Customer in Staff-
-       Only Area"
+  HIGH or MEDIUM staff → suppress ALL alerts. The person is recorded
+                         in staff_tracks so visitor counts exclude
+                         them. After-hours intrusion alerts skip
+                         them too (rule 3 — "Staff opening / closing
+                         store" rather than "Intrusion").
 
-Suppression: business-hours only, no alerts within 30 min of
-opening (staff setup), per-track-per-rule dedup max once / 20 min.
+  Correct uniform but no lanyard sustained 5 min  →  INFO
+                         "Staff member missing name tag"
+
+  UNKNOWN (no uniform) in staff_zone > 2 min      →  URGENT
+                         "Unidentified person behind counter"
+
+Suppression: business hours only, no alerts within 30 min of opening.
 """
 from __future__ import annotations
 import time
@@ -25,26 +30,15 @@ from datetime import datetime
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
-from app.ai.zone_logic import bbox_in_zone, iou
-from app.ai.detectors.uniform_compliance import uniform_colour_score
+from app.ai.detectors import staff_identity
+from app.ai.zone_logic import bbox_in_zone
 
 
 # Sustained-duration thresholds.
-UNAUTHORISED_SECONDS = 2 * 60     # no uniform → urgent after 2 min
-NO_NAMETAG_SECONDS   = 5 * 60     # uniform but no lanyard/tag → 5 min
-CUSTOMER_SECONDS     = 30         # no uniform + entered quickly → 30 s
+UNAUTHORISED_SECONDS = 2 * 60     # no uniform → URGENT after 2 min
+NO_NAMETAG_SECONDS   = 5 * 60     # uniform but no lanyard → INFO after 5 min
 
-# Per (track, rule) dedup window.
 DEDUP_SECONDS = 20 * 60
-
-# Score bands matching UniformComplianceDetector's _classify().
-SCORE_COMPLIANT = 0.80    # >= → uniform_ok
-SCORE_PARTIAL   = 0.50    # >= → no_lanyard
-# < SCORE_PARTIAL → no uniform at all (customer / intruder)
-
-# Suppress alerts for the first half-hour after the store opens
-# (staff setting up; cleaning crews shuttling between back office
-# and counter).
 OPENING_GRACE_SECONDS = 30 * 60
 
 
@@ -55,8 +49,6 @@ class StaffZoneDetector(Detector):
     def __init__(self):
         # (track_id, rule) → last alert epoch
         self._fired: dict[tuple[int, str], float] = {}
-        # track_id → first sighting epoch in this run
-        self._first_seen: dict[int, float] = {}
 
     # ------------------------------------------------------------------
 
@@ -82,63 +74,51 @@ class StaffZoneDetector(Detector):
                   if d["cls"] in COCO_PERSON and d["conf"] >= thr]
         now = time.time()
         out: list[DetectionEvent] = []
-        active_tids: set[int] = set()
 
         for det in people:
             in_zone = any(bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"])
                           for z in zones)
             if not in_zone:
                 continue
-            tid = self._match_track(ctx, det)
-            active_tids.add(tid)
-            first = self._first_seen.setdefault(tid, now)
-            duration = now - first
+            tid = staff_identity.match_track(ctx, det)
+            staff_identity.observe(ctx.camera_id, tid, "staff_zone", now)
 
-            score = uniform_colour_score(ctx.frame_bgr, det["bbox_norm"])
-            # When pixels can't be read we treat them as "uniformed
-            # staff" — same conservative default as elsewhere — so we
-            # never false-alarm on a camera that can't see colour.
-            if score is None:
+            verdict = staff_identity.classify(ctx, det, tid, now)
+            elapsed = verdict["time_in_staff_zone_s"]
+
+            # HIGH or MEDIUM → identified staff. Mark them on the
+            # staff_tracks roster and emit NO alerts for this track.
+            if verdict["level"] in ("high", "medium"):
+                staff_identity.mark_staff_track(
+                    ctx, tid,
+                    source="uniform" if verdict["top_ok"] else "zone",
+                )
+                # Correct-colour staff who are missing a lanyard get
+                # the gentle "missing name tag" INFO after 5 min — same
+                # operator action, never URGENT.
+                if (verdict["top_ok"]
+                        and verdict["has_lanyard"] is False
+                        and elapsed >= NO_NAMETAG_SECONDS
+                        and now - self._fired.get((tid, "missing_nametag"), 0) >= DEDUP_SECONDS):
+                    self._fired[(tid, "missing_nametag")] = now
+                    out.append(self._make_event(
+                        ctx, det, tid, "missing_nametag", elapsed, "info"))
                 continue
 
-            rule, threshold = self._classify(score, duration)
-            if rule is None:
-                continue
-            if duration < threshold:
-                continue
-            if now - self._fired.get((tid, rule), 0) < DEDUP_SECONDS:
-                continue
-            self._fired[(tid, rule)] = now
-            out.append(self._make_event(ctx, det, tid, rule, duration))
+            # UNKNOWN → potential intruder / customer in staff area.
+            if elapsed >= UNAUTHORISED_SECONDS:
+                rule = "unauthorised_person"
+                if now - self._fired.get((tid, rule), 0) >= DEDUP_SECONDS:
+                    self._fired[(tid, rule)] = now
+                    out.append(self._make_event(ctx, det, tid, rule, elapsed, "high"))
 
-        # Forget tracks that left the zone so the next entry starts a
-        # fresh duration clock.
-        for tid in list(self._first_seen.keys()):
-            if tid not in active_tids:
-                self._first_seen.pop(tid, None)
+        staff_identity.forget_stale(now)
         return out
 
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _classify(score: float, duration: float) -> tuple[str | None, float]:
-        """Map (uniform-score, time-in-zone) to (rule, threshold).
-        Returns (None, 0) when the situation doesn't warrant an alert."""
-        if score < SCORE_PARTIAL:
-            # No uniform — customer or unidentified intruder.
-            if duration <= CUSTOMER_SECONDS * 2:
-                # Quick entry — likely a customer who strayed in.
-                return "customer_in_staff_zone", CUSTOMER_SECONDS
-            return "unauthorised_person", UNAUTHORISED_SECONDS
-        if score < SCORE_COMPLIANT:
-            # Uniform present but lanyard/name tag missing.
-            return "missing_nametag", NO_NAMETAG_SECONDS
-        # Fully compliant — no alert.
-        return None, 0.0
-
     def _make_event(self, ctx: DetectorContext, det: dict, tid: int,
-                    rule: str, duration: float) -> DetectionEvent:
-        priority = "info" if rule == "missing_nametag" else "high"
+                    rule: str, duration: float, priority: str) -> DetectionEvent:
         return DetectionEvent(
             detection_type=self.detection_type, cls=rule,
             confidence=1.0, bbox_norm=det["bbox_norm"], track_id=tid,
@@ -151,18 +131,12 @@ class StaffZoneDetector(Detector):
             },
         )
 
-    def _match_track(self, ctx: DetectorContext, det: dict) -> int:
-        for tr, _ in ctx.tracks:
-            if tr.cls in COCO_PERSON and iou(tr.bbox_norm, det["bbox_norm"]) > 0.3:
-                return tr.track_id
-        return hash(tuple(round(c, 2) for c in det["bbox_norm"])) & 0x7FFFFFFF
-
     # ------------------------------------------------------------------
 
     @staticmethod
     def _business_hours_active(ctx: DetectorContext) -> bool:
         if not ctx.business_hours or not ctx.store_timezone:
-            return True   # no hours configured → don't block alerts
+            return True
         try:
             from app.utils.business_hours import is_open, localised_now
             return is_open(ctx.business_hours, localised_now(ctx.store_timezone))

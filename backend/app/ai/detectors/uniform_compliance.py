@@ -66,14 +66,19 @@ _METRIC = {
 }
 
 # Sustained-duration thresholds (seconds) before an alert fires.
-VIOLATION_SECONDS  = 2 * 60       # NON_COMPLIANT  → URGENT
-NO_LANYARD_SECONDS = 5 * 60       # PARTIAL/COLOR  → ATTENTION
+VIOLATION_SECONDS  = 2 * 60       # NON_COMPLIANT sustained
+NO_LANYARD_SECONDS = 5 * 60       # PARTIAL/COLOR sustained
+# Time in the staff/counter zone before we'll trust that someone really
+# works there. NON_COMPLIANT alerts only fire after this dwell — a
+# customer who briefly enters a staff zone in street clothes must not
+# trigger a uniform-violation alert.
+CONFIRMED_STAFF_SECONDS = 5 * 60
 # Per (track, kind) dedup window.
 DEDUP_SECONDS = 30 * 60
 # Repeated-violations-today threshold.
 REPEAT_THRESHOLD = 3
 
-STAFF_ZONE_TAGS = {"counter", "staff"}
+STAFF_ZONE_TAGS = {"counter", "staff", "staff_zone"}
 
 
 def uniform_features(frame_bgr, bbox_norm) -> dict | None:
@@ -190,9 +195,6 @@ class UniformComplianceDetector(Detector):
         self._state_since: dict[int, tuple[str, float]] = {}
         # store_id -> {"day": iso, "count": n} for the repeat-day rule.
         self._violations_today: dict[int, dict] = {}
-        # (store_id, day, signature) already written to staff_tracks —
-        # avoids re-querying/writing every frame for the same track.
-        self._staff_marked: set[tuple[int, str, str]] = set()
         # Per-track dedup for the auto-crop harvester — capture at most
         # one frame per person per CROP_DEDUP_SECONDS so the training
         # queue doesn't fill with near-duplicates of the same person.
@@ -221,9 +223,25 @@ class UniformComplianceDetector(Detector):
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON:
                 continue
-            if not any(bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"])
-                       for z in staff_zones):
+            # Which (if any) staff/counter tag this detection sits in —
+            # also feeds the shared time-in-zone registry.
+            zone_tag: str | None = None
+            for z in staff_zones:
+                if bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"]):
+                    tags = set(z.get("detection_types_json") or [])
+                    if "staff_zone" in tags:
+                        zone_tag = "staff_zone"
+                    else:
+                        zone_tag = "counter"
+                    break
+            if zone_tag is None:
                 continue   # civilian / not at the counter — skip
+
+            tid = self._match_track(ctx, det)
+            from app.ai.detectors import staff_identity
+            staff_identity.observe(ctx.camera_id, tid, zone_tag, now)
+            elapsed_in_zone = staff_identity.time_in_any_staff_zone(
+                ctx.camera_id, tid, now)
 
             state = self._classify(ctx, det, cfg)
             # Skip non-scoreable people — customers (correct: outside
@@ -238,14 +256,22 @@ class UniformComplianceDetector(Detector):
             if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY):
                 ok_like += 1
 
-            tid = self._match_track(ctx, det)
             # Staff exclusion — anyone scoring as uniformed staff (any
             # of the three uniform-present states) is excluded from the
             # visitor / dwell counts via the staff_tracks roster the
             # analytics endpoints LEFT-JOIN against. NON_COMPLIANT
             # stays a potential customer / unidentified person.
             if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY):
-                self._mark_staff_track(ctx, tid)
+                staff_identity.mark_staff_track(ctx, tid, source="uniform")
+
+            # Confirmed-staff gate (P5 false-alert fix). A
+            # NON_COMPLIANT reading on someone who just walked into
+            # the staff zone is almost always a customer who strayed
+            # behind the counter — NOT a uniform violation. Only fire
+            # the warning once they've been in the zone long enough
+            # to confirm they actually work there.
+            if state == NON_COMPLIANT and elapsed_in_zone < CONFIRMED_STAFF_SECONDS:
+                continue
 
             evt = self._maybe_alert(ctx, det, tid, state, now)
             if evt is not None:
@@ -313,51 +339,6 @@ class UniformComplianceDetector(Detector):
         if feats["has_lanyard"]:
             return PARTIAL_COMPLIANT
         return COLOR_ONLY
-
-    # ---- staff exclusion -------------------------------------------
-
-    def _mark_staff_track(self, ctx: DetectorContext, tid: int) -> None:
-        """Record this track as staff for today so the analytics
-        endpoints exclude it from visitor / dwell counts. Writes to the
-        same staff_tracks roster the counter-dwell classifier uses,
-        with a `cam{cam}:tr{tid}` signature that matches the
-        UniqueVisitorDetector's VisitorTrack signature, and a source of
-        'uniform' so the dashboard can show uniform- vs zone-identified
-        staff separately. Deduped per session via an in-memory set."""
-        if ctx.db is None or ctx.store_id is None:
-            return
-        from datetime import date, datetime, timezone
-        today = date.today()
-        signature = f"cam{ctx.camera_id}:tr{tid}"
-        key = (ctx.store_id, today.isoformat(), signature)
-        if key in self._staff_marked:
-            return
-        self._staff_marked.add(key)
-        try:
-            from app.models import StaffTrack
-            row = (ctx.db.query(StaffTrack)
-                       .filter(StaffTrack.store_id == ctx.store_id,
-                               StaffTrack.day == today,
-                               StaffTrack.track_signature == signature)
-                       .first())
-            now = datetime.now(timezone.utc)
-            if row is None:
-                ctx.db.add(StaffTrack(
-                    store_id=ctx.store_id, day=today,
-                    track_signature=signature,
-                    first_seen=now, last_seen=now,
-                    classified_as="staff", source="uniform",
-                ))
-            else:
-                row.last_seen = now
-                row.classified_as = "staff"
-                row.source = "uniform"
-            ctx.db.flush()
-        except Exception:
-            try:
-                ctx.db.rollback()
-            except Exception:
-                pass
 
     # ---- alerting --------------------------------------------------
 

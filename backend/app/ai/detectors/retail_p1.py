@@ -416,11 +416,24 @@ class IntrusionDetector(Detector):
 
         out: list[DetectionEvent] = []
         now = time.time()
+        from app.ai.detectors import staff_identity
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON or det["conf"] < thr:
                 continue
             for z in zones:
                 if bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"]):
+                    # After-hours staff opening / closing — if the
+                    # person reads as staff (correct uniform OR known
+                    # via the shared identity registry from staff/
+                    # counter zone dwell), suppress the intrusion alert
+                    # per the P5 ops rule. Their presence is logged
+                    # via the staff_tracks roster, not an alert.
+                    tid = staff_identity.match_track(ctx, det)
+                    verdict = staff_identity.classify(ctx, det, tid, now)
+                    if verdict["level"] in ("high", "medium") or verdict["top_ok"]:
+                        staff_identity.mark_staff_track(
+                            ctx, tid, source="opening_closing")
+                        break
                     zid = z.get("id") or -1
                     if now - self._fired.get(zid, 0) < 30:
                         continue

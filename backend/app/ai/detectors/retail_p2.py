@@ -15,6 +15,7 @@ from statistics import mean
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
+from app.ai.detectors import staff_identity
 from app.ai.zone_logic import bbox_in_zone
 
 
@@ -118,6 +119,22 @@ class StaffPresenceDetector(Detector):
                     key = (tr.track_id, z["id"])
                     active_track_zones.add(key)
                     self._counter_entries.setdefault(key, now)
+                    # Feed the shared staff-identity registry so the
+                    # uniform/staff_zone detectors and the intrusion
+                    # check can see how long this track has been at
+                    # the counter, and mark identified staff on the
+                    # staff_tracks roster.
+                    staff_identity.observe(ctx.camera_id, tr.track_id,
+                                           "counter", now)
+                    fake_det = {"bbox_norm": tr.bbox_norm}
+                    verdict = staff_identity.classify(
+                        ctx, fake_det, tr.track_id, now)
+                    if verdict["level"] in ("high", "medium"):
+                        staff_identity.mark_staff_track(
+                            ctx, tr.track_id,
+                            source=("uniform" if verdict["top_ok"]
+                                    else "zone"),
+                        )
         # Tracks that LEFT the counter this frame → close the timer
         # and emit the service_time metric (counter dwell).
         for key in list(self._counter_entries.keys()):
