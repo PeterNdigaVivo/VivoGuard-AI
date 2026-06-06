@@ -1,7 +1,7 @@
 // Camera management page — list all cameras with status, quick actions,
 // and an inline Store dropdown so operators attach/detach without curl.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge, Button, Card, Input, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
@@ -13,6 +13,67 @@ function statusColor(s: string): 'green' | 'red' | 'amber' | 'slate' {
   if (s === 'offline')  return 'red'
   if (s === 'degraded') return 'amber'
   return 'slate'
+}
+
+// Tiny snapshot thumbnail — lazy-loaded via IntersectionObserver so a
+// store with 50 cameras doesn't queue 50 snapshot requests on mount.
+// Reuses /cameras/{id}/snapshot which serves a Redis-cached frame from
+// the inference worker (no extra RTSP load when AI is enabled).
+function CameraThumb({ cameraId, name, onClick }: {
+  cameraId: number
+  name: string
+  onClick?: () => void
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'fail'>('idle')
+  const [src, setSrc] = useState<string | null>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const io = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        if (e.isIntersecting && state === 'idle') {
+          setState('loading')
+          api<{ jpeg_b64: string }>(`/cameras/${cameraId}/snapshot`)
+            .then(r => { setSrc(`data:image/jpeg;base64,${r.jpeg_b64}`); setState('ready') })
+            .catch(() => setState('fail'))
+          io.disconnect()
+        }
+      }
+    }, { rootMargin: '200px' })
+    io.observe(el)
+    return () => io.disconnect()
+    // cameraId is stable per row; intentional one-shot fetch
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId])
+
+  const baseCls = "w-24 h-16 rounded border border-slate-200 bg-slate-100 " +
+                  "flex items-center justify-center overflow-hidden text-slate-400"
+  const interactiveCls = onClick ? " cursor-zoom-in hover:border-sky-400" : ""
+
+  return (
+    <div ref={ref} className={baseCls + interactiveCls}
+         title={state === 'fail' ? 'Snapshot unavailable' : name}
+         onClick={state === 'ready' && onClick ? onClick : undefined}>
+      {state === 'ready' && src
+        ? <img src={src} alt={name} loading="lazy"
+               className="w-full h-full object-cover" />
+        : <CameraIconPlaceholder dim={state === 'loading'} />}
+    </div>
+  )
+}
+
+function CameraIconPlaceholder({ dim }: { dim?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none"
+         stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+         strokeLinejoin="round" className={dim ? 'animate-pulse' : ''}>
+      <path d="M3 7h11l3 3v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"
+            transform="translate(2 0)" />
+      <circle cx="10.5" cy="13" r="2.8" />
+    </svg>
+  )
 }
 
 export default function CamerasPage() {
@@ -177,6 +238,10 @@ export default function CamerasPage() {
     }
   }
 
+  // Clicking a thumbnail opens a larger view. State is just the camera
+  // id; the overlay re-fetches a fresh snapshot at full size.
+  const [zoomed, setZoomed] = useState<Camera | null>(null)
+
   // Group by store now (was grouped by `site` text label before).
   const groups: Record<string, Camera[]> = {}
   for (const c of cams) {
@@ -243,6 +308,7 @@ export default function CamerasPage() {
           <table className="w-full text-sm">
             <thead className="text-slate-600">
               <tr>
+                <th className="text-left p-3 w-28"></th>
                 <th className="text-left p-3">Name</th>
                 <th className="text-left p-3">Type</th>
                 <th className="text-left p-3">Host</th>
@@ -254,6 +320,10 @@ export default function CamerasPage() {
             <tbody>
               {list.map(c => (
                 <tr key={c.id} className="border-t hover:bg-slate-50">
+                  <td className="p-3">
+                    <CameraThumb cameraId={c.id} name={c.name}
+                                 onClick={() => setZoomed(c)} />
+                  </td>
                   <td className="p-3 font-medium">{c.name}</td>
                   <td className="p-3 capitalize">{c.connection_type.replace('_', ' ')}</td>
                   <td className="p-3 font-mono text-xs">
@@ -298,6 +368,13 @@ export default function CamerasPage() {
         <Card className="p-4 text-amber-700 bg-amber-50 border-amber-200">
           You have cameras but no stores yet. <Link to="/stores" className="underline">Create a store</Link> so you can attach them.
         </Card>
+      )}
+
+      {/* Click-to-enlarge snapshot overlay. Re-fetches the snapshot at
+          full size so the operator sees the current frame rather than
+          the cached thumbnail. */}
+      {zoomed && (
+        <ZoomedSnapshot cam={zoomed} onClose={() => setZoomed(null)} />
       )}
 
       {/* Quick Add NVR modal — replaces the manual SQL workflow.
@@ -406,6 +483,55 @@ export default function CamerasPage() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function ZoomedSnapshot({ cam, onClose }: { cam: Camera; onClose: () => void }) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [tick, setTick] = useState(0)
+
+  useEffect(() => {
+    let alive = true
+    setSrc(null); setErr(null)
+    api<{ jpeg_b64: string }>(`/cameras/${cam.id}/snapshot`)
+      .then(r => { if (alive) setSrc(`data:image/jpeg;base64,${r.jpeg_b64}`) })
+      .catch(e => { if (alive) setErr(String(e)) })
+    return () => { alive = false }
+  }, [cam.id, tick])
+
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6"
+         onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+           className="bg-white rounded shadow-lg max-w-4xl w-full">
+        <div className="flex items-center justify-between p-3 border-b">
+          <div>
+            <div className="font-medium">{cam.name}</div>
+            <div className="text-xs text-slate-500 font-mono">
+              {cam.host}:{cam.rtsp_port}{cam.channel_number ? ` · ch${cam.channel_number}` : ''}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={() => setTick(t => t + 1)}>Refresh</Button>
+            <button className="text-slate-400 hover:text-slate-700 px-2"
+                    onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div className="bg-slate-900 min-h-[320px] flex items-center justify-center">
+          {src && <img src={src} alt={cam.name}
+                       className="max-h-[70vh] w-auto object-contain" />}
+          {!src && !err && (
+            <div className="text-slate-400 text-sm py-12">Loading snapshot…</div>
+          )}
+          {err && (
+            <div className="text-slate-300 text-sm py-12">
+              Snapshot unavailable — the camera may be offline.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
