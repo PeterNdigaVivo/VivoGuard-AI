@@ -12,8 +12,9 @@ Run the worker with `-B` so beat runs in the same process:
   celery -A app.tasks.celery_app worker -B --loglevel=info --concurrency=8
 """
 from __future__ import annotations
+from datetime import timedelta
 from celery import Celery
-from celery.schedules import crontab
+from celery.schedules import crontab  # noqa: F401  (kept for other tasks that may use it)
 
 from app.config import settings
 
@@ -131,21 +132,21 @@ celery_app.conf.update(
             "task": "training.chain_retrain_due",
             "schedule": 300.0,
         },
-        # Sales Floor Intelligence — fires every 15 min ON the wall-
-        # clock quarter (00 / 15 / 30 / 45) so operators see the
-        # heartbeat at predictable times. crontab() honours
-        # celery_app.conf.timezone (Africa/Nairobi) so the schedule is
-        # already in EAT.
+        # Sales Floor Intelligence — 15-min timedelta tick (the
+        # crontab schedule wasn't being picked up by this worker's
+        # beat scheduler; switching to timedelta matches every other
+        # interval task in this file).
         "sales-floor-insights-every-15min": {
             "task": "alerting.sales_floor_insights_check",
-            "schedule": crontab(minute="*/15"),
+            "schedule": timedelta(minutes=15),
         },
-        # Daily 18:00 EAT WhatsApp summary. Wall-clock-aligned with
-        # crontab — fires once at 18:00, per-store-per-day Redis
-        # dedup remains as the safety net.
-        "sales-floor-daily-summary": {
+        # Daily 18:00 EAT WhatsApp summary — 5-min dispatcher pattern
+        # (same as briefings-daily-every-5min). The task itself checks
+        # store-local clock + per-store-per-day Redis dedup so a single
+        # 18:00 fire is guaranteed.
+        "sales-floor-daily-summary-every-5min": {
             "task": "alerting.sales_floor_daily_summary",
-            "schedule": crontab(hour=18, minute=0),
+            "schedule": timedelta(minutes=5),
         },
     },
 )
