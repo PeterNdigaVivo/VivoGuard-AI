@@ -124,21 +124,33 @@ interface HourlyPayload {
 export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range?: RangeProp }) {
   const { data, error, busy } = useRefresh<HourlyPayload>(
     withRange(`/analytics/store/${storeId}/hourly`, range), [storeId, range?.since, range?.until])
+  const todayTotal = (data?.hours || []).reduce((s, h) => s + (h.visitors || 0), 0)
+  const allZero = data != null && todayTotal === 0
   return (
     <PanelShell title="Hourly footfall intelligence"
                 subtitle="Visitors per hour today, with auto-generated insights"
                 busy={busy}>
-      {/* Three states: error → loading → render */}
+      {/* Three states: error → loading → render. Plain-English copy
+          on error — operators are not engineers. */}
       {error ? (
-        <div className="text-sm text-red-600 py-4 text-center">
-          Could not load hourly data. The API may not be deployed yet —
-          rebuild the api container and try again.
-          <div className="text-xs text-slate-500 mt-1">({error})</div>
+        <div className="text-sm text-slate-600 py-4 text-center">
+          Visitor data not available yet.
+          <div className="text-xs text-slate-500 mt-1">
+            Check back after 9:00 AM when the store opens.
+          </div>
         </div>
       ) : !data ? (
         <SkeletonBlock height={160} />
       ) : (
-        <SimpleLineChart payload={data} />
+        <>
+          <SimpleLineChart payload={data} />
+          {allZero && (
+            <div className="text-xs text-slate-500 text-center mt-2">
+              No visitor data recorded yet for today — the chart will
+              fill in as customers are detected.
+            </div>
+          )}
+        </>
       )}
       {data && <InsightList insights={data.insights} />}
     </PanelShell>

@@ -611,7 +611,31 @@ def store_hourly(store_id: int,
                  _u=Depends(get_current_user)):
     """Hourly visitor breakdown for the given window (defaults to
     today's business-hours session) + same-window-yesterday
-    comparison. Includes auto-generated insights."""
+    comparison. Includes auto-generated insights.
+
+    Top-level try/except: any unhandled failure (bad metric data,
+    schema drift, transient DB blip) returns a clean empty hourly
+    payload instead of a 500 so the dashboard chart still paints
+    rather than showing a scary "rebuild the api container" error."""
+    try:
+        return _store_hourly_impl(store_id, since, until, db)
+    except HTTPException:
+        raise   # 404 etc. should still propagate
+    except Exception as e:
+        import logging as _l
+        _l.getLogger(__name__).exception(
+            "store_hourly failed for store=%s — returning empty payload: %s",
+            store_id, e)
+        payload = _empty_hourly()
+        payload["store_id"] = store_id
+        payload["insights"] = ["Visitor data not available yet."]
+        return payload
+
+
+def _store_hourly_impl(store_id: int,
+                       since: datetime | None,
+                       until: datetime | None,
+                       db: Session) -> dict:
     from sqlalchemy import extract
     from app.utils.business_hours import todays_session, _store_local_now
     store = db.get(Store, store_id)
@@ -666,13 +690,22 @@ def store_hourly(store_id: int,
         by_hour = {int(r.h): float(r.v or 0) for r in rows}
 
     # Same window, yesterday — for the trend-vs-yesterday line.
+    # Use the matching metric_type for the yesterday query: pulling
+    # 'occupancy' for the same period when we fell back, otherwise
+    # 'visitor_count_in'. The previous form
+    #     `metric_type == metric if metric == "visitor_count_in" else "occupancy"`
+    # was a precedence bug — Python parsed it as
+    #     `(metric_type == metric) if (metric == "visitor_count_in") else "occupancy"`
+    # so the fallback path passed the bare string "occupancy" into
+    # .filter(), which SQLAlchemy 2.x rejects → 500.
+    yest_metric_type = "visitor_count_in" if metric == "visitor_count_in" else "occupancy"
     yest_session_start = session_start - timedelta(days=1)
     yest_session_end   = session_end   - timedelta(days=1)
     yest_rows = (
         db.query(extract("hour", MetricSnapshot.period_start).label("h"),
                  func.sum(MetricSnapshot.value).label("v"))
           .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                  MetricSnapshot.metric_type == metric if metric == "visitor_count_in" else "occupancy",
+                  MetricSnapshot.metric_type == yest_metric_type,
                   MetricSnapshot.period_start >= yest_session_start,
                   MetricSnapshot.period_start <  yest_session_end)
           .group_by("h").all()
