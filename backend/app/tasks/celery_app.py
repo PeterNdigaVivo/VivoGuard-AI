@@ -13,6 +13,7 @@ Run the worker with `-B` so beat runs in the same process:
 """
 from __future__ import annotations
 from celery import Celery
+from celery.schedules import crontab
 
 from app.config import settings
 
@@ -130,20 +131,21 @@ celery_app.conf.update(
             "task": "training.chain_retrain_due",
             "schedule": 300.0,
         },
-        # Sales Floor Intelligence — fires every 15 min, creates one
-        # plain-English INFO alert per store summarising the last
-        # 15 min of browse + staff-coverage on the sales floor. Also
-        # serves as a heartbeat: if these stop appearing the AI
-        # system is the first place to look.
+        # Sales Floor Intelligence — fires every 15 min ON the wall-
+        # clock quarter (00 / 15 / 30 / 45) so operators see the
+        # heartbeat at predictable times. crontab() honours
+        # celery_app.conf.timezone (Africa/Nairobi) so the schedule is
+        # already in EAT.
         "sales-floor-insights-every-15min": {
             "task": "alerting.sales_floor_insights_check",
-            "schedule": 900.0,
+            "schedule": crontab(minute="*/15"),
         },
-        # Daily 18:00 EAT WhatsApp summary of today's sales-floor
-        # activity. 5-min beat tick + per-store-per-day dedup.
-        "sales-floor-daily-every-5min": {
+        # Daily 18:00 EAT WhatsApp summary. Wall-clock-aligned with
+        # crontab — fires once at 18:00, per-store-per-day Redis
+        # dedup remains as the safety net.
+        "sales-floor-daily-summary": {
             "task": "alerting.sales_floor_daily_summary",
-            "schedule": 300.0,
+            "schedule": crontab(hour=18, minute=0),
         },
     },
 )
