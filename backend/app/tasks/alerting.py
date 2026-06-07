@@ -788,3 +788,106 @@ def _sfi_send_daily_for_store(db, store, local_now) -> None:
     sent = _send_whatsapp(recipients, body)
     log.info("sales-floor daily: store=%s customers=%s → %d WhatsApp sent",
              store.id, total_customers, sent)
+
+
+# ---- "Store Not Opened" URGENT (line-crossing path) ------------------
+#
+# 5-min beat tick. For every store whose local EAT clock has crossed
+# the not-opened cutoff (default 09:30) and where NO entry/exit camera
+# has fired the daily "open" line-crossing alert, emit one URGENT
+# "Store Not Opened" alert. Per-store-per-day Redis dedupe.
+
+NOT_OPENED_DEDUP_TTL = 24 * 3600    # one URGENT per store per day
+
+
+@celery_app.task(name="alerting.shop_not_opened_check", ignore_result=True)
+def shop_not_opened_check() -> None:
+    from app.database import SessionLocal
+    from app.models import Store
+    from app.ai.detectors.shop_state import _read_cfg
+
+    r = _redis()
+    with SessionLocal() as db:
+        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+        for store in stores:
+            try:
+                _shop_not_opened_for_store(db, r, store, _read_cfg)
+            except Exception as e:
+                log.exception("shop_not_opened: store=%s failed: %s",
+                              store.id, e)
+
+
+def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
+    """Single-store check called from the beat task."""
+    from app.models import Camera, Zone
+
+    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
+    if not cams:
+        return
+    cam_ids = [c.id for c in cams]
+    # Only entrance cameras matter — those with an entry_exit line.
+    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    entrance_cam_ids = sorted({
+        z.camera_id for z in zones
+        if z.shape == "line"
+        and "entry_exit" in (z.detection_types_json or [])
+    })
+    if not entrance_cam_ids:
+        return       # no entry/exit line → out of scope for this rule
+
+    # Use the cutoff from the FIRST entry_exit zone's detector config
+    # (or the default if no overrides). Stays consistent with the
+    # opening-alert thresholds the EntryExitDetector reads from
+    # the same config block.
+    cfg = read_cfg(None)
+    if not cfg["not_open_cutoff_t"]:
+        return
+
+    local = _store_eat_now(store)
+    if local.time() < cfg["not_open_cutoff_t"]:
+        return       # cutoff hasn't passed yet
+
+    day_iso = local.date().isoformat()
+    # Have ANY of this store's entrance cameras fired an open today?
+    for cam_id in entrance_cam_ids:
+        if r.get(f"vg:shop_open_close:fired:{cam_id}:{day_iso}:open"):
+            return   # already opened — nothing to do
+
+    # Per-store-per-day dedupe for the URGENT itself.
+    sent_key = f"vg:shop_open_close:not_opened:{store.id}:{day_iso}"
+    if r.get(sent_key):
+        return
+
+    cutoff_hhmm = cfg["not_open_cutoff_t"].strftime("%H:%M")
+    body = (f"{store.name or 'Store ' + str(store.id)} has not opened as of "
+            f"{cutoff_hhmm}. No staff detected at the entrance.")
+    extra = {
+        "priority":          "high",
+        "rule":              "shop_not_opened",
+        "store_id":          store.id,
+        "store_name":        store.name,
+        "message":           body,
+        "eat_time":          local.strftime("%H:%M"),
+        "not_open_cutoff":   cutoff_hhmm,
+        "signal":            "no_inward_crossing_by_cutoff",
+    }
+    # Anchor the event on the first entrance camera so the snapshot
+    # path has a real FK to attach to.
+    _create_info_alert(db, camera_id=entrance_cam_ids[0],
+                       zone_id=None, store_id=store.id,
+                       detection_type="shop_open_close",
+                       cls="shop_not_opened", extra=extra)
+    db.commit()
+    r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
+
+    # WhatsApp the ops list too — this is a manager-actionable URGENT.
+    recipients: list[str] = []
+    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
+    if mgr:
+        recipients.append(mgr)
+    recipients.extend(_dashboard_recipients())
+    recipients = list(dict.fromkeys(recipients))
+    if recipients:
+        _send_whatsapp(recipients, f"🚨 {body}")
+    log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
+                store.id, store.name, cutoff_hhmm)

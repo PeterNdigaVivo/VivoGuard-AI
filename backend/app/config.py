@@ -129,6 +129,18 @@ class Settings(BaseSettings):
     # a deploy / DB restore where zones may not have been synced.
     sales_floor_debug: bool = False
 
+    # --- Shutter open/close detection method ---
+    # When True, ShutterDetector runs its brightness + texture
+    # rule-based classifier AND requires shutter=open before the
+    # "Store opened" alert fires (the original two-signal design).
+    # When False (default), the brightness analysis is skipped
+    # entirely and the line-crossing alone drives shop-open/close
+    # alerts — overhead cameras with messy lighting can't lie about
+    # whether the shutter is up if no-one's walked in.
+    # Kept as a flag so the brightness method can be A/B-tested
+    # later without re-writing the code.
+    use_shutter_brightness: bool = False
+
     # --- WAN behaviour ---
     ddns_refresh_interval_seconds: int = 300
     wan_reconnect_initial_delay_seconds: int = 5

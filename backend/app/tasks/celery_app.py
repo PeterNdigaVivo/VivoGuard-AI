@@ -148,5 +148,13 @@ celery_app.conf.update(
             "task": "alerting.sales_floor_daily_summary",
             "schedule": timedelta(minutes=5),
         },
+        # 5-min dispatcher checking whether each store has had its
+        # first inward line-crossing of the day before the
+        # not-opened cutoff (default 09:30 EAT). Per-store-per-day
+        # Redis dedupe inside the task.
+        "shop-not-opened-every-5min": {
+            "task": "alerting.shop_not_opened_check",
+            "schedule": timedelta(minutes=5),
+        },
     },
 )

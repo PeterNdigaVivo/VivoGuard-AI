@@ -51,8 +51,12 @@ log = logging.getLogger(__name__)
 EAT = ZoneInfo("Africa/Nairobi")
 
 DEFAULT_TRADING_START   = "09:00"
-DEFAULT_LATE_THRESHOLD  = "09:33"
+DEFAULT_LATE_THRESHOLD  = "09:03"
 DEFAULT_CLOSING_THRESH  = "20:15"
+# Cut-off after which a still-not-opened store earns an URGENT
+# "Store Not Opened" alert. Configurable via the entry_exit detector
+# config's `extra.not_opened_cutoff_eat` field.
+DEFAULT_NOT_OPENED_CUTOFF = "09:30"
 
 # Detection type used for the alerts emitted from this module. NOT
 # in app.ai.inference_worker._SKIP_ALERT_TYPES so events auto-promote
@@ -130,6 +134,8 @@ def _read_cfg(cfg_extra: dict | None) -> dict:
                                     or DEFAULT_LATE_THRESHOLD)),
         "close_t":  _parse_hhmm(str(extra.get("closing_threshold_eat")
                                     or DEFAULT_CLOSING_THRESH)),
+        "not_open_cutoff_t": _parse_hhmm(str(extra.get("not_opened_cutoff_eat")
+                                             or DEFAULT_NOT_OPENED_CUTOFF)),
     }
 
 
@@ -152,9 +158,14 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
     if not (cfg["open_t"] and cfg["late_t"]):
         return None
 
-    # Signal-agreement gate.
-    if get_shutter_state(ctx.camera_id) != "open":
-        return None
+    # Signal-agreement gate — only enforced when the brightness-based
+    # shutter detector is enabled (settings.use_shutter_brightness).
+    # With brightness disabled, ShutterDetector never publishes a
+    # state, so requiring "open" here would silence every alert.
+    from app.config import settings as _settings
+    if _settings.use_shutter_brightness:
+        if get_shutter_state(ctx.camera_id) != "open":
+            return None
 
     now_eat = _now_eat()
     day_iso = now_eat.date().isoformat()

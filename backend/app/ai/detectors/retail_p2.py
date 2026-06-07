@@ -684,6 +684,14 @@ class ShutterDetector(Detector):
             return best[1]
 
         # Mode 2: brightness + texture rule-based classifier.
+        # Gated behind settings.use_shutter_brightness so production
+        # can run purely on the line-crossing path while keeping the
+        # brightness code intact for A/B testing later. The HSV/
+        # Laplacian path was unreliable on overhead cameras with the
+        # in-store lighting drift we see at Vivo Junction.
+        from app.config import settings as _settings
+        if not _settings.use_shutter_brightness:
+            return None
         if ctx.frame_bgr is None:
             return None
         feats = self._zone_features(ctx.frame_bgr,

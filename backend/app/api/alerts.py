@@ -109,7 +109,7 @@ def _severity_label(detection_type: str | None,
     # (staffing issue, not an emergency).
     if detection_type == "shop_open_close" and event is not None:
         rule = (event.extra or {}).get("rule", "")
-        if rule == "shop_opened_before_hours":
+        if rule in ("shop_opened_before_hours", "shop_not_opened"):
             return "URGENT"
         if rule == "shop_opened_late":
             return "ATTENTION"
@@ -172,13 +172,15 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         rule = extra.get("rule", "")
         eat = extra.get("eat_time", "")
         if rule == "shop_opened_before_hours":
-            return f"Shop opened before trading hours ({eat})"
+            return f"⚠️ Store opened before trading hours ({eat})"
         if rule == "shop_opened_late":
-            return f"Shop opened late ({eat})"
+            return f"⚠️ Store Opened Late ({eat})"
         if rule == "shop_opened":
-            return f"Shop open ({eat})"
+            return f"✅ Store Opened ({eat})"
+        if rule == "shop_not_opened":
+            return "🚨 Store Not Opened"
         if rule == "shop_closed":
-            return f"Shop closed ({eat})"
+            return f"✅ Store Closed ({eat})"
         return "Shop open/close event"
     if dt == "sales_floor_insight":
         rule = extra.get("rule", "")
@@ -329,6 +331,10 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         elif rule == "shop_opened":
             steps = ["Routine opening — no action needed",
                      "Mark resolved"]
+        elif rule == "shop_not_opened":
+            steps = ["Call the store manager: {store_phone}",
+                     "Check the live camera at the entrance",
+                     "Mark resolved once the store has opened"]
         elif rule == "shop_closed":
             steps = ["Routine closing — no action needed",
                      "Mark resolved"]
@@ -479,14 +485,17 @@ def _title(event: DetectionEvent, camera: Camera | None,
     if dt == "shop_open_close":
         rule = extra.get("rule", "")
         eat = extra.get("eat_time", "")
+        store_name = extra.get("store_name") or (store.name if store else "Store")
         if rule == "shop_opened_before_hours":
-            return f"{icon} Shop opened before trading hours ({eat}) — {cam}"
+            return f"⚠️ {store_name} opened before trading hours ({eat})"
         if rule == "shop_opened_late":
-            return f"{icon} Shop opened late ({eat}) — {cam}"
+            return f"⚠️ Store Opened Late — {store_name} ({eat})"
         if rule == "shop_opened":
-            return f"{icon} Shop open ({eat}) — {cam}"
+            return f"✅ Store Opened — {store_name} ({eat})"
+        if rule == "shop_not_opened":
+            return f"🚨 Store Not Opened — {store_name}"
         if rule == "shop_closed":
-            return f"{icon} Shop closed ({eat}) — {cam}"
+            return f"✅ Store Closed — {store_name} ({eat})"
         return f"{icon} Shop open/close — {cam}"
     if dt == "sales_floor_insight":
         # Sales-floor insight is store-scoped, not camera-scoped — the
