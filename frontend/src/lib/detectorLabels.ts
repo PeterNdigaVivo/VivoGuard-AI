@@ -58,6 +58,10 @@ export const DETECTOR_LABELS: Record<string, string> = {
   uniform_compliance:  'Uniform Compliance',
   demographic:         'Visitor Demographics',
   face:                'Face Detection',
+
+  // Shop / sales-floor heartbeats
+  shop_open_close:     'Shop Open / Close',
+  sales_floor_insight: 'Sales Floor Update',
 }
 
 export function labelForDetector(type: string): string {

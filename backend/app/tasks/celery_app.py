@@ -130,5 +130,20 @@ celery_app.conf.update(
             "task": "training.chain_retrain_due",
             "schedule": 300.0,
         },
+        # Sales Floor Intelligence — fires every 15 min, creates one
+        # plain-English INFO alert per store summarising the last
+        # 15 min of browse + staff-coverage on the sales floor. Also
+        # serves as a heartbeat: if these stop appearing the AI
+        # system is the first place to look.
+        "sales-floor-insights-every-15min": {
+            "task": "alerting.sales_floor_insights_check",
+            "schedule": 900.0,
+        },
+        # Daily 18:00 EAT WhatsApp summary of today's sales-floor
+        # activity. 5-min beat tick + per-store-per-day dedup.
+        "sales-floor-daily-every-5min": {
+            "task": "alerting.sales_floor_daily_summary",
+            "schedule": 300.0,
+        },
     },
 )

@@ -58,6 +58,7 @@ _SEVERITY: dict[str, str] = {
     "dwell":             "info",
     "passersby":         "info",
     "shop_open_close":   "info",
+    "sales_floor_insight": "info",
 }
 
 
@@ -113,6 +114,13 @@ def _severity_label(detection_type: str | None,
         if rule == "shop_opened_late":
             return "ATTENTION"
         return "INFO"      # shop_opened, shop_closed
+    # Sales-floor insight: heartbeat is INFO; low engagement and
+    # unattended floor are ATTENTION (a manager-actionable nudge).
+    if detection_type == "sales_floor_insight" and event is not None:
+        rule = (event.extra or {}).get("rule", "")
+        if rule in ("low_engagement", "unattended_floor"):
+            return "ATTENTION"
+        return "INFO"
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
 
 
@@ -172,6 +180,18 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "shop_closed":
             return f"Shop closed ({eat})"
         return "Shop open/close event"
+    if dt == "sales_floor_insight":
+        rule = extra.get("rule", "")
+        store_name = extra.get("store_name") or (store.name if store else "Store")
+        if rule == "good_engagement":
+            return f"✅ Good Customer Engagement — {store_name}"
+        if rule == "low_engagement":
+            return f"⚠️ Low Customer Engagement — {store_name}"
+        if rule == "unattended_floor":
+            return f"⚠️ Sales Floor Needs Staff — {store_name}"
+        if rule == "quiet_period":
+            return f"🔵 Quiet Period — {store_name}"
+        return f"📊 Sales Floor Update — {store_name}"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -276,6 +296,26 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Ask the person to identify themselves",
                      "Guide customers back to the customer area if needed"]
+    elif dt == "sales_floor_insight":
+        rule = (event.extra or {}).get("rule", "")
+        if rule == "unattended_floor":
+            steps = ["Send a staff member to the sales floor",
+                     "Greet customers and offer assistance",
+                     "Mark resolved once staff are in position"]
+        elif rule == "low_engagement":
+            steps = ["Check if popular displays are well stocked",
+                     "Move popular items to more visible locations",
+                     "Mark resolved when adjusted"]
+        elif rule == "good_engagement":
+            steps = ["Keep popular zones well stocked",
+                     "No action needed — mark resolved"]
+        elif rule == "quiet_period":
+            steps = ["No action needed — this may be normal for the time of day",
+                     "Mark resolved"]
+        else:
+            steps = ["Check if popular zones are well stocked",
+                     "Ensure staff are available in busy areas",
+                     "No action needed if all looks good"]
     elif dt == "shop_open_close":
         rule = (event.extra or {}).get("rule", "")
         if rule == "shop_opened_before_hours":
@@ -327,6 +367,7 @@ _TITLE_ICONS: dict[str, str] = {
     "loitering":         "⚠️",
     "shutter":           "🔒",
     "shop_open_close":   "🏬",
+    "sales_floor_insight": "📊",
     "abandoned_object":  "🧳",
     "tailgating":        "⚠️",
     "staff_present":     "👤",
@@ -447,6 +488,11 @@ def _title(event: DetectionEvent, camera: Camera | None,
         if rule == "shop_closed":
             return f"{icon} Shop closed ({eat}) — {cam}"
         return f"{icon} Shop open/close — {cam}"
+    if dt == "sales_floor_insight":
+        # Sales-floor insight is store-scoped, not camera-scoped — the
+        # camera-suffix would be noise for managers. Pull straight from
+        # the plain-title path.
+        return _plain_title(event, zone, store)
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -573,6 +619,18 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         if rule == "shop_closed":
             return f"Shop closed at {eat}."
         return "Shop open/close event recorded."
+    if dt == "sales_floor_insight":
+        # Worker pre-formats the body; pass it through. Falls back to
+        # a short summary if message is missing (older row).
+        msg = extra.get("message") or ""
+        if msg:
+            return msg
+        n = extra.get("total_customers")
+        avg = extra.get("avg_browse_seconds")
+        if n is not None and avg is not None:
+            return (f"{n} customers browsed the sales floor in the last "
+                    f"15 minutes. Average browse time {avg:.0f}s.")
+        return "Sales floor activity summary."
     if dt == "trespass":
         return (f"An unauthorised person was detected in {zone_name or 'a restricted area'}. "
                 f"Investigate and respond per protocol.")

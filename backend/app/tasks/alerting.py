@@ -252,3 +252,464 @@ def uniform_violation_check() -> None:
             log.info("uniform violation: %s [%s] → %d WhatsApp sent",
                      store_name, cam.name, sent)
             r.set(sent_key, "1", ex=UNIFORM_DEDUP_TTL_SECONDS)
+
+
+# ---- Sales Floor Intelligence (15-min plain-English heartbeat) -------
+#
+# Fires every 15 minutes during 09:00-21:00 EAT for each store that
+# has at least one zone tagged 'aisle' (the canonical sales-floor tag)
+# or the legacy 'dwell' alias. Builds an INFO alert in the database
+# summarising the last 15 minutes of customer browsing + staff
+# coverage, so operators get a continuous plain-English read on what's
+# happening AND a heartbeat that the AI system is still running.
+#
+# Dedupe: one alert per store per 15-min bucket, via Redis with a 30
+# min TTL — the bucket key already prevents collisions, the TTL is
+# just a safety net.
+
+SFI_WINDOW_MIN          = 15
+SFI_LOW_ENGAGEMENT_S    = 60.0     # avg browse time < 1 min → ATTENTION
+SFI_GOOD_ENGAGEMENT_S   = 120.0    # avg browse time ≥ 2 min → "good"
+SFI_UNATTENDED_MIN_CUST = 1        # ≥ this many customers + no staff
+                                    # for the whole window → unattended
+SFI_HEARTBEAT_FRESH_MIN = 5        # camera "active" if last_seen ≤ 5 min
+
+
+def _fmt_browse_time(seconds: float) -> str:
+    s = int(round(max(0.0, seconds)))
+    m, s = divmod(s, 60)
+    if m and s:
+        return f"{m} min {s} sec"
+    if m:
+        return f"{m} min"
+    return f"{s} sec"
+
+
+def _store_eat_now(store):
+    from zoneinfo import ZoneInfo
+    tz_name = getattr(store, "timezone", None) or "Africa/Nairobi"
+    try:
+        return datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Africa/Nairobi"))
+
+
+def _sfi_metric_summary(db, store, cam_ids: list[int], zone_id_to_name: dict[int, str],
+                         window_start_utc, now_utc):
+    """Aggregate the last-15-min metric_snapshots into a plain payload
+    the alert body + classifier consume."""
+    from app.models import MetricSnapshot
+    from sqlalchemy import func
+
+    # browse_time_seconds → average across zones (recorded with avg aggregator
+    # by AisleDwellDetector). dwell_count is per-zone "customers in zone now"
+    # written at "last" aggregator — we take the MAX across the window per
+    # zone as the high-water mark, then sum zones for a store total.
+    rows = (db.query(MetricSnapshot.zone_id,
+                     MetricSnapshot.metric_type,
+                     MetricSnapshot.value,
+                     MetricSnapshot.period_start)
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.period_start >= window_start_utc,
+                      MetricSnapshot.period_start <  now_utc,
+                      MetricSnapshot.metric_type.in_((
+                          "browse_time_seconds", "dwell_seconds",
+                          "dwell_count", "staff_present")))
+              .all())
+
+    # Per-zone collectors.
+    browse_avg_by_zone: dict[int, list[float]] = {}
+    dwell_count_peak:   dict[int, float]       = {}
+    staff_pres_by_zone: dict[int, list[float]] = {}
+
+    for zid, mtype, value, _ts in rows:
+        if zid is None:
+            continue
+        if zid not in zone_id_to_name:
+            continue        # not an aisle zone
+        v = float(value or 0.0)
+        if mtype in ("browse_time_seconds", "dwell_seconds"):
+            browse_avg_by_zone.setdefault(zid, []).append(v)
+        elif mtype == "dwell_count":
+            dwell_count_peak[zid] = max(dwell_count_peak.get(zid, 0.0), v)
+        elif mtype == "staff_present":
+            staff_pres_by_zone.setdefault(zid, []).append(v)
+
+    # Per-zone average + winner.
+    per_zone: dict[int, dict] = {}
+    for zid, name in zone_id_to_name.items():
+        avgs = browse_avg_by_zone.get(zid) or []
+        zone_avg = sum(avgs) / len(avgs) if avgs else 0.0
+        per_zone[zid] = {
+            "name":  name,
+            "avg":   zone_avg,
+            "peak":  int(dwell_count_peak.get(zid, 0)),
+        }
+    winner = max(per_zone.values(),
+                 key=lambda z: z["avg"], default=None) if per_zone else None
+
+    # Store-wide rollups.
+    all_avgs = [v for vs in browse_avg_by_zone.values() for v in vs]
+    avg_browse_s = sum(all_avgs) / len(all_avgs) if all_avgs else 0.0
+    total_customers = int(sum(dwell_count_peak.values()))
+    all_staff = [v for vs in staff_pres_by_zone.values() for v in vs]
+    staff_coverage = (sum(all_staff) / len(all_staff)) if all_staff else 0.0
+
+    return {
+        "avg_browse_s":   avg_browse_s,
+        "total_customers": total_customers,
+        "staff_coverage": staff_coverage,
+        "per_zone":       per_zone,
+        "winner":         winner,
+    }
+
+
+def _sfi_classify(summary: dict) -> tuple[str, str]:
+    """Map summary → (rule, priority). Rules drive the alert title +
+    body + severity rendering in app.api.alerts."""
+    avg = summary["avg_browse_s"]
+    customers = summary["total_customers"]
+    coverage = summary["staff_coverage"]
+
+    if customers == 0:
+        return "quiet_period", "info"
+    if customers >= SFI_UNATTENDED_MIN_CUST and coverage <= 0.05:
+        return "unattended_floor", "warning"
+    if avg > 0 and avg < SFI_LOW_ENGAGEMENT_S:
+        return "low_engagement", "warning"
+    if avg >= SFI_GOOD_ENGAGEMENT_S:
+        return "good_engagement", "info"
+    return "sales_floor_update", "info"   # neutral/baseline
+
+
+def _sfi_heartbeat(db, store, cam_ids: list[int], now_utc) -> dict:
+    """Camera-health snippet — cameras active in the last 5 min and
+    the freshest last_seen so the body can carry the "Last inference:
+    N min ago" reassurance line."""
+    from app.models import Camera
+    fresh_cutoff = now_utc - timedelta(minutes=SFI_HEARTBEAT_FRESH_MIN)
+    cams = (db.query(Camera)
+              .filter(Camera.id.in_(cam_ids)).all()) if cam_ids else []
+    active = 0
+    most_recent = None
+    for c in cams:
+        ls = c.last_seen_at
+        if ls and ls.tzinfo is None:
+            ls = ls.replace(tzinfo=timezone.utc)
+        if ls and ls >= fresh_cutoff:
+            active += 1
+        if ls and (most_recent is None or ls > most_recent):
+            most_recent = ls
+    last_inference_min = None
+    if most_recent is not None:
+        delta = (now_utc - most_recent).total_seconds()
+        last_inference_min = max(0, int(round(delta / 60)))
+    return {
+        "cameras_active": active,
+        "cameras_total":  len(cams),
+        "last_inference_min": last_inference_min,
+    }
+
+
+def _sfi_compose_body(store_name: str, summary: dict, rule: str,
+                       hb: dict) -> str:
+    """Plain-English alert body — exact format from the spec, with the
+    AI System Status heartbeat appended."""
+    avg_text = _fmt_browse_time(summary["avg_browse_s"])
+    customers = summary["total_customers"]
+    coverage_pct = int(round(summary["staff_coverage"] * 100))
+    winner = summary["winner"]
+
+    lines: list[str] = ["In the last 15 minutes:",
+                        f"👥 {customers} customers browsed your product aisles",
+                        f"⏱️ Average browse time: {avg_text}"]
+    if winner and winner["avg"] > 0:
+        lines.append(
+            f"🏆 Most popular area: {winner['name']} "
+            f"({_fmt_browse_time(winner['avg'])} avg)")
+    lines.append(f"👔 Staff coverage: {coverage_pct}% of the time")
+
+    if rule == "good_engagement":
+        lines += ["",
+                  "What this means: Customers are spending good time "
+                  "browsing your products."]
+        if winner:
+            lines.append(f"{winner['name']} is getting the most attention.")
+    elif rule == "low_engagement":
+        lines += ["",
+                  "What this means: Customers are spending less than 1 min "
+                  "browsing. Consider improving displays or moving popular "
+                  "items to more visible locations."]
+    elif rule == "unattended_floor":
+        lines += ["",
+                  "What this means: Customers are browsing without staff in "
+                  "sight. Please send a staff member to the sales floor."]
+    elif rule == "quiet_period":
+        # Replace the noisy zero-stat lines with the quiet-period copy.
+        lines = ["No customers have been detected browsing the product "
+                 "aisles in the last 15 minutes.",
+                 "This may be a quiet period — normal for this time of day."]
+
+    last = (f"{hb['last_inference_min']} minutes ago"
+            if hb["last_inference_min"] is not None else "not yet")
+    lines += ["",
+              "🤖 AI System Status: Running normally",
+              f"📷 Cameras active: {hb['cameras_active']}/{hb['cameras_total']}",
+              f"⚡ Last inference: {last}"]
+    return "\n".join(lines)
+
+
+def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
+                        store_id: int | None, detection_type: str,
+                        cls: str, extra: dict):
+    """Write a DetectionEvent + Alert row directly (no detector frame
+    needed). Used by the sales-floor heartbeat."""
+    from app.models import Alert, DetectionEvent
+    rec = DetectionEvent(
+        camera_id=camera_id,
+        zone_id=zone_id,
+        detection_type=detection_type,
+        confidence=1.0,
+        bbox_json=[0, 0, 1, 1],
+        extra=extra,
+    )
+    db.add(rec); db.flush()
+    db.add(Alert(event_id=rec.id, status="new"))
+    return rec
+
+
+@celery_app.task(name="alerting.sales_floor_insights_check", ignore_result=True)
+def sales_floor_insights_check() -> None:
+    """Every 15 min during 09:00-21:00 EAT (per-store), create one
+    INFO alert per store summarising the last 15 minutes of customer
+    browsing + staff coverage on the sales floor.
+
+    Skips stores that have no zone tagged 'aisle' / 'dwell'.
+    Skips stores that aren't currently inside business hours (in
+    their local timezone — Africa/Nairobi default).
+    Per-store + per-15-min-bucket Redis dedupe so two beat ticks in
+    the same bucket can't double-fire."""
+    from app.database import SessionLocal
+    from app.models import Camera, Store, Zone
+
+    r = _redis()
+    now_utc = datetime.now(timezone.utc)
+    window_start_utc = now_utc - timedelta(minutes=SFI_WINDOW_MIN)
+
+    with SessionLocal() as db:
+        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+        for store in stores:
+            try:
+                _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc)
+            except Exception as e:
+                log.exception("sales-floor insight failed for store %s: %s",
+                              store.id, e)
+                try: db.rollback()
+                except Exception: pass
+
+
+def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> None:
+    from app.models import Camera, Zone
+
+    # Local time gate — only run inside trading hours.
+    local = _store_eat_now(store)
+    if not (9 <= local.hour < 21):
+        return
+
+    # Per-15-min-bucket dedupe: the bucket id is just the floored
+    # quarter-hour, in EAT, so concurrent beat ticks can't duplicate.
+    bucket = local.replace(minute=(local.minute // 15) * 15, second=0,
+                           microsecond=0).strftime("%Y%m%dT%H%M")
+    sent_key = f"vg:sfi:sent:{store.id}:{bucket}"
+    if r.get(sent_key):
+        return
+
+    # Find aisle/dwell zones across this store's cameras.
+    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return
+    zones = (db.query(Zone)
+               .filter(Zone.camera_id.in_(cam_ids)).all())
+    aisle_zones = [z for z in zones
+                   if {"aisle", "dwell"} & set(z.detection_types_json or [])]
+    if not aisle_zones:
+        return     # not a sales-floor store — spec says skip
+    zone_id_to_name = {z.id: (z.name or f"Zone {z.id}") for z in aisle_zones}
+    # Use the first aisle zone's camera for the alert FK — the alert
+    # is store-level conceptually but the schema needs camera_id.
+    anchor_zone = aisle_zones[0]
+    anchor_cam_id = anchor_zone.camera_id
+
+    summary = _sfi_metric_summary(db, store, cam_ids, zone_id_to_name,
+                                  window_start_utc, now_utc)
+    rule, priority = _sfi_classify(summary)
+    hb = _sfi_heartbeat(db, store, cam_ids, now_utc)
+    body = _sfi_compose_body(store.name or f"Store {store.id}",
+                             summary, rule, hb)
+
+    extra = {
+        "priority":            priority,
+        "rule":                rule,
+        "store_id":            store.id,
+        "store_name":          store.name,
+        "window_minutes":      SFI_WINDOW_MIN,
+        "bucket_eat":          bucket,
+        "avg_browse_seconds":  round(summary["avg_browse_s"], 1),
+        "total_customers":     summary["total_customers"],
+        "staff_coverage":      round(summary["staff_coverage"], 3),
+        "top_zone_name":       (summary["winner"] or {}).get("name"),
+        "top_zone_avg_s":      round((summary["winner"] or {}).get("avg", 0.0), 1),
+        "cameras_active":      hb["cameras_active"],
+        "cameras_total":       hb["cameras_total"],
+        "last_inference_min":  hb["last_inference_min"],
+        "message":             body,
+        "eat_time":            local.strftime("%H:%M"),
+    }
+    _create_info_alert(db, camera_id=anchor_cam_id,
+                       zone_id=anchor_zone.id, store_id=store.id,
+                       detection_type="sales_floor_insight",
+                       cls=rule, extra=extra)
+    db.commit()
+    r.set(sent_key, "1", ex=60 * 60)   # 1h dedup TTL, belt + braces
+    log.info("sales-floor insight: store=%s rule=%s customers=%s "
+             "avg_browse=%.1fs coverage=%.2f",
+             store.id, rule, summary["total_customers"],
+             summary["avg_browse_s"], summary["staff_coverage"])
+
+
+# ---- 18:00 Daily Sales Floor WhatsApp summary ------------------------
+
+SFI_DAILY_HOUR = 18                  # 18:00 store-local trigger
+
+
+@celery_app.task(name="alerting.sales_floor_daily_summary", ignore_result=True)
+def sales_floor_daily_summary() -> None:
+    """Per-store 18:00 EAT WhatsApp summary of today's sales-floor
+    activity. 5-min beat tick + per-store-per-day Redis dedup matches
+    the briefings pattern."""
+    from app.database import SessionLocal
+    from app.models import Store
+
+    r = _redis()
+    with SessionLocal() as db:
+        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+        for store in stores:
+            try:
+                local = _store_eat_now(store)
+                if local.hour < SFI_DAILY_HOUR:
+                    continue
+                today = local.date().isoformat()
+                key = f"vg:sfi:daily:{store.id}:date"
+                if r.get(key) == today:
+                    continue
+                _sfi_send_daily_for_store(db, store, local)
+                r.set(key, today, ex=2 * 24 * 3600)
+            except Exception as e:
+                log.exception("sales-floor daily failed for store %s: %s",
+                              store.id, e)
+
+
+def _sfi_send_daily_for_store(db, store, local_now) -> None:
+    from app.models import Camera, MetricSnapshot, Zone
+    from sqlalchemy import func
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(getattr(store, "timezone", None) or "Africa/Nairobi")
+    today_local_00 = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start_utc = today_local_00.astimezone(timezone.utc)
+    window_end_utc   = local_now.astimezone(timezone.utc)
+
+    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return
+    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    aisle_zones = [z for z in zones
+                   if {"aisle", "dwell"} & set(z.detection_types_json or [])]
+    if not aisle_zones:
+        return
+    zone_id_to_name = {z.id: (z.name or f"Zone {z.id}") for z in aisle_zones}
+
+    # Pull today's metric snapshots in one go.
+    rows = (db.query(MetricSnapshot.zone_id, MetricSnapshot.metric_type,
+                     MetricSnapshot.value, MetricSnapshot.period_start)
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.period_start >= window_start_utc,
+                      MetricSnapshot.period_start <  window_end_utc,
+                      MetricSnapshot.metric_type.in_((
+                          "browse_time_seconds", "dwell_seconds",
+                          "dwell_count", "staff_present")))
+              .all())
+
+    by_zone_browse: dict[int, list[float]] = {}
+    by_zone_count:  dict[int, float]       = {}
+    by_hour_count:  dict[int, float]       = {}
+    staff_samples: list[float] = []
+
+    for zid, mtype, value, ts in rows:
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        local_hr = ts.astimezone(tz).hour if ts else 0
+        v = float(value or 0.0)
+        if zid is None or zid not in zone_id_to_name:
+            if mtype == "staff_present":
+                staff_samples.append(v)
+            continue
+        if mtype in ("browse_time_seconds", "dwell_seconds"):
+            by_zone_browse.setdefault(zid, []).append(v)
+        elif mtype == "dwell_count":
+            by_zone_count[zid] = by_zone_count.get(zid, 0.0) + v
+            by_hour_count[local_hr] = by_hour_count.get(local_hr, 0.0) + v
+        elif mtype == "staff_present":
+            staff_samples.append(v)
+
+    all_avgs = [v for vs in by_zone_browse.values() for v in vs]
+    avg_browse = sum(all_avgs) / len(all_avgs) if all_avgs else 0.0
+    total_customers = int(sum(by_zone_count.values()))
+    staff_coverage = (sum(staff_samples) / len(staff_samples)) if staff_samples else 0.0
+
+    # Most popular zone — highest avg browse.
+    winner_zid = max(by_zone_browse, key=lambda z: sum(by_zone_browse[z]) /
+                                                    len(by_zone_browse[z]),
+                     default=None)
+    winner_name = zone_id_to_name.get(winner_zid, "—") if winner_zid else "—"
+
+    # Peak + quiet hours.
+    if by_hour_count:
+        peak_hour  = max(by_hour_count, key=by_hour_count.get)
+        # Only consider hours within trading and that actually have data.
+        quiet_hour = min(by_hour_count, key=by_hour_count.get)
+    else:
+        peak_hour = quiet_hour = None
+
+    def _hour_band(h: int | None) -> str:
+        if h is None:
+            return "—"
+        return f"{h:02d}:00 - {(h + 1) % 24:02d}:00"
+
+    body = (
+        f"📊 Sales Floor Report — {store.name or 'Store ' + str(store.id)} "
+        f"— Today\n\n"
+        f"Most popular product area: {winner_name}\n"
+        f"Avg customer browse time: {_fmt_browse_time(avg_browse)}\n"
+        f"Total customers who browsed: {total_customers}\n"
+        f"Staff coverage of sales floor: {int(round(staff_coverage * 100))}%\n\n"
+        f"🏆 Peak browsing time: {_hour_band(peak_hour)}\n"
+        f"⚠️ Quiet period: {_hour_band(quiet_hour)}\n"
+    )
+    if winner_name and winner_name != "—":
+        body += (f"\nTip: Consider moving popular items from {winner_name} "
+                 f"to the main floor during quiet periods.")
+
+    recipients: list[str] = []
+    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
+    if mgr:
+        recipients.append(mgr)
+    recipients.extend(_dashboard_recipients())
+    recipients = list(dict.fromkeys(recipients))
+    if not recipients:
+        return
+    sent = _send_whatsapp(recipients, body)
+    log.info("sales-floor daily: store=%s customers=%s → %d WhatsApp sent",
+             store.id, total_customers, sent)
