@@ -118,6 +118,7 @@ interface HourlyPayload {
   today_total?: number
   yesterday_so_far?: number
   metric_source?: string | null
+  data_source_label?: string | null
   restock_hour?: number | null
 }
 
@@ -311,6 +312,11 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
 
       {/* Plain-language callouts so the chart is readable even if
           the SVG is glanced at quickly. */}
+      {payload.data_source_label && (
+        <div className="mt-1 text-[11px] text-slate-500 italic">
+          {payload.data_source_label}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
         <span><strong className="text-slate-700">Total today:</strong>{' '}
           <span className="tabular-nums">{Math.round(todayTotal)}</span></span>

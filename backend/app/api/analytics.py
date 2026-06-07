@@ -406,29 +406,20 @@ def store_live_dashboard(store_id: int,
                .scalar())
         return float(v) if v is not None else 0.0
 
-    # Unique visitors in the active range — STAFF EXCLUDED.
-    # We LEFT-JOIN visitor_tracks to staff_tracks on
-    # (store_id, day, track_signature) and filter out any signature
-    # marked as 'staff' by the daily classifier. NULL on the join
-    # (no staff_tracks row yet) is treated as customer — better to
-    # over-count for a few minutes than to silently drop fresh data
-    # before the classifier has had a chance to run.
-    from app.models import VisitorTrack, StaffTrack
-
-    def _unique_visitors(t0: datetime, t1: datetime) -> int:
-        return (db.query(func.count(VisitorTrack.id))
-                  .outerjoin(StaffTrack,
-                             (StaffTrack.store_id == store_id)
-                             & (StaffTrack.day == VisitorTrack.day)
-                             & (StaffTrack.track_signature == VisitorTrack.track_signature))
-                  .filter(((VisitorTrack.store_id == store_id) | VisitorTrack.camera_id.in_(cam_ids)),
-                          VisitorTrack.first_seen >= t0,
-                          VisitorTrack.first_seen <  t1,
-                          (StaffTrack.classified_as.is_(None))
-                          | (StaffTrack.classified_as != "staff"))
-                  .scalar() or 0)
-    unique_curr = _unique_visitors(active_since, active_until)
-    unique_prev = _unique_visitors(prev_since,   prev_until)
+    # Unique visitors — STAFF EXCLUDED. Use the shared
+    # daily_visitor_count helper so this tile reconciles exactly with
+    # the hourly footfall chart's "Total today" line (single source
+    # of truth — fallback chain unique_visitors → visitor_count_in →
+    # occupancy).
+    from app.utils.visitor_count import daily_visitor_count
+    _curr = daily_visitor_count(db, store, since_utc=active_since,
+                                until_utc=active_until, cam_ids=cam_ids)
+    _prev = daily_visitor_count(db, store, since_utc=prev_since,
+                                until_utc=prev_until, cam_ids=cam_ids)
+    unique_curr = _curr.total
+    unique_prev = _prev.total
+    visitor_source = _curr.source
+    visitor_source_label = _curr.source_label
 
     # Alerts in the active range, grouped by type.
     alerts_today = dict(
@@ -520,6 +511,12 @@ def store_live_dashboard(store_id: int,
             "value": int(unique_curr),
             "trend": _trend(unique_curr, unique_prev),
             "visible": True,
+            # Plain-English data source so the manager understands
+            # whether this is true unique-track counting, entry/exit
+            # line crossings, or an occupancy-peak estimate. Matches
+            # the same field on /store/{id}/hourly.
+            "data_source":       visitor_source,
+            "data_source_label": visitor_source_label,
         },
         "queue_wait_avg_today_sec": {
             "value": round(queue_wait_avg["value"], 0),
@@ -636,8 +633,8 @@ def _store_hourly_impl(store_id: int,
                        since: datetime | None,
                        until: datetime | None,
                        db: Session) -> dict:
-    from sqlalchemy import extract
     from app.utils.business_hours import todays_session, _store_local_now
+    from app.utils.visitor_count import daily_visitor_count, reconcile_warn
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
@@ -648,10 +645,6 @@ def _store_hourly_impl(store_id: int,
 
     now = datetime.now(timezone.utc)
     local_now = _store_local_now(store, now)
-    # Active window: explicit since/until override the default
-    # "today's business-hours session". Operators picking
-    # "Yesterday" / "Last week" / etc. on the dashboard get the
-    # range they asked for instead of always seeing today.
     if since is not None:
         session_start = since
         session_end   = until or now
@@ -661,56 +654,18 @@ def _store_hourly_impl(store_id: int,
     close_hr = session_end.astimezone(local_now.tzinfo).hour or (open_hr + 12)
     current_hr = local_now.hour
 
-    # Per-hour visitor count today — local-hour aggregation.
-    # We use `visitor_count_in` when entry/exit zones exist, falling
-    # back to occupancy_peak otherwise so empty rows still show
-    # something useful.
-    metric = "visitor_count_in"
-    rows = (
-        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
-                 func.sum(MetricSnapshot.value).label("v"))
-          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                  MetricSnapshot.metric_type == metric,
-                  MetricSnapshot.period_start >= session_start,
-                  MetricSnapshot.period_start <  session_end)
-          .group_by("h").all()
-    )
-    by_hour = {int(r.h): float(r.v or 0) for r in rows}
-    if not any(by_hour.values()):
-        metric = "occupancy_peak"
-        rows = (
-            db.query(extract("hour", MetricSnapshot.period_start).label("h"),
-                     func.max(MetricSnapshot.value).label("v"))
-              .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                      MetricSnapshot.metric_type == "occupancy",
-                      MetricSnapshot.period_start >= session_start,
-                      MetricSnapshot.period_start <  session_end)
-              .group_by("h").all()
-        )
-        by_hour = {int(r.h): float(r.v or 0) for r in rows}
-
-    # Same window, yesterday — for the trend-vs-yesterday line.
-    # Use the matching metric_type for the yesterday query: pulling
-    # 'occupancy' for the same period when we fell back, otherwise
-    # 'visitor_count_in'. The previous form
-    #     `metric_type == metric if metric == "visitor_count_in" else "occupancy"`
-    # was a precedence bug — Python parsed it as
-    #     `(metric_type == metric) if (metric == "visitor_count_in") else "occupancy"`
-    # so the fallback path passed the bare string "occupancy" into
-    # .filter(), which SQLAlchemy 2.x rejects → 500.
-    yest_metric_type = "visitor_count_in" if metric == "visitor_count_in" else "occupancy"
+    # Single source of truth — same helper that feeds the LIVE
+    # dashboard's unique_visitors tile, so the chart total and the
+    # daily summary tile always reconcile.
+    today = daily_visitor_count(db, store, since_utc=session_start,
+                                until_utc=session_end, cam_ids=cam_ids)
     yest_session_start = session_start - timedelta(days=1)
     yest_session_end   = session_end   - timedelta(days=1)
-    yest_rows = (
-        db.query(extract("hour", MetricSnapshot.period_start).label("h"),
-                 func.sum(MetricSnapshot.value).label("v"))
-          .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                  MetricSnapshot.metric_type == yest_metric_type,
-                  MetricSnapshot.period_start >= yest_session_start,
-                  MetricSnapshot.period_start <  yest_session_end)
-          .group_by("h").all()
-    )
-    yest_by_hour = {int(r.h): float(r.v or 0) for r in yest_rows}
+    yesterday = daily_visitor_count(db, store, since_utc=yest_session_start,
+                                    until_utc=yest_session_end, cam_ids=cam_ids)
+
+    by_hour = today.by_hour_eat
+    yest_by_hour = yesterday.by_hour_eat
 
     def _intensity(v: float) -> str:
         if v >= 30: return "high"
@@ -718,15 +673,14 @@ def _store_hourly_impl(store_id: int,
         if v > 0:   return "low"
         return "empty"
 
-    # Always return the canonical 09:00–21:00 retail window (12 hours,
-    # 12 data points). The chart on the dashboard renders a fixed
-    # 12-point X axis so the line never collapses on slow days.
+    # Always paint the canonical 09:00-21:00 window so the chart has
+    # 12 ticks even on a quiet day.
     chart_open = min(open_hr, 9)
     chart_close = max(close_hr, 21)
     hours = []
     hours_yesterday = []
     for hr in range(chart_open, max(chart_close, chart_open + 1)):
-        v = by_hour.get(hr, 0.0)
+        v = by_hour.get(hr, 0)
         hours.append({
             "hour": hr,
             "label": f"{hr:02d}:00",
@@ -736,16 +690,24 @@ def _store_hourly_impl(store_id: int,
         })
         hours_yesterday.append({
             "hour": hr,
-            "visitors": int(round(yest_by_hour.get(hr, 0.0))),
+            "visitors": int(round(yest_by_hour.get(hr, 0))),
         })
 
-    today_total = sum(by_hour.values()) or 0
-    yest_so_far = sum(v for h, v in yest_by_hour.items() if h <= current_hr) or 0
+    # Chart-total = sum of the rendered bars. By construction this
+    # equals `today.total` because both come from the same source,
+    # but compute it independently and warn loudly if they ever
+    # diverge — that's the canary for a future regression.
+    today_total = sum(h["visitors"] for h in hours)
+    reconcile_warn(store.name or f"store {store.id}",
+                   hourly_sum=today_total, daily_total=today.total)
+    today_total = today.total       # prefer the helper's total as truth
+
+    yest_so_far = sum(v for h, v in yest_by_hour.items() if h <= current_hr)
     trend_delta_pct = None
     if yest_so_far > 0:
         trend_delta_pct = round((today_total - yest_so_far) / yest_so_far * 100, 1)
 
-    # Peak / quiet — only over hours that actually had data.
+    # Peak / quiet — over hours that actually had data.
     populated = [(h, v) for h, v in by_hour.items() if v > 0]
     peak  = max(populated, key=lambda kv: kv[1]) if populated else None
     quiet = min(populated, key=lambda kv: kv[1]) if populated else None
@@ -753,44 +715,39 @@ def _store_hourly_impl(store_id: int,
     insights: list[str] = []
     if peak:
         insights.append(
-            f"Peak hour today: {peak[0]:02d}:00–{peak[0]+1:02d}:00 "
-            f"with {int(peak[1])} visitors"
-        )
+            f"Peak hour today: {peak[0]:02d}:00-{peak[0]+1:02d}:00 "
+            f"with {int(peak[1])} visitors")
     if quiet:
         insights.append(
-            f"Quietest hour: {quiet[0]:02d}:00–{quiet[0]+1:02d}:00 "
-            f"with {int(quiet[1])} visitors"
-        )
-    # Restock window = first low-traffic hour after opening.
+            f"Quietest hour: {quiet[0]:02d}:00-{quiet[0]+1:02d}:00 "
+            f"with {int(quiet[1])} visitors")
     restock_hour = None
     for hr in range(open_hr, min(open_hr + 3, close_hr)):
         if by_hour.get(hr, 0) <= 10:
             restock_hour = hr
             insights.append(
-                f"Best time to restock: {hr:02d}:00–{hr+1:02d}:00 (lowest traffic)"
-            )
+                f"Best time to restock: {hr:02d}:00-{hr+1:02d}:00 (lowest traffic)")
             break
-    # Staffing recommendation: contiguous peak block (>= 75% of peak value).
     peak_v = peak[1] if peak else 0
     threshold = peak_v * 0.75
     busy_hours = sorted(h for h, v in by_hour.items() if v >= threshold and v > 0)
     if busy_hours:
         insights.append(
-            f"Recommend extra staff at: {busy_hours[0]:02d}:00–"
-            f"{busy_hours[-1]+1:02d}:00 (peak period)"
-        )
+            f"Recommend extra staff at: {busy_hours[0]:02d}:00-"
+            f"{busy_hours[-1]+1:02d}:00 (peak period)")
     if trend_delta_pct is not None:
         arrow = "▲" if trend_delta_pct > 0 else "▼" if trend_delta_pct < 0 else "▶"
         insights.append(
-            f"{arrow} {abs(trend_delta_pct)}% vs same time yesterday"
-        )
+            f"{arrow} {abs(trend_delta_pct)}% vs same time yesterday")
+    insights.append(today.source_label)
 
     return {
         "store_id": store_id,
         "open_hour":  open_hr,
         "close_hour": close_hr,
         "current_hour": current_hr,
-        "metric_source": metric,
+        "metric_source": today.source,
+        "data_source_label": today.source_label,
         "hours": hours,
         "hours_yesterday": hours_yesterday,
         "peak":  {"hour": peak[0],  "visitors": int(peak[1])}  if peak  else None,
