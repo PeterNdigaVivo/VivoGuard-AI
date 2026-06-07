@@ -505,6 +505,10 @@ def sales_floor_insights_check() -> None:
 
     now_utc = datetime.now(timezone.utc)
     window_start_utc = now_utc - timedelta(minutes=SFI_WINDOW_MIN)
+    debug = bool(getattr(settings, "sales_floor_debug", False))
+    if debug:
+        log.warning("sales_floor_insights: DEBUG MODE — bypassing dedupe + "
+                    "closed-hours + aisle-zone gates")
     created = 0
     skipped = 0
     failed = 0
@@ -516,7 +520,7 @@ def sales_floor_insights_check() -> None:
             for store in stores:
                 try:
                     outcome = _maybe_emit_sfi_for_store(
-                        db, r, store, now_utc, window_start_utc)
+                        db, r, store, now_utc, window_start_utc, debug=debug)
                     if outcome == "created":
                         created += 1
                     else:
@@ -533,28 +537,31 @@ def sales_floor_insights_check() -> None:
         log.exception("sales_floor_insights: top-level failure: %s", e)
 
 
-def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> str:
+def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
+                               *, debug: bool = False) -> str:
     """Returns one of:
       'created'       — alert row written
-      'closed_hours'  — outside trading hours
-      'dedup'         — bucket already fired this 15-min window
+      'closed_hours'  — outside trading hours (bypassed by debug)
+      'dedup'         — bucket already fired (bypassed by debug)
       'no_cameras'    — store has no cameras attached
       'no_aisle_zone' — no zone tagged 'aisle' or 'dwell'
+                       (bypassed by debug — alert still fires)
     """
     from app.models import Camera, Zone
 
     # Local time gate — only run inside trading hours.
     local = _store_eat_now(store)
-    if not (9 <= local.hour < 21):
+    if not (9 <= local.hour < 21) and not debug:
         log.info("sales_floor_insights: store=%s (%s) skipped — closed hours "
                  "(local=%s)", store.id, store.name, local.strftime("%H:%M"))
         return "closed_hours"
 
-    # Per-15-min-bucket dedupe.
+    # Per-15-min-bucket dedupe. Buckets are :00 :15 :30 :45 EAT —
+    # exactly 4 per hour per store. floor(min/15)*15 → {0,15,30,45}.
     bucket = local.replace(minute=(local.minute // 15) * 15, second=0,
                            microsecond=0).strftime("%Y%m%dT%H%M")
     sent_key = f"vg:sfi:sent:{store.id}:{bucket}"
-    if r.get(sent_key):
+    if not debug and r.get(sent_key):
         log.info("sales_floor_insights: store=%s (%s) skipped — already fired "
                  "for bucket %s", store.id, store.name, bucket)
         return "dedup"
@@ -571,15 +578,26 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> str:
     aisle_zones = [z for z in zones
                    if {"aisle", "dwell"} & set(z.detection_types_json or [])]
     if not aisle_zones:
-        log.info("sales_floor_insights: store=%s (%s) skipped — no aisle/dwell "
-                 "zones configured (cameras=%d, zones=%d). Draw an aisle zone "
-                 "on at least one camera to start receiving updates.",
-                 store.id, store.name, len(cam_ids), len(zones))
-        return "no_aisle_zone"
-
-    zone_id_to_name = {z.id: (z.name or f"Zone {z.id}") for z in aisle_zones}
-    anchor_zone = aisle_zones[0]
-    anchor_cam_id = anchor_zone.camera_id
+        if not debug:
+            log.info("sales_floor_insights: store=%s (%s) skipped — no "
+                     "aisle/dwell zones configured (cameras=%d, zones=%d). "
+                     "Draw an aisle zone on at least one camera to start "
+                     "receiving updates.",
+                     store.id, store.name, len(cam_ids), len(zones))
+            return "no_aisle_zone"
+        # Debug mode: fire anyway. No aisle zone → use first camera,
+        # no zone FK. Empty zone_id_to_name means _sfi_metric_summary
+        # returns the zero-customer baseline, which classifies as
+        # 'quiet_period' — exactly the heartbeat we want for ops.
+        log.warning("sales_floor_insights: store=%s (%s) DEBUG firing without "
+                    "aisle zones (cameras=%d)", store.id, store.name, len(cam_ids))
+        zone_id_to_name: dict[int, str] = {}
+        anchor_zone = None
+        anchor_cam_id = cams[0].id
+    else:
+        zone_id_to_name = {z.id: (z.name or f"Zone {z.id}") for z in aisle_zones}
+        anchor_zone = aisle_zones[0]
+        anchor_cam_id = anchor_zone.camera_id
 
     summary = _sfi_metric_summary(db, store, cam_ids, zone_id_to_name,
                                   window_start_utc, now_utc)
@@ -618,15 +636,20 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> str:
         "eat_time":            local.strftime("%H:%M"),
     }
     _create_info_alert(db, camera_id=anchor_cam_id,
-                       zone_id=anchor_zone.id, store_id=store.id,
+                       zone_id=(anchor_zone.id if anchor_zone else None),
+                       store_id=store.id,
                        detection_type="sales_floor_insight",
                        cls=rule, extra=extra)
     db.commit()
-    r.set(sent_key, "1", ex=60 * 60)
+    # Only mark the bucket dedupe in NORMAL mode — in debug we want
+    # every 15-min tick to fire regardless of what already ran.
+    if not debug:
+        r.set(sent_key, "1", ex=60 * 60)
     log.info("sales_floor_insights: store=%s (%s) ALERT CREATED rule=%s "
-             "customers=%s avg_browse=%.1fs coverage=%.2f bucket=%s",
+             "customers=%s avg_browse=%.1fs coverage=%.2f bucket=%s%s",
              store.id, store.name, rule, summary["total_customers"],
-             summary["avg_browse_s"], summary["staff_coverage"], bucket)
+             summary["avg_browse_s"], summary["staff_coverage"], bucket,
+             " (debug)" if debug else "")
     return "created"
 
 

@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30
 
+    # --- Sales-floor insight debugging ---
+    # When True, sales_floor_insights_check skips the 15-min Redis
+    # dedupe AND the closed-hours gate AND the "store needs an aisle
+    # zone" gate — every active store with at least one camera gets
+    # an alert each tick. Use to confirm the task is wired up after
+    # a deploy / DB restore where zones may not have been synced.
+    sales_floor_debug: bool = False
+
     # --- WAN behaviour ---
     ddns_refresh_interval_seconds: int = 300
     wan_reconnect_initial_delay_seconds: int = 5
