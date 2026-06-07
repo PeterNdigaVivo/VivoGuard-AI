@@ -177,15 +177,20 @@ _PERSON_RESTRICTED_TAGS = {"restricted", "intrusion", "trespass", "high_value", 
 
 def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
     """A plain person detection only deserves an alert when it's
-    genuinely notable: after hours, OR inside a restricted/staff-only
-    zone. During business hours in a normal customer area it's just a
-    customer — noise — so we persist the metric but skip the alert.
+    genuinely notable: after hours (with the configurable grace
+    window around opening/closing), OR inside a restricted/staff-only
+    zone. During business hours, or inside the grace windows, it's
+    just normal staff/customer traffic — we persist the metric but
+    skip the alert.
 
-    Business hours are evaluated via is_store_open(), which defaults to
-    Africa/Nairobi (EAT) when the store tz is NULL and to a permissive
-    09:00-21:00 daily window when business_hours_json is missing. A
-    store with no configured hours is therefore treated as OPEN during
-    the day, NOT as always-after-hours."""
+    Grace windows (settings):
+      person_afterhours_grace_before_min  default 60
+      person_afterhours_grace_after_min   default 60
+    so a staff member arriving at 08:50 EAT for a 09:00 opening does
+    NOT trip URGENT intrusion, but 02:00 EAT still does.
+
+    All time math runs in Africa/Nairobi via is_after_hours_with_grace().
+    """
     # Restricted-zone check — find the event's zone among the list.
     if ev.zone_id is not None:
         for z in zones:
@@ -196,10 +201,38 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
     if store is None:
         return False   # no store context → treat as a normal customer
     try:
-        from app.utils.business_hours import is_store_open
-        return not is_store_open(store)
+        from app.utils.business_hours import is_after_hours_with_grace
+        return is_after_hours_with_grace(
+            store,
+            grace_before_open_min=settings.person_afterhours_grace_before_min,
+            grace_after_close_min=settings.person_afterhours_grace_after_min,
+        )
     except Exception:
         return False
+
+
+def _person_alert_recently_fired(camera_id: int) -> bool:
+    """Per-camera Redis dedupe gate. Returns True when an after-hours
+    person alert has already fired for `camera_id` within the last
+    person_afterhours_dedupe_min minutes. Fails OPEN (allows the
+    alert) on any Redis error so a broken cache never silences a
+    genuine intrusion."""
+    try:
+        import redis
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        return bool(r.get(f"vg:person_afterhours:fired:{int(camera_id)}"))
+    except Exception:
+        return False
+
+
+def _mark_person_alert_fired(camera_id: int) -> None:
+    try:
+        import redis
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        ttl = max(60, int(settings.person_afterhours_dedupe_min) * 60)
+        r.set(f"vg:person_afterhours:fired:{int(camera_id)}", "1", ex=ttl)
+    except Exception:
+        pass
 
 
 def run_for_camera(camera_id: int, *, max_seconds: int = 0,
@@ -278,6 +311,13 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             )
 
             events_emitted: list[dict] = []
+            # Per-frame dedupe set: kills back-to-back duplicate
+            # detections (NMS misses, near-identical bboxes, concurrent-
+            # worker overlap before the lock catches up). Signature is
+            # (detection_type, cls, bbox rounded to 0.02) so we don't
+            # drop legitimately co-present people on opposite ends of
+            # the frame.
+            seen_this_frame: set[tuple] = set()
             for det in registry.detectors_for(camera_id):
                 # Per-frame skip honouring detection_every_n_frames.
                 step = int((cfg.get(det.detection_type) or {}).get("detection_every_n_frames", 1) or 1)
@@ -285,11 +325,27 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                     continue
                 try:
                     for ev in det.evaluate(ctx):
+                        sig = (
+                            ev.detection_type, getattr(ev, "cls", None),
+                            tuple(round(float(c), 2) for c in (ev.bbox_norm or [])),
+                        )
+                        if sig in seen_this_frame:
+                            continue
+                        seen_this_frame.add(sig)
                         # A bare person detection during business hours
                         # in a normal customer zone is just a customer —
                         # persist the metric but don't raise an alert.
-                        suppress = (ev.detection_type == "person" and
-                                    not _person_alert_warranted(ev, zones, store))
+                        # After-hours person alerts also get a per-camera
+                        # Redis dedupe so a single staff arrival can't
+                        # flood the dashboard with hundreds of URGENTs.
+                        suppress = False
+                        if ev.detection_type == "person":
+                            if not _person_alert_warranted(ev, zones, store):
+                                suppress = True
+                            elif _person_alert_recently_fired(camera_id):
+                                suppress = True
+                            else:
+                                _mark_person_alert_fired(camera_id)
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name,

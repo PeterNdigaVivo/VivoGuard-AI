@@ -111,6 +111,16 @@ class Settings(BaseSettings):
     webhook_url: str = ""
     webhook_auth_header: str = ""
 
+    # --- After-hours person alert tuning ---
+    # Pre-opening grace: staff arriving up to N minutes before opening
+    # don't trigger an URGENT "Person Detected After Hours" alert.
+    person_afterhours_grace_before_min: int = 60
+    # Symmetric post-closing grace for end-of-day staff egress.
+    person_afterhours_grace_after_min: int = 60
+    # Per-camera dedupe — once an after-hours person alert has fired
+    # for a camera, suppress repeats for this many minutes.
+    person_afterhours_dedupe_min: int = 30
+
     # --- WAN behaviour ---
     ddns_refresh_interval_seconds: int = 300
     wan_reconnect_initial_delay_seconds: int = 5

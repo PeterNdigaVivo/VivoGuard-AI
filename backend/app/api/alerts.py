@@ -361,22 +361,29 @@ def _zone_restricted(zone: Zone | None) -> bool:
 
 
 def _is_after_hours(event: DetectionEvent, store) -> bool:
-    """True if the event happened outside the store's business hours.
+    """True if the event happened outside the store's business hours
+    AND outside the configurable pre-opening / post-closing grace
+    windows.
 
-    Uses is_store_open(), which defaults the timezone to Africa/Nairobi
-    (EAT, UTC+3) when the store's tz column is NULL and applies a
-    permissive 09:00-21:00 daily default when business_hours_json is
-    missing — so a store with no configured hours is NEVER treated as
-    "always after hours" (that was the 9:57 AM false-alarm bug)."""
+    Mirrors the worker-side gate so the alert label ("Person Detected
+    After Hours") only attaches to events the worker also classified
+    as after-hours. Time math uses Africa/Nairobi via
+    is_after_hours_with_grace().
+    """
     if store is None:
         return False   # unknown store → don't cry wolf
     try:
-        from app.utils.business_hours import is_store_open
+        from app.utils.business_hours import is_after_hours_with_grace
+        from app.config import settings
         ts = event.timestamp
         if ts is not None and ts.tzinfo is None:
             from datetime import timezone as _tz
             ts = ts.replace(tzinfo=_tz.utc)
-        return not is_store_open(store, ts)
+        return is_after_hours_with_grace(
+            store, ts,
+            grace_before_open_min=settings.person_afterhours_grace_before_min,
+            grace_after_close_min=settings.person_afterhours_grace_after_min,
+        )
     except Exception:
         return False
 

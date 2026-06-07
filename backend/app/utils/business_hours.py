@@ -115,6 +115,53 @@ def is_store_open(store, now_utc: Optional[datetime] = None) -> bool:
     return False
 
 
+def is_after_hours_with_grace(
+    store,
+    now_utc: Optional[datetime] = None,
+    *,
+    grace_before_open_min: int = 60,
+    grace_after_close_min: int = 60,
+) -> bool:
+    """True when `now` falls OUTSIDE today's business hours AND
+    OUTSIDE the configurable grace windows around the open + close
+    times.
+
+    Use this for "Person Detected After Hours" alerts so legitimate
+    staff arriving shortly before the 09:00 opening (or leaving shortly
+    after the 21:00 close) don't trip URGENT intrusion. 02:00 EAT
+    still fires because it's well outside both grace windows.
+
+    Grace defaults:
+      grace_before_open_min = 60   (08:00–09:00 EAT for a 09:00 open)
+      grace_after_close_min = 60   (21:00–22:00 EAT for a 21:00 close)
+
+    Time math runs in the store's local timezone (Africa/Nairobi
+    default) via the same path is_store_open uses.
+    """
+    if is_store_open(store, now_utc):
+        return False
+    local = _store_local_now(store, now_utc)
+    t = local.time()
+    grace_before = max(0, int(grace_before_open_min))
+    grace_after  = max(0, int(grace_after_close_min))
+    for w in _windows_for_day(store, local.weekday()):
+        parsed = _parse_window(w)
+        if not parsed:
+            continue
+        open_t, close_t = parsed
+        # Minutes-of-day arithmetic — handles the hour boundary cleanly
+        # without dealing with date rollover (grace ≤ 12 h always
+        # stays inside the same day for retail hours).
+        t_min     = t.hour * 60 + t.minute
+        open_min  = open_t.hour * 60 + open_t.minute
+        close_min = close_t.hour * 60 + close_t.minute
+        if open_min - grace_before <= t_min < open_min:
+            return False                # inside pre-opening grace
+        if close_min <= t_min < close_min + grace_after:
+            return False                # inside post-closing grace
+    return True
+
+
 def todays_session(store, now_utc: Optional[datetime] = None) -> tuple[datetime, datetime]:
     """(open_utc, close_utc) covering today's FULL operating window
     — earliest open to latest close. Multi-window days collapse to
