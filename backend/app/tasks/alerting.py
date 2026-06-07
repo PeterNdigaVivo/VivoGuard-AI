@@ -488,61 +488,112 @@ def sales_floor_insights_check() -> None:
     Skips stores that aren't currently inside business hours (in
     their local timezone — Africa/Nairobi default).
     Per-store + per-15-min-bucket Redis dedupe so two beat ticks in
-    the same bucket can't double-fire."""
-    from app.database import SessionLocal
-    from app.models import Camera, Store, Zone
+    the same bucket can't double-fire.
 
-    r = _redis()
+    Logging policy: every branch logs at INFO level so the worker
+    log alone explains why an expected alert didn't fire (no zones,
+    closed hours, dedup, exception). Hard failures inside the
+    per-store body are caught and logged with full stack traces."""
+    from app.database import SessionLocal
+    from app.models import Store
+
+    try:
+        r = _redis()
+    except Exception as e:
+        log.exception("sales_floor_insights: redis unavailable, aborting: %s", e)
+        return
+
     now_utc = datetime.now(timezone.utc)
     window_start_utc = now_utc - timedelta(minutes=SFI_WINDOW_MIN)
+    created = 0
+    skipped = 0
+    failed = 0
 
-    with SessionLocal() as db:
-        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
-        for store in stores:
-            try:
-                _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc)
-            except Exception as e:
-                log.exception("sales-floor insight failed for store %s: %s",
-                              store.id, e)
-                try: db.rollback()
-                except Exception: pass
+    try:
+        with SessionLocal() as db:
+            stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+            log.info("sales_floor_insights: checking %d active stores", len(stores))
+            for store in stores:
+                try:
+                    outcome = _maybe_emit_sfi_for_store(
+                        db, r, store, now_utc, window_start_utc)
+                    if outcome == "created":
+                        created += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    failed += 1
+                    log.exception("sales_floor_insights: store=%s (%s) FAILED: %s",
+                                  store.id, store.name, e)
+                    try: db.rollback()
+                    except Exception: pass
+            log.info("sales_floor_insights: done — created=%d skipped=%d failed=%d",
+                     created, skipped, failed)
+    except Exception as e:
+        log.exception("sales_floor_insights: top-level failure: %s", e)
 
 
-def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> None:
+def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> str:
+    """Returns one of:
+      'created'       — alert row written
+      'closed_hours'  — outside trading hours
+      'dedup'         — bucket already fired this 15-min window
+      'no_cameras'    — store has no cameras attached
+      'no_aisle_zone' — no zone tagged 'aisle' or 'dwell'
+    """
     from app.models import Camera, Zone
 
     # Local time gate — only run inside trading hours.
     local = _store_eat_now(store)
     if not (9 <= local.hour < 21):
-        return
+        log.info("sales_floor_insights: store=%s (%s) skipped — closed hours "
+                 "(local=%s)", store.id, store.name, local.strftime("%H:%M"))
+        return "closed_hours"
 
-    # Per-15-min-bucket dedupe: the bucket id is just the floored
-    # quarter-hour, in EAT, so concurrent beat ticks can't duplicate.
+    # Per-15-min-bucket dedupe.
     bucket = local.replace(minute=(local.minute // 15) * 15, second=0,
                            microsecond=0).strftime("%Y%m%dT%H%M")
     sent_key = f"vg:sfi:sent:{store.id}:{bucket}"
     if r.get(sent_key):
-        return
+        log.info("sales_floor_insights: store=%s (%s) skipped — already fired "
+                 "for bucket %s", store.id, store.name, bucket)
+        return "dedup"
 
-    # Find aisle/dwell zones across this store's cameras.
     cams = db.query(Camera).filter(Camera.store_id == store.id).all()
     cam_ids = [c.id for c in cams]
     if not cam_ids:
-        return
+        log.info("sales_floor_insights: store=%s (%s) skipped — no cameras "
+                 "attached", store.id, store.name)
+        return "no_cameras"
+
     zones = (db.query(Zone)
                .filter(Zone.camera_id.in_(cam_ids)).all())
     aisle_zones = [z for z in zones
                    if {"aisle", "dwell"} & set(z.detection_types_json or [])]
     if not aisle_zones:
-        return     # not a sales-floor store — spec says skip
+        log.info("sales_floor_insights: store=%s (%s) skipped — no aisle/dwell "
+                 "zones configured (cameras=%d, zones=%d). Draw an aisle zone "
+                 "on at least one camera to start receiving updates.",
+                 store.id, store.name, len(cam_ids), len(zones))
+        return "no_aisle_zone"
+
     zone_id_to_name = {z.id: (z.name or f"Zone {z.id}") for z in aisle_zones}
-    # Use the first aisle zone's camera for the alert FK — the alert
-    # is store-level conceptually but the schema needs camera_id.
     anchor_zone = aisle_zones[0]
     anchor_cam_id = anchor_zone.camera_id
 
     summary = _sfi_metric_summary(db, store, cam_ids, zone_id_to_name,
                                   window_start_utc, now_utc)
+    log.info("sales_floor_insights: store=%s (%s) zones=%d browse_records=%d "
+             "customers=%d avg_browse=%.1fs coverage=%.2f",
+             store.id, store.name, len(aisle_zones),
+             sum(1 for z in summary["per_zone"].values() if z["avg"] > 0),
+             summary["total_customers"], summary["avg_browse_s"],
+             summary["staff_coverage"])
+
+    # _sfi_classify returns 'quiet_period' when there are zero customers,
+    # so an alert IS created even on cameras that have not produced any
+    # browse_time_seconds rows yet — that's the "system is running, no
+    # one is here" heartbeat the operator needs.
     rule, priority = _sfi_classify(summary)
     hb = _sfi_heartbeat(db, store, cam_ids, now_utc)
     body = _sfi_compose_body(store.name or f"Store {store.id}",
@@ -571,11 +622,12 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc) -> None:
                        detection_type="sales_floor_insight",
                        cls=rule, extra=extra)
     db.commit()
-    r.set(sent_key, "1", ex=60 * 60)   # 1h dedup TTL, belt + braces
-    log.info("sales-floor insight: store=%s rule=%s customers=%s "
-             "avg_browse=%.1fs coverage=%.2f",
-             store.id, rule, summary["total_customers"],
-             summary["avg_browse_s"], summary["staff_coverage"])
+    r.set(sent_key, "1", ex=60 * 60)
+    log.info("sales_floor_insights: store=%s (%s) ALERT CREATED rule=%s "
+             "customers=%s avg_browse=%.1fs coverage=%.2f bucket=%s",
+             store.id, store.name, rule, summary["total_customers"],
+             summary["avg_browse_s"], summary["staff_coverage"], bucket)
+    return "created"
 
 
 # ---- 18:00 Daily Sales Floor WhatsApp summary ------------------------
