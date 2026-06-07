@@ -827,6 +827,16 @@ class ShutterDetector(Detector):
         else:
             state = self._commit_state(ctx.camera_id, observed)
 
+        # Publish the committed state to the shop-open/close cross-
+        # detector module so EntryExitDetector can require shutter=open
+        # before raising a "shop opened" alert on an inward crossing.
+        try:
+            from app.ai.detectors import shop_state as _shop
+            _shop.set_shutter_state(ctx.camera_id,
+                                    self._STATE_NAME.get(state, "closed"))
+        except Exception:
+            pass
+
         # Track how long we've been in PARTIAL so the "stuck" rule can
         # fire after PARTIAL_STUCK_SECONDS. Clear the timer whenever we
         # leave PARTIAL.

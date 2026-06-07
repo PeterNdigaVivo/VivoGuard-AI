@@ -81,4 +81,22 @@ class EntryExitDetector(Detector):
                     track_id=tr.track_id, zone_id=z["id"],
                     extra={"direction": direction, "store_id": ctx.store_id},
                 ))
+
+                # Shop-open / shop-close alert dispatcher. Reuses this
+                # entrance line — only entrance cameras (with an
+                # entry_exit line) ever reach this branch. The
+                # dispatcher gates open alerts on the latest committed
+                # shutter state (signal-agreement rule).
+                from app.ai.detectors import shop_state
+                shop_alert = None
+                if direction == "in":
+                    shop_alert = shop_state.maybe_emit_open_alert(
+                        ctx, cfg.get("extra"),
+                        tr.track_id, z["id"], tr.bbox_norm)
+                elif direction == "out":
+                    shop_alert = shop_state.maybe_emit_close_alert(
+                        ctx, cfg.get("extra"),
+                        tr.track_id, z["id"], tr.bbox_norm)
+                if shop_alert is not None:
+                    out.append(shop_alert)
         return out

@@ -57,6 +57,7 @@ _SEVERITY: dict[str, str] = {
     "entry_exit":        "info",
     "dwell":             "info",
     "passersby":         "info",
+    "shop_open_close":   "info",
 }
 
 
@@ -102,6 +103,16 @@ def _severity_label(detection_type: str | None,
     # (unauthorised / customer in staff area) is URGENT.
     if detection_type == "staff_zone" and event is not None:
         return "INFO" if (event.extra or {}).get("rule") == "missing_nametag" else "URGENT"
+    # Shop open / close: routine open + close are INFO; before-hours
+    # is URGENT (security implication); late-opening is ATTENTION
+    # (staffing issue, not an emergency).
+    if detection_type == "shop_open_close" and event is not None:
+        rule = (event.extra or {}).get("rule", "")
+        if rule == "shop_opened_before_hours":
+            return "URGENT"
+        if rule == "shop_opened_late":
+            return "ATTENTION"
+        return "INFO"      # shop_opened, shop_closed
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
 
 
@@ -149,6 +160,18 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "partial_stuck":
             return "Store Door Stuck Part-Open"
         return "Store Door Issue"
+    if dt == "shop_open_close":
+        rule = extra.get("rule", "")
+        eat = extra.get("eat_time", "")
+        if rule == "shop_opened_before_hours":
+            return f"Shop opened before trading hours ({eat})"
+        if rule == "shop_opened_late":
+            return f"Shop opened late ({eat})"
+        if rule == "shop_opened":
+            return f"Shop open ({eat})"
+        if rule == "shop_closed":
+            return f"Shop closed ({eat})"
+        return "Shop open/close event"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -253,6 +276,24 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Ask the person to identify themselves",
                      "Guide customers back to the customer area if needed"]
+    elif dt == "shop_open_close":
+        rule = (event.extra or {}).get("rule", "")
+        if rule == "shop_opened_before_hours":
+            steps = ["Check the live camera now",
+                     "Confirm whether opening early is authorised",
+                     "Call the store manager if unexpected: {store_phone}"]
+        elif rule == "shop_opened_late":
+            steps = ["Note the late opening time",
+                     "Check why opening was delayed",
+                     "Mark resolved once trading has begun"]
+        elif rule == "shop_opened":
+            steps = ["Routine opening — no action needed",
+                     "Mark resolved"]
+        elif rule == "shop_closed":
+            steps = ["Routine closing — no action needed",
+                     "Mark resolved"]
+        else:
+            steps = ["Check the live camera"]
     else:
         steps = _WHAT_TO_DO.get(dt)
     if not steps:
@@ -285,6 +326,7 @@ _TITLE_ICONS: dict[str, str] = {
     "crowd":             "⚠️",
     "loitering":         "⚠️",
     "shutter":           "🔒",
+    "shop_open_close":   "🏬",
     "abandoned_object":  "🧳",
     "tailgating":        "⚠️",
     "staff_present":     "👤",
@@ -386,6 +428,18 @@ def _title(event: DetectionEvent, camera: Camera | None,
     if dt == "shutter":
         state = _extract(extra, "state", "shutter_state", default="")
         return f"{icon} Shutter {state or 'state change'} — {cam}"
+    if dt == "shop_open_close":
+        rule = extra.get("rule", "")
+        eat = extra.get("eat_time", "")
+        if rule == "shop_opened_before_hours":
+            return f"{icon} Shop opened before trading hours ({eat}) — {cam}"
+        if rule == "shop_opened_late":
+            return f"{icon} Shop opened late ({eat}) — {cam}"
+        if rule == "shop_opened":
+            return f"{icon} Shop open ({eat}) — {cam}"
+        if rule == "shop_closed":
+            return f"{icon} Shop closed ({eat}) — {cam}"
+        return f"{icon} Shop open/close — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -497,6 +551,21 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return ("Large gathering detected. Monitor for safety.")
     if dt == "shutter":
         return ("Shutter open/close state has changed. Verify against expected store hours.")
+    if dt == "shop_open_close":
+        msg = extra.get("message") or ""
+        if msg:
+            return msg
+        rule = extra.get("rule", "")
+        eat = extra.get("eat_time", "")
+        if rule == "shop_opened_before_hours":
+            return f"Shop opened before trading hours at {eat}."
+        if rule == "shop_opened_late":
+            return f"Shop opened late at {eat}."
+        if rule == "shop_opened":
+            return f"Shop open at {eat}."
+        if rule == "shop_closed":
+            return f"Shop closed at {eat}."
+        return "Shop open/close event recorded."
     if dt == "trespass":
         return (f"An unauthorised person was detected in {zone_name or 'a restricted area'}. "
                 f"Investigate and respond per protocol.")
