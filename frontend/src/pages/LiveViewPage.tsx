@@ -310,21 +310,33 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
   }
 
   useEffect(() => {
+    // Lifecycle guard for the whole effect: when the tile unmounts
+    // (page changed, layout changed, navigated away from Live View)
+    // every async branch — pending reconnect timer, in-flight health
+    // fetch, queued WebSocket events — has to see this flip and
+    // bail. Without it the reconnect setTimeout would fire AFTER
+    // cleanup and silently open a new WebSocket on an off-screen
+    // camera, which is exactly the CPU leak we're trying to kill.
+    let aborted = false
     let ws: WebSocket | null = null
-    let closed = false
     let retryMs = 1000
     let healthTimer: ReturnType<typeof setInterval> | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    const healthAbort = new AbortController()
 
     function connect() {
+      if (aborted) return
       ws = new WebSocket(wsUrl(`/ws/stream/${cameraId}`))
       ws.binaryType = 'blob'
       ws.onmessage = (e) => {
+        if (aborted) return
         lastFrameAt.current = Date.now()
         setState('live'); setDiag(null)
         const blob = e.data as Blob
         const url = URL.createObjectURL(blob)
         const img = new Image()
         img.onload = () => {
+          if (aborted) { URL.revokeObjectURL(url); return }
           const c = canvasRef.current
           if (!c) { URL.revokeObjectURL(url); return }
           c.width = img.naturalWidth; c.height = img.naturalHeight
@@ -336,36 +348,51 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
         retryMs = 1000
       }
       ws.onclose = () => {
-        if (closed) return
+        if (aborted) return
         setState(s => s === 'live' ? 'stale' : 'connecting')
-        setTimeout(connect, retryMs)
+        reconnectTimer = setTimeout(connect, retryMs)
         retryMs = Math.min(30_000, retryMs * 2)
       }
     }
     connect()
 
     healthTimer = setInterval(async () => {
+      if (aborted) return
       const silentMs = Date.now() - lastFrameAt.current
       if (silentMs > 10_000) {
         setState(lastFrameAt.current ? 'stale' : 'connecting')
         try {
           const tok = localStorage.getItem('vg_access_token') ?? ''
           const r = await fetch(`/api/system/cameras/${cameraId}/stream-health`,
-                                { headers: { Authorization: `Bearer ${tok}` } })
+                                { headers: { Authorization: `Bearer ${tok}` },
+                                  signal: healthAbort.signal })
+          if (aborted) return
           if (r.ok) {
             const h = await r.json()
+            if (aborted) return
             if (h.error)            setDiag(h.error)
             else if (!h.is_streaming) setDiag('Streamer not yet attempting this camera. Wait ~10s after attaching, or check streamer logs.')
             else                     setDiag('Streamer connected but no frames received yet.')
           }
-        } catch { /* ignore */ }
+        } catch { /* abort or transient — ignore */ }
       }
     }, 5000)
 
     return () => {
-      closed = true
-      if (healthTimer) clearInterval(healthTimer)
-      if (ws) ws.close()
+      // Order matters: flip the guard first so any in-flight onmessage
+      // / onclose / setTimeout / setInterval callback short-circuits
+      // before it touches state or opens a fresh socket.
+      aborted = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (healthTimer)    clearInterval(healthTimer)
+      healthAbort.abort()
+      if (ws) {
+        // Drop handlers so the close event can't trigger a reconnect
+        // race even if the browser fires it after `aborted` was set.
+        ws.onmessage = null
+        ws.onclose   = null
+        try { ws.close() } catch { /* ignore */ }
+      }
     }
   }, [cameraId])
 
