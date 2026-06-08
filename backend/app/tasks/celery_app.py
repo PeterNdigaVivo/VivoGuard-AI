@@ -42,6 +42,12 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue="default",
+    # Auto-declare any queue referenced by `options={"queue": ...}` on
+    # an enqueue so we don't have to enumerate task_queues by hand.
+    # The bookkeeping beat tasks route to `beat` to avoid being
+    # starved by the 16 long-running inference.run_camera tasks
+    # holding every slot on `default`.
+    task_create_missing_queues=True,
     timezone=settings.app_timezone,
     beat_schedule={
         "supervise-inference-every-30s": {
@@ -136,17 +142,22 @@ celery_app.conf.update(
         # crontab schedule wasn't being picked up by this worker's
         # beat scheduler; switching to timedelta matches every other
         # interval task in this file).
+        #
+        # Routed to the `beat` queue so it doesn't compete with the
+        # 16 long-running inference.run_camera workers on the
+        # `default` queue (each holding a slot for ~9 minutes). The
+        # worker MUST be started with `-Q default,beat` to consume
+        # both, otherwise messages pile up in `beat` forever.
         "sales-floor-insights-every-15min": {
             "task": "alerting.sales_floor_insights_check",
             "schedule": timedelta(minutes=15),
+            "options": {"queue": "beat"},
         },
-        # Daily 18:00 EAT WhatsApp summary — 5-min dispatcher pattern
-        # (same as briefings-daily-every-5min). The task itself checks
-        # store-local clock + per-store-per-day Redis dedup so a single
-        # 18:00 fire is guaranteed.
+        # Daily 18:00 EAT WhatsApp summary — same routing rationale.
         "sales-floor-daily-summary-every-5min": {
             "task": "alerting.sales_floor_daily_summary",
             "schedule": timedelta(minutes=5),
+            "options": {"queue": "beat"},
         },
         # 5-min dispatcher checking whether each store has had its
         # first inward line-crossing of the day before the
@@ -155,6 +166,7 @@ celery_app.conf.update(
         "shop-not-opened-every-5min": {
             "task": "alerting.shop_not_opened_check",
             "schedule": timedelta(minutes=5),
+            "options": {"queue": "beat"},
         },
         # 5-min dispatcher checking whether 22:00 EAT has passed for
         # each store; when it has, builds the daily open/close
@@ -163,6 +175,7 @@ celery_app.conf.update(
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),
+            "options": {"queue": "beat"},
         },
     },
 )
