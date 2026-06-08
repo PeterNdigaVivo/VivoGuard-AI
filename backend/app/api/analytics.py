@@ -3852,3 +3852,348 @@ def cameras_cv_quality(db: Session = Depends(get_db),
         })
     out.sort(key=lambda r: r["avg_confidence"])
     return {"cameras": out, "flagged_count": sum(1 for r in out if r["flag"])}
+
+
+# ====================================================================
+# Chain dashboard revamp — Commit 3 of the dashboard rework.
+# ====================================================================
+# Two new endpoints that power the Store Opening Status board and
+# the Top Issues panel on /chain. Both run cheap aggregates on
+# detection_events for the current EAT day, so no heavy joins.
+
+
+def _eat_now():
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Africa/Nairobi"))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+@router.get("/chain/opening-status")
+@cached_store_endpoint("chain-opening-status", ttl=60)
+def chain_opening_status(db: Session = Depends(get_db),
+                         _u=Depends(get_current_user)):
+    """Per-store opening status for today (EAT). Drives the Store
+    Opening Status board on /chain.
+
+    For each active store returns one of:
+      on_time     — opened at or before the late threshold
+      late        — opened after the late threshold, includes minutes_late
+      not_opened  — past the not-opened cutoff with no inward crossing
+      pending     — before the late threshold, no crossing yet
+      no_data     — store has no entry/exit camera or detection events
+    """
+    from zoneinfo import ZoneInfo
+    eat = ZoneInfo("Africa/Nairobi")
+    now_local = _eat_now()
+    today_local_00 = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_local_00.astimezone(timezone.utc)
+    today_end_utc   = (today_local_00 + timedelta(days=1)).astimezone(timezone.utc)
+    # Match the shop_state defaults (also configurable via the
+    # entry_exit detector_config.extra). Hard-coding them here is
+    # acceptable because the chain summary just needs to colour a
+    # row — operators tune per-store thresholds in detection_configs.
+    late_threshold = time(9, 3)
+    not_opened_cutoff = time(9, 30)
+
+    stores = (db.query(Store).filter(Store.is_active == True)  # noqa: E712
+                .order_by(Store.name).all())
+    if not stores:
+        return {"as_of": now_local.isoformat(), "stores": []}
+
+    # One pass for cameras (map store_id → has-entry/exit-line).
+    has_entry_zone: dict[int, bool] = {}
+    cam_rows = db.query(Camera, Zone).join(
+        Zone, Zone.camera_id == Camera.id, isouter=True
+    ).filter(Camera.ai_enabled == True).all()  # noqa: E712
+    for cam, zone in cam_rows:
+        if (cam.store_id and zone
+                and zone.shape == "line"
+                and "entry_exit" in (zone.detection_types_json or [])):
+            has_entry_zone[cam.store_id] = True
+
+    # All shop_open_close events today, batched per-store.
+    ev_rows = (db.query(DetectionEvent, Camera)
+                 .join(Camera, Camera.id == DetectionEvent.camera_id)
+                 .filter(DetectionEvent.detection_type == "shop_open_close",
+                         DetectionEvent.timestamp >= today_start_utc,
+                         DetectionEvent.timestamp <  today_end_utc)
+                 .all())
+    first_open_by_store: dict[int, DetectionEvent] = {}
+    for ev, cam in ev_rows:
+        if cam.store_id is None:
+            continue
+        rule = (ev.extra or {}).get("rule", "")
+        if rule not in ("shop_opened", "shop_opened_late"):
+            continue
+        prev = first_open_by_store.get(cam.store_id)
+        if prev is None or ev.timestamp < prev.timestamp:
+            first_open_by_store[cam.store_id] = ev
+
+    out = []
+    for s in stores:
+        opened = first_open_by_store.get(s.id)
+        if not has_entry_zone.get(s.id):
+            out.append({
+                "store_id": s.id, "store_name": s.name,
+                "status": "no_data",
+                "status_label": "No entry/exit camera configured",
+                "opened_at_eat": None, "minutes_late": None,
+            })
+            continue
+        if opened is not None:
+            ts = opened.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            local = ts.astimezone(eat)
+            rule = (opened.extra or {}).get("rule", "")
+            late = rule == "shop_opened_late"
+            mins_late = None
+            if late:
+                opened_mins = local.hour * 60 + local.minute
+                start_mins  = 9 * 60       # trading_start_eat default
+                mins_late = max(0, opened_mins - start_mins)
+            out.append({
+                "store_id": s.id, "store_name": s.name,
+                "status": "late" if late else "on_time",
+                "status_label": (f"Opened {local.strftime('%-I:%M %p')} "
+                                 + (f"({mins_late} min late)" if late else "(on time)")),
+                "opened_at_eat": local.strftime("%H:%M"),
+                "minutes_late": mins_late,
+            })
+            continue
+        # No crossing today — late or pending depends on the clock.
+        t_now = now_local.time()
+        if t_now > not_opened_cutoff:
+            out.append({
+                "store_id": s.id, "store_name": s.name,
+                "status": "not_opened",
+                "status_label": "Not yet opened",
+                "opened_at_eat": None, "minutes_late": None,
+            })
+        else:
+            out.append({
+                "store_id": s.id, "store_name": s.name,
+                "status": "pending",
+                "status_label": "Awaiting first crossing",
+                "opened_at_eat": None, "minutes_late": None,
+            })
+    return {"as_of": now_local.isoformat(), "stores": out}
+
+
+# ----- Top issues across chain --------------------------------------
+
+# Detection types we want to surface on the Top Issues panel,
+# mapped to plain-English labels. Heartbeat / informational types
+# are deliberately excluded.
+_TOP_ISSUE_LABELS: dict[str, str] = {
+    "staff_present":      "Counter left unattended",
+    "queue":              "Long queues",
+    "queue_length":       "Long queues",
+    "uniform_compliance": "Staff not in uniform",
+    "shop_open_close":    "Late or missed opening",
+    "staff_zone":         "Unauthorised person behind counter",
+    "intrusion":          "After-hours intrusion",
+    "trespass":           "Restricted area entered",
+    "fight":              "Incident detected",
+    "fall":               "Person fall detected",
+    "shrinkage":          "Suspected shoplifting",
+    "crowd":              "Crowding",
+    "loitering":          "Loitering",
+    "abandoned_object":   "Unattended item",
+    "tailgating":         "Tailgating",
+    "weapon":             "Weapon detected",
+    "weapon_brandished":  "Weapon drawn",
+    "fire":               "Fire detected",
+    "smoke":              "Smoke detected",
+}
+
+
+@router.get("/chain/top-issues")
+@cached_store_endpoint("chain-top-issues", ttl=60)
+def chain_top_issues(db: Session = Depends(get_db),
+                     _u=Depends(get_current_user),
+                     limit: int = 5):
+    """Top alert types across all stores today (EAT) with the
+    most-affected stores per type. Powers the Top Issues card on
+    /chain. Informational heartbeats (sales_floor_insight, routine
+    shop_opened, entry_exit, dwell, passersby) are excluded so the
+    list reads as actionable."""
+    from collections import Counter, defaultdict
+    now_local = _eat_now()
+    today_local_00 = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_local_00.astimezone(timezone.utc)
+    today_end_utc   = (today_local_00 + timedelta(days=1)).astimezone(timezone.utc)
+
+    # For shop_open_close we only count the actionable rules — routine
+    # shop_opened / shop_closed alerts are heartbeats, not issues.
+    actionable_shop_rules = ("shop_opened_late", "shop_not_opened",
+                             "shop_opened_before_hours")
+
+    rows = (db.query(Alert, DetectionEvent, Camera, Store)
+              .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+              .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+              .outerjoin(Store,  Camera.store_id == Store.id)
+              .filter(Alert.created_at >= today_start_utc,
+                      Alert.created_at <  today_end_utc)
+              .all())
+
+    type_counts: Counter = Counter()
+    per_type_per_store: dict[str, Counter] = defaultdict(Counter)
+    minutes_late_by_store: dict[int, int] = {}     # for "Late opening"
+    for alert, ev, cam, store in rows:
+        dt = ev.detection_type
+        if dt not in _TOP_ISSUE_LABELS:
+            continue
+        # Filter heartbeat-ish shop_open_close rules.
+        if dt == "shop_open_close":
+            rule = (ev.extra or {}).get("rule", "")
+            if rule not in actionable_shop_rules:
+                continue
+            if rule == "shop_opened_late" and store is not None:
+                mins = (ev.extra or {}).get("minutes_late") or 0
+                minutes_late_by_store[store.id] = max(
+                    minutes_late_by_store.get(store.id, 0), int(mins) or 0)
+        type_counts[dt] += 1
+        if store is not None:
+            per_type_per_store[dt][store.id] += 1
+
+    # Build the response — top N types, with the top 2 most-affected
+    # stores rendered inline.
+    store_names = {s.id: s.name for s in db.query(Store).all()}
+    severity_for = {
+        "shrinkage": "high", "intrusion": "high",
+        "fight": "critical", "fall": "critical", "weapon": "critical",
+        "weapon_brandished": "critical", "fire": "critical", "smoke": "critical",
+        "staff_present": "high", "staff_zone": "high",
+        "queue": "medium", "queue_length": "medium",
+        "uniform_compliance": "medium", "crowd": "medium",
+        "shop_open_close": "medium", "loitering": "medium",
+        "abandoned_object": "high", "tailgating": "medium",
+        "trespass": "high",
+    }
+
+    top = []
+    for dt, total in type_counts.most_common(limit):
+        affected = per_type_per_store[dt].most_common(2)
+        affected_text = ", ".join(
+            f"{store_names.get(sid, f'Store {sid}')} ({n}x)"
+            for sid, n in affected)
+        rec = {
+            "detection_type": dt,
+            "label":          _TOP_ISSUE_LABELS[dt],
+            "count":          total,
+            "severity":       severity_for.get(dt, "medium"),
+            "affected_stores": [
+                {"store_id": sid, "store_name": store_names.get(sid),
+                 "count": n}
+                for sid, n in affected],
+            "affected_text": affected_text or "—",
+        }
+        if dt == "shop_open_close" and minutes_late_by_store:
+            rec["late_stores"] = [
+                {"store_id": sid,
+                 "store_name": store_names.get(sid),
+                 "minutes_late": m}
+                for sid, m in sorted(minutes_late_by_store.items(),
+                                     key=lambda kv: -kv[1])]
+        top.append(rec)
+
+    return {"as_of": now_local.isoformat(), "top_issues": top}
+
+
+# ====================================================================
+# ROI / Value Report — Commit 4 of the dashboard rework.
+# ====================================================================
+
+@router.get("/roi")
+@cached_store_endpoint("roi-report", ttl=300)
+def roi_report(db: Session = Depends(get_db),
+               _u=Depends(get_current_user)):
+    """Month-to-date "VivoGuard Value Report" — count of incidents
+    caught + an estimated value, derived from real alert / detection
+    data with per-incident KES values from settings.
+
+    All money figures are estimates. The per-incident values are
+    deliberately conservative; head-office can tune them via
+    .env (ROI_THEFT_PER_INCIDENT_KES, ROI_UNAUTHORISED_PER_INCIDENT_KES,
+    ROI_QUEUE_PER_INCIDENT_KES, ROI_MONTHLY_COST_KES).
+    """
+    from sqlalchemy import func as _func
+    from app.config import settings as _settings
+    from zoneinfo import ZoneInfo
+    eat = ZoneInfo("Africa/Nairobi")
+    now_local = _eat_now()
+    month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_start_utc   = month_start_local.astimezone(timezone.utc)
+    prev_month_end_local = month_start_local
+    prev_month_start_local = (month_start_local - timedelta(days=1)
+                              ).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_start_utc = prev_month_start_local.astimezone(timezone.utc)
+    prev_month_end_utc   = prev_month_end_local.astimezone(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+
+    def _count(types, status_in=None, t0=month_start_utc, t1=now_utc):
+        q = (db.query(_func.count(Alert.id))
+               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+               .filter(DetectionEvent.detection_type.in_(types),
+                       Alert.created_at >= t0,
+                       Alert.created_at <  t1))
+        if status_in:
+            q = q.filter(Alert.status.in_(status_in))
+        return int(q.scalar() or 0)
+
+    theft_alerts        = _count(("shrinkage",))
+    theft_confirmed     = _count(("shrinkage",), status_in=("resolved", "confirmed"))
+    unauthorised        = _count(("trespass", "intrusion", "staff_zone"))
+    queue_resolved      = _count(("queue", "queue_length"),
+                                 status_in=("resolved", "confirmed"))
+
+    # Staff compliance change: average uniform_compliance_pct this
+    # month vs last. Returns a fraction (0..1); we report the
+    # percentage-point delta.
+    def _avg_uniform(t0, t1):
+        v = (db.query(_func.avg(MetricSnapshot.value))
+               .filter(MetricSnapshot.metric_type == "uniform_compliance_pct",
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1).scalar())
+        return float(v or 0.0)
+    cur_uniform  = _avg_uniform(month_start_utc, now_utc) * 100.0
+    prev_uniform = _avg_uniform(prev_month_start_utc, prev_month_end_utc) * 100.0
+    uniform_delta_pts = round(cur_uniform - prev_uniform, 1)
+
+    # Estimated KES values — defaults are conservative; head-office
+    # tunes via env. "Value of theft prevention" uses CONFIRMED
+    # shrinkage alerts so we don't inflate the figure with false
+    # positives.
+    v_theft  = theft_confirmed * int(_settings.roi_theft_per_incident_kes)
+    v_unauth = unauthorised    * int(_settings.roi_unauthorised_per_incident_kes)
+    v_ops    = queue_resolved  * int(_settings.roi_queue_per_incident_kes)
+    total_value   = v_theft + v_unauth + v_ops
+    monthly_cost  = int(_settings.roi_monthly_cost_kes)
+    roi_multiple  = round(total_value / monthly_cost, 1) if monthly_cost else None
+
+    return {
+        "month_label": now_local.strftime("%B %Y"),
+        "as_of":       now_local.isoformat(),
+        "incidents": {
+            "theft_alerts":         theft_alerts,
+            "theft_confirmed":      theft_confirmed,
+            "unauthorised_access":  unauthorised,
+            "queue_issues_resolved": queue_resolved,
+            "uniform_compliance_change_pts": uniform_delta_pts,
+        },
+        "estimated_value_kes": {
+            "theft_prevention":     v_theft,
+            "operational_savings":  v_ops + v_unauth,
+            "total":                total_value,
+        },
+        "monthly_cost_kes":         monthly_cost,
+        "roi_multiple":             roi_multiple,
+        "per_incident_kes": {
+            "theft":         int(_settings.roi_theft_per_incident_kes),
+            "unauthorised":  int(_settings.roi_unauthorised_per_incident_kes),
+            "queue":         int(_settings.roi_queue_per_incident_kes),
+        },
+    }

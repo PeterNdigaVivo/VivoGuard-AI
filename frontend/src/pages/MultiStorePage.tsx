@@ -16,6 +16,7 @@ import { Card, PageHeader } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { analytics } from '@/api/stores'
 import { labelForDetector } from '@/lib/detectorLabels'
+import { api } from '@/api/client'
 
 type RAG = 'red' | 'amber' | 'green'
 
@@ -156,6 +157,15 @@ export default function MultiStorePage() {
                 ? `${data.best_store_today.visitors} visitors`
                 : 'no visitor data yet'} />
       </div>
+
+      {/* Plain-English chain panels — Commit 3 of the revamp. All
+          three pull from cheap aggregate endpoints, no per-store
+          fan-out. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChainHealthOverview />
+        <StoreOpeningStatusBoard />
+      </div>
+      <ChainTopIssues />
 
       {/* Needs attention */}
       {data.needs_attention.length > 0 && (
@@ -378,4 +388,218 @@ function pluck(obj: any, path: string): any {
 function fmt(v: number | null | undefined, digits = 1, suffix = ''): string {
   if (v === null || v === undefined || Number.isNaN(v)) return '—'
   return v.toFixed(digits) + suffix
+}
+
+
+// ---------------------------------------------------------------
+// Chain Health Overview — buckets stores into 4 health bands using
+// the existing /analytics/chain/health-leaderboard endpoint.
+// ---------------------------------------------------------------
+
+interface LeaderboardEntry {
+  store_id: number; store_name: string; country: string
+  score: number; delta: number | null
+}
+
+function _band(score: number): 'great' | 'good' | 'needs_work' | 'poor' {
+  if (score >= 80) return 'great'
+  if (score >= 60) return 'good'
+  if (score >= 40) return 'needs_work'
+  return 'poor'
+}
+
+function ChainHealthOverview() {
+  const [data, setData] = useState<LeaderboardEntry[] | null>(null)
+  useEffect(() => {
+    api<{ leaderboard: LeaderboardEntry[] }>('/analytics/chain/health-leaderboard')
+      .then(d => setData(d.leaderboard ?? []))
+      .catch(() => setData([]))
+  }, [])
+  const today = new Date().toLocaleDateString(
+    'en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const buckets = useMemo(() => {
+    const b = { great: [] as LeaderboardEntry[], good: [] as LeaderboardEntry[],
+                needs_work: [] as LeaderboardEntry[], poor: [] as LeaderboardEntry[] }
+    for (const r of (data ?? [])) b[_band(Math.round(r.score))].push(r)
+    return b
+  }, [data])
+  const best = (data ?? [])[0] || null
+  const worst = (data ?? [])[(data ?? []).length - 1] || null
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
+      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+        Vivo Fashion Group — Store Health Today
+      </div>
+      <div className="text-xs text-slate-400 mb-3">{today}</div>
+      {data == null ? (
+        <div className="text-sm text-slate-400">Loading scores…</div>
+      ) : data.length === 0 ? (
+        <div className="text-sm text-slate-500">No store scores available yet.</div>
+      ) : (
+        <>
+          <ul className="text-sm space-y-1.5">
+            <BucketRow emoji="🟢" label="Great (80–100)"     entries={buckets.great} fallback="No stores in great health yet" />
+            <BucketRow emoji="🟡" label="Good (60–79)"      entries={buckets.good} fallback="No stores in good range" />
+            <BucketRow emoji="🟠" label="Needs Work (40–59)" entries={buckets.needs_work} fallback="No stores in this range" />
+            <BucketRow emoji="🔴" label="Poor (0–39)"        entries={buckets.poor} fallback="No stores in poor health" />
+          </ul>
+          <div className="mt-3 text-sm space-y-0.5">
+            {best && (
+              <div>🏆 Best store today: <strong>{best.store_name}</strong> ({Math.round(best.score)}/100)</div>
+            )}
+            {worst && worst.store_id !== best?.store_id && (
+              <div>⚠️ Needs most help: <strong>{worst.store_name}</strong> ({Math.round(worst.score)}/100)</div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function BucketRow({ emoji, label, entries, fallback }: {
+  emoji: string; label: string; entries: LeaderboardEntry[]; fallback: string
+}) {
+  if (!entries.length) {
+    return <li className="text-slate-400">{emoji} {label}: <em>{fallback}</em></li>
+  }
+  const names = entries.map(e => e.store_name).join(', ')
+  return (
+    <li>
+      {emoji} {label}: <span className="text-slate-700">{names}</span>
+      <span className="text-slate-400 ml-1">({entries.length})</span>
+    </li>
+  )
+}
+
+
+// ---------------------------------------------------------------
+// Store Opening Status Board — today's opening per store.
+// ---------------------------------------------------------------
+
+interface OpeningRow {
+  store_id: number; store_name: string
+  status: 'on_time' | 'late' | 'not_opened' | 'pending' | 'no_data'
+  status_label: string
+  opened_at_eat: string | null
+  minutes_late: number | null
+}
+
+const _STATUS_EMOJI: Record<OpeningRow['status'], string> = {
+  on_time: '✅', late: '⚠️', not_opened: '🔴', pending: '🕐', no_data: '⚫',
+}
+const _STATUS_TONE: Record<OpeningRow['status'], string> = {
+  on_time: 'text-emerald-700', late: 'text-amber-700',
+  not_opened: 'text-red-700', pending: 'text-slate-500', no_data: 'text-slate-400',
+}
+
+function StoreOpeningStatusBoard() {
+  const [data, setData] = useState<OpeningRow[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    const tick = () => {
+      api<{ stores: OpeningRow[] }>('/analytics/chain/opening-status')
+        .then(d => { if (alive) setData(d.stores ?? []) })
+        .catch(() => { if (alive) setData([]) })
+    }
+    tick()
+    const t = setInterval(tick, 60_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
+      <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+        Store Opening Status — Today
+      </div>
+      {data == null ? (
+        <div className="text-sm text-slate-400">Loading…</div>
+      ) : data.length === 0 ? (
+        <div className="text-sm text-slate-500">No active stores configured.</div>
+      ) : (
+        <ul className="text-sm divide-y divide-slate-100">
+          {data.map(r => (
+            <li key={r.store_id} className="flex items-baseline gap-3 py-1.5">
+              <span>{_STATUS_EMOJI[r.status]}</span>
+              <span className="flex-1 text-slate-700">{r.store_name}</span>
+              <span className={'text-xs ' + _STATUS_TONE[r.status]}>{r.status_label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+
+// ---------------------------------------------------------------
+// Top Issues Across Chain — alert counts grouped by type.
+// ---------------------------------------------------------------
+
+interface ChainIssue {
+  detection_type: string
+  label: string
+  count: number
+  severity: 'critical' | 'high' | 'medium'
+  affected_text: string
+  late_stores?: { store_id: number; store_name: string | null; minutes_late: number }[]
+}
+
+const _SEV_EMOJI: Record<ChainIssue['severity'], string> = {
+  critical: '🔴', high: '🟠', medium: '🟡',
+}
+
+function ChainTopIssues() {
+  const [data, setData] = useState<ChainIssue[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    const tick = () => {
+      api<{ top_issues: ChainIssue[] }>('/analytics/chain/top-issues')
+        .then(d => { if (alive) setData(d.top_issues ?? []) })
+        .catch(() => { if (alive) setData([]) })
+    }
+    tick()
+    const t = setInterval(tick, 60_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
+      <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+        Top Issues Across All Stores Today
+      </div>
+      {data == null ? (
+        <div className="text-sm text-slate-400">Loading…</div>
+      ) : data.length === 0 ? (
+        <div className="text-sm text-emerald-700">
+          ✅ No actionable issues across the chain today.
+        </div>
+      ) : (
+        <ol className="space-y-2 text-sm">
+          {data.map((it, i) => (
+            <li key={it.detection_type}>
+              <div className="flex items-baseline gap-2">
+                <span className="text-slate-400 tabular-nums">{i + 1}.</span>
+                <span>{_SEV_EMOJI[it.severity]}</span>
+                <span className="text-slate-700">{it.label}</span>
+                <span className="text-slate-500">— {it.count} {it.count === 1 ? 'time' : 'times'}</span>
+              </div>
+              {it.detection_type === 'shop_open_close' && it.late_stores?.length ? (
+                <div className="ml-7 text-xs text-slate-500">
+                  {it.late_stores.map(s =>
+                    `${s.store_name ?? `Store ${s.store_id}`} (${s.minutes_late} min)`
+                  ).join(', ')}
+                </div>
+              ) : (
+                <div className="ml-7 text-xs text-slate-500">
+                  Most affected: {it.affected_text}
+                </div>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
 }
