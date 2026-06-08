@@ -24,6 +24,7 @@ const AddCameraWizard      = lazy(() => import('@/pages/AddCameraWizard'))
 const LiveViewPage         = lazy(() => import('@/pages/LiveViewPage'))
 const AlertsPage           = lazy(() => import('@/pages/AlertsPage'))
 const ReportsPage          = lazy(() => import('@/pages/ReportsPage'))
+const RoiPage              = lazy(() => import('@/pages/RoiPage'))
 const DetectionConfigPage  = lazy(() => import('@/pages/DetectionConfigPage'))
 const TrainingStudioPage   = lazy(() => import('@/pages/TrainingStudioPage'))
 const AnnotationPage       = lazy(() => import('@/pages/AnnotationPage'))
@@ -92,6 +93,7 @@ export default function App() {
               <Route path="/live"                     element={<LiveViewPage />} />
               <Route path="/alerts"                   element={<AlertsPage />} />
               <Route path="/reports"                  element={<ReportsPage />} />
+              <Route path="/analytics/roi"            element={<RoiPage />} />
               <Route path="/training"                 element={<TrainingStudioPage />} />
               <Route path="/training/shutter"         element={<ShutterTrainingPage />} />
               <Route path="/training/uniform"         element={<UniformTrainingPage />} />
