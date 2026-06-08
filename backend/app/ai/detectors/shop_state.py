@@ -52,11 +52,20 @@ EAT = ZoneInfo("Africa/Nairobi")
 
 DEFAULT_TRADING_START   = "09:00"
 DEFAULT_LATE_THRESHOLD  = "09:03"
-DEFAULT_CLOSING_THRESH  = "20:15"
+DEFAULT_CLOSING_THRESH  = "20:00"
 # Cut-off after which a still-not-opened store earns an URGENT
 # "Store Not Opened" alert. Configurable via the entry_exit detector
 # config's `extra.not_opened_cutoff_eat` field.
 DEFAULT_NOT_OPENED_CUTOFF = "09:30"
+# Outside this morning window, an inward line-crossing is NOT
+# considered a store-opening signal. Before 07:00 the only people on
+# camera are security / cleaning, so we ignore. After 09:30 every
+# crossing is regular customer traffic — the metric still increments,
+# but the open-alert path returns without firing.
+EARLIEST_OPEN_EAT = "07:00"
+# Symmetric upper bound on the close-detection window — outward
+# crossings after this are just late customers leaving.
+LATEST_CLOSE_EAT = "22:00"
 
 # Detection type used for the alerts emitted from this module. NOT
 # in app.ai.inference_worker._SKIP_ALERT_TYPES so events auto-promote
@@ -136,6 +145,10 @@ def _read_cfg(cfg_extra: dict | None) -> dict:
                                     or DEFAULT_CLOSING_THRESH)),
         "not_open_cutoff_t": _parse_hhmm(str(extra.get("not_opened_cutoff_eat")
                                              or DEFAULT_NOT_OPENED_CUTOFF)),
+        "earliest_open_t":   _parse_hhmm(str(extra.get("earliest_open_eat")
+                                             or EARLIEST_OPEN_EAT)),
+        "latest_close_t":    _parse_hhmm(str(extra.get("latest_close_eat")
+                                             or LATEST_CLOSE_EAT)),
     }
 
 
@@ -169,28 +182,35 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
 
     now_eat = _now_eat()
     day_iso = now_eat.date().isoformat()
+    t = now_eat.time()
+    open_t      = cfg["open_t"]
+    late_t      = cfg["late_t"]
+    earliest_t  = cfg["earliest_open_t"]
+    cutoff_t    = cfg["not_open_cutoff_t"]
 
-    # One shared dedupe key across the three open bands — the spec
-    # says "fire ONCE per camera per day" for the open alert family,
-    # regardless of which band ended up triggering.
+    # Morning-window gate. Crossings outside 07:00 – 09:30 EAT are
+    # NOT considered store-opening signals:
+    #   t < 07:00  → security / cleaning, ignore silently.
+    #   t > 09:30  → regular customer traffic; the metric still
+    #                ticks via EntryExitDetector, but no alert fires.
+    # This is the single rule that eliminates 99% of false alerts.
+    if earliest_t is not None and t < earliest_t:
+        return None
+    if cutoff_t is not None and t > cutoff_t:
+        return None
+
+    # One shared dedupe key across the open bands — fire ONCE per
+    # camera per day regardless of which band ended up triggering.
     if _already_fired(ctx.camera_id, day_iso, "open"):
         return None
 
-    t = now_eat.time()
-    open_t  = cfg["open_t"]
-    late_t  = cfg["late_t"]
-
-    if t < open_t:
-        kind     = "shop_opened_before_hours"
-        priority = "high"
-        message  = f"Shop opened before trading hours at {now_eat.strftime('%H:%M')}"
-    elif t <= late_t:
+    if t <= late_t:
         kind     = "shop_opened"
         priority = "info"
         message  = f"Shop open at {now_eat.strftime('%H:%M')}"
     else:
-        # Minutes late relative to the trading start, not the late
-        # threshold — operators care about how far past opening time.
+        # Minutes late relative to the trading start so operators see
+        # how far past opening time the store actually opened.
         minutes_late = (
             (t.hour * 60 + t.minute) - (open_t.hour * 60 + open_t.minute))
         kind     = "shop_opened_late"
@@ -234,7 +254,14 @@ def maybe_emit_close_alert(ctx: DetectorContext, cfg_extra: dict | None,
         return None
 
     now_eat = _now_eat()
-    if now_eat.time() < cfg["close_t"]:
+    t = now_eat.time()
+    # Closing window: only outward crossings between close_t (20:00
+    # default) and latest_close_t (22:00 default) count as closing
+    # signals. Outside this band an outward crossing is a customer
+    # leaving early or a very late shopper, not the close-of-day.
+    if t < cfg["close_t"]:
+        return None
+    if cfg["latest_close_t"] is not None and t > cfg["latest_close_t"]:
         return None
 
     day_iso = now_eat.date().isoformat()

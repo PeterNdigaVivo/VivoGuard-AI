@@ -156,5 +156,13 @@ celery_app.conf.update(
             "task": "alerting.shop_not_opened_check",
             "schedule": timedelta(minutes=5),
         },
+        # 5-min dispatcher checking whether 22:00 EAT has passed for
+        # each store; when it has, builds the daily open/close
+        # summary from today's shop_open_close events and emits one
+        # INFO alert + WhatsApp.
+        "shop-daily-summary-every-5min": {
+            "task": "alerting.shop_daily_summary_check",
+            "schedule": timedelta(minutes=5),
+        },
     },
 )

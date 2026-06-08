@@ -181,6 +181,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
             return "🚨 Store Not Opened"
         if rule == "shop_closed":
             return f"✅ Store Closed ({eat})"
+        if rule == "shop_daily_summary":
+            return "📋 Daily Open/Close Summary"
         return "Shop open/close event"
     if dt == "sales_floor_insight":
         rule = extra.get("rule", "")
@@ -337,6 +339,10 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
                      "Mark resolved once the store has opened"]
         elif rule == "shop_closed":
             steps = ["Routine closing — no action needed",
+                     "Mark resolved"]
+        elif rule == "shop_daily_summary":
+            steps = ["Daily summary — no action needed",
+                     "Review the open / close times if anything looks off",
                      "Mark resolved"]
         else:
             steps = ["Check the live camera"]
@@ -496,6 +502,8 @@ def _title(event: DetectionEvent, camera: Camera | None,
             return f"🚨 Store Not Opened — {store_name}"
         if rule == "shop_closed":
             return f"✅ Store Closed — {store_name} ({eat})"
+        if rule == "shop_daily_summary":
+            return f"📋 Daily Summary — {store_name}"
         return f"{icon} Shop open/close — {cam}"
     if dt == "sales_floor_insight":
         # Sales-floor insight is store-scoped, not camera-scoped — the

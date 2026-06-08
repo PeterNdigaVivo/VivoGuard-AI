@@ -891,3 +891,141 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         _send_whatsapp(recipients, f"🚨 {body}")
     log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
                 store.id, store.name, cutoff_hhmm)
+
+
+# ---- Daily open/close summary (22:00 EAT) ----------------------------
+
+SHOP_DAILY_HOUR = 22       # 22:00 store-local trigger
+
+
+@celery_app.task(name="alerting.shop_daily_summary_check", ignore_result=True)
+def shop_daily_summary_check() -> None:
+    """5-min dispatcher. Per-store-per-day at 22:00 EAT, builds the
+    open / close summary from today's shop_open_close DetectionEvent
+    rows and creates one INFO alert + WhatsApp.
+
+    "Vivo Yaya opened at 08:58 AM, closed at 21:05 PM
+     Open for 12 hours 7 minutes today"
+    """
+    from app.database import SessionLocal
+    from app.models import Store
+
+    r = _redis()
+    with SessionLocal() as db:
+        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+        for store in stores:
+            try:
+                local = _store_eat_now(store)
+                if local.hour < SHOP_DAILY_HOUR:
+                    continue
+                day_iso = local.date().isoformat()
+                key = f"vg:shop_daily_summary:{store.id}:{day_iso}"
+                if r.get(key):
+                    continue
+                _shop_daily_summary_for_store(db, store, local)
+                r.set(key, "1", ex=2 * 24 * 3600)
+            except Exception as e:
+                log.exception("shop_daily_summary: store=%s failed: %s",
+                              store.id, e)
+
+
+def _shop_daily_summary_for_store(db, store, local_now) -> None:
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import asc
+    from app.models import Camera, DetectionEvent
+
+    tz = ZoneInfo(getattr(store, "timezone", None) or "Africa/Nairobi")
+    today_local_00 = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start_utc = today_local_00.astimezone(timezone.utc)
+    window_end_utc   = local_now.astimezone(timezone.utc)
+
+    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return
+
+    rows = (db.query(DetectionEvent)
+              .filter(DetectionEvent.camera_id.in_(cam_ids),
+                      DetectionEvent.detection_type == "shop_open_close",
+                      DetectionEvent.timestamp >= window_start_utc,
+                      DetectionEvent.timestamp <  window_end_utc)
+              .order_by(asc(DetectionEvent.timestamp))
+              .all())
+
+    open_ev = next((e for e in rows
+                    if (e.extra or {}).get("rule") in ("shop_opened",
+                                                       "shop_opened_late")),
+                   None)
+    # FIRST shop_closed event of the day; the maybe_emit_close_alert
+    # dedupes per camera so there's typically only one anyway.
+    close_ev = next((e for e in rows
+                     if (e.extra or {}).get("rule") == "shop_closed"),
+                    None)
+    not_opened_ev = next((e for e in rows
+                          if (e.extra or {}).get("rule") == "shop_not_opened"),
+                         None)
+
+    def _fmt(ev) -> str:
+        ts = ev.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(tz).strftime("%H:%M")
+
+    store_name = store.name or f"Store {store.id}"
+    parts: list[str] = []
+    if open_ev:
+        parts.append(f"opened at {_fmt(open_ev)}")
+    elif not_opened_ev:
+        parts.append("did not open today")
+    else:
+        parts.append("opening time not recorded")
+    if close_ev:
+        parts.append(f"closed at {_fmt(close_ev)}")
+    else:
+        parts.append("closing time not recorded")
+
+    duration_text = ""
+    if open_ev and close_ev:
+        delta = (close_ev.timestamp - open_ev.timestamp).total_seconds()
+        mins  = max(0, int(round(delta / 60)))
+        hrs, mins = divmod(mins, 60)
+        if hrs and mins:
+            duration_text = f"Open for {hrs} hours {mins} minutes today."
+        elif hrs:
+            duration_text = f"Open for {hrs} hours today."
+        else:
+            duration_text = f"Open for {mins} minutes today."
+
+    summary = f"{store_name} {parts[0]}, {parts[1]}."
+    if duration_text:
+        summary += " " + duration_text
+
+    # Anchor the alert on the first camera attached — the alert is
+    # store-scoped conceptually, but the schema needs camera_id.
+    extra = {
+        "priority":           "info",
+        "rule":               "shop_daily_summary",
+        "store_id":           store.id,
+        "store_name":         store.name,
+        "message":            summary,
+        "opened_at_eat":      _fmt(open_ev)  if open_ev  else None,
+        "closed_at_eat":      _fmt(close_ev) if close_ev else None,
+        "did_not_open":       not_opened_ev is not None and open_ev is None,
+        "duration_text":      duration_text or None,
+        "eat_time":           local_now.strftime("%H:%M"),
+    }
+    _create_info_alert(db, camera_id=cams[0].id, zone_id=None,
+                       store_id=store.id,
+                       detection_type="shop_open_close",
+                       cls="shop_daily_summary", extra=extra)
+    db.commit()
+
+    recipients: list[str] = []
+    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
+    if mgr:
+        recipients.append(mgr)
+    recipients.extend(_dashboard_recipients())
+    recipients = list(dict.fromkeys(recipients))
+    if recipients:
+        _send_whatsapp(recipients, f"📋 {summary}")
+    log.info("shop_daily_summary: store=%s %s", store.id, summary)
