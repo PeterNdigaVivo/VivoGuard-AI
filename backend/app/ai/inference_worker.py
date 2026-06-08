@@ -318,6 +318,20 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             # drop legitimately co-present people on opposite ends of
             # the frame.
             seen_this_frame: set[tuple] = set()
+            # One-line per-camera diagnostic for the entry_exit
+            # detector specifically — operator can grep
+            #     `entry_exit detector: camera=`
+            # in the worker log to see whether a camera even reaches
+            # the detector. Throttled by frame_idx so we log roughly
+            # once per ~30 s of running at 5 FPS instead of every
+            # frame.
+            ee_zone_count = sum(
+                1 for z in zones
+                if "entry_exit" in (z.get("detection_types_json") or []))
+            if ee_zone_count and frame_idx % 150 == 0:
+                person_count = sum(1 for d in raw if d.get("cls") == "person")
+                log.info("entry_exit detector: camera=%s zones=%d detections=%d",
+                         camera_id, ee_zone_count, person_count)
             for det in registry.detectors_for(camera_id):
                 # Per-frame skip honouring detection_every_n_frames.
                 step = int((cfg.get(det.detection_type) or {}).get("detection_every_n_frames", 1) or 1)
