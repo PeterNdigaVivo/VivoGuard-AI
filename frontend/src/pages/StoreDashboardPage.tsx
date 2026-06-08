@@ -14,6 +14,10 @@ import {
   Card, PageHeader, Skeleton, StatusLight, Trend,
 } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
+import {
+  computeStoreHealth, StoreHealthCard,
+  TodayPlainEnglishPanel, AiNarrative, StaffPerformancePanel,
+} from '@/components/StoreHealthPanels'
 import { api } from '@/api/client'
 import { stores as storesApi, type Store } from '@/api/stores'
 import StoreForm from '@/components/StoreForm'
@@ -228,18 +232,34 @@ export default function StoreDashboardPage() {
         </div>
       )}
 
+      {/* STORE HEALTH SCORE + Plain-English summary + AI narrative —
+          Commit 2 of the dashboard revamp. All three derive from the
+          tiles payload, no new API surface. */}
+      {(() => {
+        const health = computeStoreHealth(t as any, data.status_light)
+        return (
+          <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <StoreHealthCard health={health} />
+            <TodayPlainEnglishPanel tiles={t as any} />
+          </section>
+        )
+      })()}
+      <AiNarrative storeName={data.store_name} tiles={t as any} />
+      <StaffPerformancePanel tiles={t as any} />
+
       {/* RIGHT NOW — values are last-known when the store is closed.
           The dimmed prop greys the tile and prints a small "Store
           closed" pill so operators know this isn't a live reading. */}
       <section>
-        <SectionTitle>Right now</SectionTitle>
+        <SectionTitle>What's happening right now</SectionTitle>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi label="People in store" big dimmed={closed} value={fmtInt(t.occupancy_now?.value)} />
           {t.queue_length_now?.visible && (
             <Kpi label="People in queue" big dimmed={closed} value={fmtInt(t.queue_length_now.value)} />
           )}
           {t.staff_present_pct_today?.visible && (
-            <Kpi label="Staff present today" big dimmed={closed} value={`${fmtInt(t.staff_present_pct_today.value)}%`} />
+            <Kpi label="Time staff were at counter" big dimmed={closed}
+                 value={`${fmtInt(t.staff_present_pct_today.value)}%`} />
           )}
           <Kpi label="Cameras live" value={`${data.cameras_online ?? 0}/${data.cameras_total ?? data.camera_count ?? 0}`} />
         </div>
@@ -250,20 +270,20 @@ export default function StoreDashboardPage() {
 
       {/* TODAY SO FAR */}
       <section>
-        <SectionTitle>Today so far</SectionTitle>
+        <SectionTitle>How today compares to yesterday</SectionTitle>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {/* Every tile in this section now carries trend vs the prior
               same-length window via t.<key>.trend. */}
-          <Kpi label="Unique visitors"
+          <Kpi label="Customers today"
                value={fmtInt(t.unique_visitors_today?.value)}
                trendDir={t.unique_visitors_today?.trend?.direction}
                trendPct={t.unique_visitors_today?.trend?.delta_pct ?? null} />
-          <Kpi label="Peak occupancy"
+          <Kpi label="Most people at once"
                value={fmtInt(t.occupancy_peak_today?.value)}
                trendDir={t.occupancy_peak_today?.trend?.direction}
                trendPct={t.occupancy_peak_today?.trend?.delta_pct ?? null} />
           {t.queue_wait_avg_today_sec?.visible && (
-            <Kpi label="Avg queue wait"
+            <Kpi label="Average wait in queue"
                  value={`${fmtInt(t.queue_wait_avg_today_sec.value)} sec`}
                  trendDir={t.queue_wait_avg_today_sec?.trend?.direction}
                  trendPct={t.queue_wait_avg_today_sec?.trend?.delta_pct ?? null} />
