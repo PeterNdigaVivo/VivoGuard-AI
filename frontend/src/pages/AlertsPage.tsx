@@ -23,6 +23,11 @@ export default function AlertsPage() {
     urgent: 0, attention: 0,
     resolved_today: 0, dismissed_today: 0,
     unread_urgent: 0,
+    critical_today: 0, high_today: 0, medium_today: 0, low_today: 0,
+    avg_response_seconds: null as number | null,
+    today_count: 0, yesterday_count: 0,
+    trend_vs_yesterday_pct: null as number | null,
+    date_label: null as string | null,
   })
   // Bottom-right toast for the "resolved" confirmation. Auto-clears
   // after 4s. Use this for any user-facing success/error message
@@ -166,8 +171,15 @@ export default function AlertsPage() {
         </div>
       } />
 
-      {/* Quick stats */}
-      <div className="text-sm text-slate-600 mb-3">
+      {/* Executive summary bar — spec Part 1 §3. Four-tier severity
+          counts + resolved tally + avg-time-to-resolve + vs-yesterday
+          trend in one glanceable strip. */}
+      <ExecutiveSummaryBar summary={summary} />
+
+      {/* Legacy compact tally — kept beneath the bar for the operators
+          who still scan for it. Drops once everyone's adopted the new
+          card-style bar above. */}
+      <div className="text-xs text-slate-500 mb-3">
         Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
         {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
         {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
@@ -235,5 +247,82 @@ function QuickBtn({ active, onClick, children }: {
               (active ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200')}>
       {children}
     </button>
+  )
+}
+
+
+// Executive summary bar — spec Part 1 §3. One card at the top of the
+// page with the day label, four severity counts, resolved tally, the
+// average time-to-resolve, and the vs-yesterday trend.
+function ExecutiveSummaryBar({ summary }: {
+  summary: {
+    critical_today: number; high_today: number
+    medium_today:   number; low_today:  number
+    resolved_today: number
+    avg_response_seconds: number | null
+    today_count: number; yesterday_count: number
+    trend_vs_yesterday_pct: number | null
+    date_label: string | null
+  }
+}) {
+  const today = summary.date_label || new Date().toLocaleDateString(
+    'en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const avg = summary.avg_response_seconds
+  const avgText = avg == null
+    ? '—'
+    : avg < 60
+      ? `${Math.round(avg)}s`
+      : `${Math.floor(avg / 60)}m ${Math.round(avg % 60)}s`
+  const trend = summary.trend_vs_yesterday_pct
+  const trendText = trend == null
+    ? null
+    : trend > 0 ? `📈 Alerts up ${trend}% vs yesterday`
+      : trend < 0 ? `📉 Alerts down ${Math.abs(trend)}% vs yesterday`
+      : '➡️ Same volume as yesterday'
+  const trendColor = trend == null ? 'text-slate-500'
+    : trend > 0 ? 'text-red-600'
+    : trend < 0 ? 'text-emerald-600'
+    : 'text-slate-500'
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white shadow-sm
+                    mb-3 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+        Today's Store Health — {today}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+        <SevPill label="Critical" emoji="🔴" count={summary.critical_today}
+                 tone="text-red-700 bg-red-50 border-red-200" />
+        <SevPill label="High"     emoji="🟠" count={summary.high_today}
+                 tone="text-orange-700 bg-orange-50 border-orange-200" />
+        <SevPill label="Medium"   emoji="🟡" count={summary.medium_today}
+                 tone="text-yellow-700 bg-yellow-50 border-yellow-200" />
+        <SevPill label="Low"      emoji="🔵" count={summary.low_today}
+                 tone="text-blue-700 bg-blue-50 border-blue-200" />
+        <span className="text-slate-300">|</span>
+        <span className="text-emerald-700">
+          ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved
+        </span>
+        <span className="text-slate-600">
+          ⏱ Avg Response: <strong className="tabular-nums">{avgText}</strong>
+        </span>
+        {trendText && (
+          <span className={'ml-auto ' + trendColor}>{trendText}</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SevPill({ label, emoji, count, tone }: {
+  label: string; emoji: string; count: number; tone: string
+}) {
+  return (
+    <span className={'inline-flex items-center gap-1.5 px-2 py-0.5 rounded ' +
+                     'border text-xs font-medium ' + tone}>
+      <span>{emoji}</span>
+      <span className="tabular-nums">{count}</span>
+      <span className="opacity-80">{label}</span>
+    </span>
   )
 }

@@ -34,6 +34,14 @@ class AlertOut(BaseModel):
     # Non-technical traffic-light label for store managers:
     # 'URGENT' (red) | 'ATTENTION' (amber) | 'INFO' (blue).
     severity_label: str | None = None
+    # Four-tier severity ladder for the redesigned alerts page:
+    #   CRITICAL — act now (theft, fight, weapon, fire, intrusion)
+    #   HIGH     — act within 5 min (restricted area, counter unstaffed)
+    #   MEDIUM   — review within 30 min (queue, uniform, loitering)
+    #   LOW      — review end of day (routine heartbeats)
+    severity_4:       str | None = None
+    severity_4_color: str | None = None   # hex e.g. "#dc2626"
+    severity_4_emoji: str | None = None   # "🔴" / "🟠" / "🟡" / "🔵"
     title:    str | None = None        # "⚠️ Counter Unstaffed — Vivo Runda Cam 3"
     # Plain-English heading with NO camera suffix, for the big card
     # title ("Someone in Store After Hours").

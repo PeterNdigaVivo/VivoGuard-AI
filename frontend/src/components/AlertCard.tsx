@@ -151,6 +151,20 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
     }
   }
 
+  async function acknowledgeOne() {
+    // Optimistic — stamp acknowledged_at locally so the lifecycle
+    // pip moves to the middle step immediately. Status stays 'new'
+    // so the alert remains in the active list.
+    setLocal({ ...alert, acknowledged_at: new Date().toISOString() })
+    try {
+      await alertsApi.acknowledge(alert.id)
+      onChanged?.()
+    } catch (e) {
+      setLocal(incoming)
+      window.alert('Could not acknowledge. ' + e)
+    }
+  }
+
   async function dismissOne() {
     setLocal({ ...alert, status: 'dismissed',
                resolved_at: new Date().toISOString() })
@@ -261,6 +275,19 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
             </details>
           )}
 
+          {/* Lifecycle progress pip — Generated → Acknowledged →
+              Resolved. Filled steps are dark; the active step pulses;
+              future steps are pale. Hides when the alert is dismissed
+              (acknowledge / resolve aren't the relevant flow). */}
+          {!isDismissed && (
+            <LifecyclePip
+              createdAt={alert.created_at}
+              acknowledgedAt={alert.acknowledged_at}
+              resolvedAt={alert.resolved_at}
+              isResolved={isResolved}
+            />
+          )}
+
           {/* Closure footer — shown only when already resolved or dismissed. */}
           {isClosed && (
             <div className="mt-2 text-xs text-slate-500">
@@ -273,6 +300,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
           <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
             {alert.status === 'new' && (
               <>
+                {!alert.acknowledged_at && (
+                  <ActionBtn onClick={acknowledgeOne} tone="amber" disabled={busy}>
+                    👁 I'm on it
+                  </ActionBtn>
+                )}
                 <ActionBtn onClick={resolveOne} tone="emerald" disabled={busy}>
                   ✅ I handled this
                 </ActionBtn>
@@ -370,12 +402,14 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
 }
 
 function ActionBtn({ onClick, tone, disabled, children }: {
-  onClick: () => void; tone: 'emerald' | 'slate'; disabled?: boolean
+  onClick: () => void; tone: 'emerald' | 'slate' | 'amber'; disabled?: boolean
   children: React.ReactNode
 }) {
   const cls = tone === 'emerald'
     ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+    : tone === 'amber'
+      ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
   return (
     <button onClick={onClick} disabled={disabled}
             className={'px-2 py-1 rounded ' + cls + ' disabled:opacity-50'}>
@@ -431,4 +465,49 @@ export function groupAlerts(rows: Alert[]): {
   }
   out.sort((a, b) => (b.last || '').localeCompare(a.last || ''))
   return out
+}
+
+
+// Lifecycle pip — three-dot timeline showing how far the alert is
+// through the Generated → Acknowledged → Resolved flow. Each step
+// renders the timestamp inline when reached. The active (current)
+// step pulses so the operator's eye lands on what's next.
+function LifecyclePip({ createdAt, acknowledgedAt, resolvedAt, isResolved }: {
+  createdAt: string | null
+  acknowledgedAt: string | null
+  resolvedAt: string | null
+  isResolved: boolean
+}) {
+  // Steps: generated (always), acknowledged (optional), resolved.
+  const steps = [
+    { label: 'Generated',    ts: createdAt,      done: !!createdAt },
+    { label: 'Acknowledged', ts: acknowledgedAt, done: !!acknowledgedAt || isResolved },
+    { label: 'Resolved',     ts: resolvedAt,     done: isResolved },
+  ]
+  const activeIdx = steps.findIndex(s => !s.done)
+  return (
+    <div className="mt-2 flex items-center gap-1 text-[11px] text-slate-500"
+         aria-label="Alert lifecycle">
+      {steps.map((s, i) => {
+        const active = i === activeIdx
+        const dotCls = s.done
+          ? 'bg-emerald-500 border-emerald-500'
+          : active
+            ? 'bg-amber-400 border-amber-400 animate-pulse'
+            : 'bg-slate-200 border-slate-300'
+        return (
+          <span key={s.label} className="inline-flex items-center gap-1">
+            <span className={'inline-block w-2 h-2 rounded-full border ' + dotCls} />
+            <span className={s.done ? 'text-slate-700' : ''}>
+              {s.label}
+              {s.ts && <span className="text-slate-400"> ({formatTime(s.ts)})</span>}
+            </span>
+            {i < steps.length - 1 && (
+              <span className="inline-block w-4 h-px bg-slate-200 mx-0.5" />
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
 }

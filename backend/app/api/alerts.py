@@ -82,6 +82,97 @@ _SEVERITY_LABEL: dict[str, str] = {
     "tailgating": "ATTENTION", "camera_offline": "ATTENTION",
 }
 
+# Four-tier severity ladder (spec Part 1 §1):
+#   CRITICAL — immediate action required (theft, fight, weapon, fire,
+#              fall, smoke, shrinkage, after-hours intrusion).
+#   HIGH     — act within 5 minutes (suspicious behaviour, restricted
+#              area, counter unstaffed, person after-hours).
+#   MEDIUM   — review within 30 minutes (queue, loitering, uniform,
+#              tailgating, crowd, sales-floor unattended).
+#   LOW      — review end of day (routine heartbeats, on-time shop
+#              open / close, sales-floor insight).
+_SEVERITY_4: dict[str, str] = {
+    "fight":              "CRITICAL",
+    "weapon":             "CRITICAL",
+    "weapon_brandished":  "CRITICAL",
+    "fire":               "CRITICAL",
+    "smoke":              "CRITICAL",
+    "fall":               "CRITICAL",
+    "shrinkage":          "CRITICAL",
+    "intrusion":          "CRITICAL",
+
+    "trespass":           "HIGH",
+    "staff_present":      "HIGH",       # counter unstaffed
+    "staff_zone":         "HIGH",       # default; per-rule override below
+    "abandoned_object":   "HIGH",
+    "camera_offline":     "HIGH",
+
+    "queue":              "MEDIUM",
+    "queue_length":       "MEDIUM",
+    "crowd":              "MEDIUM",
+    "loitering":          "MEDIUM",
+    "tailgating":         "MEDIUM",
+    "uniform_compliance": "MEDIUM",
+    "shutter":            "MEDIUM",
+
+    "shop_open_close":    "LOW",
+    "sales_floor_insight":"LOW",
+    "entry_exit":         "LOW",
+    "dwell":              "LOW",
+    "passersby":          "LOW",
+    "occupancy":          "LOW",
+    "person":             "LOW",        # default; per-context override below
+}
+
+_SEVERITY_4_COLOR: dict[str, str] = {
+    "CRITICAL": "#dc2626",      # red-600
+    "HIGH":     "#ea580c",      # orange-600
+    "MEDIUM":   "#ca8a04",      # yellow-600
+    "LOW":      "#2563eb",      # blue-600
+}
+_SEVERITY_4_EMOJI: dict[str, str] = {
+    "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵",
+}
+
+
+def _severity_4_label(detection_type: str | None,
+                      event: DetectionEvent | None = None,
+                      zone: Zone | None = None, store=None) -> str:
+    """4-tier severity ladder. Per-rule overrides for the detectors
+    whose level depends on the event context."""
+    dt = detection_type or ""
+    extra = (event.extra or {}) if event is not None else {}
+    rule = extra.get("rule", "")
+    # Person: customer = LOW; after-hours / restricted = HIGH.
+    if dt == "person":
+        if event is not None:
+            ctxt = _person_context(event, zone, store)
+            return "LOW" if ctxt == "customer" else "HIGH"
+        return "HIGH"
+    # Uniform compliance: no-lanyard is gentle; wrong colour is louder.
+    if dt == "uniform_compliance":
+        return "LOW" if rule == "no_lanyard" else "MEDIUM"
+    # Staff zone: customer/intruder behind counter is HIGH; missing
+    # nametag is just LOW.
+    if dt == "staff_zone":
+        return "LOW" if rule == "missing_nametag" else "HIGH"
+    # Sales-floor insight: low engagement / unattended floor = MEDIUM;
+    # everything else (quiet/good/baseline) is the LOW heartbeat.
+    if dt == "sales_floor_insight":
+        return "MEDIUM" if rule in ("low_engagement", "unattended_floor") else "LOW"
+    # Shop open/close: not-opened-by-cutoff is CRITICAL; before-hours
+    # / late-opening are HIGH/MEDIUM; routine open + close are LOW.
+    if dt == "shop_open_close":
+        if rule == "shop_not_opened":           return "CRITICAL"
+        if rule == "shop_opened_before_hours":  return "HIGH"
+        if rule == "shop_opened_late":          return "MEDIUM"
+        return "LOW"
+    return _SEVERITY_4.get(dt, "LOW")
+
+
+def _severity_4_color(label: str) -> str:
+    return _SEVERITY_4_COLOR.get(label, "#64748b")
+
 
 def _severity_label(detection_type: str | None,
                     event: DetectionEvent | None = None,
@@ -782,6 +873,13 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.thumbnail_path = event.thumbnail_path
     item.severity       = _severity(event.detection_type)
     item.severity_label = _severity_label(event.detection_type, event, zone, store)
+    # Four-tier ladder for the redesigned alerts page. severity_label
+    # (3-tier URGENT/ATTENTION/INFO) stays for backwards-compat with
+    # any cached client bundles.
+    s4 = _severity_4_label(event.detection_type, event, zone, store)
+    item.severity_4       = s4
+    item.severity_4_color = _severity_4_color(s4)
+    item.severity_4_emoji = _SEVERITY_4_EMOJI.get(s4, "•")
     item.title          = _title(event, camera, zone, store)
     item.plain_title    = _plain_title(event, zone, store)
     item.body           = _body(event, zone, store)
@@ -797,37 +895,55 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
 def alerts_summary(db: Session = Depends(get_db),
                    _u: User = Depends(get_current_user),
                    store_id: Optional[int] = Query(None)):
-    """Quick counts for the alerts page header + the sidebar badge.
-    Today (since UTC midnight) urgent / attention / resolved, plus
-    unread_urgent (still-new + URGENT) which drives the red badge.
+    """Counts + lifecycle metrics for the alerts page's executive
+    summary bar and the sidebar badge.
 
-    Joins Store + Zone so the person-context severity is computed
-    correctly — a customer-during-hours person alert counts as INFO,
-    not URGENT, so the badge isn't flooded by routine detections."""
+    Returns BOTH the legacy 3-tier counts (urgent / attention) and
+    the new 4-tier counts (critical / high / medium / low) so older
+    clients keep working while the redesigned page reads the new
+    fields directly. Adds avg-time-to-resolve and a vs-yesterday
+    trend so the bar can render "Avg Response: 1m 42s · 📈 Alerts
+    up 12% vs yesterday" without a follow-up request."""
     from app.models import Store as _Store
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    q = (db.query(Alert, DetectionEvent, _Store)
-           .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .outerjoin(_Store, Camera.store_id == _Store.id)
-           .filter(DetectionEvent.timestamp >= today))
-    if store_id is not None:
-        q = q.filter(Camera.store_id == store_id)
-    rows = q.all()
+    yest_start = today - timedelta(days=1)
+
+    def _fetch(window_start, window_end):
+        qq = (db.query(Alert, DetectionEvent, _Store)
+               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+               .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+               .outerjoin(_Store, Camera.store_id == _Store.id)
+               .filter(DetectionEvent.timestamp >= window_start,
+                       DetectionEvent.timestamp <  window_end))
+        if store_id is not None:
+            qq = qq.filter(Camera.store_id == store_id)
+        return qq.all()
+
+    rows = _fetch(today, today + timedelta(days=1))
+    yest_count = len(_fetch(yest_start, today))
+
     zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
     zones_by_id = ({z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()}
                    if zone_ids else {})
+
     urgent = attention = resolved = dismissed = unread_urgent = 0
+    critical = high = medium = low = 0
+    resolve_durations: list[float] = []
     for alert, ev, store in rows:
         zone = zones_by_id.get(ev.zone_id) if ev.zone_id else None
         label = _severity_label(ev.detection_type, ev, zone, store)
-        # Resolved = the operator-acted-on states. The /resolve
-        # endpoint still uses 'confirmed' as its closure status, so
-        # we treat it the same as 'resolved'. Dismissed is reported
-        # separately so the dashboard can show "3 resolved · 2
-        # dismissed" rather than rolling them together.
+        s4    = _severity_4_label(ev.detection_type, ev, zone, store)
         if alert.status in ("resolved", "confirmed"):
             resolved += 1
+            # Time-to-resolve = resolved_at − created_at when both
+            # present. Falls back to acknowledged_at when an older
+            # row never recorded the resolve timestamp explicitly.
+            r_at = alert.resolved_at or alert.acknowledged_at
+            if r_at and alert.created_at:
+                if r_at.tzinfo is None: r_at = r_at.replace(tzinfo=timezone.utc)
+                c_at = alert.created_at
+                if c_at.tzinfo is None: c_at = c_at.replace(tzinfo=timezone.utc)
+                resolve_durations.append(max(0.0, (r_at - c_at).total_seconds()))
             continue
         if alert.status == "dismissed":
             dismissed += 1
@@ -838,12 +954,68 @@ def alerts_summary(db: Session = Depends(get_db),
                 unread_urgent += 1
         elif label == "ATTENTION":
             attention += 1
+        if s4 == "CRITICAL": critical += 1
+        elif s4 == "HIGH":   high += 1
+        elif s4 == "MEDIUM": medium += 1
+        else:                low += 1
+
+    avg_response_seconds = (sum(resolve_durations) / len(resolve_durations)
+                            if resolve_durations else None)
+    today_count = len(rows)
+    trend_vs_yesterday_pct = None
+    if yest_count > 0:
+        trend_vs_yesterday_pct = round(
+            (today_count - yest_count) / yest_count * 100.0, 1)
+    elif today_count > 0:
+        trend_vs_yesterday_pct = 100.0
+
+    # Friendly date label in the store's timezone (or EAT default).
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo("Africa/Nairobi")
+    except Exception:
+        tz = timezone.utc
+    date_label = datetime.now(tz).strftime("%A %-d %B %Y") \
+        if hasattr(datetime, "strftime") else None
+    # Some platforms (Windows) reject %-d — fall back to the padded form.
+    if date_label is None or "-" in date_label:
+        date_label = datetime.now(tz).strftime("%A %d %B %Y")
+
     return {
+        # Legacy 3-tier — kept for backwards compat with cached bundles.
         "urgent": urgent, "attention": attention,
         "resolved_today": resolved,
         "dismissed_today": dismissed,
         "unread_urgent": unread_urgent,
+        # New 4-tier ladder.
+        "critical_today": critical,
+        "high_today":     high,
+        "medium_today":   medium,
+        "low_today":      low,
+        # Lifecycle stats.
+        "avg_response_seconds":  avg_response_seconds,
+        "today_count":           today_count,
+        "yesterday_count":       yest_count,
+        "trend_vs_yesterday_pct": trend_vs_yesterday_pct,
+        "date_label":            date_label,
     }
+
+
+# ---- Acknowledge endpoint ----------------------------------------
+
+@router.post("/{alert_id}/acknowledge", response_model=AlertActionOut)
+def acknowledge_alert(alert_id: int, db: Session = Depends(get_db),
+                      _u: User = Depends(get_current_user)):
+    """Mark the alert as acknowledged — drives the Generated →
+    Acknowledged → Resolved progress bar. Idempotent: a second
+    acknowledge on the same alert is a no-op."""
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(404, "alert not found")
+    if alert.acknowledged_at is None:
+        alert.acknowledged_at = datetime.now(timezone.utc)
+        db.commit()
+    return AlertActionOut(id=alert.id, status=alert.status)
 
 
 @router.get("/export.xlsx")

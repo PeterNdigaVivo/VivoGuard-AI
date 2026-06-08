@@ -18,6 +18,10 @@ export interface Alert {
   severity: 'critical' | 'warning' | 'info' | null
   // Non-technical traffic-light label: 'URGENT' | 'ATTENTION' | 'INFO'.
   severity_label: 'URGENT' | 'ATTENTION' | 'INFO' | null
+  // Four-tier severity ladder used by the redesigned page.
+  severity_4: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | null
+  severity_4_color: string | null     // hex e.g. "#dc2626"
+  severity_4_emoji: string | null     // "🔴" / "🟠" / "🟡" / "🔵"
   title: string | null
   // Plain-English heading with no camera suffix ("Staff Not in Uniform").
   plain_title: string | null
@@ -37,16 +41,28 @@ export const alerts = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
     return api<Alert[]>(`/alerts${q.toString() ? `?${q}` : ''}`)
   },
-  // Quick counts for the header stats + sidebar badge. dismissed_today
-  // is split out from resolved_today so the page can show both.
+  // Quick counts for the executive summary bar + sidebar badge.
+  // Returns both the legacy 3-tier counts and the new 4-tier
+  // ladder (critical/high/medium/low), plus avg-time-to-resolve
+  // and the vs-yesterday trend.
   summary: (storeId?: number) =>
     api<{
       urgent: number; attention: number
       resolved_today: number; dismissed_today: number
       unread_urgent: number
+      critical_today: number; high_today: number
+      medium_today: number;   low_today: number
+      avg_response_seconds: number | null
+      today_count: number;    yesterday_count: number
+      trend_vs_yesterday_pct: number | null
+      date_label: string | null
     }>(`/alerts/summary${storeId ? `?store_id=${storeId}` : ''}`),
   confirm: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/confirm`, { method: 'POST' }),
   dismiss: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/dismiss`, { method: 'POST' }),
+  // Mark as acknowledged — drives the Generated → Acknowledged →
+  // Resolved progress bar on the alert card. Idempotent.
+  acknowledge: (id: number) =>
+    api<{ id: number; status: string }>(`/alerts/${id}/acknowledge`, { method: 'POST' }),
   // Resolved is the everyday "I handled it" action — distinct from
   // confirm (which also feeds ML training as a true positive).
   resolve: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/resolve`, { method: 'POST' }),
