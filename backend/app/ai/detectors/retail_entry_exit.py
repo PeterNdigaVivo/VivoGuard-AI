@@ -79,20 +79,24 @@ class EntryExitDetector(Detector):
     needs_tracking = True
 
     # Match this frame's person to a pseudo-track when their centroids
-    # are within this normalised distance (≈15% of frame width/height).
+    # are within this normalised distance (≈25% of frame width/height).
     # Wide enough to bridge a tracker-ID drop where the person moved a
-    # few pixels between frames; tight enough that two genuinely
-    # different people don't collapse.
-    MATCH_RADIUS = 0.15
-    # Drop pseudo-tracks not seen for this long.
-    PSEUDO_TRACK_TTL = 10.0
+    # fair distance between frames at 5 FPS, tight enough that two
+    # genuinely different people don't collapse into one pseudo-track.
+    MATCH_RADIUS = 0.25
+    # Drop pseudo-tracks not seen for this long. Spec asks for a
+    # 30-second memory window — match it. A person who steps out of
+    # frame and returns within 30 s still gets credited.
+    PSEUDO_TRACK_TTL = 30.0
     # Cooldown between consecutive crossing fires for the same
     # pseudo-track (so a person hovering on the line is counted once
     # per genuine crossing).
     REFIRE_COOLDOWN = 3.0
     # If the centroid is within this distance of the line treat side
     # as 0 — prevents sub-pixel oscillation registering as a crossing.
-    SIDE_DEADBAND = 0.01
+    # Kept tight (0.5% of frame) so legitimate near-line crossings
+    # still register.
+    SIDE_DEADBAND = 0.005
     # Diagnostic log threshold for "person near line".
     NEAR_LINE_THRESHOLD = 0.10
 
@@ -101,6 +105,10 @@ class EntryExitDetector(Detector):
         self._pseudo: dict[tuple[int, int], list[dict]] = {}
         self._last_hb: dict[int, float] = {}
         self._last_near: dict[tuple[int, int], float] = {}
+        # Per-camera flag so the "code path loaded" banner only logs
+        # once — confirms the position-based pseudo-track code is
+        # what's running, not the retired prev/curr centroid version.
+        self._announced: set[int] = set()
 
     # ---- log throttles -----------------------------------------------
 
@@ -165,6 +173,14 @@ class EntryExitDetector(Detector):
         thr = float(cfg.get("confidence_threshold", 0.5))
         persons = [d for d in ctx.raw_detections
                    if d.get("cls") in COCO_PERSON and d.get("conf", 0.0) >= thr]
+        if ctx.camera_id not in self._announced:
+            self._announced.add(ctx.camera_id)
+            log.info("EntryExit camera=%s pseudo-track impl loaded "
+                     "(MATCH_RADIUS=%.2f PSEUDO_TRACK_TTL=%.0fs "
+                     "SIDE_DEADBAND=%.3f conf_thr=%.2f) — visitor counting "
+                     "and shop-open alerts are independent gates.",
+                     ctx.camera_id, self.MATCH_RADIUS, self.PSEUDO_TRACK_TTL,
+                     self.SIDE_DEADBAND, thr)
         if self._hb_due(ctx.camera_id, now):
             log.info("EntryExit camera=%s zones=%d persons=%d",
                      ctx.camera_id, len(good_lines), len(persons))
@@ -230,6 +246,10 @@ class EntryExitDetector(Detector):
                              prev_side, side_now,
                              entry["cx"], entry["cy"], cx, cy)
 
+                    # Visitor counting runs UNCONDITIONALLY — the time
+                    # window gate lives in shop_state.maybe_emit_*_alert
+                    # and only suppresses the operator-facing "Store
+                    # Opened/Closed" alert, never the metric.
                     if ctx.db is not None:
                         from app.analytics import recorder
                         recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,

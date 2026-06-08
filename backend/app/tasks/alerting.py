@@ -12,6 +12,7 @@ Redis marker so a single sustained incident produces one nudge.
 """
 from __future__ import annotations
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 import redis
@@ -505,7 +506,17 @@ def sales_floor_insights_check() -> None:
 
     now_utc = datetime.now(timezone.utc)
     window_start_utc = now_utc - timedelta(minutes=SFI_WINDOW_MIN)
-    debug = bool(getattr(settings, "sales_floor_debug", False))
+    # Belt-and-braces debug-flag resolution. settings.sales_floor_debug
+    # is the canonical source (pydantic-settings reads SALES_FLOOR_DEBUG
+    # from .env), but if the worker container was started without
+    # picking up the env var we also consult os.environ directly so a
+    # restart isn't required when ops flips the flag.
+    settings_debug = bool(getattr(settings, "sales_floor_debug", False))
+    env_debug = (os.environ.get("SALES_FLOOR_DEBUG", "")
+                 .strip().lower() in ("1", "true", "yes", "on"))
+    debug = settings_debug or env_debug
+    log.info("sales_floor_insights: debug_resolved=%s (settings=%s env=%s)",
+             debug, settings_debug, env_debug)
     if debug:
         log.warning("sales_floor_insights: DEBUG MODE — bypassing dedupe + "
                     "closed-hours + aisle-zone gates")
@@ -561,10 +572,17 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
     bucket = local.replace(minute=(local.minute // 15) * 15, second=0,
                            microsecond=0).strftime("%Y%m%dT%H%M")
     sent_key = f"vg:sfi:sent:{store.id}:{bucket}"
-    if not debug and r.get(sent_key):
-        log.info("sales_floor_insights: store=%s (%s) skipped — already fired "
-                 "for bucket %s", store.id, store.name, bucket)
-        return "dedup"
+    # Debug-mode short-circuit happens BEFORE the Redis read so a
+    # broken cache or a stale key from a non-debug tick can't silence
+    # a debug tick. Spec rule: "In debug mode — always proceed,
+    # never check dedup key".
+    if debug:
+        pass    # fire regardless
+    else:
+        if r.get(sent_key):
+            log.info("sales_floor_insights: store=%s (%s) skipped — already "
+                     "fired for bucket %s", store.id, store.name, bucket)
+            return "dedup"
 
     cams = db.query(Camera).filter(Camera.store_id == store.id).all()
     cam_ids = [c.id for c in cams]
