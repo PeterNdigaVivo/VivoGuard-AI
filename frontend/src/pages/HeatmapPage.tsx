@@ -4,7 +4,7 @@
 // image) on the camera snapshot. Use the opacity slider to tune the
 // blend; click Download to grab the overlay as a standalone PNG.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { Button, Card, PageHeader } from '@/components/ui/Primitives'
 import { cameras } from '@/api/cameras'
@@ -98,24 +98,47 @@ export default function HeatmapPage() {
   // proper opacity blending on the snapshot, smooth gaussian blobs
   // instead of grid squares, and a graceful "empty" baseline.
   const [gridResp, setGridResp] = useState<HeatmapGridResp | null>(null)
+  const [gridLoading, setGridLoading] = useState<boolean>(true)
+
+  // Per-layer in-memory cache so toggling between Engagement /
+  // Traffic / Congestion doesn't re-fetch the same grid every click.
+  // Entries live for GRID_CACHE_MS; the Refresh button (bust++) and a
+  // window switch both clear the cache, so this only shortcuts rapid
+  // toggle clicks — never hides genuinely stale data.
+  const GRID_CACHE_MS = 30_000
+  const gridCacheRef = useRef<Map<string, { data: HeatmapGridResp; ts: number }>>(new Map())
+  useEffect(() => { gridCacheRef.current.clear() }, [cameraId, bust, windowSel])
 
   // Pull the active raster layer's grid + period/peak labels.
   useEffect(() => {
     let cancelled = false
     const layer = activeRasterLayer()
+    const cacheKey = `${windowSel}:${layer}`
+    const cached = gridCacheRef.current.get(cacheKey)
+    if (cached && Date.now() - cached.ts < GRID_CACHE_MS) {
+      setGridResp(cached.data)
+      setPeriodLabel(cached.data.period_label ?? null)
+      setPeakLabel(cached.data.peak_label ?? null)
+      setGridLoading(false)
+      return
+    }
+    setGridLoading(true)
     const ep = layer === 'traffic'
       ? `/analytics/heatmap/${cameraId}?window=${apiWindow()}`
       : `/analytics/heatmap/${cameraId}/${layer}?window=${apiWindow()}`
     api<HeatmapGridResp>(ep)
       .then(d => {
         if (cancelled) return
+        gridCacheRef.current.set(cacheKey, { data: d, ts: Date.now() })
         setGridResp(d)
         setPeriodLabel(d.period_label ?? null)
         setPeakLabel(d.peak_label ?? null)
+        setGridLoading(false)
       })
       .catch(() => {
         if (!cancelled) {
           setGridResp(null); setPeriodLabel(null); setPeakLabel(null)
+          setGridLoading(false)
         }
       })
     return () => { cancelled = true }
@@ -172,6 +195,17 @@ export default function HeatmapPage() {
 
   const backHref = storeId ? `/stores/${storeId}` : '/cameras'
   const backLabel = storeName ? `← Back to ${storeName} Dashboard` : '← Back'
+
+  // "No heatmap data yet" — true when the grid is missing OR every
+  // cell is zero. Combined with !gridLoading so the empty-state
+  // overlay doesn't flash during the initial fetch.
+  const gridEmpty = useMemo(() => {
+    const g = gridResp?.grid
+    if (!g || !g.length) return true
+    return g.every(row => row.every(v => !v))
+  }, [gridResp])
+  const showEmptyState = !gridLoading && gridEmpty
+                         && (layers.engagement || layers.traffic || layers.congestion)
 
   return (
     <div className="p-6">
@@ -251,10 +285,35 @@ export default function HeatmapPage() {
 
       <Card className="p-3 bg-[#0d1b2a] text-white border-slate-800">
         <div className="relative w-full bg-[#0a1628] rounded overflow-hidden">
-          {snap ? (
+          {/* Camera snapshot: render the <img> as soon as we have bytes
+              and fade it in via onLoad. While the bytes are in flight,
+              show a pulsing skeleton rectangle so the layout doesn't
+              flicker — the snapshot endpoint is fast (Redis cache
+              hit) most of the time but can take a few seconds on a
+              cold camera. */}
+          {snap && (
             <img src={`data:image/jpeg;base64,${snap}`}
-                 className="block w-full h-auto opacity-90" alt="camera snapshot" />
-          ) : (
+                 alt="camera snapshot"
+                 className="block w-full h-auto opacity-0 transition-opacity duration-300"
+                 onLoad={(e) => {
+                   const el = e.currentTarget
+                   el.classList.remove('opacity-0')
+                   el.classList.add('opacity-90')
+                 }} />
+          )}
+          {!snap && !snapFailed && (
+            <div className="aspect-video relative overflow-hidden bg-slate-800"
+                 aria-busy="true" aria-label="Loading camera snapshot">
+              <div className="absolute inset-0 bg-gradient-to-r from-slate-800
+                              via-slate-700 to-slate-800 animate-pulse" />
+              <div className="absolute inset-0 flex flex-col items-center
+                              justify-center text-slate-400 gap-1">
+                <div className="text-3xl opacity-50">📷</div>
+                <div className="text-xs">Loading snapshot…</div>
+              </div>
+            </div>
+          )}
+          {!snap && snapFailed && (
             <div className="aspect-video flex flex-col items-center justify-center
                             bg-slate-800 text-slate-300 gap-1">
               <div className="text-3xl opacity-50">📷</div>
@@ -262,8 +321,7 @@ export default function HeatmapPage() {
                 {cameraName ?? `Camera ${cameraId}`}
               </div>
               <div className="text-xs text-slate-500">
-                {snapFailed ? 'Snapshot unavailable — heatmap still updating'
-                            : 'Loading snapshot…'}
+                Snapshot unavailable — heatmap still updating
               </div>
             </div>
           )}
@@ -276,6 +334,29 @@ export default function HeatmapPage() {
           {layers.paths && paths && paths.edges && paths.edges.length > 0 && (
             <PathArrowsOverlay edges={paths.edges} />
           )}
+
+          {/* Empty-state overlay — sits ON TOP of the snapshot so the
+              operator immediately sees why the heatmap is blank.
+              Pointer-events-none so the legend / Refresh button stays
+              clickable behind it. */}
+          {showEmptyState && (
+            <div className="absolute inset-0 flex items-center justify-center
+                            p-4 pointer-events-none">
+              <div className="max-w-sm bg-slate-900/85 border border-slate-700
+                              rounded-lg px-5 py-4 text-center text-slate-200
+                              shadow-lg backdrop-blur-sm">
+                <div className="text-3xl mb-1">📷</div>
+                <div className="font-medium text-sm mb-1">
+                  Heatmap data is being collected for this camera
+                </div>
+                <div className="text-xs text-slate-400 leading-snug">
+                  Check back in 15–30 minutes as customers are detected.
+                  Data updates every 30 seconds.
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/70 text-white text-xs font-semibold
                           animate-pulse pointer-events-none">
             {layers.engagement ? '🔴 High Interest Zone'
