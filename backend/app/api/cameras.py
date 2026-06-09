@@ -870,7 +870,7 @@ async def diagnose(camera_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/activity/top")
-def activity_top(limit: int = 15, minutes: int = 15,
+def activity_top(limit: int = 15, minutes: int = 30,
                  db: Session = Depends(get_db),
                  _u: User = Depends(get_current_user)):
     """Top cameras across the chain by recent activity. Powers the

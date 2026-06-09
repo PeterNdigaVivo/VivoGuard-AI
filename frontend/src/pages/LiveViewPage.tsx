@@ -528,7 +528,7 @@ function ActivityGrid({ onPickFullscreen }: {
   onPickFullscreen: (id: number) => void
 }) {
   const [data, setData] = useState<ActivityCamera[] | null>(null)
-  const [windowMin, setWindowMin] = useState<number>(15)
+  const [windowMin, setWindowMin] = useState<number>(30)
   const [lastAt, setLastAt] = useState<number | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -536,11 +536,11 @@ function ActivityGrid({ onPickFullscreen }: {
     let alive = true
     const tick = () => {
       api<{ window_minutes: number; cameras: ActivityCamera[] }>(
-        '/cameras/activity/top?limit=15&minutes=15')
+        '/cameras/activity/top?limit=15&minutes=30')
         .then(d => {
           if (!alive) return
           setData(d.cameras ?? [])
-          setWindowMin(d.window_minutes ?? 15)
+          setWindowMin(d.window_minutes ?? 30)
           setLastAt(Date.now()); setErr(null)
         })
         .catch(e => { if (alive) setErr(String(e)) })
