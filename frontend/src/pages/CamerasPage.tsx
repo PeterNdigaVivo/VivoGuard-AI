@@ -175,6 +175,9 @@ export default function CamerasPage() {
   // camera individually. The endpoint requires at least one filter,
   // so empty inputs trigger a clear error instead of a fleet-wide
   // rewrite.
+  // Search filter — client-side. Matches camera name OR store name
+  // (case-insensitive substring). Empty string = no filter.
+  const [search, setSearch] = useState('')
   const [bulkHost, setBulkHost] = useState('')
   const [bulkPort, setBulkPort] = useState<number>(7000)
   const [bulkTunnel, setBulkTunnel] = useState(true)
@@ -243,8 +246,22 @@ export default function CamerasPage() {
   const [zoomed, setZoomed] = useState<Camera | null>(null)
 
   // Group by store now (was grouped by `site` text label before).
+  // Apply the search filter first — match either the camera name OR
+  // the store name (case-insensitive substring), then drop empty
+  // groups so a query like "Greenspan" hides every unrelated store
+  // entirely instead of just emptying the table inside its card.
+  const q = search.trim().toLowerCase()
+  const filteredCams = q
+    ? cams.filter(c => {
+        const storeName = c.store_id
+          ? (stores.find(s => s.id === c.store_id)?.name ?? '')
+          : ''
+        return (c.name || '').toLowerCase().includes(q)
+            || storeName.toLowerCase().includes(q)
+      })
+    : cams
   const groups: Record<string, Camera[]> = {}
-  for (const c of cams) {
+  for (const c of filteredCams) {
     const label = c.store_id
       ? (stores.find(s => s.id === c.store_id)?.name ?? `Store #${c.store_id}`)
       : '(unattached)'
@@ -266,6 +283,33 @@ export default function CamerasPage() {
         </>}
       />
       {error && <div className="text-red-600 mb-2">{error}</div>}
+
+      {/* Search — filters the loaded camera list by store name OR
+          camera name. Client-side only, no API call. Empty groups
+          are hidden so a query for "Greenspan" doesn't leave empty
+          cards for every other store. */}
+      <Card className="p-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-medium">Search:</span>
+          <input className="border rounded px-2 py-1 text-sm flex-1 min-w-[240px]"
+                 placeholder="Type a store name or camera name…"
+                 value={search}
+                 onChange={e => setSearch(e.target.value)} />
+          {search && (
+            <>
+              <button onClick={() => setSearch('')}
+                      className="text-xs text-sky-600 hover:underline">
+                clear
+              </button>
+              <span className="text-xs text-slate-500">
+                Showing <strong>{filteredCams.length}</strong> of <strong>{cams.length}</strong>
+                {' '}cameras across <strong>{Object.keys(groups).length}</strong>{' '}
+                store{Object.keys(groups).length === 1 ? '' : 's'}
+              </span>
+            </>
+          )}
+        </div>
+      </Card>
 
       {/* Bulk port update — set the RTSP port on every camera at a
           given host in one shot. The most common use is "every Moi
@@ -357,6 +401,15 @@ export default function CamerasPage() {
           </table>
         </Card>
       ))}
+
+      {cams.length > 0 && filteredCams.length === 0 && (
+        <Card className="p-8 text-center text-slate-500">
+          No cameras match "<strong>{search}</strong>".
+          {' '}
+          <button onClick={() => setSearch('')}
+                  className="text-sky-600 hover:underline">Clear search</button>
+        </Card>
+      )}
 
       {cams.length === 0 && !error && (
         <Card className="p-8 text-center text-slate-500">
