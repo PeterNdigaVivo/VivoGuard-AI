@@ -9,8 +9,13 @@ import { alerts as alertsApi, type Alert } from '@/api/alerts'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 
-// Simple quick-filter buttons non-technical staff understand.
-type Quick = 'urgent' | 'attention' | 'resolved' | 'all'
+// Simple quick-filter buttons non-technical staff understand. The
+// 'status' bucket isolates the recurring sales_floor_insight cards
+// ("Status Update — <store>") so they don't pollute the urgent /
+// attention / resolved feeds.
+type Quick = 'urgent' | 'attention' | 'resolved' | 'all' | 'status'
+
+const SFI_TYPE = 'sales_floor_insight'
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
@@ -82,15 +87,22 @@ export default function AlertsPage() {
     return () => window.removeEventListener('vg:alert-resolved', onResolved)
   }, [items])
 
-  // Client-side quick-filter + search over the loaded window.
+  // Client-side quick-filter + search over the loaded window. Every
+  // non-status filter EXCLUDES sales_floor_insight so the routine
+  // 15-min "Status Update" alerts only show up under their own tab.
   const filtered = useMemo(() => {
     let rows = items
-    if (quick === 'urgent')     rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
-    else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
-    // 'confirmed' covers alerts the /resolve endpoint flipped (it
-    // re-uses that bucket as a "handled" state). 'dismissed' covers
-    // "Not a problem".
-    else if (quick === 'resolved')  rows = rows.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status))
+    if (quick === 'status') {
+      rows = rows.filter(a => a.detection_type === SFI_TYPE)
+    } else {
+      rows = rows.filter(a => a.detection_type !== SFI_TYPE)
+      if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
+      else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
+      // 'confirmed' covers alerts the /resolve endpoint flipped (it
+      // re-uses that bucket as a "handled" state). 'dismissed' covers
+      // "Not a problem".
+      else if (quick === 'resolved')  rows = rows.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status))
+    }
     if (search.trim()) {
       const q = search.toLowerCase()
       rows = rows.filter(a =>
@@ -100,6 +112,21 @@ export default function AlertsPage() {
     }
     return rows
   }, [items, quick, search])
+
+  // Per-bucket counts derived from the loaded items, so each filter
+  // button's badge equals what the user will actually see when they
+  // click it. Status-update alerts are excluded from every other
+  // bucket; the Status Update tab is the only one that shows them.
+  const counts = useMemo(() => {
+    const nonSfi = items.filter(a => a.detection_type !== SFI_TYPE)
+    return {
+      urgent:    nonSfi.filter(a => a.severity_label === 'URGENT' && a.status === 'new').length,
+      attention: nonSfi.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new').length,
+      resolved:  nonSfi.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
+      all:       nonSfi.length,
+      status:    items.filter(a => a.detection_type === SFI_TYPE).length,
+    }
+  }, [items])
 
   const groups = groupAlerts(filtered)
 
@@ -190,15 +217,20 @@ export default function AlertsPage() {
           operator sees at a glance how much is in each bucket. */}
       <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
-          🔴 Urgent ({summary.urgent})
+          🔴 Urgent ({counts.urgent})
         </QuickBtn>
         <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>
-          🟡 Needs Attention ({summary.attention})
+          🟡 Needs Attention ({counts.attention})
         </QuickBtn>
         <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>
-          ✅ Resolved ({summary.resolved_today + summary.dismissed_today})
+          ✅ Resolved ({counts.resolved})
         </QuickBtn>
-        <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>📋 All</QuickBtn>
+        <QuickBtn active={quick === 'status'}    onClick={() => setQuick('status')}>
+          📊 Status Update ({counts.status})
+        </QuickBtn>
+        <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>
+          📋 All ({counts.all})
+        </QuickBtn>
 
         <select className="border rounded px-2 py-1 text-sm ml-2"
                 value={storeId} onChange={e => setStoreId(e.target.value)}>
