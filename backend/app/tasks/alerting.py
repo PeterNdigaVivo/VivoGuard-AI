@@ -273,7 +273,11 @@ SFI_LOW_ENGAGEMENT_S    = 60.0     # avg browse time < 1 min → ATTENTION
 SFI_GOOD_ENGAGEMENT_S   = 120.0    # avg browse time ≥ 2 min → "good"
 SFI_UNATTENDED_MIN_CUST = 1        # ≥ this many customers + no staff
                                     # for the whole window → unattended
-SFI_HEARTBEAT_FRESH_MIN = 5        # camera "active" if last_seen ≤ 5 min
+SFI_HEARTBEAT_FRESH_MIN = 20       # camera "active" if it produced a
+                                    # metric_snapshot or detection_event
+                                    # in the last N minutes — the
+                                    # streamer never writes Camera.status,
+                                    # so DB-flag reads always said 0.
 
 
 def _fmt_browse_time(seconds: float) -> str:
@@ -417,30 +421,64 @@ def _sfi_classify(summary: dict, hb: dict | None = None) -> tuple[str, str]:
 
 
 def _sfi_heartbeat(db, store, cam_ids: list[int], now_utc) -> dict:
-    """Camera-health snippet — cameras active in the last 5 min and
-    the freshest last_seen so the body can carry the "Last inference:
-    N min ago" reassurance line."""
-    from app.models import Camera
+    """Camera-health snippet — cameras that have actually produced
+    inference output in the last SFI_HEARTBEAT_FRESH_MIN minutes.
+
+    "Active" used to read `Camera.last_seen_at`, but the streamer
+    never updates that column, so the figure was always 0/N even on
+    healthy stores. The real signal is "did this camera write a
+    metric_snapshot or a detection_event recently?" — we now query
+    both tables for distinct camera ids in the window and take the
+    union as the active set."""
+    from sqlalchemy import func
+    from app.models import DetectionEvent, MetricSnapshot
+    if not cam_ids:
+        return {"cameras_active": 0, "cameras_total": 0,
+                "last_inference_min": None}
+
     fresh_cutoff = now_utc - timedelta(minutes=SFI_HEARTBEAT_FRESH_MIN)
-    cams = (db.query(Camera)
-              .filter(Camera.id.in_(cam_ids)).all()) if cam_ids else []
-    active = 0
+
+    ms_cams = {
+        cid for (cid,) in db.query(MetricSnapshot.camera_id)
+                            .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                                    MetricSnapshot.period_start >= fresh_cutoff)
+                            .distinct().all()
+        if cid is not None
+    }
+    de_cams = {
+        cid for (cid,) in db.query(DetectionEvent.camera_id)
+                            .filter(DetectionEvent.camera_id.in_(cam_ids),
+                                    DetectionEvent.timestamp >= fresh_cutoff)
+                            .distinct().all()
+        if cid is not None
+    }
+    active_cams = ms_cams | de_cams
+
+    # Freshest write across either table for the store.
+    ms_max = (db.query(func.max(MetricSnapshot.period_start))
+                .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                        MetricSnapshot.period_start >= fresh_cutoff)
+                .scalar())
+    de_max = (db.query(func.max(DetectionEvent.timestamp))
+                .filter(DetectionEvent.camera_id.in_(cam_ids),
+                        DetectionEvent.timestamp >= fresh_cutoff)
+                .scalar())
     most_recent = None
-    for c in cams:
-        ls = c.last_seen_at
-        if ls and ls.tzinfo is None:
-            ls = ls.replace(tzinfo=timezone.utc)
-        if ls and ls >= fresh_cutoff:
-            active += 1
-        if ls and (most_recent is None or ls > most_recent):
-            most_recent = ls
+    for ts in (ms_max, de_max):
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if most_recent is None or ts > most_recent:
+            most_recent = ts
     last_inference_min = None
     if most_recent is not None:
         delta = (now_utc - most_recent).total_seconds()
         last_inference_min = max(0, int(round(delta / 60)))
+
     return {
-        "cameras_active": active,
-        "cameras_total":  len(cams),
+        "cameras_active":     len(active_cams),
+        "cameras_total":      len(cam_ids),
         "last_inference_min": last_inference_min,
     }
 
