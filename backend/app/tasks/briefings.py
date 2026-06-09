@@ -50,23 +50,16 @@ def _redis():
 
 
 def _send_whatsapp(recipients: list[str], body: str) -> int:
-    """Returns count of successful sends. Silent skip when Twilio creds
-    are absent — keeps dev environments noise-free."""
-    sid    = getattr(settings, "twilio_account_sid", None)
-    token  = getattr(settings, "twilio_auth_token", None)
-    sender = getattr(settings, "twilio_whatsapp_from", None)
-    if not (sid and token and sender and recipients):
+    """WhatsApp delivery is disabled (Ops decision — dashboard alerts
+    only). Kept as a no-op stub so every existing caller still
+    compiles and the signature can be unwound piece-by-piece in
+    follow-up commits. Logs once per call so the ops team can see
+    that a notification WOULD have gone out."""
+    if not recipients:
         return 0
-    from twilio.rest import Client
-    client = Client(sid, token)
-    sent = 0
-    for to in recipients:
-        try:
-            client.messages.create(body=body, from_=sender, to=to)
-            sent += 1
-        except Exception as e:
-            log.warning("briefing whatsapp send to %s failed: %s", to, e)
-    return sent
+    log.info("WhatsApp disabled — would have sent to %d recipient(s): %s",
+             len(recipients), body[:120].replace("\n", " "))
+    return 0
 
 
 def _format_whatsapp_recipient(phone: str | None) -> str | None:

@@ -20,46 +20,15 @@ log = logging.getLogger(__name__)
 
 
 class WhatsAppNotifier(Notifier):
+    """Disabled — Ops decision (dashboard alerts only). Kept in the
+    notifier registry as a no-op so existing dispatch code still
+    iterates cleanly; is_enabled() always returns False."""
     name = "whatsapp"
 
     def is_enabled(self) -> bool:
-        return bool(
-            settings.twilio_account_sid
-            and settings.twilio_auth_token
-            and getattr(settings, "twilio_whatsapp_from", "")
-            and getattr(settings, "whatsapp_to", "")
-        )
-
-    def _priority_only(self) -> bool:
-        return str(getattr(settings, "whatsapp_priority_only", "true")).lower() != "false"
+        return False
 
     async def send(self, alert: AlertPayload) -> None:
-        if not self.is_enabled():
-            return
-        priority = (alert.extra or {}).get("priority", "normal")
-        if self._priority_only() and priority != "high":
-            return
-
-        body = (
-            f"🚨 VivoGuard *{alert.detection_type}*\n"
-            f"Camera: {alert.camera_name}\n"
-            f"Confidence: {alert.confidence:.2f}\n"
-            f"Time: {alert.timestamp_iso}\n"
-            f"{('Zone: ' + alert.zone_name + chr(10)) if alert.zone_name else ''}"
-        )
-        recipients = [r.strip() for r in settings.whatsapp_to.split(",") if r.strip()]
-
-        def _send():
-            from twilio.rest import Client
-            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-            for to in recipients:
-                client.messages.create(
-                    body=body,
-                    from_=settings.twilio_whatsapp_from,
-                    to=to,
-                )
-
-        try:
-            await asyncio.to_thread(_send)
-        except Exception as e:
-            log.warning("WhatsApp send failed: %s", e)
+        log.info("WhatsApp disabled — skipping notify for %s",
+                 alert.detection_type)
+        return

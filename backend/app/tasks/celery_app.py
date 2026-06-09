@@ -42,12 +42,42 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue="default",
-    # Auto-declare any queue referenced by `options={"queue": ...}` on
-    # an enqueue so we don't have to enumerate task_queues by hand.
-    # The bookkeeping beat tasks route to `beat` to avoid being
-    # starved by the 16 long-running inference.run_camera tasks
-    # holding every slot on `default`.
+    # Auto-declare any queue referenced from a task route or an
+    # `options={"queue": ...}` enqueue. Avoids having to enumerate
+    # task_queues by hand.
     task_create_missing_queues=True,
+    # Two dedicated worker pools (see docker-compose.yml):
+    #   worker-inference  →  -Q inference,default  (14 slots)
+    #   worker-alerts     →  -Q alerts,beat        ( 4 slots)
+    # Routing the slow inference tasks into `inference` keeps them
+    # out of the way of the short bookkeeping tasks on `alerts`,
+    # which used to be starved when every default-queue slot was
+    # held by a 9-minute camera loop.
+    task_routes={
+        # Inference pool.
+        "inference.run_camera":               {"queue": "inference"},
+        "inference.supervise_all":            {"queue": "inference"},
+        # Operator-facing alerts pool.
+        "alerting.sales_floor_insights_check":  {"queue": "alerts"},
+        "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
+        "alerting.shop_not_opened_check":       {"queue": "alerts"},
+        "alerting.shop_daily_summary_check":    {"queue": "alerts"},
+        "alerting.camera_health_check":         {"queue": "alerts"},
+        "alerting.queue_escalation_check":      {"queue": "alerts"},
+        "alerting.uniform_violation_check":     {"queue": "alerts"},
+        # Beat-only / scheduled batch tasks (also picked up by the
+        # alerts worker — `beat` is on the same -Q list).
+        "briefings.daily_fire_due":           {"queue": "beat"},
+        "briefings.weekly_fire_due":          {"queue": "beat"},
+        "training.chain_retrain_due":         {"queue": "beat"},
+        "reports.dispatch_due":               {"queue": "beat"},
+        "maintenance.refresh_ddns":           {"queue": "beat"},
+        "maintenance.prune_alerts":           {"queue": "beat"},
+        "queue_report.fire_due":              {"queue": "beat"},
+        "staff_classifier.classify_today":    {"queue": "beat"},
+        "heatmap.snapshot_all":               {"queue": "beat"},
+        "heatmap.snapshot_grids_hourly":      {"queue": "beat"},
+    },
     timezone=settings.app_timezone,
     beat_schedule={
         "supervise-inference-every-30s": {
@@ -151,13 +181,11 @@ celery_app.conf.update(
         "sales-floor-insights-every-15min": {
             "task": "alerting.sales_floor_insights_check",
             "schedule": timedelta(minutes=15),
-            "options": {"queue": "beat"},
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
         "sales-floor-daily-summary-every-5min": {
             "task": "alerting.sales_floor_daily_summary",
             "schedule": timedelta(minutes=5),
-            "options": {"queue": "beat"},
         },
         # 5-min dispatcher checking whether each store has had its
         # first inward line-crossing of the day before the
@@ -166,7 +194,6 @@ celery_app.conf.update(
         "shop-not-opened-every-5min": {
             "task": "alerting.shop_not_opened_check",
             "schedule": timedelta(minutes=5),
-            "options": {"queue": "beat"},
         },
         # 5-min dispatcher checking whether 22:00 EAT has passed for
         # each store; when it has, builds the daily open/close
@@ -175,7 +202,6 @@ celery_app.conf.update(
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),
-            "options": {"queue": "beat"},
         },
     },
 )

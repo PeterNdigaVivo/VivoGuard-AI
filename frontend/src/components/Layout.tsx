@@ -1,9 +1,9 @@
 // Shared shell — sidebar nav + top bar. Used by every authenticated page.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
-import { alerts as alertsApi } from '@/api/alerts'
+import { alerts as alertsApi, type Alert } from '@/api/alerts'
 
 const NAV = [
   { to: '/chain',    label: 'Chain' },
@@ -28,15 +28,20 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const nav = useNavigate()
 
-  // Unread-urgent badge on the Alerts nav item. Polls every 30s,
-  // refreshes on every websocket push, AND listens for the local
-  // `vg:alert-resolved` event so clicking "I handled this" / "Resolve
-  // all" decrements the badge before the next poll lands.
+  // Sidebar badge + the chain-wide UrgentRibbon both read from
+  // /alerts/summary. Single poller, single source of truth.
   const [urgentBadge, setUrgentBadge] = useState(0)
+  const [urgentCount, setUrgentCount] = useState(0)
+  const [criticalCount, setCriticalCount] = useState(0)
   useEffect(() => {
     let alive = true
     const refresh = () => alertsApi.summary()
-      .then(s => { if (alive) setUrgentBadge(s.unread_urgent) })
+      .then(s => {
+        if (!alive) return
+        setUrgentBadge(s.unread_urgent)
+        setUrgentCount(s.urgent ?? 0)
+        setCriticalCount(s.critical_today ?? 0)
+      })
       .catch(() => {})
     refresh()
     const t = setInterval(refresh, 30_000)
@@ -45,7 +50,6 @@ export default function Layout() {
       const detail = (e as CustomEvent).detail
       const bulk = typeof detail?.bulk === 'number' ? detail.bulk : 1
       setUrgentBadge(b => Math.max(0, b - bulk))
-      // Re-fetch in 2s to reconcile with the server's view.
       setTimeout(refresh, 2000)
     }
     window.addEventListener('vg:alert-resolved', onResolved)
@@ -89,8 +93,117 @@ export default function Layout() {
 
       {/* Main */}
       <main className="flex-1 overflow-auto bg-slate-100">
+        <UrgentRibbon urgent={urgentCount} critical={criticalCount} />
         <Outlet />
       </main>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------
+// UrgentRibbon — chain-wide red banner at the top of the main
+// panel when one or more URGENT / CRITICAL alerts are open.
+// ---------------------------------------------------------------
+
+const RIBBON_DISMISS_KEY = 'vg_ribbon_dismissed_until'
+const RIBBON_DISMISS_MS  = 10 * 60 * 1000
+
+function UrgentRibbon({ urgent, critical }: { urgent: number; critical: number }) {
+  const nav = useNavigate()
+  const total = Math.max(urgent, critical)
+  // Pull a few alert titles so the "2–5 alerts" banner can name them.
+  // Cheap — limit=5, only re-runs when `total` changes.
+  const [titles, setTitles] = useState<string[]>([])
+  useEffect(() => {
+    if (total < 2 || total > 5) { setTitles([]); return }
+    let alive = true
+    alertsApi.list({ limit: 5 })
+      .then((rows: Alert[]) => {
+        if (!alive) return
+        const urgents = rows
+          .filter(a => a.severity_label === 'URGENT' && a.status === 'new')
+          .map(a => a.plain_title ?? a.title ?? a.detection_type ?? 'Alert')
+          .filter(Boolean)
+          .slice(0, 3)
+        setTitles(urgents)
+      })
+      .catch(() => setTitles([]))
+    return () => { alive = false }
+  }, [total])
+
+  // Dismiss state — read from localStorage, plus a 1Hz tick so the
+  // ribbon re-appears automatically once the 10-minute window ends.
+  const [dismissUntil, setDismissUntil] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(RIBBON_DISMISS_KEY)
+      const n = raw ? Number(raw) : 0
+      return Number.isFinite(n) ? n : 0
+    } catch { return 0 }
+  })
+  // Auto-revive when a NEW urgent arrives after the user dismissed.
+  // We compare the latest urgent count against the snapshot taken at
+  // dismiss time — if the count grew, the ribbon ignores the dismiss.
+  const [dismissBaseline, setDismissBaseline] = useState<number>(0)
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => forceTick(n => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const now = Date.now()
+  const stillDismissed = now < dismissUntil && total <= dismissBaseline
+  const visible = total > 0 && !stillDismissed
+  const message = useMemo(() => {
+    if (total === 1) return '1 URGENT ALERT NEEDS ATTENTION'
+    if (total > 5)   return `${total} URGENT ALERTS NEED IMMEDIATE ATTENTION`
+    if (titles.length)
+      return `${total} URGENT ALERTS — ${titles.join(' · ')}`
+    return `${total} URGENT ALERTS NEED ATTENTION`
+  }, [total, titles])
+
+  if (!visible) return null
+
+  const shouldPulse = total > 3
+
+  return (
+    <div
+      role="alert"
+      style={{ backgroundColor: '#dc2626' }}
+      className={
+        'sticky top-0 z-40 text-white px-4 py-2 flex items-center gap-3 ' +
+        'shadow-md animate-vg-slide-down ' +
+        (shouldPulse ? 'animate-pulse' : '')
+      }
+    >
+      <span className="text-base">🚨</span>
+      <span className="text-sm font-semibold flex-1 truncate">{message}</span>
+      <button
+        onClick={() => nav('/alerts')}
+        className="px-3 py-1 rounded bg-white text-red-700 text-xs font-semibold hover:bg-red-50">
+        View Alerts
+      </button>
+      <button
+        onClick={() => {
+          const until = Date.now() + RIBBON_DISMISS_MS
+          setDismissUntil(until)
+          setDismissBaseline(total)
+          try { localStorage.setItem(RIBBON_DISMISS_KEY, String(until)) } catch {}
+        }}
+        title="Hide for 10 minutes — re-appears if a new urgent alert fires."
+        className="text-white/80 hover:text-white text-xl leading-none px-2">
+        ×
+      </button>
+
+      {/* Slide-down keyframes injected inline so we don't need to
+          touch tailwind.config.js or the global stylesheet. */}
+      <style>{`
+        @keyframes vg-ribbon-slide {
+          from { transform: translateY(-100%); opacity: 0 }
+          to   { transform: translateY(0);     opacity: 1 }
+        }
+        .animate-vg-slide-down { animation: vg-ribbon-slide 240ms ease-out both; }
+      `}</style>
     </div>
   )
 }

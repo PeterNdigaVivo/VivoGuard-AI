@@ -269,41 +269,9 @@ def _send_email(to: list[str], subject: str, body: str,
 
 def _send_whatsapp_summary(rep, store, rollups: list[dict],
                             recipients: list[str]) -> None:
-    """Build a short WhatsApp text from the rollup payload and send
-    via Twilio. Skipped silently when Twilio creds are absent (dev /
-    no-Twilio operators just get email)."""
-    sid = getattr(settings, "twilio_account_sid", None)
-    token = getattr(settings, "twilio_auth_token", None)
-    sender = getattr(settings, "twilio_whatsapp_from", None)
-    if not (sid and token and sender):
-        log.info("dispatch_report: Twilio not configured — skipping WhatsApp")
-        return
-
-    # Headline numbers — keep the message under 1KB so it fits the
-    # WhatsApp Business preview. Pull the obvious aggregates only.
-    lines: list[str] = []
-    label = (store.name if store else "Chain") + f" — {rep.cadence}"
-    lines.append(f"📊 VivoGuard {label}")
-    total_visitors = 0
-    total_alerts = 0
-    for r in rollups:
-        k = r.get("kpis") or {}
-        total_visitors += int(k.get("unique_visitors_today") or 0)
-        total_alerts += sum((r.get("alerts_breakdown") or {}).values())
-    lines.append(f"Visitors: {total_visitors}")
-    lines.append(f"Alerts: {total_alerts}")
-    if len(rollups) == 1:
-        k = rollups[0].get("kpis") or {}
-        if k.get("queue_wait_avg_sec") is not None:
-            lines.append(f"Avg queue wait: {round(float(k['queue_wait_avg_sec']))}s")
-        if k.get("staff_present_avg") is not None:
-            lines.append(f"Staff present: {round(float(k['staff_present_avg']) * 100)}%")
-    body = "\n".join(lines)
-
-    from twilio.rest import Client
-    client = Client(sid, token)
-    for to in recipients:
-        try:
-            client.messages.create(body=body, from_=sender, to=to)
-        except Exception as e:
-            log.warning("WhatsApp send to %s failed: %s", to, e)
+    """WhatsApp delivery is disabled (Ops decision — dashboard alerts
+    only). Kept as a no-op so the dispatch loop signature stays the
+    same; email and dashboard alerts are unaffected."""
+    if recipients:
+        log.info("WhatsApp disabled — would have sent %s summary to %d",
+                 getattr(rep, "cadence", "report"), len(recipients))

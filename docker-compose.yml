@@ -105,27 +105,24 @@ services:
       retries: 5
     # `docker compose up --scale api=3` to run multiple replicas behind nginx.
 
-  # --- Celery worker (~1.5 GB CPU / ~5 GB GPU) — runs YOLOv8 + training.
-  # Scale: `docker compose up --scale worker=4` for more inference capacity.
-  worker:
+  # --- Inference worker (camera AI). 14 concurrent slots dedicated
+  # to the long-running inference.run_camera tasks. Also runs Beat
+  # (`-B`) for the inference supervisor that wakes the pipeline every
+  # 30 s. Listens on the `inference` + `default` queues so it never
+  # picks up a 5-min sales-floor / shop-not-opened task and blocks
+  # the camera pipeline.
+  worker-inference:
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
       args:
-        # Set GPU=true here (or via `docker compose build --build-arg GPU=true worker`)
-        # to install CUDA-enabled torch wheels.
         GPU: "false"
     image: vivoguard/worker:latest
     restart: unless-stopped
-    # `-B` runs Celery Beat in the same process so the inference
-    # supervisor (every 30s) fires without a separate beat container.
-    # Concurrency is now WORKER_CONCURRENCY (default 16). For 40+
-    # cameras either bump this further (CPU box: 24-32 OK at 1-2 fps
-    # per camera) or scale horizontally: `docker compose up -d --scale worker=3`.
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -B --loglevel=info --concurrency=${WORKER_CONCURRENCY:-16}"
+      - "celery -A app.tasks.celery_app worker -B -Q inference,default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-14} -n inference-worker@%h"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings
@@ -139,6 +136,35 @@ services:
     # GPU passthrough — uncomment once the host has nvidia-container-toolkit
     # and you've rebuilt with `--build-arg GPU=true`.
     # <<: *gpu-reservation
+
+  # --- Alerts / bookkeeping worker. 4 slots dedicated to the short
+  # tasks the operations team depends on (sales-floor insight,
+  # shop-not-opened, queue escalation, camera health, uniform
+  # violation, daily summaries). Lives on `alerts` + `beat` queues so
+  # it never competes with the inference pool for runtime.
+  # No `-B` flag — Beat is owned by the inference worker.
+  worker-alerts:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args:
+        GPU: "false"
+    image: vivoguard/worker:latest
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - "celery -A app.tasks.celery_app worker -Q alerts,beat --loglevel=info --concurrency=${WORKER_ALERTS_CONCURRENCY:-4} -n alerts-worker@%h"
+    environment: *app-env
+    volumes:
+      - ./data/recordings:/data/recordings
+      - ./data/models:/data/models
+      - ./data/datasets:/data/datasets
+      - ./data/thumbnails:/data/thumbnails
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [vivoguard]
 
   # --- Streamer: ffmpeg subprocess pool. Slim image, no torch.
   #
