@@ -519,54 +519,118 @@ interface ActivityCamera {
   store_id: number | null
   store_name: string | null
   status: string
-  // Sum of the chosen activity metrics in the window (occupancy +
-  // browse_time_seconds + dwell_count). Drives the ranking.
-  activity_score: number
-  // MAX(occupancy) over the window — null when the camera has
-  // telemetry but no occupancy signal yet.
-  people_peak: number | null
-  last_activity_at: string | null
+  // Raw people count seen RIGHT NOW (this frame).
+  people: number
+  // Ranking score — currently == people; kept as its own field so
+  // future tweaks (motion energy, dwell weighting) don't require a
+  // breaking change to the API shape.
+  score: number
+  // Epoch seconds of the most recent activity write in Redis.
+  last_activity_at: number
 }
+
+const SLOT_HOLD_MS = 5 * 60 * 1000   // 5-minute minimum hold per tile
+const REPLACE_RATIO = 2              // candidate must be 2× the held tile's score
 
 function ActivityGrid({ onPickFullscreen }: {
   onPickFullscreen: (id: number) => void
 }) {
-  const [data, setData] = useState<ActivityCamera[] | null>(null)
-  const [windowMin, setWindowMin] = useState<number>(30)
+  // Most recent fetch (top 15 by current score per backend).
+  const [latest, setLatest] = useState<ActivityCamera[] | null>(null)
+  // Currently-displayed slots, in order. Each entry is the camera id
+  // and the moment it entered its slot — drives the hold timer +
+  // the "X:YY" countdown label.
+  type Slot = { camera_id: number; entered_at: number }
+  const [slots, setSlots] = useState<Slot[]>([])
   const [lastAt, setLastAt] = useState<number | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  // Tick once a second so the per-tile countdown / "Updated Ns ago"
+  // pills stay live between fetches without another network call.
+  const [, forceTick] = useState(0)
+
+  // Latest-known cam metadata + score, keyed by camera_id. Slots
+  // dereference this to render — so a held slot whose camera dropped
+  // off the top-15 list keeps its label + (last known) score.
+  const known = useMemo(() => {
+    const map = new Map<number, ActivityCamera>()
+    for (const c of latest ?? []) map.set(c.camera_id, c)
+    return map
+  }, [latest])
 
   useEffect(() => {
     let alive = true
     const tick = () => {
-      api<{ window_minutes: number; cameras: ActivityCamera[] }>(
-        '/cameras/activity/top?limit=15&minutes=30')
+      api<{ cameras: ActivityCamera[]; as_of: number; source: string }>(
+        '/cameras/activity/live?limit=15')
         .then(d => {
           if (!alive) return
-          setData(d.cameras ?? [])
-          setWindowMin(d.window_minutes ?? 30)
+          setLatest(d.cameras ?? [])
           setLastAt(Date.now()); setErr(null)
         })
         .catch(e => { if (alive) setErr(String(e)) })
     }
     tick()
-    const t = setInterval(tick, ACTIVITY_REFRESH_MS)
-    return () => { alive = false; clearInterval(t) }
+    const refresh = setInterval(tick, ACTIVITY_REFRESH_MS)
+    const seconds = setInterval(() => forceTick(n => n + 1), 1000)
+    return () => { alive = false; clearInterval(refresh); clearInterval(seconds) }
   }, [])
+
+  // Slot management — apply the 5-min hold + 2× replacement rule.
+  useEffect(() => {
+    if (!latest) return
+    setSlots(prev => {
+      const now = Date.now()
+      const inLatest = new Set(latest.map(c => c.camera_id))
+      const heldIds  = new Set(prev.map(s => s.camera_id))
+
+      // First load: take the top 15 as-is.
+      if (prev.length === 0) {
+        return latest.slice(0, 15).map(c => ({ camera_id: c.camera_id, entered_at: now }))
+      }
+
+      // Build the candidate pool — cameras in latest that aren't
+      // already held, sorted by current score desc.
+      const candidates = latest
+        .filter(c => !heldIds.has(c.camera_id))
+        .sort((a, b) => b.score - a.score)
+      let nextSlots: Slot[] = [...prev]
+
+      // For each held slot past the 5-min hold, see if a candidate
+      // beats it by REPLACE_RATIO. Process weakest first so the
+      // strongest candidates get the best slots.
+      const replaceable = nextSlots
+        .map((s, i) => ({ s, i, score: known.get(s.camera_id)?.score ?? 0 }))
+        .filter(x => now - x.s.entered_at >= SLOT_HOLD_MS)
+        .sort((a, b) => a.score - b.score)
+
+      for (const { i, score } of replaceable) {
+        if (!candidates.length) break
+        const top = candidates[0]
+        const needBeat = Math.max(score * REPLACE_RATIO, 1)  // floor so a 0-score slot can be replaced by any non-zero
+        if (top.score >= needBeat) {
+          nextSlots[i] = { camera_id: top.camera_id, entered_at: now }
+          candidates.shift()
+        }
+      }
+
+      // Fill empty slots (e.g. first poll yielded < 15 cameras) with
+      // any remaining candidates, no hold required.
+      while (nextSlots.length < 15 && candidates.length) {
+        const top = candidates.shift()!
+        nextSlots.push({ camera_id: top.camera_id, entered_at: now })
+      }
+      return nextSlots
+    })
+  }, [latest, known])
 
   return (
     <div>
-      {/* Orange banner — matches the toggle button's filled-orange
-          treatment so the whole Activity view reads as one
-          contiguous "spotlight" block. White bold text + tighter
-          opacity on the secondary lines keeps the hierarchy
-          readable on the orange ground. */}
+      {/* Orange banner. */}
       <div className="rounded p-3 mb-3 flex flex-wrap items-center gap-3
                       text-sm text-white bg-orange-500 shadow-sm">
         <span className="font-bold tracking-wide">🔴 LIVE ACTIVITY</span>
         <span className="text-white/90">
-          Top {Math.min(15, data?.length ?? 0)} cameras by detection count in the
-          last {windowMin} minutes
+          Top {slots.length} cameras by current activity · 5-minute hold per tile
         </span>
         <span className="ml-auto text-xs text-white/80">
           {lastAt
@@ -579,35 +643,52 @@ function ActivityGrid({ onPickFullscreen }: {
           Could not load activity. {err}
         </Card>
       )}
-      {data && data.length === 0 && !err && (
+      {latest && slots.length === 0 && !err && (
         <Card className="p-8 text-center text-slate-500">
-          No detections recorded in the last {windowMin} minutes across the chain.
+          No cameras reporting activity right now.
         </Card>
       )}
-      {data && data.length > 0 && (
+      {slots.length > 0 && (
         <div className="grid gap-2"
              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
-          {data.map(c => (
-            <ActivityTile key={c.camera_id} cam={c}
-                          onClick={() => onPickFullscreen(c.camera_id)} />
-          ))}
+          {slots.map(slot => {
+            const cam = known.get(slot.camera_id)
+            // If we lost the camera from the latest fetch entirely
+            // (e.g. it stopped reporting) but its hold isn't up, we
+            // can't render without metadata — drop the slot quietly.
+            if (!cam) return null
+            return (
+              <ActivityTile key={slot.camera_id} cam={cam}
+                            enteredAt={slot.entered_at}
+                            onClick={() => onPickFullscreen(slot.camera_id)} />
+            )
+          })}
         </div>
       )}
+      {/* Fade keyframes injected once — no tailwind.config edit. */}
+      <style>{`
+        @keyframes vg-act-fade-in { from { opacity: 0; transform: scale(0.97) }
+                                    to   { opacity: 1; transform: scale(1)    } }
+        .vg-act-tile { animation: vg-act-fade-in 320ms ease-out both; }
+        @keyframes vg-act-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(234,88,12,0.55) }
+                                  50%     { box-shadow: 0 0 0 6px rgba(234,88,12,0.00) } }
+        .vg-act-pulse { animation: vg-act-pulse 1800ms ease-out infinite; }
+      `}</style>
     </div>
   )
 }
 
 
-function ActivityTile({ cam, onClick }: {
+function ActivityTile({ cam, enteredAt, onClick }: {
   cam: ActivityCamera
+  enteredAt: number
   onClick: () => void
 }) {
   const [src, setSrc] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
-  // Re-fetch the snapshot every time the activity payload refreshes
-  // (we just key the effect on last_detection_at so the polling
-  // cadence is owned by the parent — no extra timer here). Snapshot
-  // hits the cached Redis frame so this is cheap.
+  // Re-fetch when the camera's freshest activity epoch advances so
+  // the snapshot tracks the live feed. The parent owns polling
+  // cadence — no extra timer here.
   useEffect(() => {
     let alive = true
     setBusy(true)
@@ -617,21 +698,29 @@ function ActivityTile({ cam, onClick }: {
     return () => { alive = false }
   }, [cam.camera_id, cam.last_activity_at])
 
-  // Headline activity label — prefer the real people count when
-  // occupancy is populated, fall back to a neutral "active" badge
-  // when the camera is being processed but hasn't reported a
-  // people-count metric yet (e.g. dwell-only zones).
-  const headline = cam.people_peak != null && cam.people_peak > 0
-    ? `👥 ${cam.people_peak} ${cam.people_peak === 1 ? 'person' : 'people'} detected`
+  const headline = cam.people > 0
+    ? `👥 ${cam.people} ${cam.people === 1 ? 'person' : 'people'} detected`
     : '📷 Active'
 
+  // 5-minute hold timer — both the bottom progress bar and the
+  // "in slot Xm Ys" caption read from this. Math runs on every
+  // parent forceTick (1 Hz), so the bar drains smoothly.
+  const held = Math.max(0, Math.min(SLOT_HOLD_MS, Date.now() - enteredAt))
+  const pct = Math.min(100, (held / SLOT_HOLD_MS) * 100)
+  const remainSec = Math.max(0, Math.ceil((SLOT_HOLD_MS - held) / 1000))
+  const m = Math.floor(remainSec / 60)
+  const s = remainSec % 60
+  const holdLabel = remainSec === 0
+    ? 'eligible for rotation'
+    : `in slot ${m}:${s.toString().padStart(2, '0')}`
+
   return (
-    // Card from @/components/ui/Primitives only takes children +
-    // className, so the click handler lives on an outer <button>
-    // wrapper that takes up the whole tile. text-left so the inner
-    // labels don't get the default button centering.
     <button type="button" onClick={onClick}
-            className="text-left cursor-zoom-in">
+            // vg-act-tile = fade-in keyframes from the parent
+            // <style> block. Re-runs whenever React mounts a new
+            // ActivityTile (i.e. when a slot's camera_id changes),
+            // so swapped tiles fade in smoothly.
+            className="text-left cursor-zoom-in vg-act-tile">
     <Card className="p-1">
       <div className="flex items-center justify-between mb-1 text-xs">
         <div className="truncate flex-1">
@@ -642,7 +731,8 @@ function ActivityTile({ cam, onClick }: {
         </div>
         <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
       </div>
-      <div className="relative bg-black rounded overflow-hidden aspect-video">
+      <div className={'relative bg-black rounded overflow-hidden aspect-video '
+                       + (cam.people > 0 ? 'vg-act-pulse' : '')}>
         {src
           ? <img src={src} alt={cam.camera_name}
                  className="block w-full h-auto opacity-90" />
@@ -652,12 +742,21 @@ function ActivityTile({ cam, onClick }: {
               {busy ? 'Loading…' : 'Snapshot unavailable'}
             </div>
           )}
-        {/* Top-left orange chip — headline activity, matches the
-            new ranking source. People count when occupancy is
-            populated, "📷 Active" otherwise. */}
         <div className="absolute top-1 left-1 px-2 py-0.5 rounded
                         bg-orange-600 text-white text-[11px] font-bold">
           {headline}
+        </div>
+      </div>
+      {/* 5-min hold bar — drains over the hold window so the
+          operator can see when a tile becomes eligible for
+          rotation. Caption sits just below in tiny grey. */}
+      <div className="mt-1">
+        <div className="h-1 w-full bg-slate-200 rounded overflow-hidden">
+          <div className="h-full bg-orange-500 transition-[width] duration-1000 ease-linear"
+               style={{ width: `${pct}%` }} />
+        </div>
+        <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">
+          {holdLabel}
         </div>
       </div>
     </Card>

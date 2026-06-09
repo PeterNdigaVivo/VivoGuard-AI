@@ -337,6 +337,29 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 person_count = sum(1 for d in raw if d.get("cls") == "person")
                 log.info("entry_exit detector: camera=%s zones=%d detections=%d",
                          camera_id, ee_zone_count, person_count)
+
+            # Live Activity heartbeat — written every frame so the
+            # /cameras/activity/live endpoint can rank cameras
+            # purely from Redis with zero DB reads in the hot path.
+            # Score is "people seen RIGHT NOW" (raw person count
+            # in this frame); 5-min TTL so a camera that stops
+            # streaming drops off naturally instead of lingering
+            # at its last score.
+            try:
+                _people_now = sum(1 for d in raw if d.get("cls") == "person")
+                pub.set(
+                    f"vg:activity:{camera_id}",
+                    json.dumps({
+                        "camera_id": camera_id,
+                        "people":    _people_now,
+                        "score":     float(_people_now),
+                        "ts":        time.time(),
+                    }),
+                    ex=300,
+                )
+            except Exception:
+                pass
+
             for det in registry.detectors_for(camera_id):
                 # Per-frame skip honouring detection_every_n_frames.
                 step = int((cfg.get(det.detection_type) or {}).get("detection_every_n_frames", 1) or 1)

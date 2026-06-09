@@ -1000,3 +1000,116 @@ def activity_top(limit: int = 15, minutes: int = 30,
             "last_activity_at": last_at.isoformat() if last_at else None,
         })
     return {"window_minutes": minutes, "cameras": out, "source": source}
+
+
+# ---- Live Activity (Redis-only, sub-100ms) -----------------------
+
+# Per-process cache of camera_id → {name, store_name}. Filled lazily
+# by _live_cam_meta(); refreshed when older than _META_TTL_SECONDS or
+# when an unknown camera id appears in the activity payload (the
+# operator just attached a camera).
+_META_TTL_SECONDS = 60
+_meta_cache: dict[int, dict] = {}
+_meta_last_refresh: float = 0.0
+
+
+def _live_cam_meta(db, needed_ids: set[int]) -> dict[int, dict]:
+    """Camera + store lookup with a TTL'd in-memory cache so the
+    /activity/live endpoint doesn't hit Postgres on every 30 s poll.
+    Refreshes when stale OR when an unseen camera_id appears."""
+    import time as _t
+    global _meta_last_refresh
+    now = _t.time()
+    missing = needed_ids - _meta_cache.keys()
+    if missing or (now - _meta_last_refresh) > _META_TTL_SECONDS:
+        from app.models import Store as _Store
+        cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
+        store_ids = {c.store_id for c in cams if c.store_id}
+        stores = ({s.id: s for s in db.query(_Store).filter(_Store.id.in_(store_ids)).all()}
+                  if store_ids else {})
+        fresh: dict[int, dict] = {}
+        for c in cams:
+            s = stores.get(c.store_id) if c.store_id else None
+            fresh[c.id] = {
+                "camera_id":   c.id,
+                "camera_name": c.name,
+                "store_id":    c.store_id,
+                "store_name":  s.name if s else None,
+                "status":      c.status,
+            }
+        _meta_cache.clear()
+        _meta_cache.update(fresh)
+        _meta_last_refresh = now
+    return _meta_cache
+
+
+@router.get("/activity/live")
+def activity_live(limit: int = 15,
+                  db: Session = Depends(get_db),
+                  _u: User = Depends(get_current_user)):
+    """Top cameras by CURRENT activity, scored from Redis only.
+
+    The inference worker writes `vg:activity:{camera_id}` every
+    frame (see app/ai/inference_worker.py) with
+    `{people, score, ts}` and a 5-min TTL. This endpoint reads
+    those keys in one MGET, ranks by score desc + ts desc, and
+    layers camera + store metadata from a 60-s in-memory cache.
+
+    No DB reads in the hot path beyond the metadata cache refresh.
+    Snapshot bytes stay on the existing /cameras/{id}/snapshot
+    endpoint — this one is just the ranking + labels.
+    """
+    import json as _json
+    import time as _t
+    import redis
+    from app.config import settings as _settings
+
+    limit = max(1, min(100, int(limit)))
+    try:
+        r = redis.from_url(_settings.redis_url, decode_responses=True)
+    except Exception:
+        return {"cameras": [], "source": "redis-unavailable", "as_of": _t.time()}
+
+    # Walk every ai_enabled camera id from the meta cache; one
+    # MGET pulls every activity blob in a single round-trip. SCAN
+    # would also work but the meta cache is the more direct
+    # iteration target and lets us short-circuit on "no telemetry"
+    # cameras.
+    meta = _live_cam_meta(db, needed_ids=set())
+    cam_ids = sorted(meta.keys())
+    if not cam_ids:
+        return {"cameras": [], "source": "no-cameras", "as_of": _t.time()}
+
+    keys = [f"vg:activity:{cid}" for cid in cam_ids]
+    try:
+        raw = r.mget(keys)
+    except Exception:
+        return {"cameras": [], "source": "redis-mget-failed", "as_of": _t.time()}
+
+    scored: list[dict] = []
+    for cid, blob in zip(cam_ids, raw):
+        if not blob:
+            continue
+        try:
+            payload = _json.loads(blob)
+        except Exception:
+            continue
+        m = meta.get(cid, {})
+        scored.append({
+            "camera_id":        cid,
+            "camera_name":      m.get("camera_name"),
+            "store_id":         m.get("store_id"),
+            "store_name":       m.get("store_name"),
+            "status":           m.get("status"),
+            "people":           int(payload.get("people") or 0),
+            "score":            float(payload.get("score") or 0.0),
+            "last_activity_at": float(payload.get("ts") or 0.0),
+        })
+
+    scored.sort(key=lambda r: (-r["score"], -r["last_activity_at"]))
+    return {
+        "cameras":  scored[:limit],
+        "as_of":    _t.time(),
+        "source":   "redis",
+        "total_with_activity": len(scored),
+    }
