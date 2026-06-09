@@ -873,33 +873,43 @@ async def diagnose(camera_id: int, db: Session = Depends(get_db),
 def activity_top(limit: int = 15, minutes: int = 15,
                  db: Session = Depends(get_db),
                  _u: User = Depends(get_current_user)):
-    """Top cameras across the chain by detection_event count in the
-    last `minutes`. Powers the Live View "Activity" toggle.
+    """Top cameras across the chain by recent activity. Powers the
+    Live View "Activity" toggle.
 
-    Aggregated in a single Postgres query using FILTER clauses so the
-    response is one round-trip; hits the existing
-    (camera_id, timestamp) index on detection_events. Rounds out the
-    response with camera + store metadata for the tile labels.
+    Ranking: count ALL detection_event rows per camera in the last
+    `minutes` (default 15) — sales_floor_insight excluded because
+    it's a scheduled aggregate rather than a real detection. The
+    earlier version filtered the count to person / dwell / counter
+    types only, which returned an empty grid on stores that have
+    cameras actively producing other detection types.
 
-    Detection-type buckets (mapped to the spec's three activity icons):
-      person                      → 👤 person
-      dwell                       → 🛍 browsing (aisle zones)
-      staff_present, queue,
-      queue_length, entry_exit    → 🧾 checkout / entry
-    sales_floor_insight is the bookkeeping heartbeat and is
-    excluded so it can't dominate the ranking on a quiet store."""
+    Per-type breakdown (person / browsing / checkout) is kept as
+    bonus info for the tile icons, but does NOT gate the ranking.
+
+    Fallback: when no detection_event rows exist in the window
+    (fresh deploy, supervisor warm-up, model not configured), we
+    surface the top cameras the inference worker is processing
+    according to metric_snapshot writes in the last 20 minutes —
+    so the grid always shows the most-active cameras instead of
+    going blank.
+
+    Aggregation runs as a single Postgres GROUP BY with FILTER
+    clauses, hitting the existing (camera_id, timestamp) index on
+    detection_events / (camera_id, period_start) on metric_snapshots.
+    """
     from datetime import datetime, timedelta, timezone
-    from sqlalchemy import func, and_
-    from app.models import DetectionEvent
+    from sqlalchemy import func
+    from app.models import DetectionEvent, MetricSnapshot
 
     limit   = max(1, min(100, int(limit)))
     minutes = max(1, min(180, int(minutes)))
     cutoff  = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    fallback_cutoff = datetime.now(timezone.utc) - timedelta(minutes=20)
 
     person_types   = ("person",)
     browsing_types = ("dwell",)
     checkout_types = ("staff_present", "queue", "queue_length", "entry_exit")
-    counted_types  = person_types + browsing_types + checkout_types
+    excluded_types = ("sales_floor_insight",)
 
     rows = (
         db.query(
@@ -918,14 +928,54 @@ def activity_top(limit: int = 15, minutes: int = 15,
         )
         .filter(DetectionEvent.timestamp >= cutoff,
                 DetectionEvent.camera_id.isnot(None),
-                DetectionEvent.detection_type.in_(counted_types))
+                ~DetectionEvent.detection_type.in_(excluded_types))
         .group_by(DetectionEvent.camera_id)
         .order_by(func.count(DetectionEvent.id).desc())
         .limit(limit)
         .all()
     )
+
+    source = "detection_events"
     if not rows:
-        return {"window_minutes": minutes, "cameras": []}
+        # Fallback path — no detections in the window. Find the
+        # cameras the inference worker is actively processing based
+        # on metric_snapshot writes (every detector flushes at least
+        # one of these per frame). Counts and per-type breakdowns
+        # default to zero on the fallback rows; the tile still shows
+        # the snapshot + store/camera label so the operator can see
+        # the system is alive.
+        fb_rows = (
+            db.query(
+                MetricSnapshot.camera_id.label("camera_id"),
+                func.count(MetricSnapshot.id).label("total"),
+                func.max(MetricSnapshot.period_start).label("last_at"),
+            )
+            .filter(MetricSnapshot.period_start >= fallback_cutoff,
+                    MetricSnapshot.camera_id.isnot(None))
+            .group_by(MetricSnapshot.camera_id)
+            .order_by(func.max(MetricSnapshot.period_start).desc())
+            .limit(limit)
+            .all()
+        )
+        if not fb_rows:
+            return {"window_minutes": minutes, "cameras": [],
+                    "source": "none"}
+
+        class _Row:
+            __slots__ = ("camera_id", "total", "person", "browsing",
+                         "checkout", "last_at")
+            def __init__(self, r):
+                self.camera_id = r.camera_id
+                # `total` here is metric_snapshot writes, NOT
+                # detection events — kept so the chip renders, but
+                # the tile-side label can switch text via `source`.
+                self.total    = int(r.total or 0)
+                self.person   = 0
+                self.browsing = 0
+                self.checkout = 0
+                self.last_at  = r.last_at
+        rows = [_Row(r) for r in fb_rows]
+        source = "metric_snapshots"
 
     cam_ids = [r.camera_id for r in rows]
     cams = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(cam_ids)).all()}
@@ -957,4 +1007,4 @@ def activity_top(limit: int = 15, minutes: int = 15,
             },
             "last_detection_at": last_at.isoformat() if last_at else None,
         })
-    return {"window_minutes": minutes, "cameras": out}
+    return {"window_minutes": minutes, "cameras": out, "source": source}
