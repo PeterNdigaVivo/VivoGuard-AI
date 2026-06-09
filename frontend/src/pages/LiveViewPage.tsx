@@ -519,9 +519,13 @@ interface ActivityCamera {
   store_id: number | null
   store_name: string | null
   status: string
-  total: number
-  counts: { person: number; browsing: number; checkout: number }
-  last_detection_at: string | null
+  // Sum of the chosen activity metrics in the window (occupancy +
+  // browse_time_seconds + dwell_count). Drives the ranking.
+  activity_score: number
+  // MAX(occupancy) over the window — null when the camera has
+  // telemetry but no occupancy signal yet.
+  people_peak: number | null
+  last_activity_at: string | null
 }
 
 function ActivityGrid({ onPickFullscreen }: {
@@ -611,12 +615,15 @@ function ActivityTile({ cam, onClick }: {
       .then(r => { if (alive) { setSrc(`data:image/jpeg;base64,${r.jpeg_b64}`); setBusy(false) } })
       .catch(() => { if (alive) { setSrc(null); setBusy(false) } })
     return () => { alive = false }
-  }, [cam.camera_id, cam.last_detection_at])
+  }, [cam.camera_id, cam.last_activity_at])
 
-  const icons: string[] = []
-  if (cam.counts.person   > 0) icons.push('👤')
-  if (cam.counts.browsing > 0) icons.push('🛍')
-  if (cam.counts.checkout > 0) icons.push('🧾')
+  // Headline activity label — prefer the real people count when
+  // occupancy is populated, fall back to a neutral "active" badge
+  // when the camera is being processed but hasn't reported a
+  // people-count metric yet (e.g. dwell-only zones).
+  const headline = cam.people_peak != null && cam.people_peak > 0
+    ? `👥 ${cam.people_peak} ${cam.people_peak === 1 ? 'person' : 'people'} detected`
+    : '📷 Active'
 
   return (
     // Card from @/components/ui/Primitives only takes children +
@@ -645,16 +652,13 @@ function ActivityTile({ cam, onClick }: {
               {busy ? 'Loading…' : 'Snapshot unavailable'}
             </div>
           )}
+        {/* Top-left orange chip — headline activity, matches the
+            new ranking source. People count when occupancy is
+            populated, "📷 Active" otherwise. */}
         <div className="absolute top-1 left-1 px-2 py-0.5 rounded
                         bg-orange-600 text-white text-[11px] font-bold">
-          {cam.total} {cam.total === 1 ? 'detection' : 'detections'}
+          {headline}
         </div>
-        {icons.length > 0 && (
-          <div className="absolute bottom-1 right-1 px-2 py-0.5 rounded
-                          bg-black/70 text-white text-sm tracking-wide">
-            {icons.join(' ')}
-          </div>
-        )}
       </div>
     </Card>
     </button>

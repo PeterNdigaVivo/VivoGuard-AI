@@ -873,84 +873,79 @@ async def diagnose(camera_id: int, db: Session = Depends(get_db),
 def activity_top(limit: int = 15, minutes: int = 30,
                  db: Session = Depends(get_db),
                  _u: User = Depends(get_current_user)):
-    """Top cameras across the chain by recent activity. Powers the
-    Live View "Activity" toggle.
+    """Top cameras across the chain by raw motion / activity.
+    Powers the Live View "Activity" toggle.
 
-    Ranking: count ALL detection_event rows per camera in the last
-    `minutes` (default 15) — sales_floor_insight excluded because
-    it's a scheduled aggregate rather than a real detection. The
-    earlier version filtered the count to person / dwell / counter
-    types only, which returned an empty grid on stores that have
-    cameras actively producing other detection types.
+    Ranking is based on metric_snapshots, NOT detection_events.
+    Detector-triggered events are sparse (a 540-second supervisor
+    run cycle plus per-detector cooldowns means many active cameras
+    have no recent rows), so the grid kept under-filling. The
+    occupancy / browse / dwell metrics are written by the inference
+    worker every frame regardless of whether any specific detector
+    fired — they're the truthful signal for "this camera is being
+    processed and seeing motion".
 
-    Per-type breakdown (person / browsing / checkout) is kept as
-    bonus info for the tile icons, but does NOT gate the ranking.
+    Ranking key per (camera_id):
+      1. SUM(value) over metric_type IN ('occupancy',
+         'browse_time_seconds', 'dwell_count') in the last
+         `minutes`. Highest = most active.
+      2. Tie-break on MAX(period_start) so a recently-active
+         camera beats a long-inactive one with the same total.
 
-    Fallback: when no detection_event rows exist in the window
-    (fresh deploy, supervisor warm-up, model not configured), we
-    surface the top cameras the inference worker is processing
-    according to metric_snapshot writes in the last 20 minutes —
-    so the grid always shows the most-active cameras instead of
-    going blank.
+    Bonus payload:
+      counts.people_peak  → MAX(occupancy) over the window (used
+                             by the tile chip text).
+      last_at             → MAX(period_start) (drives the "Updated"
+                             pill on the tile).
 
-    Aggregation runs as a single Postgres GROUP BY with FILTER
-    clauses, hitting the existing (camera_id, timestamp) index on
-    detection_events / (camera_id, period_start) on metric_snapshots.
+    Fallback: if NO metric_snapshot exists in the window (truly
+    cold deploy / inference fully stalled), return the cameras with
+    the freshest period_start regardless of metric_type so the
+    grid still names the cameras the worker most recently touched.
     """
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import func
-    from app.models import DetectionEvent, MetricSnapshot
+    from app.models import MetricSnapshot
 
     limit   = max(1, min(100, int(limit)))
     minutes = max(1, min(180, int(minutes)))
     cutoff  = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    fallback_cutoff = datetime.now(timezone.utc) - timedelta(minutes=20)
 
-    person_types   = ("person",)
-    browsing_types = ("dwell",)
-    checkout_types = ("staff_present", "queue", "queue_length", "entry_exit")
-    excluded_types = ("sales_floor_insight",)
+    ACTIVITY_METRICS = ("occupancy", "browse_time_seconds", "dwell_count")
 
     rows = (
         db.query(
-            DetectionEvent.camera_id.label("camera_id"),
-            func.count(DetectionEvent.id).label("total"),
-            func.count(DetectionEvent.id).filter(
-                DetectionEvent.detection_type.in_(person_types)
-            ).label("person"),
-            func.count(DetectionEvent.id).filter(
-                DetectionEvent.detection_type.in_(browsing_types)
-            ).label("browsing"),
-            func.count(DetectionEvent.id).filter(
-                DetectionEvent.detection_type.in_(checkout_types)
-            ).label("checkout"),
-            func.max(DetectionEvent.timestamp).label("last_at"),
+            MetricSnapshot.camera_id.label("camera_id"),
+            func.coalesce(func.sum(MetricSnapshot.value), 0.0).label("total"),
+            func.max(MetricSnapshot.value).filter(
+                MetricSnapshot.metric_type == "occupancy"
+            ).label("people_peak"),
+            func.max(MetricSnapshot.period_start).label("last_at"),
         )
-        .filter(DetectionEvent.timestamp >= cutoff,
-                DetectionEvent.camera_id.isnot(None),
-                ~DetectionEvent.detection_type.in_(excluded_types))
-        .group_by(DetectionEvent.camera_id)
-        .order_by(func.count(DetectionEvent.id).desc())
+        .filter(MetricSnapshot.period_start >= cutoff,
+                MetricSnapshot.camera_id.isnot(None),
+                MetricSnapshot.metric_type.in_(ACTIVITY_METRICS))
+        .group_by(MetricSnapshot.camera_id)
+        .order_by(
+            func.coalesce(func.sum(MetricSnapshot.value), 0.0).desc(),
+            func.max(MetricSnapshot.period_start).desc(),
+        )
         .limit(limit)
         .all()
     )
 
-    source = "detection_events"
+    source = "metric_snapshots"
     if not rows:
-        # Fallback path — no detections in the window. Find the
-        # cameras the inference worker is actively processing based
-        # on metric_snapshot writes (every detector flushes at least
-        # one of these per frame). Counts and per-type breakdowns
-        # default to zero on the fallback rows; the tile still shows
-        # the snapshot + store/camera label so the operator can see
-        # the system is alive.
+        # Fallback — no occupancy/browse/dwell rows at all. Surface
+        # the cameras the inference worker most recently touched
+        # (any metric_type) so the grid still names them. Activity
+        # values default to 0 on these rows.
         fb_rows = (
             db.query(
                 MetricSnapshot.camera_id.label("camera_id"),
-                func.count(MetricSnapshot.id).label("total"),
                 func.max(MetricSnapshot.period_start).label("last_at"),
             )
-            .filter(MetricSnapshot.period_start >= fallback_cutoff,
+            .filter(MetricSnapshot.period_start >= cutoff,
                     MetricSnapshot.camera_id.isnot(None))
             .group_by(MetricSnapshot.camera_id)
             .order_by(func.max(MetricSnapshot.period_start).desc())
@@ -962,20 +957,14 @@ def activity_top(limit: int = 15, minutes: int = 30,
                     "source": "none"}
 
         class _Row:
-            __slots__ = ("camera_id", "total", "person", "browsing",
-                         "checkout", "last_at")
+            __slots__ = ("camera_id", "total", "people_peak", "last_at")
             def __init__(self, r):
-                self.camera_id = r.camera_id
-                # `total` here is metric_snapshot writes, NOT
-                # detection events — kept so the chip renders, but
-                # the tile-side label can switch text via `source`.
-                self.total    = int(r.total or 0)
-                self.person   = 0
-                self.browsing = 0
-                self.checkout = 0
-                self.last_at  = r.last_at
+                self.camera_id   = r.camera_id
+                self.total       = 0.0
+                self.people_peak = None
+                self.last_at     = r.last_at
         rows = [_Row(r) for r in fb_rows]
-        source = "metric_snapshots"
+        source = "metric_snapshots_any"
 
     cam_ids = [r.camera_id for r in rows]
     cams = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(cam_ids)).all()}
@@ -993,18 +982,21 @@ def activity_top(limit: int = 15, minutes: int = 30,
         last_at = r.last_at
         if last_at is not None and last_at.tzinfo is None:
             last_at = last_at.replace(tzinfo=timezone.utc)
+        # `total` is the activity score (sum of the chosen metric
+        # values). people_peak is the max occupancy snapshot in the
+        # window — None when no occupancy metric exists yet for this
+        # camera. The frontend uses people_peak for the headline
+        # ("👥 N people detected"); falls back to "📷 Active" when
+        # the camera has telemetry but no occupancy signal.
         out.append({
-            "camera_id":   cam.id,
-            "camera_name": cam.name,
-            "store_id":    cam.store_id,
-            "store_name":  store.name if store else None,
-            "status":      cam.status,
-            "total":       int(r.total or 0),
-            "counts": {
-                "person":   int(r.person or 0),
-                "browsing": int(r.browsing or 0),
-                "checkout": int(r.checkout or 0),
-            },
-            "last_detection_at": last_at.isoformat() if last_at else None,
+            "camera_id":       cam.id,
+            "camera_name":     cam.name,
+            "store_id":        cam.store_id,
+            "store_name":      store.name if store else None,
+            "status":          cam.status,
+            "activity_score":  round(float(r.total or 0.0), 2),
+            "people_peak":     int(round(float(r.people_peak)))
+                                  if r.people_peak is not None else None,
+            "last_activity_at": last_at.isoformat() if last_at else None,
         })
     return {"window_minutes": minutes, "cameras": out, "source": source}
