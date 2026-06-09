@@ -278,19 +278,10 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
             return "📋 Daily Open/Close Summary"
         return "Shop open/close event"
     if dt == "sales_floor_insight":
-        rule = extra.get("rule", "")
+        # All sales-floor insight rules now share one neutral title;
+        # the severity colour + body carry the rule-specific tone.
         store_name = extra.get("store_name") or (store.name if store else "Store")
-        if rule == "good_engagement":
-            return f"✅ Good Customer Engagement — {store_name}"
-        if rule == "low_engagement":
-            return f"⚠️ Low Customer Engagement — {store_name}"
-        if rule == "unattended_floor":
-            return f"⚠️ Sales Floor Needs Staff — {store_name}"
-        if rule == "detection_offline":
-            return f"⚠️ No Detection Data — {store_name}"
-        if rule == "quiet_period":
-            return f"🔵 Quiet Period — {store_name}"
-        return f"📊 Sales Floor Update — {store_name}"
+        return f"Status Update — {store_name}"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":

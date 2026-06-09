@@ -445,10 +445,33 @@ def _sfi_heartbeat(db, store, cam_ids: list[int], now_utc) -> dict:
     }
 
 
+def _people_count_line(customers: int, people_peak: int) -> str:
+    """One brief line summarising who was on camera in the window.
+    `people_peak` (from `occupancy`) includes both staff and
+    customers; staff is the residual after subtracting the customer
+    count. Falls back to a total-people line when there's no useful
+    split (no customers and no staff)."""
+    customers = max(0, int(customers))
+    people_peak = max(0, int(people_peak))
+    staff_est = max(0, people_peak - customers)
+    cust_word = "customer" if customers == 1 else "customers"
+    staff_word = "staff member" if staff_est == 1 else "staff"
+    if people_peak == 0 and customers == 0:
+        return "👥 No people detected in store"
+    if staff_est == 0:
+        return f"👥 {customers} {cust_word} in store"
+    if customers == 0:
+        return (f"👥 {staff_est} {staff_word} detected on sales floor "
+                "(no customers)")
+    return (f"👥 {customers} {cust_word} in store · "
+            f"{staff_est} {staff_word} detected on sales floor")
+
+
 def _sfi_compose_body(store_name: str, summary: dict, rule: str,
                        hb: dict) -> str:
-    """Plain-English alert body — exact format from the spec, with the
-    AI System Status heartbeat appended."""
+    """Plain-English alert body. Every rule renders the same one-line
+    people-count summary up front; the rest of the body is the
+    rule-specific copy + the AI System Status footer."""
     avg_text = _fmt_browse_time(summary["avg_browse_s"])
     customers = summary["total_customers"]
     people_peak = int(summary.get("people_peak") or 0)
@@ -457,6 +480,7 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
     cams_active = int(hb.get("cameras_active") or 0)
     cams_total  = int(hb.get("cameras_total")  or 0)
     last_inf    = hb.get("last_inference_min")
+    people_line = _people_count_line(customers, people_peak)
 
     # Detection-offline override fires BEFORE the regular body so the
     # mis-leading "X customers browsed" / "Most popular area" lines
@@ -485,6 +509,7 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
         ])
 
     lines: list[str] = ["In the last 15 minutes:",
+                        people_line,
                         f"👥 {customers} customers browsed your product aisles",
                         f"⏱️ Average browse time: {avg_text}"]
     if winner and winner["avg"] > 0:
@@ -509,30 +534,10 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
                   "What this means: Customers are browsing without staff in "
                   "sight. Please send a staff member to the sales floor."]
     elif rule == "quiet_period":
-        # Replace the customer-only zero lines with a fact-first
-        # quiet-period block. people_peak comes from `occupancy`
-        # snapshots and includes staff — so a store that's been
-        # empty all 15 min reads "0 people detected", while one
-        # with a staff member behind the counter reads "1 person
-        # detected (likely staff)". The "normal for this time of
-        # day" copy is reserved for actual zero-people windows.
-        cust_word = "customers" if customers != 1 else "customer"
-        if people_peak == 0:
-            headline = ("No people have been detected on camera in the "
-                        "last 15 minutes.")
-            verdict  = "This may be a quiet period — normal for this time of day."
-        elif people_peak == customers:
-            headline = (f"{people_peak} {cust_word} were on camera, "
-                        f"and {customers} browsed product aisles.")
-            verdict  = "Quiet period — light customer interest right now."
-        else:
-            extra = people_peak - customers
-            who_word = "person" if extra == 1 else "people"
-            headline = (f"{people_peak} people were on camera — "
-                        f"{customers} browsed product aisles, "
-                        f"the other {extra} {who_word} likely staff.")
-            verdict  = "Quiet period for customers — staff are present."
-        lines = [headline, verdict]
+        # Brief one-line summary — the people-count line above already
+        # carries the actual numbers. No multi-tier rewrite needed.
+        lines = [people_line,
+                 "Quiet period — light store activity in the last 15 minutes."]
 
     last = (f"{last_inf} minutes ago"
             if last_inf is not None else "not yet")
