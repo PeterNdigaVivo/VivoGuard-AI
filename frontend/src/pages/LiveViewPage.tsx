@@ -181,10 +181,19 @@ export default function LiveViewPage() {
                   onClick={() => setViewMode('cameras')}>
             📡 All Cameras
           </Button>
-          <Button variant={viewMode === 'activity' ? 'primary' : 'ghost'}
-                  onClick={() => setViewMode('activity')}>
+          {/* Live Activity toggle — distinct orange / white / bold so
+              it reads as the "spotlight on what's happening now"
+              control, not just another grid mode. Darker orange when
+              selected. Inline button because the shared Button
+              primitive only ships primary/ghost/danger variants. */}
+          <button onClick={() => setViewMode('activity')}
+                  className={
+                    'px-3 py-1.5 rounded text-sm font-bold text-white ' +
+                    (viewMode === 'activity'
+                      ? 'bg-orange-600 hover:bg-orange-700'
+                      : 'bg-orange-500 hover:bg-orange-600')}>
             🔴 Live Activity
-          </Button>
+          </button>
           {viewMode === 'cameras' && (
             <Select value={storeFilter}
                     onChange={e => setStoreFilter(e.target.value ? Number(e.target.value) : '')}>
@@ -543,18 +552,24 @@ function ActivityGrid({ onPickFullscreen }: {
 
   return (
     <div>
-      <Card className="p-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
-        <span className="font-medium">🔴 Live Activity</span>
-        <span className="text-slate-500">
+      {/* Orange banner — matches the toggle button's filled-orange
+          treatment so the whole Activity view reads as one
+          contiguous "spotlight" block. White bold text + tighter
+          opacity on the secondary lines keeps the hierarchy
+          readable on the orange ground. */}
+      <div className="rounded p-3 mb-3 flex flex-wrap items-center gap-3
+                      text-sm text-white bg-orange-500 shadow-sm">
+        <span className="font-bold tracking-wide">🔴 LIVE ACTIVITY</span>
+        <span className="text-white/90">
           Top {Math.min(15, data?.length ?? 0)} cameras by detection count in the
           last {windowMin} minutes
         </span>
-        <span className="ml-auto text-xs text-slate-500">
+        <span className="ml-auto text-xs text-white/80">
           {lastAt
             ? `Updated ${Math.max(0, Math.floor((Date.now() - lastAt) / 1000))}s ago`
             : 'Loading…'} · auto-refresh 30s
         </span>
-      </Card>
+      </div>
       {err && (
         <Card className="p-4 text-sm text-red-600">
           Could not load activity. {err}
