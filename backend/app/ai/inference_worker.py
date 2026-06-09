@@ -138,6 +138,11 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None,
                    suppress_alert: bool = False) -> int:
+    """Always writes a DetectionEvent row. `suppress_alert` ONLY
+    controls whether the companion Alert row is created — it must
+    NEVER gate the underlying detection_event persistence (Vivo
+    regression Jun 2026 traced to a path where a suppress-check
+    exception silently dropped every person event for the frame)."""
     # Capture an annotated snapshot for the alert-worthy detector types
     # so the Alerts page can show the picture, not just the label.
     thumb_path = None
@@ -346,20 +351,33 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         if sig in seen_this_frame:
                             continue
                         seen_this_frame.add(sig)
-                        # A bare person detection during business hours
-                        # in a normal customer zone is just a customer —
-                        # persist the metric but don't raise an alert.
-                        # After-hours person alerts also get a per-camera
-                        # Redis dedupe so a single staff arrival can't
-                        # flood the dashboard with hundreds of URGENTs.
+                        # Decide whether to suppress the ALERT for this
+                        # event. Suppress=True means the DetectionEvent
+                        # row IS STILL WRITTEN; only the Alert row is
+                        # skipped. Wrapped in its own try block so a
+                        # Redis blip / settings hiccup in the suppress
+                        # check can never bubble up to the outer detector
+                        # handler — which would rollback the whole
+                        # transaction and drop every event queued for
+                        # this frame (Vivo regression, Jun 2026).
                         suppress = False
                         if ev.detection_type == "person":
-                            if not _person_alert_warranted(ev, zones, store):
+                            try:
+                                if not _person_alert_warranted(ev, zones, store):
+                                    suppress = True
+                                elif _person_alert_recently_fired(camera_id):
+                                    suppress = True
+                                else:
+                                    _mark_person_alert_fired(camera_id)
+                            except Exception as _sup_exc:
+                                # Fail safe: persist the event, skip the
+                                # after-hours alert. Better to miss a
+                                # tag than to silently lose the row.
+                                log.warning(
+                                    "person suppress-check raised cam=%s: %s "
+                                    "— persisting event without alert",
+                                    camera_id, _sup_exc)
                                 suppress = True
-                            elif _person_alert_recently_fired(camera_id):
-                                suppress = True
-                            else:
-                                _mark_person_alert_fired(camera_id)
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name,
