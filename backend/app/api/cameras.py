@@ -867,3 +867,94 @@ async def diagnose(camera_id: int, db: Session = Depends(get_db),
         "channel_number": cam.channel_number,
         "results": results,
     }
+
+
+@router.get("/activity/top")
+def activity_top(limit: int = 15, minutes: int = 15,
+                 db: Session = Depends(get_db),
+                 _u: User = Depends(get_current_user)):
+    """Top cameras across the chain by detection_event count in the
+    last `minutes`. Powers the Live View "Activity" toggle.
+
+    Aggregated in a single Postgres query using FILTER clauses so the
+    response is one round-trip; hits the existing
+    (camera_id, timestamp) index on detection_events. Rounds out the
+    response with camera + store metadata for the tile labels.
+
+    Detection-type buckets (mapped to the spec's three activity icons):
+      person                      → 👤 person
+      dwell                       → 🛍 browsing (aisle zones)
+      staff_present, queue,
+      queue_length, entry_exit    → 🧾 checkout / entry
+    sales_floor_insight is the bookkeeping heartbeat and is
+    excluded so it can't dominate the ranking on a quiet store."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import func, and_
+    from app.models import DetectionEvent
+
+    limit   = max(1, min(100, int(limit)))
+    minutes = max(1, min(180, int(minutes)))
+    cutoff  = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    person_types   = ("person",)
+    browsing_types = ("dwell",)
+    checkout_types = ("staff_present", "queue", "queue_length", "entry_exit")
+    counted_types  = person_types + browsing_types + checkout_types
+
+    rows = (
+        db.query(
+            DetectionEvent.camera_id.label("camera_id"),
+            func.count(DetectionEvent.id).label("total"),
+            func.count(DetectionEvent.id).filter(
+                DetectionEvent.detection_type.in_(person_types)
+            ).label("person"),
+            func.count(DetectionEvent.id).filter(
+                DetectionEvent.detection_type.in_(browsing_types)
+            ).label("browsing"),
+            func.count(DetectionEvent.id).filter(
+                DetectionEvent.detection_type.in_(checkout_types)
+            ).label("checkout"),
+            func.max(DetectionEvent.timestamp).label("last_at"),
+        )
+        .filter(DetectionEvent.timestamp >= cutoff,
+                DetectionEvent.camera_id.isnot(None),
+                DetectionEvent.detection_type.in_(counted_types))
+        .group_by(DetectionEvent.camera_id)
+        .order_by(func.count(DetectionEvent.id).desc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return {"window_minutes": minutes, "cameras": []}
+
+    cam_ids = [r.camera_id for r in rows]
+    cams = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(cam_ids)).all()}
+    store_ids = {c.store_id for c in cams.values() if c.store_id}
+    from app.models import Store as _Store
+    stores = ({s.id: s for s in db.query(_Store).filter(_Store.id.in_(store_ids)).all()}
+              if store_ids else {})
+
+    out = []
+    for r in rows:
+        cam = cams.get(r.camera_id)
+        if cam is None:
+            continue
+        store = stores.get(cam.store_id) if cam.store_id else None
+        last_at = r.last_at
+        if last_at is not None and last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+        out.append({
+            "camera_id":   cam.id,
+            "camera_name": cam.name,
+            "store_id":    cam.store_id,
+            "store_name":  store.name if store else None,
+            "status":      cam.status,
+            "total":       int(r.total or 0),
+            "counts": {
+                "person":   int(r.person or 0),
+                "browsing": int(r.browsing or 0),
+                "checkout": int(r.checkout or 0),
+            },
+            "last_detection_at": last_at.isoformat() if last_at else None,
+        })
+    return {"window_minutes": minutes, "cameras": out}

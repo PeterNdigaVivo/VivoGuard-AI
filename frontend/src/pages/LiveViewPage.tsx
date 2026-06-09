@@ -21,6 +21,9 @@ import { stores as storesApi, type Store } from '@/api/stores'
 import { alerts as alertsApi } from '@/api/alerts'
 import { api, wsUrl } from '@/api/client'
 
+type LiveViewMode = 'cameras' | 'activity'
+const ACTIVITY_REFRESH_MS = 30_000     // spec: 30 s minimum
+
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
 type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 const GRID_OPTIONS: GridSize[] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -52,6 +55,8 @@ export default function LiveViewPage() {
   const [autoCycle, setAutoCycle] = useState(false)
   // null = grid view; number = camera_id rendered full-screen.
   const [fullscreenId, setFullscreenId] = useState<number | null>(null)
+  // Camera grid (default) vs Activity grid (top-15 most-active cams).
+  const [viewMode, setViewMode] = useState<LiveViewMode>('cameras')
   const toast = useToast()
 
   useEffect(() => { camsApi.list().then(setCams) }, [])
@@ -168,24 +173,44 @@ export default function LiveViewPage() {
       <PageHeader
         title="Live View"
         actions={<>
-          <Select value={storeFilter}
-                  onChange={e => setStoreFilter(e.target.value ? Number(e.target.value) : '')}>
-            <option value="">All stores ({cams.length} cams)</option>
-            {stores.map(s => {
-              const n = cams.filter(c => c.store_id === s.id).length
-              return <option key={s.id} value={s.id}>{s.name} ({n})</option>
-            })}
-          </Select>
-          <Button variant="ghost" onClick={autoFixAll} disabled={fixing}>
-            {fixing ? 'Probing…' : '🛠 Auto-fix offline'}
+          {/* View toggle — Activity reuses the cached snapshot
+              endpoint and refreshes once every 30 s, so flipping
+              between modes doesn't open or tear down any live
+              WebSockets beyond what each view already does. */}
+          <Button variant={viewMode === 'cameras' ? 'primary' : 'ghost'}
+                  onClick={() => setViewMode('cameras')}>
+            📡 All Cameras
           </Button>
-          {GRID_OPTIONS.map(n => (
+          <Button variant={viewMode === 'activity' ? 'primary' : 'ghost'}
+                  onClick={() => setViewMode('activity')}>
+            🔴 Live Activity
+          </Button>
+          {viewMode === 'cameras' && (
+            <Select value={storeFilter}
+                    onChange={e => setStoreFilter(e.target.value ? Number(e.target.value) : '')}>
+              <option value="">All stores ({cams.length} cams)</option>
+              {stores.map(s => {
+                const n = cams.filter(c => c.store_id === s.id).length
+                return <option key={s.id} value={s.id}>{s.name} ({n})</option>
+              })}
+            </Select>
+          )}
+          {viewMode === 'cameras' && (
+            <Button variant="ghost" onClick={autoFixAll} disabled={fixing}>
+              {fixing ? 'Probing…' : '🛠 Auto-fix offline'}
+            </Button>
+          )}
+          {viewMode === 'cameras' && GRID_OPTIONS.map(n => (
             <Button key={n} variant={layout === n ? 'primary' : 'ghost'}
                     onClick={() => setLayout(n)}>{n}×{n}</Button>
           ))}
         </>}
       />
 
+      {viewMode === 'activity' ? (
+        <ActivityGrid onPickFullscreen={setFullscreenId} />
+      ) : (
+      <>
       {/* Page navigation + auto-cycle + camera count */}
       <Card className="p-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
         <Button variant="ghost" onClick={goPrev} disabled={!hasPrev}>
@@ -235,6 +260,8 @@ export default function LiveViewPage() {
         <Card className="p-8 text-center text-slate-500">
           {storeFilter !== '' ? 'No cameras attached to this store.' : 'No cameras yet.'}
         </Card>
+      )}
+      </>
       )}
 
       {/* Fullscreen overlay — renders ONE tile expanded. Esc closes. */}
@@ -469,5 +496,145 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
         {size.w}×{size.h}
       </div>
     </div>
+  )
+}
+
+
+// ---------------------------------------------------------------
+// Activity grid — top 15 cameras by recent detection_event count
+// ---------------------------------------------------------------
+
+interface ActivityCamera {
+  camera_id: number
+  camera_name: string
+  store_id: number | null
+  store_name: string | null
+  status: string
+  total: number
+  counts: { person: number; browsing: number; checkout: number }
+  last_detection_at: string | null
+}
+
+function ActivityGrid({ onPickFullscreen }: {
+  onPickFullscreen: (id: number) => void
+}) {
+  const [data, setData] = useState<ActivityCamera[] | null>(null)
+  const [windowMin, setWindowMin] = useState<number>(15)
+  const [lastAt, setLastAt] = useState<number | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const tick = () => {
+      api<{ window_minutes: number; cameras: ActivityCamera[] }>(
+        '/cameras/activity/top?limit=15&minutes=15')
+        .then(d => {
+          if (!alive) return
+          setData(d.cameras ?? [])
+          setWindowMin(d.window_minutes ?? 15)
+          setLastAt(Date.now()); setErr(null)
+        })
+        .catch(e => { if (alive) setErr(String(e)) })
+    }
+    tick()
+    const t = setInterval(tick, ACTIVITY_REFRESH_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return (
+    <div>
+      <Card className="p-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
+        <span className="font-medium">🔴 Live Activity</span>
+        <span className="text-slate-500">
+          Top {Math.min(15, data?.length ?? 0)} cameras by detection count in the
+          last {windowMin} minutes
+        </span>
+        <span className="ml-auto text-xs text-slate-500">
+          {lastAt
+            ? `Updated ${Math.max(0, Math.floor((Date.now() - lastAt) / 1000))}s ago`
+            : 'Loading…'} · auto-refresh 30s
+        </span>
+      </Card>
+      {err && (
+        <Card className="p-4 text-sm text-red-600">
+          Could not load activity. {err}
+        </Card>
+      )}
+      {data && data.length === 0 && !err && (
+        <Card className="p-8 text-center text-slate-500">
+          No detections recorded in the last {windowMin} minutes across the chain.
+        </Card>
+      )}
+      {data && data.length > 0 && (
+        <div className="grid gap-2"
+             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
+          {data.map(c => (
+            <ActivityTile key={c.camera_id} cam={c}
+                          onClick={() => onPickFullscreen(c.camera_id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+function ActivityTile({ cam, onClick }: {
+  cam: ActivityCamera
+  onClick: () => void
+}) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [busy, setBusy] = useState(true)
+  // Re-fetch the snapshot every time the activity payload refreshes
+  // (we just key the effect on last_detection_at so the polling
+  // cadence is owned by the parent — no extra timer here). Snapshot
+  // hits the cached Redis frame so this is cheap.
+  useEffect(() => {
+    let alive = true
+    setBusy(true)
+    api<{ jpeg_b64: string }>(`/cameras/${cam.camera_id}/snapshot`)
+      .then(r => { if (alive) { setSrc(`data:image/jpeg;base64,${r.jpeg_b64}`); setBusy(false) } })
+      .catch(() => { if (alive) { setSrc(null); setBusy(false) } })
+    return () => { alive = false }
+  }, [cam.camera_id, cam.last_detection_at])
+
+  const icons: string[] = []
+  if (cam.counts.person   > 0) icons.push('👤')
+  if (cam.counts.browsing > 0) icons.push('🛍')
+  if (cam.counts.checkout > 0) icons.push('🧾')
+
+  return (
+    <Card className="p-1 cursor-zoom-in" onClick={onClick}>
+      <div className="flex items-center justify-between mb-1 text-xs">
+        <div className="truncate flex-1">
+          <span className="font-medium text-slate-800">{cam.camera_name}</span>
+          <span className="text-slate-500">
+            {cam.store_name ? ` · ${cam.store_name}` : ''}
+          </span>
+        </div>
+        <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
+      </div>
+      <div className="relative bg-black rounded overflow-hidden aspect-video">
+        {src
+          ? <img src={src} alt={cam.camera_name}
+                 className="block w-full h-auto opacity-90" />
+          : (
+            <div className="absolute inset-0 flex items-center justify-center
+                            text-slate-400 text-xs">
+              {busy ? 'Loading…' : 'Snapshot unavailable'}
+            </div>
+          )}
+        <div className="absolute top-1 left-1 px-2 py-0.5 rounded
+                        bg-orange-600 text-white text-[11px] font-bold">
+          {cam.total} {cam.total === 1 ? 'detection' : 'detections'}
+        </div>
+        {icons.length > 0 && (
+          <div className="absolute bottom-1 right-1 px-2 py-0.5 rounded
+                          bg-black/70 text-white text-sm tracking-wide">
+            {icons.join(' ')}
+          </div>
+        )}
+      </div>
+    </Card>
   )
 }
