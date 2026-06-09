@@ -15,8 +15,11 @@ const NAV = [
   { to: '/alerts',   label: 'Alerts' },
   { to: '/reports',  label: 'Reports' },
   { to: '/analytics/roi', label: 'Value Report' },
-  { to: '/stockroom', label: 'Stockroom Log' },
-  { to: '/campaigns', label: 'Campaigns' },
+  // Hidden from the sidebar (unused, zero records). Routes,
+  // endpoints, and page components are intentionally left in place
+  // so this is fully reversible — just uncomment when needed.
+  // { to: '/stockroom', label: 'Stockroom Log' },
+  // { to: '/campaigns', label: 'Campaigns' },
   { to: '/training', label: 'AI Training' },
   { to: '/detectors',label: 'Detectors' },
   { to: '/models',   label: 'Models' },
