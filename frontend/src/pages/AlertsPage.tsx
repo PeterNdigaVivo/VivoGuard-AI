@@ -216,6 +216,10 @@ export default function AlertsPage() {
       {/* Simple filter bar. Each button shows a live count so the
           operator sees at a glance how much is in each bucket. */}
       <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
+        <QuickBtn active={quick === 'status'}    onClick={() => setQuick('status')}
+                  tone="orange">
+          📊 Status Update ({counts.status})
+        </QuickBtn>
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
           🔴 Urgent ({counts.urgent})
         </QuickBtn>
@@ -224,9 +228,6 @@ export default function AlertsPage() {
         </QuickBtn>
         <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>
           ✅ Resolved ({counts.resolved})
-        </QuickBtn>
-        <QuickBtn active={quick === 'status'}    onClick={() => setQuick('status')}>
-          📊 Status Update ({counts.status})
         </QuickBtn>
         <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>
           📋 All ({counts.all})
@@ -270,13 +271,25 @@ export default function AlertsPage() {
   )
 }
 
-function QuickBtn({ active, onClick, children }: {
+function QuickBtn({ active, onClick, children, tone = 'default' }: {
   active: boolean; onClick: () => void; children: React.ReactNode
+  tone?: 'default' | 'orange'
 }) {
+  // Same padding / sizing across all tones — only the colour swap
+  // differs. font-bold for the orange tone is intentional: the
+  // Status Update button is the routine-heartbeat tab and the brief
+  // asked for a sharp, distinct look so it doesn't blend in with the
+  // urgent / attention buckets.
+  const palette = tone === 'orange'
+    ? (active
+        ? 'bg-orange-600 text-white font-bold hover:bg-orange-700'
+        : 'bg-orange-500 text-white font-bold hover:bg-orange-600')
+    : (active
+        ? 'bg-slate-800 text-white font-medium'
+        : 'bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')
   return (
     <button onClick={onClick}
-            className={'px-3 py-1.5 rounded text-sm font-medium ' +
-              (active ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200')}>
+            className={'px-3 py-1.5 rounded text-sm ' + palette}>
       {children}
     </button>
   )
