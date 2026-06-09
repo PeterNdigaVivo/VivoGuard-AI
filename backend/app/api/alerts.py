@@ -400,10 +400,8 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Keep popular zones well stocked",
                      "No action needed — mark resolved"]
         elif rule == "detection_offline":
-            steps = ["Open the live camera view for this store",
-                     "Confirm the cameras are streaming and the worker is running",
-                     "Reboot the store NVR or escalate to IT if cameras stay offline",
-                     "Mark resolved once detection data is flowing again"]
+            steps = ["Check the live camera view if anything looks off",
+                     "Mark resolved once detection data resumes"]
         elif rule == "quiet_period":
             steps = ["No action needed — this may be normal for the time of day",
                      "Mark resolved"]

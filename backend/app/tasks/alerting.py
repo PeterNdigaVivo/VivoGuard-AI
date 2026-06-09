@@ -482,28 +482,18 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
     last_inf    = hb.get("last_inference_min")
     people_line = _people_count_line(customers, people_peak)
 
-    # Detection-offline override fires BEFORE the regular body so the
-    # mis-leading "X customers browsed" / "Most popular area" lines
-    # never reach the operator when inference didn't actually run.
+    # Detection-offline override: no person/dwell metrics landed for
+    # this store in the window. Could be a quiet store with cameras
+    # that didn't produce a metric write, a streamer warm-up gap, or
+    # an actual camera issue — the worker doesn't know which, so we
+    # keep the copy strictly factual and let the AI System Status
+    # line below carry the numbers.
     if rule == "detection_offline":
-        reason_bits: list[str] = []
-        if cams_active == 0:
-            reason_bits.append(f"0 of {cams_total} cameras active")
-        if last_inf is None:
-            reason_bits.append("inference has not run for this store")
-        reason = "; ".join(reason_bits) if reason_bits else "no telemetry"
         last = (f"{last_inf} minutes ago"
                 if last_inf is not None else "not yet")
         return "\n".join([
-            f"⚠️ No detection data — {reason}.",
-            "This is a system issue, not a quiet period.",
+            "No detection data recorded for this store in the last 15 minutes.",
             "",
-            "What to do:",
-            "• Check the cameras live view for this store",
-            "• Confirm the inference worker is running",
-            "• Reboot the store NVR or escalate to IT if cameras stay offline",
-            "",
-            "🤖 AI System Status: NOT running normally",
             f"📷 Cameras active: {cams_active}/{cams_total}",
             f"⚡ Last inference: {last}",
         ])
@@ -550,10 +540,21 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
 
 def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
                         store_id: int | None, detection_type: str,
-                        cls: str, extra: dict):
+                        cls: str, extra: dict,
+                        capture_snapshot: bool = True):
     """Write a DetectionEvent + Alert row directly (no detector frame
-    needed). Used by the sales-floor heartbeat."""
+    needed). Used by the sales-floor heartbeat.
+
+    When `capture_snapshot=True` we ALSO save the anchor camera's
+    most recent cached JPEG to disk and pin it to event.thumbnail_path
+    so the alerts UI shows the frame AT THE TIME OF DETECTION rather
+    than a live re-fetch. The /alerts/{id}/snapshot endpoint already
+    prefers thumbnail_path over the live frame buffer.
+    """
     from app.models import Alert, DetectionEvent
+    thumb_path: str | None = None
+    if capture_snapshot and camera_id is not None:
+        thumb_path = _save_alert_thumbnail(camera_id, detection_type)
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=zone_id,
@@ -561,10 +562,36 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
         confidence=1.0,
         bbox_json=[0, 0, 1, 1],
         extra=extra,
+        thumbnail_path=thumb_path,
     )
     db.add(rec); db.flush()
     db.add(Alert(event_id=rec.id, status="new"))
     return rec
+
+
+def _save_alert_thumbnail(camera_id: int, detection_type: str) -> str | None:
+    """Pull the latest cached JPEG for `camera_id` from the streamer
+    and save it under data/recordings/snapshots/YYYY-MM-DD/. Returns
+    the on-disk path or None on any failure — a missing snapshot must
+    never block alert creation."""
+    try:
+        from pathlib import Path
+        from datetime import datetime as _dt
+        from app.config import settings
+        from app.stream.frame_buffer import FrameBuffer
+        jpeg = FrameBuffer().latest_jpeg(int(camera_id))
+        if not jpeg:
+            return None
+        root = Path(settings.recordings_dir) / "snapshots" / _dt.now().strftime("%Y-%m-%d")
+        root.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%H%M%S_%f")
+        path = root / f"{detection_type}_cam{camera_id}_{ts}.jpg"
+        path.write_bytes(jpeg)
+        return str(path)
+    except Exception as e:
+        log.warning("alert thumbnail save failed for camera %s: %s",
+                    camera_id, e)
+        return None
 
 
 @celery_app.task(name="alerting.sales_floor_insights_check", ignore_result=True)
