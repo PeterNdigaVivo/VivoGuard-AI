@@ -604,7 +604,13 @@ function ActivityTile({ cam, onClick }: {
   if (cam.counts.checkout > 0) icons.push('🧾')
 
   return (
-    <Card className="p-1 cursor-zoom-in" onClick={onClick}>
+    // Card from @/components/ui/Primitives only takes children +
+    // className, so the click handler lives on an outer <button>
+    // wrapper that takes up the whole tile. text-left so the inner
+    // labels don't get the default button centering.
+    <button type="button" onClick={onClick}
+            className="text-left cursor-zoom-in">
+    <Card className="p-1">
       <div className="flex items-center justify-between mb-1 text-xs">
         <div className="truncate flex-1">
           <span className="font-medium text-slate-800">{cam.camera_name}</span>
@@ -636,5 +642,6 @@ function ActivityTile({ cam, onClick }: {
         )}
       </div>
     </Card>
+    </button>
   )
 }
