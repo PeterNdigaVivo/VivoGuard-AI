@@ -306,7 +306,12 @@ def _sfi_metric_summary(db, store, cam_ids: list[int], zone_id_to_name: dict[int
     # by AisleDwellDetector). dwell_count is per-zone "customers in zone now"
     # written at "last" aggregator — we take the MAX across the window per
     # zone as the high-water mark, then sum zones for a store total.
+    # occupancy → "people in frame right now" written by OccupancyMetricsDetector;
+    # MAX over the window per camera + sum across cameras gives a peak-people
+    # figure that includes BOTH staff and customers (useful for the
+    # quiet-period wording: "1 person detected" vs "no customers").
     rows = (db.query(MetricSnapshot.zone_id,
+                     MetricSnapshot.camera_id,
                      MetricSnapshot.metric_type,
                      MetricSnapshot.value,
                      MetricSnapshot.period_start)
@@ -315,20 +320,26 @@ def _sfi_metric_summary(db, store, cam_ids: list[int], zone_id_to_name: dict[int
                       MetricSnapshot.period_start <  now_utc,
                       MetricSnapshot.metric_type.in_((
                           "browse_time_seconds", "dwell_seconds",
-                          "dwell_count", "staff_present")))
+                          "dwell_count", "staff_present", "occupancy")))
               .all())
 
     # Per-zone collectors.
     browse_avg_by_zone: dict[int, list[float]] = {}
     dwell_count_peak:   dict[int, float]       = {}
     staff_pres_by_zone: dict[int, list[float]] = {}
+    occupancy_peak_by_cam: dict[int, float]    = {}
 
-    for zid, mtype, value, _ts in rows:
+    for zid, cam_id, mtype, value, _ts in rows:
+        v = float(value or 0.0)
+        if mtype == "occupancy":
+            if cam_id is not None:
+                occupancy_peak_by_cam[cam_id] = max(
+                    occupancy_peak_by_cam.get(cam_id, 0.0), v)
+            continue
         if zid is None:
             continue
         if zid not in zone_id_to_name:
             continue        # not an aisle zone
-        v = float(value or 0.0)
         if mtype in ("browse_time_seconds", "dwell_seconds"):
             browse_avg_by_zone.setdefault(zid, []).append(v)
         elif mtype == "dwell_count":
@@ -355,19 +366,41 @@ def _sfi_metric_summary(db, store, cam_ids: list[int], zone_id_to_name: dict[int
     total_customers = int(sum(dwell_count_peak.values()))
     all_staff = [v for vs in staff_pres_by_zone.values() for v in vs]
     staff_coverage = (sum(all_staff) / len(all_staff)) if all_staff else 0.0
+    # Peak SIMULTANEOUS people seen across the store during the window
+    # — sum of per-camera occupancy peaks. Slightly over-counts when a
+    # person is on two cameras at once; that's acceptable for the
+    # quiet-period wording ("X people detected" vs the customer-only
+    # `total_customers`).
+    people_peak = int(sum(occupancy_peak_by_cam.values()))
 
     return {
         "avg_browse_s":   avg_browse_s,
         "total_customers": total_customers,
+        "people_peak":    people_peak,
         "staff_coverage": staff_coverage,
         "per_zone":       per_zone,
         "winner":         winner,
     }
 
 
-def _sfi_classify(summary: dict) -> tuple[str, str]:
+def _sfi_classify(summary: dict, hb: dict | None = None) -> tuple[str, str]:
     """Map summary → (rule, priority). Rules drive the alert title +
-    body + severity rendering in app.api.alerts."""
+    body + severity rendering in app.api.alerts.
+
+    Detection-health gate (Vivo DIGO RD MSA bug, June 2026): when
+    the heartbeat says NO cameras are streaming or NO inference has
+    run yet for this store, the zero-customer reading is a SYSTEM
+    issue, not a quiet period. Returning 'detection_offline' here
+    short-circuits the cheerful "normal for this time of day" body
+    and routes the alert through the system-issue copy + ATTENTION
+    severity instead.
+    """
+    if hb is not None:
+        cams_active = int(hb.get("cameras_active") or 0)
+        last_inf    = hb.get("last_inference_min")
+        if cams_active == 0 or last_inf is None:
+            return "detection_offline", "warning"
+
     avg = summary["avg_browse_s"]
     customers = summary["total_customers"]
     coverage = summary["staff_coverage"]
@@ -418,8 +451,38 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
     AI System Status heartbeat appended."""
     avg_text = _fmt_browse_time(summary["avg_browse_s"])
     customers = summary["total_customers"]
+    people_peak = int(summary.get("people_peak") or 0)
     coverage_pct = int(round(summary["staff_coverage"] * 100))
     winner = summary["winner"]
+    cams_active = int(hb.get("cameras_active") or 0)
+    cams_total  = int(hb.get("cameras_total")  or 0)
+    last_inf    = hb.get("last_inference_min")
+
+    # Detection-offline override fires BEFORE the regular body so the
+    # mis-leading "X customers browsed" / "Most popular area" lines
+    # never reach the operator when inference didn't actually run.
+    if rule == "detection_offline":
+        reason_bits: list[str] = []
+        if cams_active == 0:
+            reason_bits.append(f"0 of {cams_total} cameras active")
+        if last_inf is None:
+            reason_bits.append("inference has not run for this store")
+        reason = "; ".join(reason_bits) if reason_bits else "no telemetry"
+        last = (f"{last_inf} minutes ago"
+                if last_inf is not None else "not yet")
+        return "\n".join([
+            f"⚠️ No detection data — {reason}.",
+            "This is a system issue, not a quiet period.",
+            "",
+            "What to do:",
+            "• Check the cameras live view for this store",
+            "• Confirm the inference worker is running",
+            "• Reboot the store NVR or escalate to IT if cameras stay offline",
+            "",
+            "🤖 AI System Status: NOT running normally",
+            f"📷 Cameras active: {cams_active}/{cams_total}",
+            f"⚡ Last inference: {last}",
+        ])
 
     lines: list[str] = ["In the last 15 minutes:",
                         f"👥 {customers} customers browsed your product aisles",
@@ -446,16 +509,36 @@ def _sfi_compose_body(store_name: str, summary: dict, rule: str,
                   "What this means: Customers are browsing without staff in "
                   "sight. Please send a staff member to the sales floor."]
     elif rule == "quiet_period":
-        # Replace the noisy zero-stat lines with the quiet-period copy.
-        lines = ["No customers have been detected browsing the product "
-                 "aisles in the last 15 minutes.",
-                 "This may be a quiet period — normal for this time of day."]
+        # Replace the customer-only zero lines with a fact-first
+        # quiet-period block. people_peak comes from `occupancy`
+        # snapshots and includes staff — so a store that's been
+        # empty all 15 min reads "0 people detected", while one
+        # with a staff member behind the counter reads "1 person
+        # detected (likely staff)". The "normal for this time of
+        # day" copy is reserved for actual zero-people windows.
+        cust_word = "customers" if customers != 1 else "customer"
+        if people_peak == 0:
+            headline = ("No people have been detected on camera in the "
+                        "last 15 minutes.")
+            verdict  = "This may be a quiet period — normal for this time of day."
+        elif people_peak == customers:
+            headline = (f"{people_peak} {cust_word} were on camera, "
+                        f"and {customers} browsed product aisles.")
+            verdict  = "Quiet period — light customer interest right now."
+        else:
+            extra = people_peak - customers
+            who_word = "person" if extra == 1 else "people"
+            headline = (f"{people_peak} people were on camera — "
+                        f"{customers} browsed product aisles, "
+                        f"the other {extra} {who_word} likely staff.")
+            verdict  = "Quiet period for customers — staff are present."
+        lines = [headline, verdict]
 
-    last = (f"{hb['last_inference_min']} minutes ago"
-            if hb["last_inference_min"] is not None else "not yet")
+    last = (f"{last_inf} minutes ago"
+            if last_inf is not None else "not yet")
     lines += ["",
               "🤖 AI System Status: Running normally",
-              f"📷 Cameras active: {hb['cameras_active']}/{hb['cameras_total']}",
+              f"📷 Cameras active: {cams_active}/{cams_total}",
               f"⚡ Last inference: {last}"]
     return "\n".join(lines)
 
@@ -626,12 +709,12 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
              summary["total_customers"], summary["avg_browse_s"],
              summary["staff_coverage"])
 
-    # _sfi_classify returns 'quiet_period' when there are zero customers,
-    # so an alert IS created even on cameras that have not produced any
-    # browse_time_seconds rows yet — that's the "system is running, no
-    # one is here" heartbeat the operator needs.
-    rule, priority = _sfi_classify(summary)
+    # Build the heartbeat FIRST so the classifier can downgrade a
+    # zero-customer reading to 'detection_offline' when cameras are
+    # not actually streaming. Otherwise we mislabel a system issue
+    # as a "quiet period" (Vivo DIGO RD MSA bug, June 2026).
     hb = _sfi_heartbeat(db, store, cam_ids, now_utc)
+    rule, priority = _sfi_classify(summary, hb)
     body = _sfi_compose_body(store.name or f"Store {store.id}",
                              summary, rule, hb)
 
@@ -644,6 +727,7 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
         "bucket_eat":          bucket,
         "avg_browse_seconds":  round(summary["avg_browse_s"], 1),
         "total_customers":     summary["total_customers"],
+        "people_peak":         int(summary.get("people_peak") or 0),
         "staff_coverage":      round(summary["staff_coverage"], 3),
         "top_zone_name":       (summary["winner"] or {}).get("name"),
         "top_zone_avg_s":      round((summary["winner"] or {}).get("avg", 0.0), 1),

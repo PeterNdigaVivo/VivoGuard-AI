@@ -206,10 +206,12 @@ def _severity_label(detection_type: str | None,
             return "ATTENTION"
         return "INFO"      # shop_opened, shop_closed
     # Sales-floor insight: heartbeat is INFO; low engagement and
-    # unattended floor are ATTENTION (a manager-actionable nudge).
+    # unattended floor are ATTENTION (a manager-actionable nudge);
+    # detection_offline is ATTENTION too — it's an ops / IT issue,
+    # not a customer-flow signal.
     if detection_type == "sales_floor_insight" and event is not None:
         rule = (event.extra or {}).get("rule", "")
-        if rule in ("low_engagement", "unattended_floor"):
+        if rule in ("low_engagement", "unattended_floor", "detection_offline"):
             return "ATTENTION"
         return "INFO"
     return _SEVERITY_LABEL.get(detection_type or "", "INFO")
@@ -284,6 +286,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
             return f"⚠️ Low Customer Engagement — {store_name}"
         if rule == "unattended_floor":
             return f"⚠️ Sales Floor Needs Staff — {store_name}"
+        if rule == "detection_offline":
+            return f"⚠️ No Detection Data — {store_name}"
         if rule == "quiet_period":
             return f"🔵 Quiet Period — {store_name}"
         return f"📊 Sales Floor Update — {store_name}"
@@ -404,6 +408,11 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         elif rule == "good_engagement":
             steps = ["Keep popular zones well stocked",
                      "No action needed — mark resolved"]
+        elif rule == "detection_offline":
+            steps = ["Open the live camera view for this store",
+                     "Confirm the cameras are streaming and the worker is running",
+                     "Reboot the store NVR or escalate to IT if cameras stay offline",
+                     "Mark resolved once detection data is flowing again"]
         elif rule == "quiet_period":
             steps = ["No action needed — this may be normal for the time of day",
                      "Mark resolved"]
