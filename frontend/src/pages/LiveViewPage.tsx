@@ -649,8 +649,15 @@ function ActivityGrid({ onPickFullscreen }: {
         </Card>
       )}
       {slots.length > 0 && (
-        <div className="grid gap-2"
-             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
+        // Fixed 5×3 grid on wide screens, 4×4 on narrower (the
+        // 15th item leaves one harmless empty cell). Each tile
+        // already constrains its snapshot to 16:9 via
+        // `aspect-video`, so the grid sizes naturally to ~324 px
+        // tile width × ~182 px snapshot on 1920 displays — fits
+        // three rows + labels + bars in the viewport without
+        // scroll. gap-1.5 (6 px) is just enough to separate tiles
+        // without wasting space.
+        <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5">
           {slots.map(slot => {
             const cam = known.get(slot.camera_id)
             // If we lost the camera from the latest fetch entirely
