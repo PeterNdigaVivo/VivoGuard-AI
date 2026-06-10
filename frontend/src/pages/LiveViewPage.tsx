@@ -694,31 +694,48 @@ function ActivityGrid({ onPickFullscreen }: {
           No cameras reporting activity right now.
         </Card>
       )}
-      {slots.length > 0 && (
-        // Monitoring-wall layout. Grid height is pinned to the
-        // remaining viewport so the three rows split evenly and
-        // each tile feels like a wall-screen panel, not a
-        // thumbnail. min-h-[640px] keeps tiles usable on shorter
-        // displays. The tile itself is `h-full flex flex-col` so
-        // the snapshot grabs the leftover space (no aspect-video
-        // constraint), and the snapshot uses object-cover to fill
-        // the cell cleanly regardless of native resolution.
-        <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5
-                        h-[calc(100vh-220px)] min-h-[640px]">
-          {slots.map(slot => {
-            const cam = known.get(slot.camera_id)
-            // If we lost the camera from the latest fetch entirely
-            // (e.g. it stopped reporting) but its hold isn't up, we
-            // can't render without metadata — drop the slot quietly.
-            if (!cam) return null
-            return (
-              <ActivityTile key={slot.camera_id} cam={cam}
-                            enteredAt={slot.entered_at}
-                            onClick={() => onPickFullscreen(slot.camera_id)} />
-            )
-          })}
-        </div>
-      )}
+      {slots.length > 0 && (() => {
+        // Dynamic monitoring-wall layout — columns scale with the
+        // number of active tiles so 4 cams don't get stretched to
+        // 5-column-wide panels. ≤4 → 2 cols, ≤8 → 3 cols, ≤12 → 4
+        // cols, 13–15 → 4 cols (5 on xl). Per-tile width is capped
+        // at ~400 px via the container's max-width, and the grid is
+        // centered so few-tile layouts sit in the middle of the
+        // page instead of hugging the left edge.
+        const n = slots.length
+        const colsClass =
+          n <= 4  ? 'grid-cols-2' :
+          n <= 8  ? 'grid-cols-3' :
+          n <= 12 ? 'grid-cols-4' :
+                    'grid-cols-4 xl:grid-cols-5'
+        const cols = n <= 4 ? 2 : n <= 8 ? 3 : n <= 12 ? 4 : 5
+        const rows = Math.ceil(n / cols)
+        // Only pin the grid to the viewport when there are enough
+        // tiles to fill ≥ 3 rows. Below that, give each row a fixed
+        // height so the tile's `flex-1` snapshot has space to grow
+        // (auto rows would collapse it to zero).
+        const heightClass = rows >= 3
+          ? 'h-[calc(100vh-220px)] min-h-[640px]'
+          : 'auto-rows-[300px]'
+        const maxW = cols * 400
+        return (
+          <div className={`grid ${colsClass} gap-1.5 ${heightClass} mx-auto`}
+               style={{ maxWidth: `${maxW}px` }}>
+            {slots.map(slot => {
+              const cam = known.get(slot.camera_id)
+              // If we lost the camera from the latest fetch entirely
+              // (e.g. it stopped reporting) but its hold isn't up,
+              // we can't render without metadata — drop the slot quietly.
+              if (!cam) return null
+              return (
+                <ActivityTile key={slot.camera_id} cam={cam}
+                              enteredAt={slot.entered_at}
+                              onClick={() => onPickFullscreen(slot.camera_id)} />
+              )
+            })}
+          </div>
+        )
+      })()}
       {/* Fade keyframes injected once — no tailwind.config edit. */}
       <style>{`
         @keyframes vg-act-fade-in { from { opacity: 0; transform: scale(0.97) }
