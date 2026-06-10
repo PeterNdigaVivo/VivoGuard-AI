@@ -1020,7 +1020,16 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         return       # cutoff hasn't passed yet
 
     day_iso = local.date().isoformat()
-    # Have ANY of this store's entrance cameras fired an open today?
+    # Already opened — by an entrance crossing OR by the new
+    # occupancy-inference task. The store-level marker is the
+    # single source of truth across both paths.
+    from app.ai.detectors import shop_state as _shop_state
+    if _shop_state.store_opened_today(store.id, day_iso) is not None:
+        return
+    # Belt + braces — also honour the per-camera open marker the
+    # crossing path writes (it's set in the same transaction as the
+    # store-level marker, but reading both keeps the URGENT path
+    # safe if a previous deploy missed the store-level write).
     for cam_id in entrance_cam_ids:
         if r.get(f"vg:shop_open_close:fired:{cam_id}:{day_iso}:open"):
             return   # already opened — nothing to do
@@ -1201,3 +1210,185 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
     if recipients:
         _send_whatsapp(recipients, f"📋 {summary}")
     log.info("shop_daily_summary: store=%s %s", store.id, summary)
+
+
+# ---- Occupancy-inferred store opening --------------------------------
+#
+# Backs up the EntryExitDetector crossing path. When the line crossing
+# is missed (wrong direction, occlusion, dropped frames), we still
+# need an accurate `opened_at` and an INFO alert rather than waiting
+# for 09:30 EAT and firing the URGENT "not opened".
+#
+# Rule: ≥ PERSON_OPEN_THRESHOLD person detections across the store's
+# cameras within OPEN_CONFIRMATION_WINDOW. opened_at = EARLIEST event
+# in the window that triggered confirmation. Both the entrance-
+# crossing path and this one share the store-level Redis marker so
+# only one of them ever fires per day per store.
+
+PERSON_OPEN_THRESHOLD       = 2          # spec
+OPEN_CONFIRMATION_WINDOW_S  = 5 * 60     # 5 minutes
+
+
+def confirm_opening_from_events(timestamps,
+                                 *, threshold: int = PERSON_OPEN_THRESHOLD,
+                                 window_seconds: int = OPEN_CONFIRMATION_WINDOW_S):
+    """Pure helper — given an iterable of timestamps (assumed sorted
+    ASCENDING; the caller's ORDER BY is the contract), returns the
+    EARLIEST timestamp in the first window of `window_seconds` that
+    contains at least `threshold` events. Returns None when no such
+    window exists.
+
+    Implementation is O(n) with a two-pointer sliding window so it
+    handles a busy store's day without blowing up.
+
+    Pure / no-IO so the unit tests can drive it directly without a
+    DB or Redis stub."""
+    seq = list(timestamps)
+    if len(seq) < threshold:
+        return None
+    left = 0
+    for right in range(len(seq)):
+        # Shrink window from the left while it spans more than the
+        # configured seconds.
+        while left <= right and (
+            (seq[right] - seq[left]).total_seconds() > window_seconds
+        ):
+            left += 1
+        if (right - left + 1) >= threshold:
+            return seq[left]
+    return None
+
+
+@celery_app.task(name="alerting.shop_open_inference_check", ignore_result=True)
+def shop_open_inference_check() -> None:
+    """1-min beat tick. For every active store with no opened-today
+    marker yet, walk today's person events and apply the sliding-
+    window rule. Fires one INFO `shop_opened_inferred` alert per
+    store per day when satisfied."""
+    from app.database import SessionLocal
+    from app.models import Store
+    from app.ai.detectors import shop_state
+
+    r = _redis()      # used only for diagnostics; the marker write
+    _ = r              # is via shop_state.mark_store_opened().
+
+    with SessionLocal() as db:
+        stores = db.query(Store).filter(Store.is_active == True).all()  # noqa: E712
+        for store in stores:
+            try:
+                _maybe_infer_open_for_store(db, store, shop_state)
+            except Exception as e:
+                log.exception("shop_open_inference: store=%s failed: %s",
+                              store.id, e)
+
+
+def _maybe_infer_open_for_store(db, store, shop_state) -> None:
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import asc
+    from app.models import Camera, DetectionEvent
+
+    eat = ZoneInfo("Africa/Nairobi")
+    now_eat = _store_eat_now(store)
+    day_iso = now_eat.date().isoformat()
+
+    # Already opened (by crossing OR by previous inference run)? Done.
+    if shop_state.store_opened_today(store.id, day_iso) is not None:
+        return
+
+    # Don't bother before the earliest reasonable opening time —
+    # security / cleaning before 07:00 EAT shouldn't trigger.
+    cfg = shop_state._read_cfg(None)
+    earliest_t = cfg.get("earliest_open_t")
+    if earliest_t is None:
+        from datetime import time as _time
+        earliest_t = _time(7, 0)
+    today_local_00 = now_eat.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start_local = today_local_00.replace(
+        hour=earliest_t.hour, minute=earliest_t.minute)
+    if now_eat < window_start_local:
+        return
+
+    window_start_utc = window_start_local.astimezone(timezone.utc)
+    now_utc          = now_eat.astimezone(timezone.utc)
+
+    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
+    cam_ids = [c.id for c in cams]
+    if not cam_ids:
+        return
+
+    # Single chronological pull of person events for ALL of this
+    # store's cameras in one query (avoids N+1 over cam_ids). The
+    # existing (camera_id, timestamp) composite index serves the
+    # filter; only the timestamp column is read back.
+    rows = (db.query(DetectionEvent.timestamp,
+                     DetectionEvent.camera_id)
+              .filter(DetectionEvent.camera_id.in_(cam_ids),
+                      DetectionEvent.detection_type == "person",
+                      DetectionEvent.timestamp >= window_start_utc,
+                      DetectionEvent.timestamp <= now_utc)
+              .order_by(asc(DetectionEvent.timestamp))
+              .all())
+    if len(rows) < PERSON_OPEN_THRESHOLD:
+        return
+
+    # Normalise to TZ-aware EAT for the sliding window, then run the
+    # pure rule.
+    ts_eat = []
+    for ts, _cid in rows:
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts_eat.append(ts.astimezone(eat))
+    opened_at = confirm_opening_from_events(ts_eat)
+    if opened_at is None:
+        return
+
+    # Find which camera produced the EARLIEST contributing event so
+    # the alert can anchor on a real FK + name.
+    first_cam_id = None
+    for ts, cid in rows:
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.astimezone(eat) == opened_at:
+            first_cam_id = cid
+            break
+    anchor_cam_id = first_cam_id or cam_ids[0]
+
+    # Atomic claim — if another worker raced us here, bail.
+    claimed = shop_state.mark_store_opened(
+        store.id, day_iso,
+        opened_at=opened_at,
+        method="occupancy_inference",
+        confidence="medium",
+        camera_id=anchor_cam_id,
+    )
+    if not claimed:
+        return
+
+    body = (f"{store.name or 'Store ' + str(store.id)} opened — "
+            f"inferred from occupancy. People detected on cameras at "
+            f"{opened_at.strftime('%H:%M')} but no entrance crossing "
+            f"was recorded.")
+    extra = {
+        "priority":          "info",
+        "rule":              "shop_opened_inferred",
+        "store_id":          store.id,
+        "store_name":        store.name,
+        "message":           body,
+        "method":            "occupancy_inference",
+        "confidence":        "medium",
+        "opened_at_eat":     opened_at.strftime("%H:%M"),
+        "opened_at_iso":     opened_at.isoformat(),
+        "signal":            "occupancy_two_in_five_min",
+    }
+    _create_info_alert(
+        db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
+        detection_type="shop_open_close", cls="shop_opened_inferred",
+        extra=extra,
+    )
+    db.commit()
+    log.info("shop_open_inference: store=%s opened_at=%s (cam=%s)",
+             store.id, opened_at.isoformat(), anchor_cam_id)

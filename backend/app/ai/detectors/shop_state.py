@@ -119,6 +119,70 @@ def _mark_fired(camera_id: int, day_iso: str, kind: str) -> None:
         pass
 
 
+# ---------- Store-level "opened today" coordination -----------------
+# Single source of truth across BOTH the entrance-crossing path and
+# the new occupancy-inference path (see alerting.shop_open_inference_check).
+# The shop_not_opened_check task reads this to decide whether to fire
+# the URGENT — so EITHER signal satisfies it.
+
+_STORE_OPENED_KEY = "vg:shop_open_close:opened_store:{store_id}:{day_iso}"
+
+
+def store_opened_today(store_id: int, day_iso: str) -> dict | None:
+    """Returns the opened-today marker for the store, or None if no
+    open signal has been recorded yet today. Payload schema:
+        { opened_at: ISO-8601 EAT,
+          method:     "entry_crossing" | "occupancy_inference",
+          confidence: "high" | "medium",
+          camera_id:  int | None }
+    Fails CLOSED on Redis errors — better to risk a duplicate alert
+    than to silently drop one.
+    """
+    import json as _json
+    try:
+        r = _redis()
+        raw = r.get(_STORE_OPENED_KEY.format(store_id=int(store_id),
+                                              day_iso=day_iso))
+        if not raw:
+            return None
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def mark_store_opened(store_id: int, day_iso: str, *,
+                     opened_at: datetime, method: str, confidence: str,
+                     camera_id: int | None = None) -> bool:
+    """Atomically claim the "opened today" slot for the store. Uses
+    Redis SET NX so two concurrent writers can't race. Returns True
+    when the caller actually claimed the slot (and therefore should
+    fire its alert), False when a prior signal already claimed it.
+
+    `opened_at` should already be in EAT (the canonical TZ for all
+    store-open analytics)."""
+    import json as _json
+    payload = {
+        "opened_at":  opened_at.isoformat(),
+        "method":     method,
+        "confidence": confidence,
+        "camera_id":  camera_id,
+        "store_id":   int(store_id),
+    }
+    try:
+        r = _redis()
+        key = _STORE_OPENED_KEY.format(store_id=int(store_id),
+                                        day_iso=day_iso)
+        # 36 h TTL mirrors the per-camera dedupe key.
+        return bool(r.set(key, _json.dumps(payload), ex=36 * 3600, nx=True))
+    except Exception:
+        # Fail OPEN — we'd rather risk a duplicate alert than silently
+        # drop the only opening signal of the day.
+        return True
+
+
 # ---------- helpers ------------------------------------------------
 
 def _now_eat() -> datetime:
@@ -219,6 +283,16 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
                     f"({minutes_late} min after {open_t.strftime('%H:%M')} start)")
 
     _mark_fired(ctx.camera_id, day_iso, "open")
+    # Store-level marker — coordinates with the occupancy-inference
+    # task so the URGENT "not opened" check honors EITHER signal.
+    if ctx.store_id is not None:
+        mark_store_opened(
+            ctx.store_id, day_iso,
+            opened_at=now_eat,
+            method="entry_crossing",
+            confidence="high",
+            camera_id=ctx.camera_id,
+        )
     log.info("shop_open_close: %s cam=%s eat=%s",
              kind, ctx.camera_id, now_eat.isoformat())
 

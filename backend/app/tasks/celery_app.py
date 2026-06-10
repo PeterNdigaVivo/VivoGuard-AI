@@ -61,6 +61,7 @@ celery_app.conf.update(
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
+        "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
         "alerting.camera_health_check":         {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
@@ -194,6 +195,17 @@ celery_app.conf.update(
         "shop-not-opened-every-5min": {
             "task": "alerting.shop_not_opened_check",
             "schedule": timedelta(minutes=5),
+        },
+        # 1-min dispatcher inferring the store's opening time from
+        # raw person detections when the entrance-crossing path
+        # missed (wrong line direction, occlusion, dropped frames).
+        # Fires INFO `shop_opened_inferred` with `opened_at` =
+        # earliest event in the 5-min confirmation window. Per-store
+        # marker is shared with the crossing path so the 09:30
+        # URGENT check honours either signal.
+        "shop-open-inference-every-1min": {
+            "task": "alerting.shop_open_inference_check",
+            "schedule": timedelta(minutes=1),
         },
         # 5-min dispatcher checking whether 22:00 EAT has passed for
         # each store; when it has, builds the daily open/close

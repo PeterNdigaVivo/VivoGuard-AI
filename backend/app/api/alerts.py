@@ -270,6 +270,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
             return f"⚠️ Store Opened Late ({eat})"
         if rule == "shop_opened":
             return f"✅ Store Opened ({eat})"
+        if rule == "shop_opened_inferred":
+            opened = extra.get("opened_at_eat") or eat
+            return f"✅ Store Opened — inferred ({opened})"
         if rule == "shop_not_opened":
             return "🚨 Store Not Opened"
         if rule == "shop_closed":
@@ -421,6 +424,10 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
                      "Mark resolved once trading has begun"]
         elif rule == "shop_opened":
             steps = ["Routine opening — no action needed",
+                     "Mark resolved"]
+        elif rule == "shop_opened_inferred":
+            steps = ["Routine opening — no action needed",
+                     "Check the entry/exit line setup if this keeps inferring instead of recording a crossing",
                      "Mark resolved"]
         elif rule == "shop_not_opened":
             steps = ["Call the store manager: {store_phone}",
@@ -587,6 +594,9 @@ def _title(event: DetectionEvent, camera: Camera | None,
             return f"⚠️ Store Opened Late — {store_name} ({eat})"
         if rule == "shop_opened":
             return f"✅ Store Opened — {store_name} ({eat})"
+        if rule == "shop_opened_inferred":
+            opened = extra.get("opened_at_eat") or eat
+            return f"✅ Store Opened — {store_name} (inferred {opened})"
         if rule == "shop_not_opened":
             return f"🚨 Store Not Opened — {store_name}"
         if rule == "shop_closed":
