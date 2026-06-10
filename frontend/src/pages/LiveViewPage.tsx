@@ -530,6 +530,9 @@ interface ActivityCamera {
 }
 
 const SLOT_HOLD_MS = 90 * 1000   // 90-second minimum hold per tile
+const MIN_HOLD_BEFORE_EVICT = 30 * 1000  // idle tiles (people=0, score=0)
+                                          // can be evicted after 30 s if a
+                                          // busier camera is waiting
 const REPLACE_RATIO = 2              // candidate must be 2× the held tile's score
 
 function ActivityGrid({ onPickFullscreen }: {
@@ -595,26 +598,69 @@ function ActivityGrid({ onPickFullscreen }: {
         .sort((a, b) => b.score - a.score)
       let nextSlots: Slot[] = [...prev]
 
-      // For each held slot past the 5-min hold, see if a candidate
-      // beats it by REPLACE_RATIO. Process weakest first so the
-      // strongest candidates get the best slots.
-      const replaceable = nextSlots
-        .map((s, i) => ({ s, i, score: known.get(s.camera_id)?.score ?? 0 }))
-        .filter(x => now - x.s.entered_at >= SLOT_HOLD_MS)
-        .sort((a, b) => a.score - b.score)
+      // Annotate each held slot with its current people / score so
+      // both eviction tiers below can read them without re-walking
+      // the known map.
+      const annotated = nextSlots.map((s, i) => {
+        const cam = known.get(s.camera_id)
+        return {
+          s, i,
+          score:    cam?.score  ?? 0,
+          people:   cam?.people ?? 0,
+          ageMs:    now - s.entered_at,
+        }
+      })
 
-      for (const { i, score } of replaceable) {
+      // ---- Tier 1: IDLE EVICTION ---------------------------------
+      // A slot showing the "📷 Active" chip (people === 0) AND with
+      // score === 0 is contributing nothing visible. Once it's held
+      // for MIN_HOLD_BEFORE_EVICT it's eligible for immediate
+      // replacement by ANY candidate that has a non-zero score —
+      // no 2× ratio requirement. Surfaces busier cameras as fast
+      // as the 30-s poll cadence allows.
+      const idleSlots = annotated
+        .filter(x => x.people === 0
+                  && x.score  === 0
+                  && x.ageMs  >= MIN_HOLD_BEFORE_EVICT)
+        // Replace oldest idle slots first so the longest-idle ones
+        // turn over before more-recent idle ones.
+        .sort((a, b) => b.ageMs - a.ageMs)
+
+      for (const { i } of idleSlots) {
         if (!candidates.length) break
         const top = candidates[0]
-        const needBeat = Math.max(score * REPLACE_RATIO, 1)  // floor so a 0-score slot can be replaced by any non-zero
+        if (top.score > 0 || top.people > 0) {
+          nextSlots[i] = { camera_id: top.camera_id, entered_at: now }
+          candidates.shift()
+        }
+      }
+
+      // ---- Tier 2: 2× RATIO HOLD EVICTION ------------------------
+      // Slots with actual activity (people > 0 OR score > 0) get
+      // the full 90-second hold. After that, they only yield to a
+      // candidate scoring at least REPLACE_RATIO × the held score
+      // (floor of 1 so a 0-score-but-people>0 slot is still
+      // replaceable by something stronger). Process weakest first
+      // so the strongest candidates get the best slots.
+      const heldIdsAfterIdle = new Set(nextSlots.map(s => s.camera_id))
+      const stale = annotated
+        .filter(x => heldIdsAfterIdle.has(nextSlots[x.i].camera_id))
+        .filter(x => now - nextSlots[x.i].entered_at >= SLOT_HOLD_MS)
+        .filter(x => x.people > 0 || x.score > 0)
+        .sort((a, b) => a.score - b.score)
+
+      for (const { i, score } of stale) {
+        if (!candidates.length) break
+        const top = candidates[0]
+        const needBeat = Math.max(score * REPLACE_RATIO, 1)
         if (top.score >= needBeat) {
           nextSlots[i] = { camera_id: top.camera_id, entered_at: now }
           candidates.shift()
         }
       }
 
-      // Fill empty slots (e.g. first poll yielded < 15 cameras) with
-      // any remaining candidates, no hold required.
+      // Fill empty slots (first poll yielded < 15 cameras) with any
+      // remaining candidates, no hold required.
       while (nextSlots.length < 15 && candidates.length) {
         const top = candidates.shift()!
         nextSlots.push({ camera_id: top.camera_id, entered_at: now })
@@ -649,15 +695,16 @@ function ActivityGrid({ onPickFullscreen }: {
         </Card>
       )}
       {slots.length > 0 && (
-        // Fixed 5×3 grid on wide screens, 4×4 on narrower (the
-        // 15th item leaves one harmless empty cell). Each tile
-        // already constrains its snapshot to 16:9 via
-        // `aspect-video`, so the grid sizes naturally to ~324 px
-        // tile width × ~182 px snapshot on 1920 displays — fits
-        // three rows + labels + bars in the viewport without
-        // scroll. gap-1.5 (6 px) is just enough to separate tiles
-        // without wasting space.
-        <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5">
+        // Monitoring-wall layout. Grid height is pinned to the
+        // remaining viewport so the three rows split evenly and
+        // each tile feels like a wall-screen panel, not a
+        // thumbnail. min-h-[640px] keeps tiles usable on shorter
+        // displays. The tile itself is `h-full flex flex-col` so
+        // the snapshot grabs the leftover space (no aspect-video
+        // constraint), and the snapshot uses object-cover to fill
+        // the cell cleanly regardless of native resolution.
+        <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5
+                        h-[calc(100vh-220px)] min-h-[640px]">
           {slots.map(slot => {
             const cam = known.get(slot.camera_id)
             // If we lost the camera from the latest fetch entirely
@@ -726,10 +773,13 @@ function ActivityTile({ cam, enteredAt, onClick }: {
             // vg-act-tile = fade-in keyframes from the parent
             // <style> block. Re-runs whenever React mounts a new
             // ActivityTile (i.e. when a slot's camera_id changes),
-            // so swapped tiles fade in smoothly.
-            className="text-left cursor-zoom-in vg-act-tile">
-    <Card className="p-1">
-      <div className="flex items-center justify-between mb-1 text-xs">
+            // so swapped tiles fade in smoothly. h-full so the
+            // button takes up the full grid cell — paired with the
+            // parent's viewport-pinned grid height, this gives the
+            // monitoring-wall feel: tall, equal-sized panels.
+            className="text-left cursor-zoom-in vg-act-tile h-full">
+    <Card className="p-1 h-full flex flex-col">
+      <div className="flex items-center justify-between mb-1 text-xs shrink-0">
         <div className="truncate flex-1">
           <span className="font-medium text-slate-800">{cam.camera_name}</span>
           <span className="text-slate-500">
@@ -738,11 +788,15 @@ function ActivityTile({ cam, enteredAt, onClick }: {
         </div>
         <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
       </div>
-      <div className={'relative bg-black rounded overflow-hidden aspect-video '
+      {/* Snapshot fills whatever vertical space is left after the
+          header row + the hold-bar below. object-cover crops to
+          fit the cell instead of letterboxing at the source 16:9
+          ratio, so the panel always looks full. */}
+      <div className={'relative bg-black rounded overflow-hidden flex-1 min-h-0 '
                        + (cam.people > 0 ? 'vg-act-pulse' : '')}>
         {src
           ? <img src={src} alt={cam.camera_name}
-                 className="block w-full h-auto opacity-90" />
+                 className="block w-full h-full object-cover opacity-90" />
           : (
             <div className="absolute inset-0 flex items-center justify-center
                             text-slate-400 text-xs">
@@ -754,10 +808,12 @@ function ActivityTile({ cam, enteredAt, onClick }: {
           {headline}
         </div>
       </div>
-      {/* 5-min hold bar — drains over the hold window so the
-          operator can see when a tile becomes eligible for
-          rotation. Caption sits just below in tiny grey. */}
-      <div className="mt-1">
+      {/* Hold bar — drains over the active-camera hold window so
+          the operator can see when a tile becomes eligible for
+          rotation. Caption sits just below in tiny grey. shrink-0
+          so the flex column above (snapshot) doesn't steal the
+          bar's height. */}
+      <div className="mt-1 shrink-0">
         <div className="h-1 w-full bg-slate-200 rounded overflow-hidden">
           <div className="h-full bg-orange-500 transition-[width] duration-1000 ease-linear"
                style={{ width: `${pct}%` }} />
