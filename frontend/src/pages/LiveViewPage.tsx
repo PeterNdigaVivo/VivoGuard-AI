@@ -529,7 +529,7 @@ interface ActivityCamera {
   last_activity_at: number
 }
 
-const SLOT_HOLD_MS = 5 * 60 * 1000   // 5-minute minimum hold per tile
+const SLOT_HOLD_MS = 90 * 1000   // 90-second minimum hold per tile
 const REPLACE_RATIO = 2              // candidate must be 2× the held tile's score
 
 function ActivityGrid({ onPickFullscreen }: {
@@ -630,7 +630,7 @@ function ActivityGrid({ onPickFullscreen }: {
                       text-sm text-white bg-orange-500 shadow-sm">
         <span className="font-bold tracking-wide">🔴 LIVE ACTIVITY</span>
         <span className="text-white/90">
-          Top {slots.length} cameras by current activity · 5-minute hold per tile
+          Top {slots.length} cameras by current activity · 90-second hold per tile
         </span>
         <span className="ml-auto text-xs text-white/80">
           {lastAt
@@ -702,7 +702,7 @@ function ActivityTile({ cam, enteredAt, onClick }: {
     ? `👥 ${cam.people} ${cam.people === 1 ? 'person' : 'people'} detected`
     : '📷 Active'
 
-  // 5-minute hold timer — both the bottom progress bar and the
+  // 90-second hold timer — both the bottom progress bar and the
   // "in slot Xm Ys" caption read from this. Math runs on every
   // parent forceTick (1 Hz), so the bar drains smoothly.
   const held = Math.max(0, Math.min(SLOT_HOLD_MS, Date.now() - enteredAt))
