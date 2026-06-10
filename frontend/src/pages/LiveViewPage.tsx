@@ -578,131 +578,92 @@ function ActivityGrid({ onPickFullscreen }: {
     return () => { alive = false; clearInterval(refresh); clearInterval(seconds) }
   }, [])
 
-  // Slot management — three-tier rotation, see comments below.
+  // Slot management — apply the 5-min hold + 2× replacement rule.
   useEffect(() => {
     if (!latest) return
     setSlots(prev => {
       const now = Date.now()
-      const heldIds = new Set(prev.map(s => s.camera_id))
+      const inLatest = new Set(latest.map(c => c.camera_id))
+      const heldIds  = new Set(prev.map(s => s.camera_id))
 
       // First load: take the top 15 as-is.
       if (prev.length === 0) {
         return latest.slice(0, 15).map(c => ({ camera_id: c.camera_id, entered_at: now }))
       }
 
-      // ACTIVE candidate pool — cameras not currently held AND with
-      // some signal (score > 0 OR people > 0). We deliberately
-      // exclude dead cameras (score=0 AND people=0): swapping a
-      // dead slot for another dead camera is pointless churn and
-      // the spec forbids it.
-      const pool: ActivityCamera[] = latest
+      // Build the candidate pool — cameras in latest that aren't
+      // already held, sorted by current score desc.
+      const candidates = latest
         .filter(c => !heldIds.has(c.camera_id))
-        .filter(c => c.score > 0 || c.people > 0)
+        .sort((a, b) => b.score - a.score)
+      let nextSlots: Slot[] = [...prev]
 
-      // Pop helper — remove and return the candidate that best
-      // satisfies `cmp` (lower comparator result = better). Used
-      // both for the people-first ordering (Tiers 1 + 2) and for
-      // the score-only ordering Tier 3 needs to clear the 2× bar.
-      function popBest(
-        cmp: (a: ActivityCamera, b: ActivityCamera) => number,
-        predicate: (c: ActivityCamera) => boolean = () => true,
-      ): ActivityCamera | undefined {
-        let bestIdx = -1
-        for (let i = 0; i < pool.length; i++) {
-          if (!predicate(pool[i])) continue
-          if (bestIdx === -1 || cmp(pool[i], pool[bestIdx]) < 0) bestIdx = i
-        }
-        if (bestIdx === -1) return undefined
-        return pool.splice(bestIdx, 1)[0]
-      }
-
-      // REPLACEMENT PRIORITY for Tiers 1 + 2:
-      //   1. people > 0  (more people first)
-      //   2. score > 0 + people == 0  (higher score first)
-      // Never fills with score=0 AND people=0 — already filtered
-      // out of the pool above.
-      const cmpPeopleFirst = (a: ActivityCamera, b: ActivityCamera) => {
-        const aHasPeople = a.people > 0 ? 1 : 0
-        const bHasPeople = b.people > 0 ? 1 : 0
-        if (aHasPeople !== bHasPeople) return bHasPeople - aHasPeople
-        if (a.people !== b.people) return b.people - a.people
-        return b.score - a.score
-      }
-
-      const nextSlots: Slot[] = [...prev]
-      // Snapshot per-held-slot info ONCE so tiers don't drift as
-      // earlier tiers swap cameras into the array.
-      const slotInfo = prev.map(s => {
+      // Annotate each held slot with its current people / score so
+      // both eviction tiers below can read them without re-walking
+      // the known map.
+      const annotated = nextSlots.map((s, i) => {
         const cam = known.get(s.camera_id)
         return {
-          score:  cam?.score  ?? 0,
-          people: cam?.people ?? 0,
-          ageMs:  now - s.entered_at,
+          s, i,
+          score:    cam?.score  ?? 0,
+          people:   cam?.people ?? 0,
+          ageMs:    now - s.entered_at,
         }
       })
-      const isReplaced = (i: number) =>
-        nextSlots[i].camera_id !== prev[i].camera_id
 
-      // ---- Tier 1 — IDLE EVICTION ---------------------------------
-      // people=0 AND score=0 AND age ≥ MIN_HOLD_BEFORE_EVICT (30 s).
-      // These slots are dead — swap with any active candidate.
-      // Replace oldest-idle first so the longest-stale slots turn
-      // over before more-recent idle ones.
-      const tier1 = slotInfo
-        .map((info, i) => ({ ...info, i }))
-        .filter(x => x.people === 0 && x.score === 0
+      // ---- Tier 1: IDLE EVICTION ---------------------------------
+      // A slot showing the "📷 Active" chip (people === 0) AND with
+      // score === 0 is contributing nothing visible. Once it's held
+      // for MIN_HOLD_BEFORE_EVICT it's eligible for immediate
+      // replacement by ANY candidate that has a non-zero score —
+      // no 2× ratio requirement. Surfaces busier cameras as fast
+      // as the 30-s poll cadence allows.
+      const idleSlots = annotated
+        .filter(x => x.people === 0
+                  && x.score  === 0
                   && x.ageMs  >= MIN_HOLD_BEFORE_EVICT)
+        // Replace oldest idle slots first so the longest-idle ones
+        // turn over before more-recent idle ones.
         .sort((a, b) => b.ageMs - a.ageMs)
-      for (const { i } of tier1) {
-        const pick = popBest(cmpPeopleFirst)
-        if (!pick) break
-        nextSlots[i] = { camera_id: pick.camera_id, entered_at: now }
+
+      for (const { i } of idleSlots) {
+        if (!candidates.length) break
+        const top = candidates[0]
+        if (top.score > 0 || top.people > 0) {
+          nextSlots[i] = { camera_id: top.camera_id, entered_at: now }
+          candidates.shift()
+        }
       }
 
-      // ---- Tier 2 — ELIGIBLE ROTATION -----------------------------
-      // age ≥ SLOT_HOLD_MS (90 s), any people/score. Spec says no
-      // ratio: once the hold expires, any active candidate wins.
-      // Process weakest-held first so strongest candidates land in
-      // the most-deserving (lowest-current-score) slots.
-      const tier2 = slotInfo
-        .map((info, i) => ({ ...info, i }))
-        .filter(x => !isReplaced(x.i))
-        .filter(x => x.ageMs >= SLOT_HOLD_MS)
+      // ---- Tier 2: 2× RATIO HOLD EVICTION ------------------------
+      // Slots with actual activity (people > 0 OR score > 0) get
+      // the full 90-second hold. After that, they only yield to a
+      // candidate scoring at least REPLACE_RATIO × the held score
+      // (floor of 1 so a 0-score-but-people>0 slot is still
+      // replaceable by something stronger). Process weakest first
+      // so the strongest candidates get the best slots.
+      const heldIdsAfterIdle = new Set(nextSlots.map(s => s.camera_id))
+      const stale = annotated
+        .filter(x => heldIdsAfterIdle.has(nextSlots[x.i].camera_id))
+        .filter(x => now - nextSlots[x.i].entered_at >= SLOT_HOLD_MS)
+        .filter(x => x.people > 0 || x.score > 0)
         .sort((a, b) => a.score - b.score)
-      for (const { i } of tier2) {
-        const pick = popBest(cmpPeopleFirst)
-        if (!pick) break
-        nextSlots[i] = { camera_id: pick.camera_id, entered_at: now }
-      }
 
-      // ---- Tier 3 — ACTIVE PROTECTION -----------------------------
-      // age < SLOT_HOLD_MS AND people > 0. Only displaced by a
-      // candidate whose score is ≥ REPLACE_RATIO × the held score.
-      // Pick the highest-SCORE candidate (not the people-first one)
-      // — the 2× bar is purely score-based, and picking a
-      // people-heavy-but-low-score candidate would lose the race
-      // when the same pool also has a high-score outlier.
-      const cmpScoreDesc = (a: ActivityCamera, b: ActivityCamera) =>
-        b.score - a.score
-      const tier3 = slotInfo
-        .map((info, i) => ({ ...info, i }))
-        .filter(x => !isReplaced(x.i))
-        .filter(x => x.ageMs < SLOT_HOLD_MS && x.people > 0)
-        // Process weakest-held first so easier 2× bars match first.
-        .sort((a, b) => a.score - b.score)
-      for (const { i, score } of tier3) {
+      for (const { i, score } of stale) {
+        if (!candidates.length) break
+        const top = candidates[0]
         const needBeat = Math.max(score * REPLACE_RATIO, 1)
-        const pick = popBest(cmpScoreDesc, c => c.score >= needBeat)
-        if (!pick) continue
-        nextSlots[i] = { camera_id: pick.camera_id, entered_at: now }
+        if (top.score >= needBeat) {
+          nextSlots[i] = { camera_id: top.camera_id, entered_at: now }
+          candidates.shift()
+        }
       }
 
-      // Fill empty slots (first poll yielded < 15 cameras) with
-      // remaining ACTIVE candidates, no hold required.
-      while (nextSlots.length < 15 && pool.length > 0) {
-        const pick = popBest(cmpPeopleFirst)
-        if (!pick) break
-        nextSlots.push({ camera_id: pick.camera_id, entered_at: now })
+      // Fill empty slots (first poll yielded < 15 cameras) with any
+      // remaining candidates, no hold required.
+      while (nextSlots.length < 15 && candidates.length) {
+        const top = candidates.shift()!
+        nextSlots.push({ camera_id: top.camera_id, entered_at: now })
       }
       return nextSlots
     })
