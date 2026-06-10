@@ -16,6 +16,7 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.detectors import staff_identity
+from app.ai.detectors.uniform_compliance import uniform_features
 from app.ai.zone_logic import bbox_in_zone
 
 
@@ -24,79 +25,195 @@ from app.ai.zone_logic import bbox_in_zone
 # ---------------------------------------------------------------------------
 
 class StaffPresenceDetector(Detector):
-    """For every zone tagged `counter`, fire "Counter Left Unattended"
-    only when no person has been at the counter for a sustained window.
+    """Multi-evidence "counter attended" detector.
 
-    NOTE: we deliberately do NOT try to distinguish staff from customer
-    here. The HSV uniform-colour rule was unreliable at typical camera
-    angles / lighting / distances and produced more false unattended
-    alerts than it prevented (a uniformed staffer in shadow read as
-    "customer", so the counter looked empty). Until a trained uniform
-    classifier is deployed on a camera, the simple rule is the
-    correct one:
+    REFACTOR (Jun 2026): the old "any person in counter zone =
+    attended" rule produced both false alerts (cashier briefly
+    occluded by a tall customer → 5-min countdown started) and
+    false-negative cover (a lingering customer kept the counter
+    "attended" all day). The new model is a confidence score:
 
-        Counter is ATTENDED while any person is detected in the zone.
-        Counter is UNATTENDED when no person is detected for >5 min.
+      For every tracked person inside the `counter` polygon OR an
+      adjacent `staff_zone` (staff-behind-counter), compute:
+          uniform colour      40 / 20 / 0   (top_ok / partial / none)
+          staff identity      30 / 20 / 10 / 0 (high / med / uncertain / unknown)
+          persistent tracking 1 pt / 15 s in zone, capped at 20
+          zone occupancy      10  (floor — any person in zone)
+      Sum → 0..100 per person; counter score = MAX across all people
+      in either zone, including staff seated behind the counter.
 
-    The UniformComplianceDetector still does its own job in parallel:
-    it scores uniforms and raises uniform_violation / no_lanyard alerts
-    independently. Those are separate signals and do NOT affect the
-    counter-attended status here.
+      Counter is ATTENDED when score ≥ 60.
+      Counter is UNATTENDED when score < 40.
+      40-60 keeps the previous state (hysteresis) so a single sub-40
+      frame from an occluded cashier doesn't flip everything.
 
-    Suppression — no alert when:
-      • any person was seen at the counter in the last GRACE_SECONDS, or
-      • within the first 30 min after opening (setting up), or
-      • within the last 15 min before closing (winding down), or
-      • the store is currently closed (outside business hours).
+    Alert (URGENT) fires only when:
+      • score has been < 40 CONTINUOUSLY for UNATTENDED_DWELL_SECONDS
+        (5 min), AND
+      • we are past the ABSENCE_GRACE_SECONDS (60 s) following the
+        last attended frame — covers short occlusions / dropped
+        detections / camera blink, AND
+      • the store is currently inside business hours, AND
+      • we are outside the opening / closing grace bands, AND
+      • per-zone Redis dedupe says we haven't fired in the last
+        DEDUP_SECONDS (30 min).
 
-    Always writes the `staff_present_pct` metric (1 staffed / 0 not).
+    Persists per-zone state in Redis (`vg:counter_attendance:{cam}:
+    {zone}`) so a worker restart doesn't reset the 5-min countdown.
+    The detection_type, the alert cls, the metric name, and the
+    extra payload shape all stay backward-compatible — every
+    downstream alert / analytics surface keeps working.
     """
 
     detection_type = "staff_present"
-    # We need tracking to measure per-customer service time at the
-    # counter (from the moment the track enters the zone to the
-    # moment it leaves). The presence rule itself stays simple.
     needs_tracking = True
 
-    # Grace after the last sighting before we call the counter empty.
-    GRACE_SECONDS = 5 * 60
+    # Score thresholds (hysteresis band 40–60).
+    SCORE_ATTENDED   = 60
+    SCORE_UNATTENDED = 40
+
+    # Alert timing.
+    UNATTENDED_DWELL_SECONDS = 5 * 60       # must be unattended this long
+    ABSENCE_GRACE_SECONDS    = 60           # grace after last attended frame
+    DEDUP_SECONDS            = 30 * 60      # 30 min between URGENT repeats
+
     OPENING_GRACE_SECONDS = 30 * 60
     CLOSING_GRACE_SECONDS = 15 * 60
-    # Service-time alert threshold (seconds). 5 min per spec; ignored
-    # for tracks shorter than 30 s (lookers, not customers).
     SERVICE_TIME_ALERT_SECONDS = 5 * 60
     SERVICE_TIME_MIN_SECONDS   = 30
 
+    # Redis state key.
+    _STATE_KEY_FMT = "vg:counter_attendance:{camera_id}:{zone_id}"
+    _STATE_TTL_SECONDS = 3600
+
     def __init__(self):
-        # zone_id → t_unstaffed_since (None when currently staffed)
-        self._empty_since: dict[int, float | None] = {}
-        # (track_id, zone_id) -> epoch the track entered. Pops when the
-        # track leaves and we write the service_time metric.
+        # (track_id, zone_id) → entry epoch — drives the service-time metric.
         self._counter_entries: dict[tuple[int, int], float] = {}
-        self._fired: dict[int, float] = {}
-        # zone_id → epoch a person was last seen at the counter.
-        self._last_person_seen: dict[int, float] = {}
+        # (camera_id, zone_id) → state dict {score, attended,
+        #   below_40_since, last_attended_at, last_alert_at}.
+        # In-memory authoritative; Redis is a warm-restart cache.
+        self._state: dict[tuple[int, int], dict] = {}
+
+    # ---- pure scoring helpers (unit-tested) ------------------------
+
+    @staticmethod
+    def score_uniform(feats: dict | None) -> int:
+        """40 / 20 / 0 — uniform colour evidence."""
+        if not feats:
+            return 0
+        if feats.get("top_ok"):
+            return 40
+        if float(feats.get("top_share") or 0) >= 0.10:
+            return 20
+        return 0
+
+    @staticmethod
+    def score_identity(level: str | None) -> int:
+        """30 / 20 / 10 / 0 — staff_identity classify().level."""
+        return {"high": 30, "medium": 20, "uncertain": 10}.get(level or "", 0)
+
+    @staticmethod
+    def score_dwell(time_in_zone_s: float) -> int:
+        """1 pt per 15 s of presence in counter/staff_zone, capped at 20.
+        Reaches the cap after 5 min (matches the time-based staff rule
+        in staff_identity)."""
+        if not time_in_zone_s or time_in_zone_s <= 0:
+            return 0
+        return int(min(20.0, time_in_zone_s / 15.0))
+
+    @classmethod
+    def person_score(cls, feats: dict | None, level: str | None,
+                     time_in_zone_s: float) -> int:
+        """Sum per-person evidence components; always include the
+        +10 zone-occupancy floor (caller only invokes this when the
+        person is in a counter / staff_zone polygon)."""
+        return (cls.score_uniform(feats)
+                + cls.score_identity(level)
+                + cls.score_dwell(time_in_zone_s)
+                + 10)
+
+    @classmethod
+    def apply_hysteresis(cls, score: int,
+                          previously_attended: bool) -> bool:
+        """≥60 attended; <40 unattended; the 40-60 band keeps the
+        previous state so single-frame jitter doesn't flip."""
+        if score >= cls.SCORE_ATTENDED:
+            return True
+        if score < cls.SCORE_UNATTENDED:
+            return False
+        return previously_attended
+
+    # ---- Redis state plumbing --------------------------------------
+
+    def _state_key(self, camera_id: int, zone_id: int) -> str:
+        return self._STATE_KEY_FMT.format(camera_id=camera_id, zone_id=zone_id)
+
+    def _load_state(self, camera_id: int, zone_id: int) -> dict:
+        cache_key = (camera_id, zone_id)
+        if cache_key in self._state:
+            return self._state[cache_key]
+        # Cold start — try Redis (warm-restart recovery).
+        loaded: dict = {
+            "score":            0,
+            "attended":         False,
+            "below_40_since":   None,
+            "last_attended_at": None,
+            "last_alert_at":    0.0,
+        }
+        try:
+            import json
+            import redis
+            from app.config import settings as _settings
+            r = redis.from_url(_settings.redis_url, decode_responses=True)
+            raw = r.get(self._state_key(camera_id, zone_id))
+            if raw:
+                disk = json.loads(raw)
+                loaded.update({k: disk.get(k, loaded[k]) for k in loaded})
+        except Exception:
+            pass
+        self._state[cache_key] = loaded
+        return loaded
+
+    def _save_state(self, camera_id: int, zone_id: int, state: dict) -> None:
+        try:
+            import json
+            import redis
+            from app.config import settings as _settings
+            r = redis.from_url(_settings.redis_url, decode_responses=True)
+            r.set(self._state_key(camera_id, zone_id),
+                  json.dumps(state), ex=self._STATE_TTL_SECONDS)
+        except Exception:
+            pass
+
+    # ---- main --------------------------------------------------------
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
         thr_conf = float(cfg.get("confidence_threshold", 0.6))
-        # Minimum continuous unstaffed time — default 5 min per spec.
-        dwell    = int(cfg.get("dwell_time_seconds") or 300)
+        # `dwell_time_seconds` retained as a per-store override of the
+        # 5-min unattended window — operators tune via detector_config.
+        dwell    = int(cfg.get("dwell_time_seconds") or self.UNATTENDED_DWELL_SECONDS)
 
-        zones = [z for z in ctx.zones
-                 if "counter" in (z.get("detection_types_json") or [])
-                 and not z.get("suppressed")]
-        if not zones:
+        counter_zones = [z for z in ctx.zones
+                         if "counter" in (z.get("detection_types_json") or [])
+                         and not z.get("suppressed")]
+        if not counter_zones:
             return []
+        # Adjacent staff_zone polygons on the same camera — a cashier
+        # seated behind the till is normally in the staff_zone, not in
+        # the customer-facing counter polygon.
+        staff_zones = [z for z in ctx.zones
+                       if "staff_zone" in (z.get("detection_types_json") or [])
+                       and not z.get("suppressed")]
 
         people = [d for d in ctx.raw_detections
                   if d["cls"] in COCO_PERSON and d["conf"] >= thr_conf]
         out: list[DetectionEvent] = []
         now = time.time()
 
-        # Closed-store suppression: never alert when the shop is shut.
+        # Closed-store suppression.
         if ctx.business_hours and ctx.store_timezone:
             try:
                 from app.utils.business_hours import is_open, localised_now
@@ -104,39 +221,29 @@ class StaffPresenceDetector(Detector):
                     return []
             except Exception:
                 pass
-
-        # Opening/closing suppression windows for today.
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
 
-        # Per-track presence at each counter zone — used both for the
-        # presence rule and the service-time metric.
+        # Per-track presence at each counter zone — used for service
+        # time + dwell scoring. Also feeds the staff_identity registry
+        # so the classify() call below sees a meaningful dwell.
         active_track_zones: set[tuple[int, int]] = set()
         for tr, _det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
-            for z in zones:
+            for z in counter_zones:
                 if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
                     key = (tr.track_id, z["id"])
                     active_track_zones.add(key)
                     self._counter_entries.setdefault(key, now)
-                    # Feed the shared staff-identity registry so the
-                    # uniform/staff_zone detectors and the intrusion
-                    # check can see how long this track has been at
-                    # the counter, and mark identified staff on the
-                    # staff_tracks roster.
                     staff_identity.observe(ctx.camera_id, tr.track_id,
                                            "counter", now)
-                    fake_det = {"bbox_norm": tr.bbox_norm}
-                    verdict = staff_identity.classify(
-                        ctx, fake_det, tr.track_id, now)
-                    if verdict["level"] in ("high", "medium"):
-                        staff_identity.mark_staff_track(
-                            ctx, tr.track_id,
-                            source=("uniform" if verdict["top_ok"]
-                                    else "zone"),
-                        )
-        # Tracks that LEFT the counter this frame → close the timer
-        # and emit the service_time metric (counter dwell).
+            for z in staff_zones:
+                if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                    staff_identity.observe(ctx.camera_id, tr.track_id,
+                                           "staff_zone", now)
+
+        # Tracks that LEFT a counter zone — close the timer + emit
+        # the service_time metric.
         for key in list(self._counter_entries.keys()):
             if key in active_track_zones:
                 continue
@@ -150,7 +257,6 @@ class StaffPresenceDetector(Detector):
                 recorder.record(ctx.db, "service_time", float(duration),
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=zone_id, aggregator="avg")
-            # Long service alert — gentle warning, not URGENT.
             if duration >= self.SERVICE_TIME_ALERT_SECONDS:
                 out.append(DetectionEvent(
                     detection_type=self.detection_type, cls="long_service",
@@ -161,55 +267,103 @@ class StaffPresenceDetector(Detector):
                            "rule": "long_service"},
                 ))
 
-        for z in zones:
-            in_zone = [p for p in people
-                       if bbox_in_zone(p["bbox_norm"], z["polygon_coords_json"])]
-            staffed = len(in_zone) > 0   # ANY person = attended
+        # ---- per-counter attendance scoring -------------------------
+        for z in counter_zones:
+            # Collect candidate persons: tracked people in this counter
+            # zone OR in any staff_zone on the same camera.
+            candidates: list[tuple] = []  # (track_id, bbox_norm, dwell_s)
+            for tr, _det in ctx.tracks:
+                if tr.cls not in COCO_PERSON:
+                    continue
+                in_counter = bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"])
+                in_staff = any(bbox_in_zone(tr.bbox_norm, sz["polygon_coords_json"])
+                               for sz in staff_zones)
+                if not (in_counter or in_staff):
+                    continue
+                # Dwell = MAX across counter + staff_zone (the cashier
+                # may have walked between the two).
+                d_counter = staff_identity.time_in_zone(
+                    ctx.camera_id, tr.track_id, "counter", now)
+                d_staff = staff_identity.time_in_zone(
+                    ctx.camera_id, tr.track_id, "staff_zone", now)
+                candidates.append((tr.track_id, tr.bbox_norm,
+                                   max(d_counter, d_staff)))
 
-            if staffed:
-                self._last_person_seen[z["id"]] = now
+            # Score the best candidate; zero when nobody is in either
+            # zone right now.
+            score = 0
+            for track_id, bbox, dwell_s in candidates:
+                feats = uniform_features(ctx.frame_bgr, bbox)
+                verdict = staff_identity.classify(
+                    ctx, {"bbox_norm": bbox}, track_id, now)
+                s = self.person_score(feats, verdict.get("level"), dwell_s)
+                if s > score:
+                    score = s
 
-            # Metric: 1 when staffed, 0 when not.
+            state = self._load_state(ctx.camera_id, z["id"])
+            prev_attended = bool(state.get("attended"))
+            attended = self.apply_hysteresis(score, prev_attended)
+            state["score"] = score
+            state["attended"] = attended
+
+            if attended:
+                state["last_attended_at"] = now
+                state["below_40_since"]   = None
+            else:
+                # Mark below-40 transition exactly once.
+                if score < self.SCORE_UNATTENDED and state["below_40_since"] is None:
+                    state["below_40_since"] = now
+
+            self._save_state(ctx.camera_id, z["id"], state)
+
+            # Always-on metric — kept at the existing key for
+            # backwards compat with the dashboards.
             if ctx.db is not None:
                 from app.analytics import recorder
-                recorder.record(ctx.db, "staff_present_pct", 1.0 if staffed else 0.0,
+                recorder.record(ctx.db, "staff_present_pct",
+                                1.0 if attended else 0.0,
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=z["id"], aggregator="last")
 
-            if staffed:
-                self._empty_since[z["id"]] = None
+            # ---- alert ---------------------------------------------
+            if attended:
                 continue
-
-            # Unstaffed this frame — start/extend the empty timer.
-            self._empty_since.setdefault(z["id"], now)
-            t_since = self._empty_since.get(z["id"]) or now
-            unstaffed_for = now - t_since
-
-            # Suppression gates.
             if in_opening_grace or in_closing_grace:
                 continue
-            last_seen = self._last_person_seen.get(z["id"])
-            if last_seen is not None and (now - last_seen) < self.GRACE_SECONDS:
+            below_since = state.get("below_40_since")
+            if below_since is None:
+                continue
+            # 60 s absence grace — start the 5-min countdown from
+            # max(below_since, last_attended_at + grace).
+            last_att = state.get("last_attended_at") or 0.0
+            effective_since = max(below_since, last_att + self.ABSENCE_GRACE_SECONDS)
+            continuous_below = now - effective_since
+            if continuous_below < dwell:
+                continue
+            if (now - (state.get("last_alert_at") or 0.0)) <= self.DEDUP_SECONDS:
                 continue
 
-            if unstaffed_for >= dwell and now - self._fired.get(z["id"], 0) > 300:
-                self._fired[z["id"]] = now
-                # Snapshot annotation: just a red box around the empty
-                # counter zone — no staff/customer split since we no
-                # longer try to tell them apart here.
-                boxes: list[dict] = []
-                poly = z.get("polygon_coords_json") or []
-                if poly:
-                    xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
-                    boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
-                                  "color": "red", "label": "Counter empty"})
-                out.append(DetectionEvent(
-                    detection_type=self.detection_type, cls="counter_unstaffed",
-                    confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=z["id"],
-                    extra={"unstaffed_seconds": int(unstaffed_for),
-                           "unstaffed_minutes": int(unstaffed_for / 60),
-                           "store_id": ctx.store_id, "boxes": boxes},
-                ))
+            # Fire.
+            state["last_alert_at"] = now
+            self._save_state(ctx.camera_id, z["id"], state)
+            boxes: list[dict] = []
+            poly = z.get("polygon_coords_json") or []
+            if poly:
+                xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
+                boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
+                              "color": "red", "label": "Counter unattended"})
+            out.append(DetectionEvent(
+                detection_type=self.detection_type, cls="counter_unstaffed",
+                confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=z["id"],
+                extra={
+                    "unstaffed_seconds": int(continuous_below),
+                    "unstaffed_minutes": int(continuous_below / 60),
+                    "store_id":          ctx.store_id,
+                    "boxes":             boxes,
+                    "attendance_score":  int(score),
+                    "rule":              "counter_unattended",
+                },
+            ))
         return out
 
     def _opening_closing_grace(self, ctx: DetectorContext,
