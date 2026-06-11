@@ -992,6 +992,7 @@ def shop_not_opened_check() -> None:
 def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     """Single-store check called from the beat task."""
     from app.models import Camera, Zone
+    from app.ai.detectors import shop_state as _shop_state
 
     cams = db.query(Camera).filter(Camera.store_id == store.id).all()
     if not cams:
@@ -1023,8 +1024,12 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     # Already opened — by an entrance crossing OR by the new
     # occupancy-inference task. The store-level marker is the
     # single source of truth across both paths.
-    from app.ai.detectors import shop_state as _shop_state
     if _shop_state.store_opened_today(store.id, day_iso) is not None:
+        # The crossing/inference path already detected the open. Still
+        # run the retro-labeller in case a previous deploy fired a
+        # stale shop_not_opened URGENT this morning before any of the
+        # newer signals landed.
+        _retro_label_false_positives(db, store, cam_ids, cfg, local, day_iso)
         return
     # Belt + braces — also honour the per-camera open marker the
     # crossing path writes (it's set in the same transaction as the
@@ -1032,10 +1037,28 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     # safe if a previous deploy missed the store-level write).
     for cam_id in entrance_cam_ids:
         if r.get(f"vg:shop_open_close:fired:{cam_id}:{day_iso}:open"):
+            _retro_label_false_positives(db, store, cam_ids, cfg, local, day_iso)
             return   # already opened — nothing to do
 
     # Per-store-per-day dedupe for the URGENT itself.
     sent_key = f"vg:shop_open_close:not_opened:{store.id}:{day_iso}"
+
+    # Third evidence tier — occupancy metrics. Crossings (high
+    # confidence) and person-detection sliding-window (medium)
+    # already had their say. Before crying wolf, check
+    # metric_snapshots: if ANY camera in the store recorded
+    # occupancy>0 between earliest_open and the cutoff, customers
+    # were physically present so the store was open — the detection
+    # pipeline just missed the door. Fire an INFO instead of the
+    # URGENT and claim the opened-today marker.
+    fb = _occupancy_fallback_for_store(db, _shop_state, store,
+                                        entrance_cam_ids, cam_ids,
+                                        cfg, local, day_iso)
+    if fb is not None:
+        # Fallback fired — also block any future URGENT for today.
+        r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
+        return
+
     if r.get(sent_key):
         return
 
@@ -1072,6 +1095,185 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         _send_whatsapp(recipients, f"🚨 {body}")
     log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
                 store.id, store.name, cutoff_hhmm)
+
+
+# ---- Occupancy-metric fallback + false-positive retro-labeller -------
+#
+# Today (and historically) a number of stores fired the
+# `shop_not_opened` URGENT at 09:30 EAT even though staff and
+# customers were clearly on camera — the entrance-crossing path
+# missed (bad line direction, dropped frames, no line drawn) AND
+# person-detection events were too sparse for the sliding-window
+# inference rule. The metric_snapshots table, however, was still
+# being written: occupancy>0 samples for those cameras prove the
+# store was open. Treat that as a third (lowest-confidence)
+# evidence tier and use it for two things:
+#
+#   1. Suppress the URGENT — fire an INFO `shop_opened_via_occupancy`
+#      and claim the opened-today marker.
+#   2. Retroactively label any `shop_not_opened` DetectionEvent rows
+#      from earlier today with {training_label: "false_positive",
+#      evidence: "occupancy_present"} so we have a labelled dataset
+#      to retrain the opening pipeline against.
+
+OCCUPANCY_FALLBACK_METRICS = ("occupancy", "queue_length", "passersby")
+
+
+def _morning_window_utc(cfg, local_now):
+    """Returns (start_utc, end_utc) for today's "morning open window"
+    in the store's local clock — i.e. earliest_open → not_open_cutoff
+    in EAT, converted to UTC for the SQL filter."""
+    from datetime import time as _time
+    earliest_t = cfg.get("earliest_open_t") or _time(7, 0)
+    cutoff_t   = cfg["not_open_cutoff_t"]
+    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_local = midnight.replace(hour=earliest_t.hour, minute=earliest_t.minute)
+    end_local   = midnight.replace(hour=cutoff_t.hour,   minute=cutoff_t.minute)
+    return (start_local.astimezone(timezone.utc),
+            end_local.astimezone(timezone.utc))
+
+
+def _occupancy_samples_in_window(db, cam_ids, start_utc, end_utc):
+    """Returns rows of (period_start, value, camera_id, metric_type)
+    for any occupancy/queue/passersby snapshot >0 for any of the
+    given cameras in the window, ASCENDING by period_start."""
+    from sqlalchemy import asc
+    from app.models import MetricSnapshot
+    if not cam_ids:
+        return []
+    return (db.query(MetricSnapshot.period_start,
+                     MetricSnapshot.value,
+                     MetricSnapshot.camera_id,
+                     MetricSnapshot.metric_type)
+              .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                      MetricSnapshot.metric_type.in_(OCCUPANCY_FALLBACK_METRICS),
+                      MetricSnapshot.value > 0,
+                      MetricSnapshot.period_start >= start_utc,
+                      MetricSnapshot.period_start <= end_utc)
+              .order_by(asc(MetricSnapshot.period_start))
+              .limit(500)
+              .all())
+
+
+def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
+                                   cam_ids, cfg, local_now, day_iso):
+    """If metric_snapshots prove the store was open this morning,
+    claim the opened marker, fire an INFO alert, retro-label any
+    already-created shop_not_opened false positives, and return the
+    earliest occupancy timestamp (EAT). Returns None when no
+    occupancy evidence is found — the caller then proceeds to fire
+    the URGENT as normal."""
+    from zoneinfo import ZoneInfo
+    eat = ZoneInfo("Africa/Nairobi")
+
+    start_utc, end_utc = _morning_window_utc(cfg, local_now)
+    samples = _occupancy_samples_in_window(db, cam_ids, start_utc, end_utc)
+    if not samples:
+        return None
+
+    earliest_period = samples[0][0]
+    if earliest_period.tzinfo is None:
+        earliest_period = earliest_period.replace(tzinfo=timezone.utc)
+    opened_at_eat = earliest_period.astimezone(eat)
+    peak_value = max(float(s[1]) for s in samples)
+
+    # Find a camera that contributed (preferring an entrance cam if
+    # one of them recorded occupancy).
+    entrance_set = set(entrance_cam_ids)
+    contributing_cams = list(dict.fromkeys(int(s[2]) for s in samples))
+    anchor_cam_id = next((c for c in contributing_cams if c in entrance_set),
+                         contributing_cams[0] if contributing_cams
+                         else entrance_cam_ids[0])
+
+    # Atomic claim — losing the race is fine (some other path beat us).
+    shop_state.mark_store_opened(
+        store.id, day_iso,
+        opened_at=opened_at_eat,
+        method="occupancy_metric",
+        confidence="low",
+        camera_id=anchor_cam_id,
+    )
+
+    body = (f"{store.name or 'Store ' + str(store.id)} opened — "
+            f"detected via occupancy data. Customers/staff were "
+            f"recorded on camera at "
+            f"{opened_at_eat.strftime('%H:%M')} but the entrance "
+            f"line crossing was not captured.")
+    extra = {
+        "priority":          "info",
+        "rule":              "shop_opened_via_occupancy",
+        "store_id":          store.id,
+        "store_name":        store.name,
+        "message":           body,
+        "method":            "occupancy_metric",
+        "confidence":        "low",
+        "opened_at_eat":     opened_at_eat.strftime("%H:%M"),
+        "opened_at_iso":     opened_at_eat.isoformat(),
+        "signal":            "occupancy_snapshot_present",
+        "occupancy_samples": len(samples),
+        "occupancy_peak":    peak_value,
+        "evidence_cameras":  contributing_cams[:10],
+    }
+    _create_info_alert(
+        db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
+        detection_type="shop_open_close", cls="shop_opened_via_occupancy",
+        extra=extra,
+    )
+
+    # Backfill labels on any shop_not_opened rows from earlier today
+    # for this store — they're confirmed false positives.
+    _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
+                                  day_iso,
+                                  evidence_sample_count=len(samples),
+                                  evidence_peak=peak_value)
+    db.commit()
+    log.info("shop_opened_via_occupancy: store=%s opened_at=%s "
+             "samples=%d peak=%.1f", store.id,
+             opened_at_eat.isoformat(), len(samples), peak_value)
+    return opened_at_eat
+
+
+def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
+                                  day_iso, *,
+                                  evidence_sample_count: int | None = None,
+                                  evidence_peak: float | None = None) -> None:
+    """Marks today's shop_not_opened DetectionEvent rows for `store`
+    as confirmed false positives in their `extra` JSON. Idempotent —
+    rows that already carry a training_label are left alone."""
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.models import DetectionEvent
+
+    midnight_local = local_now.replace(hour=0, minute=0,
+                                        second=0, microsecond=0)
+    day_start_utc = midnight_local.astimezone(timezone.utc)
+    day_end_utc   = (midnight_local + timedelta(days=1)).astimezone(timezone.utc)
+
+    rows = (db.query(DetectionEvent)
+              .filter(DetectionEvent.camera_id.in_(cam_ids),
+                      DetectionEvent.detection_type == "shop_open_close",
+                      DetectionEvent.timestamp >= day_start_utc,
+                      DetectionEvent.timestamp <  day_end_utc)
+              .all())
+    touched = 0
+    for ev in rows:
+        ex = dict(ev.extra or {})
+        if ex.get("rule") != "shop_not_opened":
+            continue
+        if ex.get("training_label") == "false_positive":
+            continue       # already labelled — idempotent
+        ex["training_label"] = "false_positive"
+        ex["evidence"]       = "occupancy_present"
+        ex["labelled_at"]    = local_now.isoformat()
+        if evidence_sample_count is not None:
+            ex["evidence_sample_count"] = evidence_sample_count
+        if evidence_peak is not None:
+            ex["evidence_peak_occupancy"] = evidence_peak
+        ev.extra = ex
+        flag_modified(ev, "extra")
+        touched += 1
+    if touched:
+        log.info("retro-labelled %d shop_not_opened false-positives "
+                 "for store=%s (%s)", touched, store.id, day_iso)
 
 
 # ---- Daily open/close summary (22:00 EAT) ----------------------------

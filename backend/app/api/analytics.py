@@ -2803,6 +2803,107 @@ def backfill_store_ids(db: Session = Depends(get_db), _u=Depends(get_current_use
     return {"backfilled_rows": n}
 
 
+# ---- Training-data export (shop-open pipeline) ---------------------
+#
+# Emits one row per shop_open_close DetectionEvent in the last
+# `days` (default 30), with the row's training_label and the
+# 07:00–09:30 EAT occupancy snapshots for that store on that day.
+# Used to retrain the opening pipeline against the false positives
+# that the occupancy-metric fallback identified in alerting.py.
+
+@router.get("/training/shop-open")
+def shop_open_training_export(
+    days: int = Query(30, le=180),
+    store_id: Optional[int] = None,
+    label: Optional[str] = Query(None, description="filter by training_label, e.g. 'false_positive'"),
+    db: Session = Depends(get_db),
+    _u=Depends(get_current_user),
+):
+    from zoneinfo import ZoneInfo
+    from app.models import MetricSnapshot
+    eat = ZoneInfo("Africa/Nairobi")
+    since_utc = datetime.now(timezone.utc) - timedelta(days=days)
+
+    q = (db.query(DetectionEvent, Camera.store_id, Camera.name, Store.name)
+           .join(Camera, Camera.id == DetectionEvent.camera_id)
+           .outerjoin(Store, Store.id == Camera.store_id)
+           .filter(DetectionEvent.detection_type == "shop_open_close",
+                   DetectionEvent.timestamp >= since_utc))
+    if store_id is not None:
+        q = q.filter(Camera.store_id == store_id)
+    q = q.order_by(DetectionEvent.timestamp.desc()).limit(2000)
+
+    events_out: list[dict] = []
+    for ev, sid, cam_name, store_name in q.all():
+        ex = ev.extra or {}
+        if label is not None and ex.get("training_label") != label:
+            continue
+        ts = ev.timestamp
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts_eat = ts.astimezone(eat) if ts else None
+
+        # Occupancy samples for this store on the event's morning
+        # window (07:00–09:30 EAT). Skipped when we have no store_id
+        # — older detection_events from before the store-backfill
+        # might not have one.
+        samples_payload: list[dict] = []
+        if ts_eat is not None and sid is not None:
+            day = ts_eat.date()
+            ws_eat = datetime(day.year, day.month, day.day, 7,  0, tzinfo=eat)
+            we_eat = datetime(day.year, day.month, day.day, 9, 30, tzinfo=eat)
+            cam_ids_for_store = [
+                cid for (cid,) in db.query(Camera.id)
+                                     .filter(Camera.store_id == sid).all()
+            ]
+            if cam_ids_for_store:
+                samples = (db.query(MetricSnapshot.period_start,
+                                    MetricSnapshot.value,
+                                    MetricSnapshot.camera_id,
+                                    MetricSnapshot.metric_type)
+                             .filter(MetricSnapshot.camera_id.in_(cam_ids_for_store),
+                                     MetricSnapshot.metric_type.in_(
+                                         ("occupancy", "queue_length", "passersby")),
+                                     MetricSnapshot.value > 0,
+                                     MetricSnapshot.period_start >= ws_eat.astimezone(timezone.utc),
+                                     MetricSnapshot.period_start <= we_eat.astimezone(timezone.utc))
+                             .order_by(MetricSnapshot.period_start.asc())
+                             .limit(500).all())
+                for ps, val, cid, mt in samples:
+                    if ps.tzinfo is None:
+                        ps = ps.replace(tzinfo=timezone.utc)
+                    samples_payload.append({
+                        "period_start_eat": ps.astimezone(eat).isoformat(),
+                        "value":            float(val),
+                        "camera_id":        cid,
+                        "metric_type":      mt,
+                    })
+
+        events_out.append({
+            "event_id":       ev.id,
+            "camera_id":      ev.camera_id,
+            "camera_name":    cam_name,
+            "store_id":       sid,
+            "store_name":     store_name,
+            "rule":           ex.get("rule"),
+            "timestamp_eat":  ts_eat.isoformat() if ts_eat else None,
+            "training_label": ex.get("training_label"),
+            "evidence":       ex.get("evidence"),
+            "extra":          ex,
+            "occupancy_samples": samples_payload,
+            "occupancy_sample_count": len(samples_payload),
+            "occupancy_peak": (max((s["value"] for s in samples_payload), default=0.0)
+                               if samples_payload else 0.0),
+        })
+
+    return {
+        "since_eat":  (datetime.now(timezone.utc) - timedelta(days=days))
+                       .astimezone(eat).isoformat(),
+        "count":      len(events_out),
+        "events":     events_out,
+    }
+
+
 # ---- Campaign analytics (P4) ---------------------------------------
 
 @router.get("/campaigns/{campaign_id}/lift")
