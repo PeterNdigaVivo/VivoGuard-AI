@@ -84,7 +84,9 @@ def split_dataset(db: Session, dataset_id: int, *,
     return counts
 
 
-def write_yolo_dataset_yaml(db: Session, dataset_id: int) -> Path:
+def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
+                            extra_dataset_ids: list[int] | None = None,
+                            max_neg_ratio: float = 3.0) -> Path:
     """Write the YOLO data.yaml file the trainer reads.
 
     Layout:
@@ -92,6 +94,19 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int) -> Path:
         data.yaml
         images/<file>
         labels/<file>.txt        ← YOLO-format labels written here
+
+    Background images (TrainingImage rows with no Annotation rows) are
+    now included as hard negatives — YOLO treats an image whose label
+    .txt file is EMPTY as "this frame contains no objects of interest,
+    suppress false detections here." Background images are capped at
+    `max_neg_ratio × positive_count` per split so a flood of dismissed
+    alerts can't swamp the gradient with negatives (YOLO best
+    practice: ≤ 30% background).
+
+    `extra_dataset_ids` lets a fine-tune job pull negatives from a
+    SECOND dataset (typically `feedback-negative-<type>`) without
+    moving rows across the TrainingImage FK — useful for the
+    Phase 2 feedback fine-tune pipeline.
     """
     root = dataset_root(dataset_id)
     ds = db.get(Dataset, dataset_id)
@@ -99,28 +114,64 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int) -> Path:
         raise ValueError("dataset not found")
 
     classes = list(ds.classes_json or [])
+    # Negative-only datasets ship with an empty classes_json — fall
+    # back to the positive dataset's classes so cls_map is non-empty.
     cls_map = {c: i for i, c in enumerate(classes)}
 
-    # Materialise YOLO label files for each labeled image, splitting paths.
-    train_list, val_list, test_list = [], [], []
+    # Pull images from the primary dataset + any extras (typically the
+    # paired hard-negative pool). Dedup is unnecessary because each
+    # TrainingImage row has a single dataset_id FK.
+    dataset_ids = [dataset_id, *(extra_dataset_ids or [])]
     images = (db.query(TrainingImage)
-                .filter(TrainingImage.dataset_id == dataset_id,
+                .filter(TrainingImage.dataset_id.in_(dataset_ids),
                         TrainingImage.labeled == True)            # noqa: E712
                 .all())
+
+    # Pass 1 — bucket per split into (positives, negatives) so we can
+    # apply the per-split negative cap fairly.
+    by_split: dict[str, dict[str, list]] = {}
     for img in images:
         anns = db.query(Annotation).filter(Annotation.image_id == img.id).all()
-        if not anns:
-            continue
-        rel = Path(img.file_path).resolve()
-        label_path = root / "labels" / (Path(img.file_path).stem + ".txt")
-        with label_path.open("w") as f:
-            for a in anns:
-                if a.class_label not in cls_map:
-                    continue
-                cx, cy, w, h = a.bbox_json
-                f.write(f"{cls_map[a.class_label]} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
-        target_list = {"train": train_list, "val": val_list, "test": test_list}.get(img.split or "train", train_list)
-        target_list.append(str(rel))
+        split = img.split or "train"
+        bucket = by_split.setdefault(split, {"pos": [], "neg": []})
+        if anns:
+            bucket["pos"].append((img, anns))
+        else:
+            bucket["neg"].append(img)
+
+    train_list, val_list, test_list = [], [], []
+    out_lists = {"train": train_list, "val": val_list, "test": test_list}
+
+    for split, bucket in by_split.items():
+        target = out_lists.get(split, train_list)
+        # Positives: write label file with each annotation as a YOLO row.
+        for img, anns in bucket["pos"]:
+            rel = Path(img.file_path).resolve()
+            label_path = root / "labels" / (Path(img.file_path).stem + ".txt")
+            label_path.parent.mkdir(parents=True, exist_ok=True)
+            with label_path.open("w") as f:
+                for a in anns:
+                    if a.class_label not in cls_map:
+                        continue
+                    cx, cy, w, h = a.bbox_json
+                    f.write(f"{cls_map[a.class_label]} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+            target.append(str(rel))
+
+        # Negatives: capped at max_neg_ratio × positives. Empty .txt
+        # file is YOLO's "background" convention.
+        pos_count = len(bucket["pos"])
+        neg_cap = int(pos_count * float(max_neg_ratio)) if pos_count else 0
+        # Edge case — a feedback-only fine-tune with zero positives:
+        # still allow up to max_neg_ratio*1 negatives so the trainer
+        # has SOMETHING to learn from.
+        if pos_count == 0 and bucket["neg"]:
+            neg_cap = int(max_neg_ratio) or 1
+        for img in bucket["neg"][:neg_cap]:
+            rel = Path(img.file_path).resolve()
+            label_path = root / "labels" / (Path(img.file_path).stem + ".txt")
+            label_path.parent.mkdir(parents=True, exist_ok=True)
+            label_path.write_text("")          # empty = background
+            target.append(str(rel))
 
     def _write(name: str, items: list[str]) -> Path:
         p = root / f"{name}.txt"

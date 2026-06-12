@@ -33,3 +33,19 @@ def compute_model_metrics_daily() -> None:
             backfill_recent_days(db, days=2)
         except Exception as e:
             log.exception("compute_model_metrics_daily failed: %s", e)
+
+
+@celery_app.task(name="training.pseudo_label_pending", ignore_result=True)
+def pseudo_label_pending() -> None:
+    """Hourly batch — runs the deployed YOLO over every unlabelled
+    TrainingImage in any feedback dataset and writes high-confidence
+    detections as auto_suggested+verified Annotations. Anything
+    below threshold is left for human review."""
+    from app.database import SessionLocal
+    from app.training.pseudo_label import pseudo_label_all_pending
+    with SessionLocal() as db:
+        try:
+            r = pseudo_label_all_pending(db)
+            log.info("pseudo_label_pending: %s", r)
+        except Exception as e:
+            log.exception("pseudo_label_pending failed: %s", e)

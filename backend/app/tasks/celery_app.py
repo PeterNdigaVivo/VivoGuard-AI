@@ -72,6 +72,7 @@ celery_app.conf.update(
         "briefings.weekly_fire_due":          {"queue": "beat"},
         "training.chain_retrain_due":         {"queue": "beat"},
         "training.compute_model_metrics_daily": {"queue": "beat"},
+        "training.pseudo_label_pending":      {"queue": "beat"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -177,6 +178,15 @@ celery_app.conf.update(
         "compute-model-metrics-every-15min": {
             "task": "training.compute_model_metrics_daily",
             "schedule": timedelta(minutes=15),
+        },
+        # Hourly batch pseudo-labelling — runs the deployed YOLO over
+        # any TrainingImage rows still flagged labeled=False. High-
+        # confidence detections become auto_suggested+verified
+        # Annotations the trainer trusts; weaker frames are left for
+        # operator review.
+        "pseudo-label-hourly": {
+            "task": "training.pseudo_label_pending",
+            "schedule": timedelta(hours=1),
         },
         # Sales Floor Intelligence — 15-min timedelta tick (the
         # crontab schedule wasn't being picked up by this worker's

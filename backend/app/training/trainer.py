@@ -78,12 +78,36 @@ def run_job(job_id: int) -> None:
         job.error_message = None
         db.commit()
 
+        # Incremental fine-tune branch — load the deployed (or named)
+        # model's `weights_path` as the base and lower LR/epoch
+        # defaults. Picks up Phase 2's hard-negative pool via
+        # `extra_negative_dataset_ids`.
+        incremental = bool(cfg.get("incremental_finetune", False))
+        resume_from = cfg.get("resume_from_model_id")
+        resume_weights: str | None = None
+        if incremental and resume_from is not None:
+            from app.models import AIModel
+            parent = db.get(AIModel, int(resume_from))
+            if parent is None:
+                job.status, job.error_message = "failed", (
+                    f"incremental fine-tune: resume_from_model_id="
+                    f"{resume_from} not found")
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                raise RuntimeError(job.error_message)
+            resume_weights = parent.weights_path
+
         try:
             split_dataset(db, ds.id,
                           train=float(cfg.get("split_train", 0.7)),
                           val=float(cfg.get("split_val", 0.2)),
                           test=float(cfg.get("split_test", 0.1)))
-            yaml_path = write_yolo_dataset_yaml(db, ds.id)
+            extra_neg_ids = cfg.get("extra_negative_dataset_ids") or []
+            yaml_path = write_yolo_dataset_yaml(
+                db, ds.id,
+                extra_dataset_ids=[int(i) for i in extra_neg_ids] or None,
+                max_neg_ratio=float(cfg.get("max_neg_ratio", 3.0)),
+            )
         except Exception as e:
             job.status, job.error_message = "failed", f"dataset prep: {e}"
             job.completed_at = datetime.now(timezone.utc)
@@ -93,11 +117,19 @@ def run_job(job_id: int) -> None:
     # Heavy import deferred so the rest of the app boots without torch.
     from ultralytics import YOLO
 
-    base_model = cfg.get("base_model", "yolov8n.pt")
-    epochs     = int(cfg.get("epochs", 50))
+    # Fine-tune mode: start from the named model's weights with a
+    # low LR + short schedule. Full-retrain mode: start from the
+    # configured base_model (e.g. yolov8n.pt).
+    if incremental and resume_weights:
+        base_model = resume_weights
+        epochs     = int(cfg.get("epochs", 10))     # ⇩ default for fine-tune
+        lr         = cfg.get("lr0", 0.0005)         # ⇩ low LR avoids forgetting
+    else:
+        base_model = cfg.get("base_model", "yolov8n.pt")
+        epochs     = int(cfg.get("epochs", 50))
+        lr         = cfg.get("lr0", "auto")
     batch      = int(cfg.get("batch", 16))
     imgsz      = int(cfg.get("imgsz", 640))
-    lr         = cfg.get("lr0", "auto")
     augment    = bool(cfg.get("augment", True))
 
     out_dir = Path(settings.models_dir) / f"job_{job_id}"
@@ -137,9 +169,15 @@ def run_job(job_id: int) -> None:
                 job2.status       = "done"
                 job2.completed_at = datetime.now(timezone.utc)
             ds2 = db.get(Dataset, job2.dataset_id) if job2 else None
+            # Auto-version: next vN for this model name. v1 if first.
+            model_name = job2.model_name if job2 else f"model-{job_id}"
+            existing = (db.query(AIModel)
+                          .filter(AIModel.name == model_name)
+                          .all())
+            next_version = f"v{len(existing) + 1}"
             ai_model = AIModel(
-                name=job2.model_name if job2 else f"model-{job_id}",
-                version="v1",
+                name=model_name,
+                version=next_version,
                 base_model=base_model,
                 classes_json=(ds2.classes_json if ds2 else []),
                 weights_path=str(best),

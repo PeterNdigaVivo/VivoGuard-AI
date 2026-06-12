@@ -303,6 +303,94 @@ def refresh_model_metrics(
     return {"buckets_upserted": upserts, "days": days}
 
 
+# ---- Pseudo-labelling --------------------------------------------------
+
+@router.post("/pseudo-label/run")
+def run_pseudo_label(
+    dataset_id: int | None = None,
+    conf: float            = 0.75,
+    limit: int             = 500,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator")),
+):
+    """Manual trigger for the pseudo-labeller. Without dataset_id,
+    walks every dataset with pending unlabelled images (same path the
+    hourly Celery task uses). Returns a counts summary."""
+    from app.training.pseudo_label import (
+        pseudo_label_all_pending, pseudo_label_dataset,
+    )
+    conf = max(0.1, min(0.99, float(conf)))
+    limit = max(1, min(int(limit), 5000))
+    if dataset_id is None:
+        return pseudo_label_all_pending(db, conf=conf,
+                                         limit_per_dataset=limit)
+    return pseudo_label_dataset(db, int(dataset_id),
+                                 conf=conf, limit=limit)
+
+
+# ---- Incremental fine-tune -------------------------------------------
+
+@router.post("/jobs/start-finetune", response_model=TrainingJobOut)
+def start_finetune_job(
+    detection_type: str,
+    resume_from_model_id: int,
+    epochs: int          = 10,
+    batch:  int          = 16,
+    imgsz:  int          = 640,
+    lr0:    float        = 0.0005,
+    max_neg_ratio: float = 3.0,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator")),
+):
+    """Queue an incremental fine-tune. Reads positives from the
+    `feedback-<detection_type>` Dataset and negatives from the
+    paired `feedback-negative-<detection_type>` pool. Starts from
+    the `resume_from_model_id` weights with a low LR + short epoch
+    schedule (Phase 2 default: 10 epochs, lr0=0.0005)."""
+    parent = db.get(AIModel, int(resume_from_model_id))
+    if parent is None:
+        raise HTTPException(404, f"AIModel id={resume_from_model_id} not found")
+
+    pos_ds = (db.query(Dataset)
+                .filter(Dataset.name == f"feedback-{detection_type}")
+                .first())
+    if pos_ds is None:
+        raise HTTPException(
+            404, f"no positive feedback pool for detection_type="
+                 f"'{detection_type}' (expected dataset name "
+                 f"'feedback-{detection_type}')")
+    neg_ds = (db.query(Dataset)
+                .filter(Dataset.name == f"feedback-negative-{detection_type}")
+                .first())
+    extra_neg_ids = [neg_ds.id] if neg_ds else []
+
+    cfg = {
+        "incremental_finetune":       True,
+        "resume_from_model_id":       int(resume_from_model_id),
+        "extra_negative_dataset_ids": extra_neg_ids,
+        "max_neg_ratio":              float(max_neg_ratio),
+        "epochs":                     int(epochs),
+        "batch":                      int(batch),
+        "imgsz":                      int(imgsz),
+        "lr0":                        float(lr0),
+        "augment":                    True,
+    }
+    job = TrainingJob(
+        model_name=parent.name,        # next vN auto-assigned at run time
+        dataset_id=pos_ds.id,
+        config_json=cfg,
+        status="queued",
+        total_epochs=int(epochs),
+    )
+    db.add(job); db.commit(); db.refresh(job)
+
+    # Hand off to the same Celery worker the regular `start` endpoint
+    # uses — the trainer reads `incremental_finetune` from cfg.
+    from app.tasks.training import run_training_job
+    run_training_job.delay(job.id)
+    return job
+
+
 @router.get("/feedback-stats")
 def feedback_stats(
     detection_type: str | None = None,
