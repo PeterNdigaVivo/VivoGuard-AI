@@ -7,6 +7,7 @@ from app.models.zone      import Zone
 from app.models.event     import DetectionEvent
 from app.models.alert     import Alert, ALERT_STATUSES
 from app.models.ai_model  import AIModel
+from app.models.model_metric import ModelMetric
 from app.models.training  import Dataset, TrainingImage, Annotation, TrainingJob, TrainingSample
 # Retail extension models (commit 0+ of the multi-store rollout).
 from app.models.store     import Store, Shift
@@ -24,7 +25,7 @@ __all__ = [
     "Zone",
     "DetectionEvent",
     "Alert", "ALERT_STATUSES",
-    "AIModel",
+    "AIModel", "ModelMetric",
     "Dataset", "TrainingImage", "Annotation", "TrainingJob", "TrainingSample",
     # Retail extension.
     "Store", "Shift",

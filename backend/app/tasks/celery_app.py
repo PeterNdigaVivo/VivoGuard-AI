@@ -71,6 +71,7 @@ celery_app.conf.update(
         "briefings.daily_fire_due":           {"queue": "beat"},
         "briefings.weekly_fire_due":          {"queue": "beat"},
         "training.chain_retrain_due":         {"queue": "beat"},
+        "training.compute_model_metrics_daily": {"queue": "beat"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -168,6 +169,14 @@ celery_app.conf.update(
         "chain-retrain-every-5min": {
             "task": "training.chain_retrain_due",
             "schedule": 300.0,
+        },
+        # Per-model drift dashboard — every 15 min the task walks
+        # the last 2 EAT days of alerts and recomputes precision /
+        # fp_rate per (model_id, detection_type, day). Idempotent
+        # upsert so late operator marks are picked up.
+        "compute-model-metrics-every-15min": {
+            "task": "training.compute_model_metrics_daily",
+            "schedule": timedelta(minutes=15),
         },
         # Sales Floor Intelligence — 15-min timedelta tick (the
         # crontab schedule wasn't being picked up by this worker's

@@ -247,6 +247,89 @@ def list_models(db: Session = Depends(get_db),
     return db.query(AIModel).order_by(AIModel.id.desc()).all()
 
 
+# ---- Drift dashboard + feedback-pool stats --------------------------
+
+@router.get("/model-metrics")
+def model_metrics(
+    detection_type: str | None = None,
+    model_id: int | None       = None,
+    days: int                  = 30,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator", "viewer")),
+):
+    """Per-day precision + fp_rate per (model, detection_type). The
+    chart is computed nightly by the
+    `training.compute_model_metrics_daily` task — this endpoint just
+    reads. Filterable by `detection_type` and/or `model_id`; default
+    window is 30 days."""
+    from datetime import date as _date, timedelta as _td
+    from app.models import ModelMetric
+
+    days = max(1, min(int(days), 180))
+    since = _date.today() - _td(days=days)
+    q = db.query(ModelMetric).filter(ModelMetric.day >= since)
+    if detection_type is not None:
+        q = q.filter(ModelMetric.detection_type == detection_type)
+    if model_id is not None:
+        q = q.filter(ModelMetric.model_id == model_id)
+    rows = q.order_by(ModelMetric.day.asc(),
+                      ModelMetric.detection_type.asc(),
+                      ModelMetric.model_id.asc().nullslast()).all()
+    return [{
+        "day":            r.day.isoformat(),
+        "model_id":       r.model_id,
+        "detection_type": r.detection_type,
+        "tp_count":       r.tp_count,
+        "fp_count":       r.fp_count,
+        "alerts_total":   r.alerts_total,
+        "precision":      r.precision,
+        "fp_rate":        r.fp_rate,
+        "recall":         r.recall,
+        "computed_at":    r.computed_at.isoformat() if r.computed_at else None,
+    } for r in rows]
+
+
+@router.post("/model-metrics/refresh")
+def refresh_model_metrics(
+    days: int = 2,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator")),
+):
+    """Manual trigger for a metrics rebuild. The Celery beat already
+    runs this every 15 min, but ops may want to force-refresh after
+    a triage sweep."""
+    from app.training.metrics import backfill_recent_days
+    upserts = backfill_recent_days(db, days=max(1, min(int(days), 30)))
+    return {"buckets_upserted": upserts, "days": days}
+
+
+@router.get("/feedback-stats")
+def feedback_stats(
+    detection_type: str | None = None,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator", "viewer")),
+):
+    """How many confirmed/dismissed alerts are sitting in each
+    detection type's feedback pool, ready for the next fine-tune.
+    When `detection_type` is None, returns a row per type known to
+    the system."""
+    from app.training.feedback_loop import pending_retraining_count
+    from app.models import DetectionEvent
+    if detection_type is not None:
+        types = [detection_type]
+    else:
+        types = [t for (t,) in
+                 db.query(DetectionEvent.detection_type).distinct().all()
+                 if t]
+    out = []
+    for t in sorted(types):
+        counts = pending_retraining_count(db, t)
+        out.append({"detection_type": t,
+                    "positives": counts["positives"],
+                    "negatives": counts["negatives"]})
+    return out
+
+
 @router.post("/models/{model_id}/deploy", response_model=list[int])
 def deploy_model(model_id: int, payload: DeployModelIn,
                  db: Session = Depends(get_db),
