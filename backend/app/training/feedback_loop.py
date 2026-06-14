@@ -28,6 +28,45 @@ from app.models import (
 log = logging.getLogger(__name__)
 
 
+def _build_source_extra(db: Session, ev: DetectionEvent,
+                         alert: Alert, verdict: str) -> dict:
+    """Snapshot every piece of evidence the spec asks us to persist
+    next to the feedback frame: alert id + verdict, detection type,
+    store + camera + zone names, timestamp, confidence, bbox, plus
+    whatever sub-payload the detector dumped into DetectionEvent.extra
+    (person_count, tracking_ids, …)."""
+    from app.models import Camera, Zone, Store
+    cam = db.get(Camera, ev.camera_id) if ev.camera_id else None
+    zone = db.get(Zone, ev.zone_id) if ev.zone_id else None
+    store_id = getattr(cam, "store_id", None) if cam else None
+    store_name = None
+    if store_id:
+        s = db.get(Store, store_id)
+        store_name = s.name if s else None
+    ts = ev.timestamp
+    return {
+        "alert_id":         alert.id,
+        "event_id":         ev.id,
+        "verdict":          verdict,        # "correct" | "false"
+        "detection_type":   ev.detection_type,
+        "camera_id":        ev.camera_id,
+        "camera_name":      cam.name if cam else None,
+        "store_id":         store_id,
+        "store_name":       store_name,
+        "zone_id":          ev.zone_id,
+        "zone_name":        zone.name if zone else None,
+        "confidence":       ev.confidence,
+        "bbox_norm":        ev.bbox_json,
+        "timestamp_iso":    ts.isoformat() if ts else None,
+        "model_id":         ev.model_id,
+        # DetectionEvent.extra already carries detector-specific
+        # context (person_count, tracking_ids, queue_length, …) —
+        # carry it through unchanged so curators can dedup/filter
+        # without re-joining back to the event row.
+        "detector_extra":   ev.extra or {},
+    }
+
+
 def _ensure_dataset(db: Session, name: str, classes: list[str],
                     description: str) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.name == name).first()
@@ -71,6 +110,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         camera_id=ev.camera_id,
         file_path=ev.thumbnail_path,
         labeled=True,
+        source_extra=_build_source_extra(db, ev, a, "correct"),
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
@@ -113,6 +153,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         camera_id=ev.camera_id,
         file_path=ev.thumbnail_path,
         labeled=True,           # labelled as background — no Annotation rows
+        source_extra=_build_source_extra(db, ev, a, "false"),
     ))
     a.feedback_used_for_training = True
     db.commit()

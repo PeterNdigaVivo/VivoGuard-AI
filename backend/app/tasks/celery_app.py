@@ -73,6 +73,8 @@ celery_app.conf.update(
         "training.chain_retrain_due":         {"queue": "beat"},
         "training.compute_model_metrics_daily": {"queue": "beat"},
         "training.pseudo_label_pending":      {"queue": "beat"},
+        "training.weekly_retrain_all":        {"queue": "beat"},
+        "training.evaluate_pending_promotions": {"queue": "beat"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -186,6 +188,21 @@ celery_app.conf.update(
         # operator review.
         "pseudo-label-hourly": {
             "task": "training.pseudo_label_pending",
+            "schedule": timedelta(hours=1),
+        },
+        # Weekly self-learning orchestrator. Runs every 6 hours but
+        # short-circuits when there aren't >= 50 new samples since
+        # the last fine-tune per detection type — so a busy week
+        # may produce one job per type, a quiet week none.
+        "weekly-retrain-every-6h": {
+            "task": "training.weekly_retrain_all",
+            "schedule": timedelta(hours=6),
+        },
+        # Hourly promotion gate. Walks every non-deployed candidate
+        # AIModel and flips deployment when its 7-day metrics beat
+        # the sibling production model on precision + fp_rate.
+        "evaluate-pending-promotions-hourly": {
+            "task": "training.evaluate_pending_promotions",
             "schedule": timedelta(hours=1),
         },
         # Sales Floor Intelligence — 15-min timedelta tick (the

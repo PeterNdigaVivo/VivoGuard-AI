@@ -35,6 +35,52 @@ def compute_model_metrics_daily() -> None:
             log.exception("compute_model_metrics_daily failed: %s", e)
 
 
+@celery_app.task(name="training.weekly_retrain_all", ignore_result=True)
+def weekly_retrain_all() -> None:
+    """Weekly offline pipeline. For every detection type with a
+    feedback pool that's accumulated >=50 new samples since the last
+    fine-tune, queues an incremental fine-tune via the existing
+    trainer. Each spawned job goes through the standard worker —
+    live inference is never blocked because these run on the `beat`
+    queue with separate Celery slots."""
+    from app.database import SessionLocal
+    from app.training.orchestrator import run_weekly_for_all
+    with SessionLocal() as db:
+        try:
+            results = run_weekly_for_all(db)
+            log.info("weekly_retrain_all: %s", results)
+        except Exception as e:
+            log.exception("weekly_retrain_all failed: %s", e)
+
+
+@celery_app.task(name="training.evaluate_pending_promotions",
+                  ignore_result=True)
+def evaluate_pending_promotions() -> None:
+    """Hourly sweep — picks every AIModel that's NOT currently
+    deployed, has a sibling deployed model with the same name, and
+    has accumulated enough operator-marked traffic, then promotes
+    it if precision + fp_rate beat production. Manual /deploy still
+    works for ops overrides."""
+    from app.database import SessionLocal
+    from app.models import AIModel
+    from app.training.promotion import promote
+    with SessionLocal() as db:
+        try:
+            cands = (db.query(AIModel)
+                       .filter(AIModel.deployed == False)             # noqa: E712
+                       .order_by(AIModel.created_at.desc())
+                       .all())
+            promoted = 0
+            for c in cands:
+                r = promote(db, c.id)
+                if r.get("promoted"):
+                    promoted += 1
+            log.info("evaluate_pending_promotions: candidates=%d promoted=%d",
+                     len(cands), promoted)
+        except Exception as e:
+            log.exception("evaluate_pending_promotions failed: %s", e)
+
+
 @celery_app.task(name="training.pseudo_label_pending", ignore_result=True)
 def pseudo_label_pending() -> None:
     """Hourly batch — runs the deployed YOLO over every unlabelled

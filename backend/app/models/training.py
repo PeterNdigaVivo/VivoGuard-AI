@@ -33,6 +33,13 @@ class TrainingImage(Base):
     labeled:     Mapped[bool]  = mapped_column(Boolean, default=False)
     # split: "train" | "val" | "test" — populated when training job starts.
     split:       Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Full evidence payload from the originating alert (when the row
+    # came from the feedback loop). Mirrors DetectionEvent.extra plus
+    # the operator-marked context: detection_type, store_id, zone_id,
+    # confidence, bbox, person_count, tracking_ids, alert_id,
+    # timestamp_iso, store_name, camera_name. Lets dataset curators
+    # dedup + filter without re-joining back to the alert row.
+    source_extra:Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     dataset     = relationship("Dataset", back_populates="images")

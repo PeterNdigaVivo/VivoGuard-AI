@@ -303,6 +303,207 @@ def refresh_model_metrics(
     return {"buckets_upserted": upserts, "days": days}
 
 
+# ---- AI Learning Dashboard ---------------------------------------------
+#
+# One-shot payload powering the AI Learning page on the frontend.
+# Read-only — everything in here is computed from rows the rest of
+# the pipeline already maintains. No live-inference impact.
+
+@router.get("/dashboard")
+def ai_learning_dashboard(
+    days: int = 14,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator", "viewer")),
+):
+    """Consolidated payload — review counts, feedback-pool sizes,
+    model registry summary, recent precision / fp_rate per
+    detection_type, and the weekly orchestrator's most recent
+    decisions per detection type."""
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+    from datetime import timezone as _tz
+    from sqlalchemy import func
+    from app.models import (
+        Alert, DetectionEvent, ModelMetric, Dataset, TrainingImage,
+        TrainingJob,
+    )
+    days = max(1, min(int(days), 90))
+    since_utc = _dt.now(_tz.utc) - _td(days=days)
+    since_day = _date.today() - _td(days=days)
+
+    # Review counts in the window — grouped by detection_type so the
+    # dashboard can show per-alert-type review rates side by side.
+    rows = (db.query(DetectionEvent.detection_type,
+                      Alert.status,
+                      func.count(Alert.id))
+              .join(Alert, Alert.event_id == DetectionEvent.id)
+              .filter(Alert.created_at >= since_utc)
+              .group_by(DetectionEvent.detection_type, Alert.status)
+              .all())
+    by_type: dict[str, dict[str, int]] = {}
+    for det_type, status, n in rows:
+        if not det_type:
+            continue
+        by_type.setdefault(det_type, {})[status] = int(n)
+    review_breakdown = []
+    for det_type, counts in sorted(by_type.items()):
+        correct   = counts.get("confirmed", 0)
+        false_p   = counts.get("dismissed", 0)
+        total     = sum(counts.values())
+        triaged   = correct + false_p
+        review_breakdown.append({
+            "detection_type": det_type,
+            "correct":        correct,
+            "false":          false_p,
+            "alerts_total":   total,
+            "review_rate":    (triaged / total) if total else None,
+            "false_rate":     (false_p / triaged) if triaged else None,
+        })
+
+    totals = {
+        "alerts_total":   sum(r["alerts_total"] for r in review_breakdown),
+        "correct_total":  sum(r["correct"]      for r in review_breakdown),
+        "false_total":    sum(r["false"]        for r in review_breakdown),
+    }
+    triaged_total = totals["correct_total"] + totals["false_total"]
+    totals["review_rate"] = (triaged_total / totals["alerts_total"]) \
+                            if totals["alerts_total"] else None
+
+    # Feedback pool sizes — both pools per detection_type.
+    pool_rows = (db.query(Dataset.name, func.count(TrainingImage.id))
+                    .join(TrainingImage,
+                           TrainingImage.dataset_id == Dataset.id)
+                    .filter(Dataset.name.like("feedback%"))
+                    .group_by(Dataset.name)
+                    .all())
+    pools: dict[str, dict[str, int]] = {}
+    for ds_name, n in pool_rows:
+        if ds_name.startswith("feedback-negative-"):
+            det = ds_name[len("feedback-negative-"):]
+            pools.setdefault(det, {"positives": 0, "negatives": 0})["negatives"] = int(n)
+        elif ds_name.startswith("feedback-"):
+            det = ds_name[len("feedback-"):]
+            pools.setdefault(det, {"positives": 0, "negatives": 0})["positives"] = int(n)
+    feedback_pools = [
+        {"detection_type": d, **counts}
+        for d, counts in sorted(pools.items())
+    ]
+
+    # Drift — last `days` of ModelMetric rolled up per detection_type.
+    drift_rows = (db.query(ModelMetric.detection_type,
+                            ModelMetric.day,
+                            func.sum(ModelMetric.tp_count),
+                            func.sum(ModelMetric.fp_count),
+                            func.sum(ModelMetric.alerts_total))
+                    .filter(ModelMetric.day >= since_day)
+                    .group_by(ModelMetric.detection_type, ModelMetric.day)
+                    .order_by(ModelMetric.day.asc(),
+                               ModelMetric.detection_type.asc())
+                    .all())
+    drift_series = []
+    for det_type, day, tp, fp, total in drift_rows:
+        tp, fp, total = int(tp or 0), int(fp or 0), int(total or 0)
+        triaged = tp + fp
+        drift_series.append({
+            "detection_type": det_type,
+            "day":            day.isoformat(),
+            "precision":      (tp / triaged) if triaged else None,
+            "fp_rate":        (fp / total)   if total   else None,
+            "alerts_total":   total,
+        })
+
+    # Production vs candidate registry summary.
+    models = db.query(AIModel).order_by(AIModel.created_at.desc()).all()
+    model_registry = [{
+        "id":            m.id,
+        "name":          m.name,
+        "version":       m.version,
+        "deployed":      bool(m.deployed),
+        "is_chain":      bool(m.is_chain_model),
+        "detector_type": m.detector_type,
+        "classes":       m.classes_json,
+        "map50":         m.map50,
+        "created_at":    m.created_at.isoformat() if m.created_at else None,
+    } for m in models]
+
+    # Recent training jobs (last 30) — gives the dashboard the
+    # "what's currently fine-tuning" panel.
+    jobs = (db.query(TrainingJob)
+              .order_by(TrainingJob.created_at.desc())
+              .limit(30).all())
+    recent_jobs = [{
+        "id":            j.id,
+        "model_name":    j.model_name,
+        "status":        j.status,
+        "current_epoch": j.current_epoch,
+        "total_epochs":  j.total_epochs,
+        "best_map50":    j.best_map50,
+        "incremental":   bool((j.config_json or {}).get("incremental_finetune")),
+        "origin":        (j.config_json or {}).get("origin"),
+        "created_at":    j.created_at.isoformat() if j.created_at else None,
+        "completed_at":  (j.completed_at.isoformat()
+                            if j.completed_at else None),
+        "error_message": j.error_message,
+    } for j in jobs]
+
+    return {
+        "window_days":       days,
+        "totals":            totals,
+        "review_breakdown":  review_breakdown,
+        "feedback_pools":    feedback_pools,
+        "drift_series":      drift_series,
+        "model_registry":    model_registry,
+        "recent_jobs":       recent_jobs,
+    }
+
+
+# ---- Orchestrator + promotion manual triggers --------------------------
+
+@router.post("/orchestrator/run")
+def run_orchestrator(
+    detection_type: str | None = None,
+    dry_run: bool              = False,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator")),
+):
+    """Force-trigger the weekly orchestrator. Use `dry_run=True` to
+    preview what would be queued without spawning jobs."""
+    from app.training.orchestrator import (
+        enqueue_fine_tune_if_due, run_weekly_for_all,
+    )
+    if detection_type is not None:
+        return [enqueue_fine_tune_if_due(db, detection_type, dry_run=dry_run)]
+    return run_weekly_for_all(db, dry_run=dry_run)
+
+
+@router.post("/models/{model_id}/evaluate-promotion")
+def evaluate_promotion(
+    model_id: int,
+    window_days: int = 7,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator", "viewer")),
+):
+    """Read-only — returns whether the candidate would be promoted
+    by the gate (precision + fp_rate must beat the sibling
+    production model)."""
+    from app.training.promotion import evaluate_candidate
+    return evaluate_candidate(db, model_id, window_days=window_days)
+
+
+@router.post("/models/{model_id}/promote")
+def promote_model(
+    model_id: int,
+    force: bool      = False,
+    window_days: int = 7,
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator")),
+):
+    """Run the promotion gate AND apply the result. `force=True`
+    skips the gate and deploys regardless — operators of last resort.
+    Demotes any sibling deployed model with the same name."""
+    from app.training.promotion import promote
+    return promote(db, model_id, force=force, window_days=window_days)
+
+
 # ---- Pseudo-labelling --------------------------------------------------
 
 @router.post("/pseudo-label/run")

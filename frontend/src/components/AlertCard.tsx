@@ -131,41 +131,31 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
     finally { setBusy(false) }
   }
 
-  async function resolveOne() {
-    if (!confirm('Mark this alert as resolved?')) return
-    // Optimistic update: flip the badge BEFORE the network round-trip
-    // so the operator sees instant feedback.
+  async function markCorrect() {
+    // ✅ Correct Alert — the AI was right. Counts as both
+    // "operationally handled" AND a positive training sample.
+    // Uses /alerts/{id}/confirm (not /resolve) so the backend
+    // feedback loop adds the snapshot to the positive feedback
+    // pool via absorb_confirmed.
+    if (!confirm('Mark this alert as CORRECT? Adds the snapshot to AI training.')) return
     setLocal({ ...alert, status: 'confirmed',
                resolved_at: new Date().toISOString() })
     try {
-      await alertsApi.resolve(alert.id)
-      // Tell the sidebar badge + AlertsPage stats to refresh now,
-      // without waiting for the 30s poll. The action tag lets the
-      // page decide which counter to bump (resolved vs dismissed).
+      await alertsApi.confirm(alert.id)
       window.dispatchEvent(new CustomEvent('vg:alert-resolved',
         { detail: { id: alert.id, action: 'resolve' } }))
       onChanged?.()
     } catch (e) {
       setLocal(incoming)   // rollback
-      window.alert('Could not resolve. ' + e)
+      window.alert('Could not mark correct. ' + e)
     }
   }
 
-  async function acknowledgeOne() {
-    // Optimistic — stamp acknowledged_at locally so the lifecycle
-    // pip moves to the middle step immediately. Status stays 'new'
-    // so the alert remains in the active list.
-    setLocal({ ...alert, acknowledged_at: new Date().toISOString() })
-    try {
-      await alertsApi.acknowledge(alert.id)
-      onChanged?.()
-    } catch (e) {
-      setLocal(incoming)
-      window.alert('Could not acknowledge. ' + e)
-    }
-  }
-
-  async function dismissOne() {
+  async function markFalse() {
+    // ❌ False Alert — the AI was wrong. /alerts/{id}/dismiss
+    // routes through absorb_dismissed which adds the snapshot to
+    // the hard-negative training pool.
+    if (!confirm('Mark this alert as FALSE? Adds the snapshot to AI training as a negative example.')) return
     setLocal({ ...alert, status: 'dismissed',
                resolved_at: new Date().toISOString() })
     try {
@@ -296,20 +286,20 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
             </div>
           )}
 
-          {/* Action row */}
+          {/* Action row — TWO feedback buttons only. Each click
+              also closes the alert operationally (no separate
+              "I handled it" step). Both verdicts feed the self-
+              learning training pipeline:
+                ✅ Correct  → positive sample (absorb_confirmed)
+                ❌ False    → hard negative   (absorb_dismissed) */}
           <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
             {alert.status === 'new' && (
               <>
-                {!alert.acknowledged_at && (
-                  <ActionBtn onClick={acknowledgeOne} tone="amber" disabled={busy}>
-                    👁 I'm on it
-                  </ActionBtn>
-                )}
-                <ActionBtn onClick={resolveOne} tone="emerald" disabled={busy}>
-                  ✅ I handled this
+                <ActionBtn onClick={markCorrect} tone="emerald" disabled={busy}>
+                  ✅ Correct Alert
                 </ActionBtn>
-                <ActionBtn onClick={dismissOne} tone="slate" disabled={busy}>
-                  Not a problem
+                <ActionBtn onClick={markFalse} tone="rose" disabled={busy}>
+                  ❌ False Alert
                 </ActionBtn>
               </>
             )}
@@ -402,14 +392,18 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
 }
 
 function ActionBtn({ onClick, tone, disabled, children }: {
-  onClick: () => void; tone: 'emerald' | 'slate' | 'amber'; disabled?: boolean
+  onClick: () => void
+  tone: 'emerald' | 'slate' | 'amber' | 'rose'
+  disabled?: boolean
   children: React.ReactNode
 }) {
   const cls = tone === 'emerald'
     ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
     : tone === 'amber'
       ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
-      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+      : tone === 'rose'
+        ? 'bg-rose-100 text-rose-800 hover:bg-rose-200'
+        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
   return (
     <button onClick={onClick} disabled={disabled}
             className={'px-2 py-1 rounded ' + cls + ' disabled:opacity-50'}>
