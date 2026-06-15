@@ -15,6 +15,7 @@ build/
 .next/
 .vite/
 *.local
+*.tsbuildinfo
 
 # --- Environment & secrets ---
 .env
