@@ -131,13 +131,25 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
     finally { setBusy(false) }
   }
 
-  async function markCorrect() {
-    // ✅ Correct Alert — the AI was right. Counts as both
-    // "operationally handled" AND a positive training sample.
-    // Uses /alerts/{id}/confirm (not /resolve) so the backend
-    // feedback loop adds the snapshot to the positive feedback
-    // pool via absorb_confirmed.
-    if (!confirm('Mark this alert as CORRECT? Adds the snapshot to AI training.')) return
+  async function acknowledgeOne() {
+    // 👁 I'm on it — operational acknowledgement. Stamps
+    // acknowledged_at so the lifecycle pip moves to the middle step
+    // while keeping the alert in the active list (status stays 'new'
+    // so the True/False feedback buttons remain available).
+    setLocal({ ...alert, acknowledged_at: new Date().toISOString() })
+    try {
+      await alertsApi.acknowledge(alert.id)
+      onChanged?.()
+    } catch (e) {
+      setLocal(incoming)
+      window.alert('Could not acknowledge. ' + e)
+    }
+  }
+
+  async function markTrue() {
+    // ✅ True Alert — the AI was right. Positive training sample via
+    // /alerts/{id}/confirm → absorb_confirmed.
+    if (!window.confirm('Mark this alert as TRUE? It will be added to AI training as a positive example.')) return
     setLocal({ ...alert, status: 'confirmed',
                resolved_at: new Date().toISOString() })
     try {
@@ -147,15 +159,14 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
       onChanged?.()
     } catch (e) {
       setLocal(incoming)   // rollback
-      window.alert('Could not mark correct. ' + e)
+      window.alert('Could not mark True. ' + e)
     }
   }
 
   async function markFalse() {
-    // ❌ False Alert — the AI was wrong. /alerts/{id}/dismiss
-    // routes through absorb_dismissed which adds the snapshot to
-    // the hard-negative training pool.
-    if (!confirm('Mark this alert as FALSE? Adds the snapshot to AI training as a negative example.')) return
+    // ❌ False Alert — the AI was wrong. Hard-negative training
+    // sample via /alerts/{id}/dismiss → absorb_dismissed.
+    if (!window.confirm('Mark this alert as FALSE? It will be added to AI training as a negative example.')) return
     setLocal({ ...alert, status: 'dismissed',
                resolved_at: new Date().toISOString() })
     try {
@@ -165,7 +176,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
       onChanged?.()
     } catch (e) {
       setLocal(incoming)
-      window.alert('Could not dismiss. ' + e)
+      window.alert('Could not mark False. ' + e)
     }
   }
 
@@ -286,22 +297,35 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
             </div>
           )}
 
-          {/* Action row — TWO feedback buttons only. Each click
-              also closes the alert operationally (no separate
-              "I handled it" step). Both verdicts feed the self-
-              learning training pipeline:
-                ✅ Correct  → positive sample (absorb_confirmed)
-                ❌ False    → hard negative   (absorb_dismissed) */}
-          <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
-            {alert.status === 'new' && (
+          {/* Action row.
+              The two prominent training-feedback buttons sit first
+              and visually dominate (bold, solid colour, white text)
+              so operators can't miss them. The auxiliary buttons
+              (acknowledge, see live, note, clip) keep their muted
+              tone. Once the operator has cast a verdict, both
+              True/False buttons collapse into a single disabled
+              "✓ Marked True/False" chip so the choice is obvious
+              and can't be double-submitted. */}
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+            {alert.status === 'new' ? (
               <>
-                <ActionBtn onClick={markCorrect} tone="emerald" disabled={busy}>
-                  ✅ Correct Alert
-                </ActionBtn>
-                <ActionBtn onClick={markFalse} tone="rose" disabled={busy}>
+                <FeedbackBtn onClick={markTrue} tone="green" disabled={busy}>
+                  ✅ True Alert
+                </FeedbackBtn>
+                <FeedbackBtn onClick={markFalse} tone="red" disabled={busy}>
                   ❌ False Alert
-                </ActionBtn>
+                </FeedbackBtn>
               </>
+            ) : (
+              <span className={'px-3 py-1.5 rounded font-bold text-white '
+                                + (isDismissed ? 'bg-red-600' : 'bg-green-600')}>
+                ✓ Marked {isDismissed ? 'False' : 'True'}
+              </span>
+            )}
+            {alert.status === 'new' && !alert.acknowledged_at && (
+              <ActionBtn onClick={acknowledgeOne} tone="amber" disabled={busy}>
+                👁 I'm on it
+              </ActionBtn>
             )}
             {alert.camera_id && (
               <Link to={`/live`}
@@ -411,6 +435,28 @@ function ActionBtn({ onClick, tone, disabled, children }: {
     </button>
   )
 }
+
+// Bold solid-colour variant for the two AI training-feedback buttons.
+// Visually dominates the auxiliary `ActionBtn` chips so operators
+// can't miss the primary call to action.
+function FeedbackBtn({ onClick, tone, disabled, children }: {
+  onClick: () => void
+  tone: 'green' | 'red'
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  const cls = tone === 'green'
+    ? 'bg-green-600 hover:bg-green-700'
+    : 'bg-red-600 hover:bg-red-700'
+  return (
+    <button onClick={onClick} disabled={disabled}
+            className={'px-3 py-1.5 rounded text-white font-bold shadow-sm '
+                       + cls + ' disabled:opacity-50'}>
+      {children}
+    </button>
+  )
+}
+
 
 function formatTime(iso: string): string {
   try {
