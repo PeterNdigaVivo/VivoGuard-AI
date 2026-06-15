@@ -106,8 +106,10 @@ export default function AILearningPage() {
 
   return (
     <div className="space-y-3">
-      <PageHeader title="🧠 AI Learning"
-                  subtitle="Self-improving training pipeline — operator feedback in, better models out." />
+      <PageHeader title="🧠 AI Learning" />
+      <p className="text-sm text-slate-500 -mt-4">
+        Self-improving training pipeline — operator feedback in, better models out.
+      </p>
 
       <div className="flex flex-wrap items-center gap-3 text-sm">
         <label className="text-slate-600">Window:</label>
