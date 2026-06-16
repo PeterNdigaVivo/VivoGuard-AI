@@ -989,9 +989,33 @@ def shop_not_opened_check() -> None:
                               store.id, e)
 
 
+def _entrance_cam_ids_for_store(db, store_id: int) -> list[int]:
+    """Return the sorted list of camera ids for the store that have at
+    least one entry_exit LINE zone drawn. This is the single source
+    of truth for "which cameras can speak to whether the store is
+    open today" — stockroom / behind-counter cameras do not count.
+
+    Empty list = the store has no drawn entrance line. Every shop-
+    open signal in this file (line crossing, person-event sliding
+    window, occupancy-metric fallback) must skip such stores rather
+    than fall back to all cameras: a cleaner detected in the
+    stockroom at 06:00 is not "store opened"."""
+    from app.models import Camera, Zone
+    cam_id_rows = db.query(Camera.id).filter(Camera.store_id == store_id).all()
+    cam_ids = [c for (c,) in cam_id_rows]
+    if not cam_ids:
+        return []
+    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    return sorted({
+        z.camera_id for z in zones
+        if z.shape == "line"
+        and "entry_exit" in (z.detection_types_json or [])
+    })
+
+
 def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     """Single-store check called from the beat task."""
-    from app.models import Camera, Zone
+    from app.models import Camera
     from app.ai.detectors import shop_state as _shop_state
 
     cams = db.query(Camera).filter(Camera.store_id == store.id).all()
@@ -999,12 +1023,7 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         return
     cam_ids = [c.id for c in cams]
     # Only entrance cameras matter — those with an entry_exit line.
-    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
-    entrance_cam_ids = sorted({
-        z.camera_id for z in zones
-        if z.shape == "line"
-        and "entry_exit" in (z.detection_types_json or [])
-    })
+    entrance_cam_ids = _entrance_cam_ids_for_store(db, store.id)
     if not entrance_cam_ids:
         return       # no entry/exit line → out of scope for this rule
 
@@ -1162,12 +1181,24 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     already-created shop_not_opened false positives, and return the
     earliest occupancy timestamp (EAT). Returns None when no
     occupancy evidence is found — the caller then proceeds to fire
-    the URGENT as normal."""
+    the URGENT as normal.
+
+    Only metric_snapshots from ENTRANCE cameras count as evidence —
+    a stockroom or back-counter camera recording occupancy at 06:00
+    must not be treated as a store-open signal. The full `cam_ids`
+    list is still accepted (for the retro-labeller, which walks
+    every shop_open_close DetectionEvent for the store regardless
+    of source camera).
+    """
     from zoneinfo import ZoneInfo
     eat = ZoneInfo("Africa/Nairobi")
 
+    if not entrance_cam_ids:
+        return None     # no drawn entrance line → no inference possible
+
     start_utc, end_utc = _morning_window_utc(cfg, local_now)
-    samples = _occupancy_samples_in_window(db, cam_ids, start_utc, end_utc)
+    samples = _occupancy_samples_in_window(db, entrance_cam_ids,
+                                             start_utc, end_utc)
     if not samples:
         return None
 
@@ -1487,7 +1518,7 @@ def shop_open_inference_check() -> None:
 def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     from zoneinfo import ZoneInfo
     from sqlalchemy import asc
-    from app.models import Camera, DetectionEvent
+    from app.models import DetectionEvent
 
     eat = ZoneInfo("Africa/Nairobi")
     now_eat = _store_eat_now(store)
@@ -1513,15 +1544,19 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     window_start_utc = window_start_local.astimezone(timezone.utc)
     now_utc          = now_eat.astimezone(timezone.utc)
 
-    cams = db.query(Camera).filter(Camera.store_id == store.id).all()
-    cam_ids = [c.id for c in cams]
+    # ENTRANCE CAMERAS ONLY. A person detected in a stockroom or
+    # behind the counter must not satisfy the "store opened" rule —
+    # only crossings/detections at a drawn entrance line count.
+    # Stores with no entrance line drawn are honestly excluded from
+    # inference (the URGENT "Store Not Opened" still fires at the
+    # cutoff if no other evidence lands).
+    cam_ids = _entrance_cam_ids_for_store(db, store.id)
     if not cam_ids:
         return
 
-    # Single chronological pull of person events for ALL of this
-    # store's cameras in one query (avoids N+1 over cam_ids). The
-    # existing (camera_id, timestamp) composite index serves the
-    # filter; only the timestamp column is read back.
+    # Single chronological pull of person events for the entrance
+    # cameras only — one query (no N+1) backed by the existing
+    # (camera_id, timestamp) composite index.
     rows = (db.query(DetectionEvent.timestamp,
                      DetectionEvent.camera_id)
               .filter(DetectionEvent.camera_id.in_(cam_ids),
