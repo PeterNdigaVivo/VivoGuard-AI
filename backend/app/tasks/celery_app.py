@@ -231,9 +231,9 @@ celery_app.conf.update(
         # `default` queue (each holding a slot for ~9 minutes). The
         # worker MUST be started with `-Q default,beat` to consume
         # both, otherwise messages pile up in `beat` forever.
-        "sales-floor-insights-every-15min": {
+        "sales-floor-insights-every-30min": {
             "task": "alerting.sales_floor_insights_check",
-            "schedule": timedelta(minutes=15),
+            "schedule": timedelta(minutes=30),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
         "sales-floor-daily-summary-every-5min": {
