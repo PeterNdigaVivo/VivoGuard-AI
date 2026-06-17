@@ -35,9 +35,21 @@ from app.models import AIModel, Dataset, TrainingImage, TrainingJob
 
 log = logging.getLogger(__name__)
 
-# Tunable — below this many new (positive+negative) samples a
-# fine-tune isn't worth the GPU time.
-MIN_NEW_SAMPLES_PER_RETRAIN = 50
+
+def _retrain_thresholds() -> tuple[int, int]:
+    """Read the auto-retrain thresholds from settings (env-overridable
+    via RETRAIN_MIN_FEEDBACK / RETRAIN_MAX_DAYS). Imported lazily so
+    pure unit tests of this module can monkey-patch the function
+    instead of mutating global state."""
+    from app.config import settings
+    return (int(getattr(settings, "retrain_min_feedback", 20)),
+            int(getattr(settings, "retrain_max_days", 7)))
+
+
+# Back-compat constant — `weekly_retrain_all` previously imported this.
+# Re-resolved to the env-driven value on each access via a module
+# attribute so existing callers don't need updating.
+MIN_NEW_SAMPLES_PER_RETRAIN = _retrain_thresholds()[0]
 
 
 def _last_fine_tune_completion(db: Session, detection_type: str) -> datetime | None:
@@ -91,10 +103,23 @@ def _feedback_pools_exist(db: Session, detection_type: str) -> bool:
 
 
 def enqueue_fine_tune_if_due(db: Session, detection_type: str,
-                              *, min_new: int = MIN_NEW_SAMPLES_PER_RETRAIN,
+                              *, min_new: int | None = None,
+                              max_days: int | None = None,
                               dry_run: bool = False) -> dict:
-    """Decide-and-enqueue for one detection type. Returns a status
-    dict with the verdict + counts."""
+    """Decide-and-enqueue for one detection type. Auto-fires when
+    EITHER condition holds:
+      - ≥ min_new new feedback samples since the last fine-tune
+        (default settings.retrain_min_feedback, env RETRAIN_MIN_FEEDBACK)
+      - OR ≥ max_days days since the last fine-tune
+        (default settings.retrain_max_days, env RETRAIN_MAX_DAYS) —
+        the weekly fallback so quiet stores still get periodic
+        re-training.
+
+    Returns a status dict with the verdict + counts (does not raise)."""
+    cfg_min, cfg_days = _retrain_thresholds()
+    if min_new  is None: min_new  = cfg_min
+    if max_days is None: max_days = cfg_days
+
     if not _feedback_pools_exist(db, detection_type):
         return {"detection_type": detection_type,
                 "status": "skipped",
@@ -106,19 +131,31 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
                 "reason": "no deployed parent model to fine-tune"}
     since = _last_fine_tune_completion(db, detection_type)
     pos_new, neg_new = _new_samples_since(db, detection_type, since)
-    if (pos_new + neg_new) < min_new:
+    days_elapsed = (
+        (datetime.now(timezone.utc) - since).total_seconds() / 86400.0
+        if since is not None else float("inf")
+    )
+
+    enough_samples = (pos_new + neg_new) >= min_new
+    overdue        = days_elapsed >= max_days
+    if not (enough_samples or overdue):
         return {"detection_type": detection_type,
                 "status": "skipped",
                 "reason": (f"only {pos_new + neg_new} new samples "
-                            f"(need >= {min_new})"),
+                            f"(need >= {min_new}) and "
+                            f"{days_elapsed:.1f}d since last (< {max_days}d)"),
                 "positives_new": pos_new, "negatives_new": neg_new,
+                "days_since_last": days_elapsed,
                 "since": since.isoformat() if since else None}
+    trigger = "sample_threshold" if enough_samples else "weekly_fallback"
 
     if dry_run:
         return {"detection_type": detection_type,
                 "status": "would-run",
+                "trigger": trigger,
                 "parent_model_id": parent.id,
-                "positives_new": pos_new, "negatives_new": neg_new}
+                "positives_new": pos_new, "negatives_new": neg_new,
+                "days_since_last": days_elapsed}
 
     pos_ds = db.query(Dataset).filter(
         Dataset.name == f"feedback-{detection_type}").first()
@@ -135,6 +172,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         "lr0":                        0.0005,
         "augment":                    True,
         "origin":                     "weekly_orchestrator",
+        "trigger":                    trigger,
     }
     job = TrainingJob(
         model_name=parent.name,

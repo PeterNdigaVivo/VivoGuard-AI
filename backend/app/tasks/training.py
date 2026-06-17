@@ -18,6 +18,89 @@ def run_training_job(self, job_id: int) -> None:
         raise
 
 
+# Stale `running` jobs older than this many hours are flipped to
+# `failed` so the dispatcher can keep moving. We DO NOT auto-retry —
+# the spec is explicit that failed training requires human review.
+_STALE_RUNNING_HOURS = 12
+# Cap per-tick dispatches so a 100-job backlog doesn't slam the
+# worker-alerts pool all at once.
+_DISPATCH_MAX_PER_TICK = 3
+
+
+@celery_app.task(name="training.dispatch_queued_jobs", ignore_result=True)
+def dispatch_queued_jobs() -> None:
+    """The missing link between "TrainingJob created" and "trainer
+    actually runs".
+
+    Every 5 min:
+      1. Flip any stale `running` jobs (> _STALE_RUNNING_HOURS old)
+         to `failed` with a diagnostic error_message. No auto-retry
+         per spec — operators must inspect.
+      2. Pick up to _DISPATCH_MAX_PER_TICK oldest `queued` jobs,
+         atomically mark them `running`, and enqueue
+         `training.run_job` on the `alerts` queue (NOT the inference
+         queue — live detection must never be interrupted by training).
+
+    The original `.delay()` at job-creation time still fires
+    immediately on the happy path; this task is the recovery net for
+    the (real) cases where it doesn't — worker restarts, broker
+    blips, the existing job#1 sitting queued before this code shipped,
+    etc.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from app.database import SessionLocal
+    from app.models import TrainingJob
+
+    with SessionLocal() as db:
+        # 1) Sweep stale running jobs.
+        cutoff = _dt.now(_tz.utc) - _td(hours=_STALE_RUNNING_HOURS)
+        stale = (db.query(TrainingJob)
+                   .filter(TrainingJob.status == "running",
+                           TrainingJob.started_at != None,                  # noqa: E711
+                           TrainingJob.started_at < cutoff)
+                   .all())
+        for j in stale:
+            j.status = "failed"
+            j.error_message = (
+                f"auto-failed by dispatcher: status=running for > "
+                f"{_STALE_RUNNING_HOURS}h since {j.started_at!r}. "
+                f"Worker likely crashed. Review and re-queue manually.")
+            j.completed_at = _dt.now(_tz.utc)
+            log.warning("dispatcher: stale job %s flipped to failed", j.id)
+        if stale:
+            db.commit()
+
+        # 2) Pick up queued jobs in FIFO order, mark running, dispatch.
+        picks = (db.query(TrainingJob)
+                   .filter(TrainingJob.status == "queued")
+                   .order_by(TrainingJob.created_at.asc())
+                   .limit(_DISPATCH_MAX_PER_TICK)
+                   .all())
+        dispatched: list[int] = []
+        for j in picks:
+            # Flip status BEFORE .apply_async so a re-entrant tick
+            # never picks the same job twice. The trainer also sets
+            # `status='running'` at the top of run_job — both writes
+            # are idempotent.
+            j.status     = "running"
+            j.started_at = j.started_at or _dt.now(_tz.utc)
+            db.commit()
+            try:
+                run_training_job.apply_async(args=[j.id], queue="alerts")
+                dispatched.append(j.id)
+            except Exception as e:
+                # apply_async failed (broker down?). Roll the job
+                # back to queued so the next tick retries.
+                j.status = "queued"
+                j.started_at = None
+                db.commit()
+                log.exception("dispatcher: apply_async failed for job=%s: %s",
+                              j.id, e)
+        if dispatched:
+            log.info("dispatcher: dispatched %d jobs %s",
+                     len(dispatched), dispatched)
+
+
 @celery_app.task(name="training.compute_model_metrics_daily",
                   ignore_result=True)
 def compute_model_metrics_daily() -> None:

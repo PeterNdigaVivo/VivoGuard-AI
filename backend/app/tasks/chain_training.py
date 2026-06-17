@@ -453,36 +453,81 @@ def _has_grown_since_last_train(detector_type: str) -> bool:
 
 @celery_app.task(name="training.chain_retrain_due", ignore_result=True)
 def chain_retrain_due() -> None:
-    """5-min beat tick. Fires the chain trainer on Monday 02:00 EAT
-    when the dataset has grown. Per-detector iso-week dedup."""
-    now_local = datetime.now(timezone.utc).astimezone(_chain_tz())
-    if now_local.weekday() != AUTO_RETRAIN_WEEKDAY:
-        return
-    if now_local.hour != AUTO_RETRAIN_HOUR:
-        return
+    """5-min beat tick. Auto-fires the chain trainer when:
+      - sample count for the detector has grown by ≥
+        settings.retrain_min_feedback since the last chain model, OR
+      - calendar days since the last chain model ≥
+        settings.retrain_max_days  (weekly fallback)
+    Per-detector daily dedup. The legacy Monday-02:00 gate was too
+    strict — stores accumulating 700+ confirmed alerts could go
+    weeks without a retrain.
+    """
+    from app.config import settings
+    from sqlalchemy import func, or_
+    from app.database import SessionLocal
+    from app.models import AIModel, TrainingSample
 
-    iso_year, iso_week, _ = now_local.isocalendar()
-    marker = f"{iso_year}-W{iso_week:02d}"
+    min_feedback = int(getattr(settings, "retrain_min_feedback", 20))
+    max_days     = int(getattr(settings, "retrain_max_days", 7))
+
+    now_local = datetime.now(timezone.utc).astimezone(_chain_tz())
+    day_iso = now_local.date().isoformat()
     try:
         r = _redis()
     except Exception:
         return
 
     for detector_type in ("uniform", "shutter"):
-        key = f"vg:chain_train:auto:{detector_type}:week"
+        # Daily dedup — once we've decided "fire" or "skip" for the
+        # day, don't reconsider until tomorrow. The marker is the
+        # decision day, not the iso-week, so the threshold can catch
+        # bursts mid-week.
+        key = f"vg:chain_train:auto:{detector_type}:day"
         try:
-            if r.get(key) == marker:
+            if r.get(key) == day_iso:
                 continue
-            if not _has_grown_since_last_train(detector_type):
-                # No new samples — skip retrain but still set the marker
-                # so we don't keep checking all morning.
-                r.set(key, marker, ex=14 * 24 * 3600)
+
+            with SessionLocal() as db:
+                latest = (db.query(AIModel)
+                            .filter(AIModel.is_chain_model == True,        # noqa: E712
+                                    AIModel.detector_type == detector_type)
+                            .order_by(AIModel.id.desc()).first())
+                current = int((db.query(func.count(TrainingSample.id))
+                                 .filter(TrainingSample.detector_type == detector_type,
+                                         or_(TrainingSample.approved.is_(True),
+                                             TrainingSample.approved.is_(None)),
+                                         TrainingSample.source.in_(
+                                             ("capture", "upload", "camera_crop")))
+                                 .scalar()) or 0)
+
+            if latest is None:
+                # No chain model yet — fire on any approved data.
+                enough_samples, overdue = (current > 0), True
+                delta = current
+                days_old = float("inf")
+            else:
+                delta = current - int(latest.sample_count or 0)
+                enough_samples = delta >= min_feedback
+                created = latest.created_at
+                if created is not None and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                days_old = ((datetime.now(timezone.utc) - created).total_seconds() / 86400.0
+                            if created else float("inf"))
+                overdue = days_old >= max_days
+
+            if not (enough_samples or overdue):
+                # Set marker so we don't reconsider for the rest of
+                # today; the next chance is tomorrow's first tick.
+                r.set(key, day_iso, ex=2 * 24 * 3600)
                 continue
+
             train_chain_model.delay(detector_type)
-            r.set(key, marker, ex=14 * 24 * 3600)
+            r.set(key, day_iso, ex=2 * 24 * 3600)
+            trigger = "sample_threshold" if enough_samples else "weekly_fallback"
             _notify_auto_retrain_started(detector_type)
-            log.info("chain auto-retrain queued for %s (%s)",
-                     detector_type, marker)
+            log.info("chain auto-retrain queued for %s — trigger=%s "
+                     "delta_samples=%d days_since_last=%.1f",
+                     detector_type, trigger, delta, days_old)
         except Exception as e:
             log.warning("auto-retrain dispatch failed for %s: %s",
                         detector_type, e)

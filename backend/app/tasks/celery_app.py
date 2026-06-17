@@ -75,6 +75,13 @@ celery_app.conf.update(
         "training.pseudo_label_pending":      {"queue": "beat"},
         "training.weekly_retrain_all":        {"queue": "beat"},
         "training.evaluate_pending_promotions": {"queue": "beat"},
+        "training.dispatch_queued_jobs":      {"queue": "beat"},
+        # `training.run_job` is the actual heavy fine-tune. Route it
+        # to the alerts pool — NOT the inference pool — so a running
+        # fine-tune can never starve live detection workers. The
+        # alerts worker is started with `-Q alerts,beat` so this is
+        # picked up there.
+        "training.run_job":                   {"queue": "alerts"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -204,6 +211,15 @@ celery_app.conf.update(
         "evaluate-pending-promotions-hourly": {
             "task": "training.evaluate_pending_promotions",
             "schedule": timedelta(hours=1),
+        },
+        # The fix that completes the self-learning loop. Every 5 min,
+        # picks up any TrainingJob rows sitting in status='queued',
+        # marks them running, and dispatches them to the alerts
+        # worker. Also sweeps stale (>12h) running rows to failed so
+        # a crashed worker doesn't block the queue forever.
+        "training-dispatcher-every-5min": {
+            "task": "training.dispatch_queued_jobs",
+            "schedule": timedelta(minutes=5),
         },
         # Sales Floor Intelligence — 15-min timedelta tick (the
         # crontab schedule wasn't being picked up by this worker's

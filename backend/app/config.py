@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     wan_reconnect_max_delay_seconds: int = 300
     wan_offline_alert_threshold_seconds: int = 120
 
+    # --- Auto-retrain triggers ---
+    # The self-learning pipeline fires an incremental fine-tune when
+    # EITHER condition is met:
+    #   - new positive+negative feedback samples since last fine-tune
+    #     ≥ retrain_min_feedback (default 20), OR
+    #   - calendar days since last fine-tune ≥ retrain_max_days
+    #     (weekly cadence at default 7).
+    # Env-overridable via RETRAIN_MIN_FEEDBACK / RETRAIN_MAX_DAYS.
+    retrain_min_feedback: int = 20
+    retrain_max_days: int = 7
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"
