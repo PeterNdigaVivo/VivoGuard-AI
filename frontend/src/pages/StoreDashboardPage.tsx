@@ -56,7 +56,17 @@ interface LiveResponse {
   is_open?: boolean
   hours_label?: string
   zone_capabilities: Record<string, boolean>
-  tiles: Record<string, { value: any; visible: boolean; trend?: { direction: 'up'|'down'|'flat'; delta_pct: number | null } }>
+  // `data_source` / `data_source_label` are populated by the backend
+  // on the visitor-count tile so the UI can render the glass-door
+  // "High accuracy count" badge — optional because most tiles don't
+  // carry provenance metadata.
+  tiles: Record<string, {
+    value: any
+    visible: boolean
+    trend?: { direction: 'up'|'down'|'flat'; delta_pct: number | null }
+    data_source?: string
+    data_source_label?: string
+  }>
 }
 
 // 30s auto-refresh — the spec asks every tile to refresh without a
