@@ -277,7 +277,8 @@ export default function StoreDashboardPage() {
           <Kpi label="Customers today"
                value={fmtInt(t.unique_visitors_today?.value)}
                trendDir={t.unique_visitors_today?.trend?.direction}
-               trendPct={t.unique_visitors_today?.trend?.delta_pct ?? null} />
+               trendPct={t.unique_visitors_today?.trend?.delta_pct ?? null}
+               badge={visitorBadge(t.unique_visitors_today?.data_source)} />
           <Kpi label="Most people at once"
                value={fmtInt(t.occupancy_peak_today?.value)}
                trendDir={t.occupancy_peak_today?.trend?.direction}
@@ -423,14 +424,22 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">{children}</h2>
 }
 
-function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed }: {
+function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
   label: string; value: string; big?: boolean; sub?: string
   trendDir?: 'up' | 'down' | 'flat'; trendPct?: number | null
   // When true, greys the tile and shows a small "Store closed" pill
   // — used on the Right Now row so operators see last-known values
   // while still understanding the store isn't currently trading.
   dimmed?: boolean
+  // Optional provenance pill rendered under the trend (e.g. for the
+  // visitor count: 🚪 High accuracy / ~estimated). Kept generic so
+  // other tiles can reuse it.
+  badge?: { text: string; tone: 'emerald' | 'slate' | 'amber' } | null
 }) {
+  const badgeCls =
+    badge?.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+    badge?.tone === 'amber'   ? 'bg-amber-50  text-amber-700  border-amber-200' :
+                                 'bg-slate-50  text-slate-600  border-slate-200'
   return (
     <Card className="p-4 relative">
       <div className="text-xs text-slate-500">{label}</div>
@@ -441,6 +450,12 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed }: {
       {trendDir && trendPct !== undefined && (
         <div className="mt-1"><Trend direction={trendDir} deltaPct={trendPct} /></div>
       )}
+      {badge && (
+        <div className={'mt-1 inline-block text-[10px] px-1.5 py-0.5 rounded '
+                         + 'border ' + badgeCls}>
+          {badge.text}
+        </div>
+      )}
       {dimmed && (
         <span className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded
                          bg-slate-200 text-slate-600">
@@ -449,6 +464,25 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed }: {
       )}
     </Card>
   )
+}
+
+
+// Map the /store/{id}/live tile's `data_source` to a small provenance
+// pill rendered next to the visitor count. Glass-door sourced counts
+// are flagged as high-accuracy; occupancy-fallback is flagged as a
+// rough estimate; plain entry-exit + unique-visitors render no badge
+// (the default count is trustworthy enough that the chrome would
+// just add noise).
+function visitorBadge(source: string | null | undefined):
+    { text: string; tone: 'emerald' | 'slate' | 'amber' } | null {
+  switch (source) {
+    case 'visitor_count_in_glass_door':
+      return { text: '🚪 High accuracy count', tone: 'emerald' }
+    case 'occupancy':
+      return { text: '~estimated', tone: 'amber' }
+    default:
+      return null
+  }
 }
 
 // ----- SECTION 3: THIS WEEK -----

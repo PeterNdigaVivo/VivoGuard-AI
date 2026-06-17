@@ -284,11 +284,20 @@ class EntryExitDetector(Detector):
                     # window gate lives in shop_state.maybe_emit_*_alert
                     # and only suppresses the operator-facing "Store
                     # Opened/Closed" alert, never the metric.
+                    #
+                    # dims={"source": ...} tags each metric_snapshot row
+                    # with the originating zone type so read paths can
+                    # prefer high-accuracy glass-door counts over plain
+                    # entry_exit. (Historic rows without a `dims` tag
+                    # are handled at read time via a Zone JOIN.)
                     if ctx.db is not None:
                         from app.analytics import recorder
                         recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,
                                         camera_id=ctx.camera_id, store_id=ctx.store_id,
-                                        zone_id=z["id"], aggregator="sum")
+                                        zone_id=z["id"],
+                                        dims={"source": ("glass_door" if is_glass_door
+                                                          else "entry_exit")},
+                                        aggregator="sum")
 
                     out.append(DetectionEvent(
                         detection_type=self.detection_type,

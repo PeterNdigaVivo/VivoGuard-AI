@@ -30,7 +30,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import MetricSnapshot, StaffTrack, VisitorTrack
+from app.models import MetricSnapshot, StaffTrack, VisitorTrack, Zone
 
 log = logging.getLogger(__name__)
 
@@ -42,16 +42,17 @@ _STORE_TZ_DEFAULT = "Africa/Nairobi"
 class VisitorCount:
     by_hour_eat: dict[int, int]                # {0..23: count}
     total: int                                  # = sum(by_hour_eat.values())
-    source: str                                 # "unique_visitors"|"visitor_count_in"|"occupancy"|"none"
+    source: str                                 # "unique_visitors"|"visitor_count_in_glass_door"|"visitor_count_in"|"occupancy"|"none"
     source_label: str                           # plain-English for the UI
     stores_querying: dict = field(default_factory=dict)
 
 
 _SOURCE_LABEL = {
-    "unique_visitors":  "Based on unique visitor tracks (de-duplicated, staff excluded)",
-    "visitor_count_in": "Based on entry/exit camera data",
-    "occupancy":        "Based on occupancy data (estimated)",
-    "none":             "No visitor data yet",
+    "unique_visitors":              "Based on unique visitor tracks (de-duplicated, staff excluded)",
+    "visitor_count_in_glass_door":  "🚪 High-accuracy count — based on glass-door entry sensor",
+    "visitor_count_in":             "Based on entry/exit camera data",
+    "occupancy":                    "Based on occupancy data (estimated)",
+    "none":                         "No visitor data yet",
 }
 
 
@@ -64,6 +65,36 @@ def _eat_hour_expr(column, tz_name: str):
     timezone for a UTC-stored timestamp column. Postgres:
         EXTRACT(HOUR FROM (col AT TIME ZONE tz))"""
     return func.extract("hour", func.timezone(tz_name, column))
+
+
+def _pick_visitor_zone_ids(db: Session, cam_ids: list[int]) -> tuple[list[int], bool]:
+    """Return the zone ids that should source visitor counts for the
+    store, plus a flag for whether they're the high-accuracy
+    glass-door subset.
+
+    Priority: glass_door-tagged LINE zones win when any exist among
+    the store's cameras; otherwise plain entry_exit LINE zones are
+    used. This prevents double-counting on stores that have both
+    types defined on overlapping cameras — a count is attributed to
+    the more accurate sensor when there's a choice.
+
+    Returns (zone_ids, is_glass_door). Empty list = no entry_exit
+    line zones at all for this store → caller falls back to the
+    legacy store/camera filter.
+    """
+    if not cam_ids:
+        return [], False
+    zones = (db.query(Zone)
+                .filter(Zone.camera_id.in_(cam_ids),
+                        Zone.shape == "line")
+                .all())
+    eligible = [z for z in zones
+                if "entry_exit" in (z.detection_types_json or [])]
+    glass = [z for z in eligible
+             if "glass_door" in (z.detection_types_json or [])]
+    if glass:
+        return [int(z.id) for z in glass], True
+    return [int(z.id) for z in eligible], False
 
 
 def daily_visitor_count(
@@ -119,22 +150,40 @@ def daily_visitor_count(
         )
 
     # ----- 2. visitor_count_in line crossings ------------------------
+    # Glass-door priority: when any glass_door entry_exit zone exists
+    # for the store, only its crossings are counted. This avoids
+    # double-counting on stores that also have a plain entry_exit
+    # line on overlapping cameras — and surfaces the higher-accuracy
+    # source label to the UI.
+    visitor_zone_ids, via_glass = _pick_visitor_zone_ids(db, cam_ids or [])
+    base_filters = [
+        MetricSnapshot.metric_type == "visitor_count_in",
+        MetricSnapshot.period_start >= since_utc,
+        MetricSnapshot.period_start <  until_utc,
+    ]
+    if visitor_zone_ids:
+        # Authoritative — the detector writes zone_id on every
+        # visitor_count_* row, so this filter is exact.
+        scope_filter = MetricSnapshot.zone_id.in_(visitor_zone_ids)
+    else:
+        # No entry_exit zones drawn — fall back to the legacy
+        # store/camera scope so existing tests + historic rows
+        # without zone metadata keep working.
+        scope_filter = (
+            (MetricSnapshot.store_id == store_id)
+            | (MetricSnapshot.camera_id.in_(cam_ids) if cam_ids else False)
+        )
     rows = (db.query(_eat_hour_expr(MetricSnapshot.period_start, tz_name).label("h"),
                      func.sum(MetricSnapshot.value).label("v"))
-              .filter(
-                  ((MetricSnapshot.store_id == store_id)
-                   | (MetricSnapshot.camera_id.in_(cam_ids) if cam_ids else False)),
-                  MetricSnapshot.metric_type == "visitor_count_in",
-                  MetricSnapshot.period_start >= since_utc,
-                  MetricSnapshot.period_start <  until_utc,
-              )
+              .filter(scope_filter, *base_filters)
               .group_by("h").all())
     by_hour = {int(r.h): int(round(float(r.v or 0))) for r in rows if r.h is not None}
     if sum(by_hour.values()) > 0:
+        src = "visitor_count_in_glass_door" if via_glass else "visitor_count_in"
         return VisitorCount(
             by_hour_eat=by_hour, total=sum(by_hour.values()),
-            source="visitor_count_in",
-            source_label=_SOURCE_LABEL["visitor_count_in"],
+            source=src,
+            source_label=_SOURCE_LABEL[src],
         )
 
     # ----- 3. last-resort: per-hour occupancy peaks ------------------
