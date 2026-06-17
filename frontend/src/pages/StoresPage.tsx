@@ -2,9 +2,9 @@
 // jump straight to the new store's detail page so the operator can
 // add their first camera.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primitives'
+import { Badge, Button, Card, Input, PageHeader, Skeleton } from '@/components/ui/Primitives'
 import StoreForm from '@/components/StoreForm'
 import { stores as storesApi, type Store } from '@/api/stores'
 
@@ -16,9 +16,20 @@ export default function StoresPage() {
   const nav = useNavigate()
   const [list, setList] = useState<Store[] | null>(null)
   const [creating, setCreating] = useState(false)
+  // Client-side name filter — purely local, no extra API calls.
+  const [query, setQuery] = useState('')
 
   const reload = () => storesApi.list().then(setList).catch(console.error)
   useEffect(() => { reload() }, [])
+
+  // Case-insensitive substring match on store name. Null list (still
+  // loading) passes through so the skeleton stays visible.
+  const filtered = useMemo(() => {
+    if (!list) return list
+    const q = query.trim().toLowerCase()
+    if (!q) return list
+    return list.filter(s => (s.name ?? '').toLowerCase().includes(q))
+  }, [list, query])
 
   async function onCreate(data: Partial<Store>) {
     const created = await storesApi.create(data)
@@ -63,8 +74,38 @@ export default function StoresPage() {
       )}
 
       {list && list.length > 0 && (
+        <div className="mb-4 flex items-center gap-2">
+          <Input
+            type="search"
+            placeholder={`Search ${list.length} stores by name…`}
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            className="max-w-md"
+          />
+          {query && (
+            <button
+              onClick={() => setQuery('')}
+              className="text-sm text-slate-500 hover:text-slate-700">
+              Clear
+            </button>
+          )}
+          {query && filtered && (
+            <span className="text-sm text-slate-500">
+              {filtered.length} of {list.length}
+            </span>
+          )}
+        </div>
+      )}
+
+      {list && list.length > 0 && filtered && filtered.length === 0 && (
+        <Card className="p-8 text-center text-slate-500">
+          No stores match “{query}”.
+        </Card>
+      )}
+
+      {list && list.length > 0 && filtered && filtered.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {list.map(s => (
+          {filtered.map(s => (
             <Link key={s.id} to={`/stores/${s.id}`}
                   className="block hover:scale-[1.01] transition-transform">
               <Card className="p-5 h-full">
