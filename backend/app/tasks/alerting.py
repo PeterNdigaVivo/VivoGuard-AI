@@ -990,27 +990,37 @@ def shop_not_opened_check() -> None:
 
 
 def _entrance_cam_ids_for_store(db, store_id: int) -> list[int]:
-    """Return the sorted list of camera ids for the store that have at
-    least one entry_exit LINE zone drawn. This is the single source
-    of truth for "which cameras can speak to whether the store is
-    open today" — stockroom / behind-counter cameras do not count.
+    """Return the sorted list of camera ids for the store that should
+    be treated as the canonical "is the store open?" sensors today.
 
-    Empty list = the store has no drawn entrance line. Every shop-
-    open signal in this file (line crossing, person-event sliding
-    window, occupancy-metric fallback) must skip such stores rather
-    than fall back to all cameras: a cleaner detected in the
+    Priority — **glass_door zones win** when any exist for the store
+    (their 0.65-conf + 2-frame-persistence filter eliminates the
+    reflection flickers that plagued plain entry_exit lines). The
+    bare `entry_exit` cameras are used only when no glass_door zone
+    is configured.
+
+    Empty list = the store has no drawn entrance line of any kind.
+    Every shop-open signal in this file (line crossing, person-event
+    sliding window, occupancy-metric fallback) must skip such stores
+    rather than fall back to all cameras: a cleaner detected in the
     stockroom at 06:00 is not "store opened"."""
     from app.models import Camera, Zone
     cam_id_rows = db.query(Camera.id).filter(Camera.store_id == store_id).all()
     cam_ids = [c for (c,) in cam_id_rows]
     if not cam_ids:
         return []
-    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
-    return sorted({
-        z.camera_id for z in zones
+    line_zones = [
+        z for z in db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
         if z.shape == "line"
         and "entry_exit" in (z.detection_types_json or [])
+    ]
+    glass_cams = sorted({
+        z.camera_id for z in line_zones
+        if "glass_door" in (z.detection_types_json or [])
     })
+    if glass_cams:
+        return glass_cams
+    return sorted({z.camera_id for z in line_zones})
 
 
 def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:

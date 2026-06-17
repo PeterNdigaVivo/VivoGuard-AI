@@ -220,7 +220,8 @@ def _read_cfg(cfg_extra: dict | None) -> dict:
 
 def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
                            track_id: int, zone_id: int | None,
-                           bbox_norm: list[float]) -> DetectionEvent | None:
+                           bbox_norm: list[float],
+                           *, via_glass_door: bool = False) -> DetectionEvent | None:
     """Called from EntryExitDetector on every inward crossing. Returns
     a DetectionEvent to append to its output, or None.
 
@@ -228,6 +229,13 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
       - ShutterDetector has committed state 'open' on this camera.
       - This is the first qualifying crossing today (per-camera-per-
         day dedupe across all three open bands).
+
+    `via_glass_door=True` flags that the originating zone was tagged
+    `glass_door` — the detector's 0.65-conf + 2-frame-persistence
+    filter has already passed, so we surface that in the operator-
+    facing message and the alert extra for downstream consumers
+    (briefings, dashboards) that want to weight glass-door signals
+    higher than the bare entry_exit kind.
     """
     cfg = _read_cfg(cfg_extra)
     if not cfg["enabled"]:
@@ -268,10 +276,13 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
     if _already_fired(ctx.camera_id, day_iso, "open"):
         return None
 
+    glass_suffix = " — confirmed via glass door sensor" if via_glass_door else ""
     if t <= late_t:
         kind     = "shop_opened"
         priority = "info"
-        message  = f"Shop open at {now_eat.strftime('%H:%M')}"
+        message  = (f"Shop opened at {now_eat.strftime('%H:%M')}{glass_suffix}"
+                    if via_glass_door else
+                    f"Shop open at {now_eat.strftime('%H:%M')}")
     else:
         # Minutes late relative to the trading start so operators see
         # how far past opening time the store actually opened.
@@ -279,22 +290,26 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
             (t.hour * 60 + t.minute) - (open_t.hour * 60 + open_t.minute))
         kind     = "shop_opened_late"
         priority = "warning"
-        message  = (f"Shop opened late at {now_eat.strftime('%H:%M')} "
+        message  = (f"Shop opened late at {now_eat.strftime('%H:%M')}"
+                    f"{glass_suffix} "
                     f"({minutes_late} min after {open_t.strftime('%H:%M')} start)")
 
     _mark_fired(ctx.camera_id, day_iso, "open")
     # Store-level marker — coordinates with the occupancy-inference
     # task so the URGENT "not opened" check honors EITHER signal.
+    # Glass-door crossings record `method="glass_door_crossing"` so
+    # downstream consumers can see which sensor cleared the marker.
+    method = "glass_door_crossing" if via_glass_door else "entry_crossing"
     if ctx.store_id is not None:
         mark_store_opened(
             ctx.store_id, day_iso,
             opened_at=now_eat,
-            method="entry_crossing",
+            method=method,
             confidence="high",
             camera_id=ctx.camera_id,
         )
-    log.info("shop_open_close: %s cam=%s eat=%s",
-             kind, ctx.camera_id, now_eat.isoformat())
+    log.info("shop_open_close: %s cam=%s eat=%s via_glass_door=%s",
+             kind, ctx.camera_id, now_eat.isoformat(), via_glass_door)
 
     return DetectionEvent(
         detection_type=SHOP_OPEN_CLOSE_TYPE,
@@ -310,7 +325,10 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
             "trading_start":    open_t.strftime("%H:%M"),
             "late_threshold":   late_t.strftime("%H:%M"),
             "shutter_state":    "open",
-            "signal":           "shutter_open+inward_crossing",
+            "signal":           ("glass_door_crossing" if via_glass_door
+                                  else "shutter_open+inward_crossing"),
+            "signal_confidence": "high" if via_glass_door else "medium",
+            "via_glass_door":   via_glass_door,
         },
     )
 
@@ -319,10 +337,17 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
 
 def maybe_emit_close_alert(ctx: DetectorContext, cfg_extra: dict | None,
                             track_id: int, zone_id: int | None,
-                            bbox_norm: list[float]) -> DetectionEvent | None:
+                            bbox_norm: list[float],
+                            *, via_glass_door: bool = False) -> DetectionEvent | None:
     """Called from EntryExitDetector on every outward crossing. Fires
     once per camera per EAT day on the FIRST outward crossing after
-    the configured closing threshold."""
+    the configured closing threshold.
+
+    `via_glass_door=True` is passed by the detector when the
+    originating zone is glass_door-tagged. The 2-frame persistence
+    filter has already cleared reflections; we surface that as
+    `signal="glass_door_crossing"` + a stronger plain-English
+    message."""
     cfg = _read_cfg(cfg_extra)
     if not cfg["enabled"] or not cfg["close_t"]:
         return None
@@ -343,8 +368,12 @@ def maybe_emit_close_alert(ctx: DetectorContext, cfg_extra: dict | None,
         return None
 
     _mark_fired(ctx.camera_id, day_iso, "close")
-    log.info("shop_open_close: shop_closed cam=%s eat=%s",
-             ctx.camera_id, now_eat.isoformat())
+    log.info("shop_open_close: shop_closed cam=%s eat=%s via_glass_door=%s",
+             ctx.camera_id, now_eat.isoformat(), via_glass_door)
+
+    message = (f"Shop closed at {now_eat.strftime('%H:%M')} "
+               f"— confirmed via glass door sensor") if via_glass_door \
+              else f"Shop closed at {now_eat.strftime('%H:%M')}"
 
     return DetectionEvent(
         detection_type=SHOP_OPEN_CLOSE_TYPE,
@@ -354,10 +383,13 @@ def maybe_emit_close_alert(ctx: DetectorContext, cfg_extra: dict | None,
             "priority":            "info",
             "rule":                "shop_closed",
             "store_id":            ctx.store_id,
-            "message":             f"Shop closed at {now_eat.strftime('%H:%M')}",
+            "message":             message,
             "eat_time":            now_eat.strftime("%H:%M"),
             "eat_iso":             now_eat.isoformat(),
             "closing_threshold":   cfg["close_t"].strftime("%H:%M"),
-            "signal":              "outward_crossing_after_close_threshold",
+            "signal":              ("glass_door_crossing" if via_glass_door
+                                     else "outward_crossing_after_close_threshold"),
+            "signal_confidence":   "high" if via_glass_door else "medium",
+            "via_glass_door":      via_glass_door,
         },
     )

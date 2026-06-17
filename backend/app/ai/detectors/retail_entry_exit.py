@@ -303,10 +303,12 @@ class EntryExitDetector(Detector):
                     shop_alert = None
                     if direction == "in":
                         shop_alert = shop_state.maybe_emit_open_alert(
-                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"])
+                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                            via_glass_door=is_glass_door)
                     else:
                         shop_alert = shop_state.maybe_emit_close_alert(
-                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"])
+                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                            via_glass_door=is_glass_door)
                     if shop_alert is not None:
                         log.info("EntryExit camera=%s shop alert raised: rule=%s",
                                  ctx.camera_id,
