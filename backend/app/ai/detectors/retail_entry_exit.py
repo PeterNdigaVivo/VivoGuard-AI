@@ -100,6 +100,16 @@ class EntryExitDetector(Detector):
     # Diagnostic log threshold for "person near line".
     NEAR_LINE_THRESHOLD = 0.10
 
+    # ---- glass-door modifier ----------------------------------------
+    # Zones tagged with `glass_door` (in addition to `entry_exit`) get
+    # stricter filtering — glass reflections produce low-confidence
+    # detections that flicker for a frame or two. The stricter
+    # threshold + multi-frame persistence requirement cuts the
+    # false-crossing rate on these cameras.
+    GLASS_DOOR_MIN_CONF       = 0.65
+    GLASS_DOOR_MIN_FRAMES_SEEN = 2     # pseudo-track must be matched
+                                        # on ≥ 2 frames before a side-flip fires
+
     def __init__(self):
         # (camera_id, zone_id) → list[{cx, cy, side, last_seen, last_fired}]
         self._pseudo: dict[tuple[int, int], list[dict]] = {}
@@ -198,7 +208,17 @@ class EntryExitDetector(Detector):
             hist[:] = [e for e in hist if now - e["last_seen"] <= self.PSEUDO_TRACK_TTL]
             matched_indices: set[int] = set()
 
-            for det_idx, det in enumerate(persons):
+            # Per-zone glass-door modifier: stricter conf + multi-frame
+            # persistence. Plain `entry_exit` zones use the unmodified
+            # pre-filtered `persons` list and fire on the first clean
+            # side-flip as before.
+            is_glass_door = "glass_door" in (z.get("detection_types_json") or [])
+            zone_persons = (
+                [d for d in persons if d.get("conf", 0.0) >= self.GLASS_DOOR_MIN_CONF]
+                if is_glass_door else persons
+            )
+
+            for det_idx, det in enumerate(zone_persons):
                 cx, cy = bbox_centre(det["bbox_norm"])
                 dist_to_line = _segment_distance((cx, cy), a, b)
                 if (dist_to_line <= self.NEAR_LINE_THRESHOLD
@@ -227,17 +247,31 @@ class EntryExitDetector(Detector):
                 if best_i < 0:
                     # First sighting — no crossing inferable yet.
                     hist.append({"cx": cx, "cy": cy, "side": side_now,
-                                 "last_seen": now, "last_fired": 0.0})
+                                 "last_seen": now, "last_fired": 0.0,
+                                 "frames_seen": 1})
                     continue
 
                 entry = hist[best_i]
                 matched_indices.add(best_i)
+                # Bump the consecutive-match counter — the glass-door
+                # branch below uses this to suppress single-frame
+                # reflection flickers.
+                entry["frames_seen"] = int(entry.get("frames_seen", 1)) + 1
                 prev_side = entry["side"]
 
                 # Crossing = side genuinely flipped. Skip when either
                 # side is in the deadband — wait for a clean read.
+                # For glass-door zones, ALSO require the pseudo-track
+                # to have been matched on ≥ GLASS_DOOR_MIN_FRAMES_SEEN
+                # frames so a reflection that appears for a single
+                # frame can't trigger a crossing.
+                glass_persistence_ok = (
+                    (not is_glass_door)
+                    or entry["frames_seen"] >= self.GLASS_DOOR_MIN_FRAMES_SEEN
+                )
                 if (side_now != 0 and prev_side != 0 and side_now != prev_side
-                        and now - entry["last_fired"] >= self.REFIRE_COOLDOWN):
+                        and now - entry["last_fired"] >= self.REFIRE_COOLDOWN
+                        and glass_persistence_ok):
                     direction = "in" if (side_now * inward_sign) > 0 else "out"
                     log.info("EntryExit camera=%s CROSSING direction=%s zone=%s "
                              "prev_side=%d new_side=%d prev=(%.3f,%.3f) "

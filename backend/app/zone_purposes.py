@@ -16,6 +16,19 @@ ZONE_PURPOSES = {
         "types": ["entry_exit"],
         "description": "Two-point line. People crossing inward = +1, outward = −1.",
     },
+    "count_entries_glass": {
+        "label": "Monitor glass door",
+        "shape": "line",
+        # `glass_door` is the modifier tag the EntryExit detector reads
+        # (alongside the standard `entry_exit`) to enable stricter
+        # filtering for cameras pointed at reflective glass entrances.
+        "types": ["entry_exit", "glass_door"],
+        "description": (
+            "Two-point line at a glass door. Same as 'Count people "
+            "entering' but with stricter confidence and a 2-frame "
+            "persistence requirement to ignore reflection flickers."
+        ),
+    },
     "checkout_queue":    {
         "label": "Monitor checkout queue",
         "shape": "polygon",
@@ -91,8 +104,16 @@ def types_for_purpose(purpose_key: str) -> list[str]:
 
 
 def purpose_for_types(types: list[str]) -> str | None:
-    """Reverse: pick the first purpose whose primary type matches."""
+    """Reverse: pick the most-specific purpose whose `types` are all
+    present in the given list. Most-specific = longest matching set,
+    so a zone with [entry_exit, glass_door] resolves to
+    `count_entries_glass` (the modifier-tagged variant) rather than
+    the bare `count_entries`."""
+    given = set(types or [])
+    best_key: str | None = None
+    best_len = -1
     for key, p in ZONE_PURPOSES.items():
-        if p["types"] and p["types"][0] in (types or []):
-            return key
-    return None
+        ptypes = list(p["types"] or [])
+        if ptypes and set(ptypes).issubset(given) and len(ptypes) > best_len:
+            best_key, best_len = key, len(ptypes)
+    return best_key
