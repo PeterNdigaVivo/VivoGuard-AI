@@ -299,6 +299,11 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "missing_nametag":
             return "Staff Member Missing Name Tag"
         return "Unidentified Person Behind Counter"
+    if dt == "checkout_dwell":
+        # All variants today are "long session" alerts. If the schema
+        # grows more rules (e.g. abandoned-basket), branch on
+        # extra.rule here.
+        return "Long Checkout Transaction"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
 
 
@@ -356,6 +361,10 @@ _WHAT_TO_DO: dict[str, list[str]] = {
 
 def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[str]:
     dt = event.detection_type or ""
+    if dt == "checkout_dwell":
+        # The body lists the three plausible causes inline; an
+        # additional "what to do" list would be redundant noise.
+        return []
     if dt == "person":
         ctxt = _person_context(event, zone, store)
         if ctxt == "customer":
@@ -609,6 +618,12 @@ def _title(event: DetectionEvent, camera: Camera | None,
         # camera-suffix would be noise for managers. Pull straight from
         # the plain-title path.
         return _plain_title(event, zone, store)
+    if dt == "checkout_dwell":
+        # Also store-scoped — the manager doesn't care which till
+        # camera; they care which store has a stuck checkout.
+        store_name = (store.name if store else None) \
+                      or (extra.get("store_name")) or "Unknown store"
+        return f"{icon} Long Checkout Transaction — {store_name}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -770,6 +785,28 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return ("An object has been left unattended in the store. Investigate.")
     if dt == "loitering":
         return ("A person has been lingering in one area beyond the typical browsing window.")
+    if dt == "checkout_dwell":
+        # `dwell_seconds` is set by the alerting task. Format as
+        # "X minutes Y seconds" with the noun matched to the value
+        # so "1 minute 1 second" reads correctly when relevant.
+        extra = event.extra or {}
+        secs = float(extra.get("dwell_seconds") or 0)
+        m, s = divmod(int(round(secs)), 60)
+        parts = []
+        if m:
+            parts.append(f"{m} minute{'s' if m != 1 else ''}")
+        parts.append(f"{s} second{'s' if s != 1 else ''}")
+        duration_str = " ".join(parts) if parts else "an extended period"
+
+        store_name = (store.name if store else None) \
+                      or extra.get("store_name") or "the store"
+        return (
+            f"A customer has been at the checkout counter at "
+            f"{store_name} for {duration_str}. This could be:\n"
+            f"- A payment issue or declined card needing attention\n"
+            f"- A customer with a query or exchange request\n"
+            f"- A staff member working at the counter (not a customer)"
+        )
 
     return "Review the footage and decide whether to confirm or dismiss."
 
