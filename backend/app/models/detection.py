@@ -25,6 +25,8 @@ DETECTION_TYPES = (
     "entry_exit", "fight", "shelf_change",
     # Vivo P5 — staff-only behind-counter compliance.
     "staff_zone",
+    # Vivo P6 — per-customer transaction duration at counter zones.
+    "checkout_dwell",
 )
 
 

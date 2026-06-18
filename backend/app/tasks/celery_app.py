@@ -65,6 +65,7 @@ celery_app.conf.update(
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
         "alerting.camera_health_check":         {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
+        "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
@@ -152,6 +153,14 @@ celery_app.conf.update(
         "queue-escalation-every-30s": {
             "task": "alerting.queue_escalation_check",
             "schedule": 30.0,
+        },
+        # Checkout-long-session ATTENTION alert — scans Redis open-
+        # session keys written by CheckoutDwellDetector and fires when
+        # any live session exceeds settings.checkout_alert_minutes
+        # (default 8). Per-zone 30-min dedup.
+        "checkout-long-session-every-60s": {
+            "task": "alerting.checkout_long_session_check",
+            "schedule": 60.0,
         },
         # Camera-offline WhatsApp nudge — every 60s the task scans
         # ai_enabled cameras and fires when last_seen is > 5 min stale

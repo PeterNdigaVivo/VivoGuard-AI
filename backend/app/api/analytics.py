@@ -386,6 +386,41 @@ def store_live_dashboard(store_id: int,
         p = _max(metric, prev_since,   prev_until)
         return {"value": c, "trend": _trend(c, p)}
 
+    def _count(metric: str, t0: datetime, t1: datetime) -> int:
+        """COUNT(*) of rows for a metric in [t0,t1). Used by per-session
+        metrics (e.g. checkout_dwell_seconds) where each row is one
+        completed session and the natural KPI is "how many"."""
+        v = (db.query(func.count(MetricSnapshot.id))
+               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
+                       MetricSnapshot.metric_type == metric,
+                       MetricSnapshot.period_start >= t0,
+                       MetricSnapshot.period_start <  t1)
+               .scalar())
+        return int(v or 0)
+
+    def _kpi_count(metric: str) -> dict:
+        c = _count(metric, active_since, active_until)
+        p = _count(metric, prev_since,   prev_until)
+        return {"value": c, "trend": _trend(c, p)}
+
+    def _busiest_hour_eat(metric: str, t0: datetime, t1: datetime) -> int | None:
+        """Hour (0..23) in the store's local timezone with the most
+        rows for `metric` in [t0,t1). None when there's no data."""
+        tz = store.timezone or "Africa/Nairobi"
+        hour_expr = func.extract(
+            "hour", func.timezone(tz, MetricSnapshot.period_start)
+        )
+        row = (db.query(hour_expr.label("h"),
+                         func.count(MetricSnapshot.id).label("n"))
+                 .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
+                         MetricSnapshot.metric_type == metric,
+                         MetricSnapshot.period_start >= t0,
+                         MetricSnapshot.period_start <  t1)
+                 .group_by("h")
+                 .order_by(func.count(MetricSnapshot.id).desc())
+                 .first())
+        return int(row.h) if (row and row.h is not None) else None
+
     def _latest_sum(metric: str) -> float:
         """Sum the latest sample of `metric` across the store's cameras.
         Use case: occupancy NOW = sum of each camera's most recent
@@ -529,6 +564,27 @@ def store_live_dashboard(store_id: int,
                 staff_avg or 0,
                 _avg("staff_present_pct", prev_since, prev_until) if capabilities["counter"] else 0,
             ),
+            "visible": capabilities["counter"],
+        },
+        # ---- Checkout dwell time (one row per completed transaction) -----
+        "checkout_avg_seconds_today": {
+            "value": round(_kpi_avg("checkout_dwell_seconds")["value"], 0),
+            "trend": _kpi_avg("checkout_dwell_seconds")["trend"],
+            "visible": capabilities["counter"],
+        },
+        "checkout_max_seconds_today": {
+            "value": round(_kpi_max("checkout_dwell_seconds")["value"], 0),
+            "trend": _kpi_max("checkout_dwell_seconds")["trend"],
+            "visible": capabilities["counter"],
+        },
+        "checkout_count_today": {
+            "value": _kpi_count("checkout_dwell_seconds")["value"],
+            "trend": _kpi_count("checkout_dwell_seconds")["trend"],
+            "visible": capabilities["counter"],
+        },
+        "checkout_busiest_hour_today": {
+            "value": _busiest_hour_eat("checkout_dwell_seconds",
+                                         active_since, active_until),
             "visible": capabilities["counter"],
         },
         "visitors_in_today":  {

@@ -35,6 +35,7 @@ from app.ai.detectors.retail_entry_exit import EntryExitDetector
 from app.ai.detectors.retail_fight import FightDetector
 from app.ai.detectors.retail_shelf import ShelfChangeDetector
 from app.ai.detectors.retail_journey import CustomerJourneyDetector
+from app.ai.detectors.retail_checkout import CheckoutDwellDetector
 from app.ai.detectors.staff_zone import StaffZoneDetector
 
 
@@ -92,6 +93,10 @@ STATEFUL_TYPES: dict[str, Type[Detector]] = {
     "customer_journey":   CustomerJourneyDetector,
     # Vivo P5 — behind-counter compliance.
     "staff_zone":         StaffZoneDetector,
+    # Vivo P6 — per-customer transaction duration at counter zones.
+    # Co-exists with StaffPresenceDetector on the same counter tag —
+    # they write different metric names and don't share state.
+    "checkout_dwell":     CheckoutDwellDetector,
 }
 
 

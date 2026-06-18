@@ -293,6 +293,29 @@ export default function StoreDashboardPage() {
                value={fmtInt(t.occupancy_peak_today?.value)}
                trendDir={t.occupancy_peak_today?.trend?.direction}
                trendPct={t.occupancy_peak_today?.trend?.delta_pct ?? null} />
+          {t.checkout_avg_seconds_today?.visible && (
+            <Kpi label="Avg checkout time"
+                 value={`${fmtInt(t.checkout_avg_seconds_today.value)} sec`}
+                 trendDir={t.checkout_avg_seconds_today?.trend?.direction}
+                 trendPct={t.checkout_avg_seconds_today?.trend?.delta_pct ?? null} />
+          )}
+          {t.checkout_max_seconds_today?.visible && (
+            <Kpi label="Slowest checkout"
+                 value={`${fmtInt(t.checkout_max_seconds_today.value)} sec`}
+                 trendDir={t.checkout_max_seconds_today?.trend?.direction}
+                 trendPct={t.checkout_max_seconds_today?.trend?.delta_pct ?? null} />
+          )}
+          {t.checkout_count_today?.visible && (
+            <Kpi label="Checkouts today"
+                 value={fmtInt(t.checkout_count_today.value)}
+                 trendDir={t.checkout_count_today?.trend?.direction}
+                 trendPct={t.checkout_count_today?.trend?.delta_pct ?? null} />
+          )}
+          {t.checkout_busiest_hour_today?.visible
+              && t.checkout_busiest_hour_today.value != null && (
+            <Kpi label="Busiest checkout hour"
+                 value={`${String(t.checkout_busiest_hour_today.value).padStart(2,'0')}:00`} />
+          )}
           {t.queue_wait_avg_today_sec?.visible && (
             <Kpi label="Average wait in queue"
                  value={`${fmtInt(t.queue_wait_avg_today_sec.value)} sec`}

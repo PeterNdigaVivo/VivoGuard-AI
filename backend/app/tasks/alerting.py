@@ -11,6 +11,7 @@ Both write WhatsApp to settings.dashboard_alert_to and dedup via a
 Redis marker so a single sustained incident produces one nudge.
 """
 from __future__ import annotations
+import json
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -123,6 +124,121 @@ def queue_escalation_check() -> None:
             log.info("queue escalation: %s (%d people %dm) → %d WhatsApp sent",
                      store_name, count, minutes, sent)
             r.set(sent_key, "1", ex=QUEUE_DEDUP_TTL_SECONDS)
+
+
+# ---- Checkout dwell (long-session ATTENTION alert) -------------------
+#
+# The CheckoutDwellDetector publishes a per-session Redis key when a
+# customer enters a counter zone:
+#   vg:checkout_open:{cam}:{zone}:{track}  →  JSON {entry_ts, store_id, …}
+#
+# This task scans those keys every 60s. When ANY live session's age
+# exceeds settings.checkout_alert_minutes, it fires ONE ATTENTION
+# alert per (camera, zone) and stamps a 30-minute dedup key so the
+# same prolonged transaction doesn't repeat-fire — and so a second
+# track at the same till during the dedup window is suppressed.
+#
+# Dedup key:
+#   vg:checkout_alert:sent:{store_id}:{cam}:{zone}  (TTL = 30 min)
+
+CHECKOUT_ALERT_DEDUP_TTL_SECONDS = 30 * 60
+
+
+@celery_app.task(name="alerting.checkout_long_session_check",
+                  ignore_result=True)
+def checkout_long_session_check() -> None:
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import Camera, Store, Zone
+
+    threshold_minutes = int(getattr(settings, "checkout_alert_minutes", 8))
+    threshold_seconds = max(60, threshold_minutes * 60)
+    r = _redis()
+    if r is None:
+        return
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    # Walk every open-session key. `scan_iter` is non-blocking and
+    # OK at the volume we're dealing with (one key per active
+    # checkout, store-wide — typically a handful).
+    candidates: list[dict] = []
+    try:
+        for key in r.scan_iter(match="vg:checkout_open:*", count=200):
+            raw = r.get(key)
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            entry_ts = float(payload.get("entry_ts") or 0.0)
+            age = now_ts - entry_ts
+            if age < threshold_seconds:
+                continue
+            candidates.append({
+                "key": (key.decode() if isinstance(key, bytes) else key),
+                "age": age,
+                "store_id":  payload.get("store_id"),
+                "camera_id": int(payload.get("camera_id") or 0),
+                "zone_id":   int(payload.get("zone_id")   or 0),
+                "track_id":  payload.get("track_id"),
+            })
+    except Exception as e:
+        log.exception("checkout_long_session_check: scan failed: %s", e)
+        return
+
+    if not candidates:
+        return
+
+    with SessionLocal() as db:
+        for c in candidates:
+            cam_id   = c["camera_id"]
+            zone_id  = c["zone_id"]
+            store_id = c["store_id"]
+            sent_key = (f"vg:checkout_alert:sent:"
+                         f"{store_id or 0}:{cam_id}:{zone_id}")
+            if r.get(sent_key):
+                continue
+
+            store = db.get(Store,  store_id) if store_id else None
+            zone  = db.get(Zone,   zone_id)  if zone_id  else None
+            cam   = db.get(Camera, cam_id)   if cam_id   else None
+            store_name = (store.name if store else None) or "Unknown store"
+            zone_name  = (zone.name  if zone  else None) or "checkout"
+            cam_name   = (cam.name   if cam   else None) or f"camera {cam_id}"
+            minutes = max(1, int(c["age"] / 60))
+
+            body = (f"A customer has been at the {zone_name} for "
+                    f"{minutes} minutes at {store_name}. "
+                    f"This may indicate a transaction issue or staff "
+                    f"needing support.")
+            extra = {
+                "priority":      "attention",
+                "rule":          "checkout_dwell_long",
+                "store_id":      store_id,
+                "store_name":    store_name,
+                "camera_name":   cam_name,
+                "zone_name":     zone_name,
+                "dwell_minutes": minutes,
+                "dwell_seconds": round(c["age"], 1),
+                "threshold_minutes": threshold_minutes,
+                "title":         f"Long Checkout — {store_name}",
+                "message":       body,
+                "what_to_do": [
+                    "Check the live camera at the counter",
+                    "Send a staff member to assist if needed",
+                    "Mark resolved once the customer has been served",
+                ],
+            }
+            _create_info_alert(
+                db, camera_id=cam_id or None, zone_id=zone_id or None,
+                store_id=store_id, detection_type="checkout_dwell",
+                cls="checkout_dwell_long", extra=extra,
+            )
+            db.commit()
+            r.set(sent_key, "1", ex=CHECKOUT_ALERT_DEDUP_TTL_SECONDS)
+            log.info("checkout_dwell_long: store=%s cam=%s zone=%s "
+                     "duration=%dm", store_name, cam_id, zone_id, minutes)
 
 
 # ---- Camera health ----------------------------------------------------

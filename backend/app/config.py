@@ -180,6 +180,19 @@ class Settings(BaseSettings):
     # consecutive frames. Env: GLASS_DOOR_MIN_FRAMES.
     glass_door_min_frames: int = 1
 
+    # --- Checkout dwell time ---
+    # A single customer transaction at a counter zone. Sessions shorter
+    # than min_dwell are dropped as pass-throughs (staff walking past,
+    # tracker glitches); sessions longer than max_dwell are dropped as
+    # not-a-transaction (staff working at the counter for a whole
+    # shift — that's `staff_present`, not a checkout).
+    # alert_minutes is the live-session ATTENTION-alert threshold.
+    # Env: CHECKOUT_MIN_DWELL_SECONDS / CHECKOUT_MAX_DWELL_SECONDS /
+    #      CHECKOUT_ALERT_MINUTES.
+    checkout_min_dwell_seconds: int = 30
+    checkout_max_dwell_seconds: int = 900
+    checkout_alert_minutes:     int = 8
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"
