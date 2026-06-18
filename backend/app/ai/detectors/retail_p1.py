@@ -393,6 +393,42 @@ class IntrusionDetector(Detector):
     def __init__(self):
         self._fired: dict[int, float] = {}    # zone_id → last alert ts
 
+    def _within_after_hours_grace(self, ctx: DetectorContext) -> bool:
+        """True when the current store-local time is inside the
+        configurable opening / closing grace window around today's
+        trading hours. Used to decide whether a staff-identified
+        person after-hours is "opening / closing" (fully suppressed)
+        or "present at an unusual time" (downgraded ATTENTION alert).
+
+        Permissive default — when business_hours_json is missing OR
+        unparseable, returns True so we err toward NOT firing URGENT
+        on a possibly-legitimate staff arrival."""
+        if ctx.business_hours is None or not ctx.store_timezone:
+            return True
+        try:
+            from app.config import settings as _s
+            grace_before = int(getattr(_s, "person_afterhours_grace_before_min", 60))
+            grace_after  = int(getattr(_s, "person_afterhours_grace_after_min",  60))
+            local = localised_now(ctx.store_timezone)
+            from app.utils.business_hours import WEEKDAY_KEYS, _parse_window
+            windows = ctx.business_hours.get(
+                WEEKDAY_KEYS[local.weekday()]) or []
+            t_min = local.hour * 60 + local.minute
+            for w in windows:
+                parsed = _parse_window(w)
+                if not parsed:
+                    continue
+                open_t, close_t = parsed
+                open_min  = open_t.hour * 60 + open_t.minute
+                close_min = close_t.hour * 60 + close_t.minute
+                if open_min - grace_before <= t_min < open_min:
+                    return True
+                if close_min <= t_min < close_min + grace_after:
+                    return True
+            return False
+        except Exception:
+            return True
+
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
@@ -416,41 +452,59 @@ class IntrusionDetector(Detector):
 
         out: list[DetectionEvent] = []
         now = time.time()
+        # Grace window — minutes before opening / after closing during
+        # which a person identified as staff (medium/high) is treated
+        # as opening / closing the store rather than an intruder. Same
+        # default (60 min) on both sides via existing settings.
+        in_grace = self._within_after_hours_grace(ctx)
         from app.ai.detectors import staff_identity
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON or det["conf"] < thr:
                 continue
             for z in zones:
                 if bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"]):
-                    # After-hours staff opening / closing — if the
-                    # person reads as staff (correct uniform OR known
-                    # via the shared identity registry from staff/
-                    # counter zone dwell), suppress the intrusion alert
-                    # per the P5 ops rule. Their presence is logged
-                    # via the staff_tracks roster, not an alert.
                     tid = staff_identity.match_track(ctx, det)
                     verdict = staff_identity.classify(ctx, det, tid, now)
-                    # Suppress the intrusion alert when the person is
-                    # identified staff, OR when the colour read is just
-                    # uncertain (typical for overhead cameras in low
-                    # light — we'd rather miss an intruder ping than
-                    # WhatsApp a manager about their own staff).
-                    if (verdict["level"] in ("high", "medium", "uncertain")
-                            or verdict["top_ok"]):
-                        if verdict["level"] in ("high", "medium"):
-                            staff_identity.mark_staff_track(
-                                ctx, tid, source="opening_closing")
+                    level = verdict["level"]
+                    # Tier the response:
+                    # • staff (high/medium) IN grace → fully suppress
+                    #   (this IS the opening/closing person)
+                    # • uncertain pixels → always suppress; rather miss
+                    #   an intruder ping than alarm on staff the camera
+                    #   can't read clearly
+                    # • staff OUT of grace → ATTENTION (staff present
+                    #   but at an unusual time)
+                    # • unknown → URGENT (original behaviour)
+                    if level in ("high", "medium") and in_grace:
+                        staff_identity.mark_staff_track(
+                            ctx, tid, source="opening_closing")
                         break
+                    if level == "uncertain":
+                        break
+
                     zid = z.get("id") or -1
                     if now - self._fired.get(zid, 0) < 30:
                         continue
                     self._fired[zid] = now
+                    if level in ("high", "medium"):
+                        # Staff outside the grace window — downgrade so
+                        # the manager sees it without being WhatsApped
+                        # in the middle of the night.
+                        staff_identity.mark_staff_track(
+                            ctx, tid, source="afterhours_present")
+                        priority = "attention"
+                        reason = "staff_present_after_hours"
+                    else:
+                        priority = "high"
+                        reason = "after_hours"
                     out.append(DetectionEvent(
                         detection_type=self.detection_type, cls="person",
                         confidence=det["conf"], bbox_norm=det["bbox_norm"],
                         zone_id=z.get("id"),
-                        extra={"priority": "high", "store_id": ctx.store_id,
-                               "after_hours": True},
+                        extra={"priority": priority, "store_id": ctx.store_id,
+                               "after_hours": True,
+                               "staff_level": level,
+                               "rule": reason},
                     ))
                     break
         return out

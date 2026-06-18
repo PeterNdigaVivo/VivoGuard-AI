@@ -123,59 +123,86 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
              now: float) -> dict:
     """Return the staff-classification verdict for one detection.
     Keys:
-      level                 'high' | 'medium' | 'unknown'
-      top_ok                bool | None        — correct uniform colour
-      has_lanyard           bool | None
-      has_nametag           bool | None
-      time_in_staff_zone_s  float              — max across staff_zone + counter
-      reason                str                — debug breadcrumb
+      level                 'high' | 'medium' | 'uncertain' | 'unknown'
+      top_ok, has_lanyard, has_nametag, dual_black
+      confidence            float [0..1]
+      time_in_staff_zone_s  float — max across staff_zone + counter
+      in_staff_zone_now     bool  — bbox is currently inside one
+      reason                str
+    Side effects:
+      • Promotes to HIGH on the strongest evidence we have today:
+        Vivo all-black uniform (`dual_black` from uniform_features)
+        AND the person is in a staff_zone / counter zone right now —
+        no waiting for the 5-min dwell timer.
+      • When the verdict lands HIGH, opportunistically writes the
+        staff_tracks roster row so the visitor-count LEFT JOIN
+        excludes the customer in real time (was previously only done
+        ad-hoc by IntrusionDetector at opening/closing).
+      • When level=HIGH inside a staff_zone, fires the auto-label
+        harvester for the `vivo_all_black` training pool.
     """
     feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
     top_ok      = bool(feats["top_ok"])      if feats else None
     has_lanyard = bool(feats["has_lanyard"]) if feats else None
     has_nametag = bool(feats["has_nametag"]) if feats else None
+    dual_black  = bool(feats.get("dual_black")) if feats else False
     confidence  = float(feats.get("confidence", 0.0)) if feats else 0.0
     elapsed = time_in_any_staff_zone(ctx.camera_id, track_id, now)
+    in_zone_now, zone_tag_now = is_in_staff_or_counter_zone(
+        ctx, det["bbox_norm"])
+
+    base = {"top_ok": top_ok, "has_lanyard": has_lanyard,
+            "has_nametag": has_nametag, "dual_black": dual_black,
+            "confidence": confidence,
+            "time_in_staff_zone_s": elapsed,
+            "in_staff_zone_now": in_zone_now}
+
+    def _finalize(level: str, reason: str) -> dict:
+        v = {**base, "level": level, "reason": reason}
+        # Real-time staff-roster write so analytics excludes them
+        # immediately, not after the 10-min classifier batch.
+        if level == "high":
+            mark_staff_track(ctx, track_id, source=("uniform_dual_black"
+                                                     if dual_black else "uniform"))
+            if in_zone_now and dual_black:
+                _maybe_harvest_staff_zone_crop(ctx, det, track_id, now)
+        return v
+
+    # HIGHEST evidence — all-black uniform AND currently in a staff/
+    # counter zone. The Vivo uniform is unambiguous and the zone
+    # itself is staff-only; no need to wait for the dwell timer.
+    if dual_black and in_zone_now:
+        return _finalize("high", f"dual_black+in_{zone_tag_now}")
 
     # HIGH confidence: correct uniform AND (lanyard visible OR long dwell)
     if top_ok and (has_lanyard or elapsed >= TIME_BASED_STAFF_SECONDS):
-        return {"level": "high", "top_ok": top_ok,
-                "has_lanyard": has_lanyard, "has_nametag": has_nametag,
-                "confidence": confidence,
-                "time_in_staff_zone_s": elapsed,
-                "reason": "uniform+lanyard" if has_lanyard else "uniform+dwell"}
+        return _finalize("high",
+                          "uniform+lanyard" if has_lanyard else "uniform+dwell")
+
+    # Zone-boosted MEDIUM — uniform colour reads AND person is currently
+    # in a staff/counter zone (no dwell required). Was previously
+    # MEDIUM "uniform-only"; the explicit zone-membership signal makes
+    # the classification stronger but we keep MEDIUM (not HIGH) when
+    # the bottom half doesn't also confirm.
+    if top_ok and in_zone_now:
+        return _finalize("medium", f"uniform+in_{zone_tag_now}")
 
     # MEDIUM confidence: time alone (rule 1a) — uniform unknown / not read.
     if elapsed >= TIME_BASED_STAFF_SECONDS:
-        return {"level": "medium", "top_ok": top_ok,
-                "has_lanyard": has_lanyard, "has_nametag": has_nametag,
-                "confidence": confidence,
-                "time_in_staff_zone_s": elapsed, "reason": "dwell≥5min"}
+        return _finalize("medium", "dwell≥5min")
 
     # MEDIUM confidence: uniform colour but not yet long enough for HIGH.
-    # We still trust the colour rule to suppress intrusion-style alerts,
-    # but uniform-violation alerts only fire after the dwell threshold.
     if top_ok:
-        return {"level": "medium", "top_ok": top_ok,
-                "has_lanyard": has_lanyard, "has_nametag": has_nametag,
-                "confidence": confidence,
-                "time_in_staff_zone_s": elapsed, "reason": "uniform-only"}
+        return _finalize("medium", "uniform-only")
 
     # UNCERTAIN: pixels unreadable (frame missed, occluded, overhead
     # angle, low light). Distinct from "unknown" — the caller treats
     # uncertain as "no alert" so we don't false-alarm on a uniform
     # the camera literally can't see clearly.
     if feats is None or confidence < UNCERTAIN_CONFIDENCE:
-        return {"level": "uncertain", "top_ok": top_ok,
-                "has_lanyard": has_lanyard, "has_nametag": has_nametag,
-                "confidence": confidence,
-                "time_in_staff_zone_s": elapsed,
-                "reason": "low-confidence-pixels"}
+        return _finalize("uncertain", "low-confidence-pixels")
 
-    return {"level": "unknown", "top_ok": top_ok,
-            "has_lanyard": has_lanyard, "has_nametag": has_nametag,
-            "confidence": confidence,
-            "time_in_staff_zone_s": elapsed, "reason": "no-uniform"}
+    return _finalize("unknown", "no-uniform")
 
 
 def match_track(ctx: DetectorContext, det: dict) -> int:
@@ -239,3 +266,99 @@ def is_in_staff_or_counter_zone(ctx: DetectorContext, bbox_norm) -> tuple[bool, 
                 if t in tags:
                     return True, t
     return False, None
+
+
+# ---------- auto-label: Vivo all-black uniform training pool ----------
+#
+# When classify() lands HIGH with dual_black=True inside a staff_zone,
+# the underlying frame crop is captured into TrainingSample with
+#   detector_type = "uniform"
+#   label         = "vivo_all_black"
+#   source        = "auto_staff_zone"
+#   approved      = None      (pending operator review)
+#   shared        = True      (chain-wide dataset)
+# Operator approval flips `approved` to True so the next chain retrain
+# picks the sample up — same gate as the existing uniform_compliance
+# auto-harvest path.
+
+VIVO_STAFF_HARVEST_DEDUP_SECONDS = 5 * 60
+VIVO_STAFF_HARVEST_PENDING_CAP   = 500
+_last_staff_crop: dict[tuple[int, int], float] = {}
+
+
+def _maybe_harvest_staff_zone_crop(ctx: DetectorContext, det: dict,
+                                    track_id: int, now: float) -> None:
+    """Capture a 'vivo_all_black' training sample. Best-effort — every
+    failure path swallows so a malformed frame can't crash the
+    detector. Dedup per (camera, track) for 5 min, with a global
+    pending-queue cap so the dataset doesn't run away."""
+    if ctx.db is None or ctx.frame_bgr is None:
+        return
+    key = (int(ctx.camera_id), int(track_id))
+    if now - _last_staff_crop.get(key, 0.0) < VIVO_STAFF_HARVEST_DEDUP_SECONDS:
+        return
+    try:
+        from app.models import TrainingSample
+        pending = (ctx.db.query(TrainingSample.id)
+                      .filter(TrainingSample.detector_type == "uniform",
+                              TrainingSample.source == "auto_staff_zone",
+                              TrainingSample.approved.is_(None))
+                      .count())
+    except Exception:
+        pending = 0
+    if pending >= VIVO_STAFF_HARVEST_PENDING_CAP:
+        return
+
+    path = _write_staff_crop(ctx, det.get("bbox_norm") or [0.0, 0.0, 1.0, 1.0])
+    if not path:
+        return
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        sample = TrainingSample(
+            detector_type="uniform",
+            label="vivo_all_black",
+            camera_id=ctx.camera_id, store_id=ctx.store_id,
+            frame_path=path,
+            captured_at=_dt.now(_tz.utc),
+            source="auto_staff_zone",
+            shared=True,
+            approved=None,
+        )
+        ctx.db.add(sample)
+        ctx.db.flush()
+        _last_staff_crop[key] = now
+    except Exception:
+        try: ctx.db.rollback()
+        except Exception: pass
+
+
+def _write_staff_crop(ctx: DetectorContext, bbox_norm) -> str | None:
+    """Write the person crop as JPEG under data/training/uniform/
+    _camera_crops/ — same root the uniform_compliance auto-harvest
+    uses, so a single retention sweep covers both paths."""
+    try:
+        import cv2
+        from pathlib import Path
+        from datetime import datetime as _dt
+        from app.config import settings
+        if ctx.frame_bgr is None:
+            return None
+        h, w = ctx.frame_bgr.shape[:2]
+        x1, y1, x2, y2 = bbox_norm
+        px1, py1 = int(max(0, x1) * w), int(max(0, y1) * h)
+        px2, py2 = int(min(1, x2) * w), int(min(1, y2) * h)
+        if px2 <= px1 or py2 <= py1:
+            return None
+        crop = ctx.frame_bgr[py1:py2, px1:px2]
+        if crop.size == 0:
+            return None
+        root = Path(getattr(settings, "training_dir", "/data/training")) / \
+                "uniform" / "_camera_crops"
+        root.mkdir(parents=True, exist_ok=True)
+        ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        path = root / f"vivo_cam{ctx.camera_id}_{ts}.jpg"
+        if not cv2.imwrite(str(path), crop):
+            return None
+        return str(path)
+    except Exception:
+        return None

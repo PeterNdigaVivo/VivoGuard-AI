@@ -82,19 +82,28 @@ STAFF_ZONE_TAGS = {"counter", "staff", "staff_zone"}
 
 
 def uniform_features(frame_bgr, bbox_norm) -> dict | None:
-    """Vivo P5 colour analysis for one person bbox. Returns a dict
-    {top_ok, has_lanyard, has_nametag, confidence} or None if pixels
-    can't be read. Uses the spec's exact HSV bands.
+    """Vivo P5 colour analysis for one person bbox. Returns a dict of
+    colour + accessory features, or None when pixels can't be read.
 
     UPPER BODY (top 0-50% of bbox):
-      • MAROON  H in [160..179] or [0..5], S 50-100% (= 128-255 on 0..255),
-                                            V 30-80% (= 76-204)
-      • BLACK   any H, S 0-40% (0-102), V 0-60% (0-153)
+      • MAROON  H in [160..179] or [0..8], S 90-255, V 40-220
+      • BLACK   S ≤ 110, V ≤ 165   (wide envelope — uniform shadows)
+    LOWER BODY (top 50-95% of bbox) — added for the Vivo all-black
+                    uniform (top + bottom both dark):
+      • BLACK   S ≤ 60,  V ≤ 80    (tighter than upper-body — trousers
+                    are uniformly dark and we want to avoid
+                    counting customer denim/jeans as match)
     LANYARD ZONE (top 15-65%, centre 30-70% of width):
-      • orange: H 5..25 (≈10-50° / 2), S 70-100% (179-255), V 70-100% (179-255)
-      • black : low V (<128), any H
+      • orange: H 5..25, S ≥ 179, V ≥ 179
+      • dark  : V < 128 (any H)
     NAMETAG ZONE (top 20-60%, centre 20-80% of width):
-      • white rectangle: S < 30% (<77), V > 70% (>179)
+      • white rectangle: S < 77, V > 179
+
+    Return dict keys:
+      top_ok, top_share, top_black_share, top_maroon_share, top_is_black
+      bottom_ok, bottom_share
+      dual_black        — top_is_black AND bottom_ok (Vivo all-black gate)
+      has_lanyard, has_nametag, confidence
     """
     try:
         import numpy as np  # noqa: F401
@@ -132,11 +141,33 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
                   & (V >= 40) & (V <= 220)).sum() / total
         # Black uniform — wider S/V envelope for shadows from overhead.
         black  = ((S <= 110) & (V <= 165)).sum() / total
-        # 20% of the upper-body pixels matching either band is enough
-        # to call it the uniform colour — accounts for shadows + skin
-        # + the smaller apparent top area from overhead angles.
-        top_ok = max(maroon, black) >= 0.20
         top_share = float(max(maroon, black))
+        top_ok = top_share >= 0.20
+        # Distinguish which colour band matched for the top — needed
+        # for the Vivo "all-black uniform" gate that wants the TOP
+        # specifically to be black (not just any uniform colour).
+        top_black_share  = float(black)
+        top_maroon_share = float(maroon)
+        top_is_black     = bool(black >= 0.20 and black >= maroon)
+
+        # Lower body (top 50..95% of bbox) — Vivo trousers are
+        # uniformly dark; tighter HSV envelope than the upper body so
+        # customers in dark jeans / denim don't trigger false
+        # positives. Empty / out-of-frame slice → defaults to False.
+        lb_y1 = py1 + int(bh * 0.50)
+        lb_y2 = py1 + int(bh * 0.95)
+        lb = frame_bgr[lb_y1:lb_y2, px1:px2]
+        bottom_ok = False
+        bottom_share = 0.0
+        if lb.size > 0:
+            lhsv = cv2.cvtColor(lb, cv2.COLOR_BGR2HSV)
+            lS, lV = lhsv[:, :, 1], lhsv[:, :, 2]
+            ltot = lS.size or 1
+            lbblack = ((lS <= 60) & (lV <= 80)).sum() / ltot
+            bottom_share = float(lbblack)
+            bottom_ok = bool(lbblack >= 0.20)
+
+        dual_black = bool(top_is_black and bottom_ok)
 
         # Lanyard zone — top 15..65%, centre 30..70% width.
         lz_y1 = py1 + int(bh * 0.15); lz_y2 = py1 + int(bh * 0.65)
@@ -164,18 +195,24 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             white = ((nS < 77) & (nV > 179)).sum() / nt
             has_nametag = bool(white >= 0.015)
 
-        # Confidence proxy — how strongly the top read as a Vivo colour
-        # tells the caller whether to trust the call at all. We tie the
-        # 1.0 mark to the new 40% share so the borderline band (10-20%)
-        # lands well under the "confident" threshold and the caller can
-        # route those cases to UNCERTAIN rather than NON_COMPLIANT.
+        # Confidence — strengthened when the bottom half also reads
+        # black. The dual-region signal is the strongest "this is a
+        # Vivo uniform" tell we have without a trained classifier.
         confidence = min(1.0, top_share / 0.40)
+        if dual_black:
+            confidence = max(confidence, 0.85)
         return {
-            "top_ok":      bool(top_ok),
-            "top_share":   top_share,
-            "has_lanyard": has_lanyard,
-            "has_nametag": has_nametag,
-            "confidence":  confidence,
+            "top_ok":           bool(top_ok),
+            "top_share":        top_share,
+            "top_black_share":  top_black_share,
+            "top_maroon_share": top_maroon_share,
+            "top_is_black":     top_is_black,
+            "bottom_ok":        bottom_ok,
+            "bottom_share":     bottom_share,
+            "dual_black":       dual_black,
+            "has_lanyard":      has_lanyard,
+            "has_nametag":      has_nametag,
+            "confidence":       confidence,
         }
     except Exception:
         return None
