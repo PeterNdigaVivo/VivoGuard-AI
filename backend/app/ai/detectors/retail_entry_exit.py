@@ -106,9 +106,23 @@ class EntryExitDetector(Detector):
     # detections that flicker for a frame or two. The stricter
     # threshold + multi-frame persistence requirement cuts the
     # false-crossing rate on these cameras.
-    GLASS_DOOR_MIN_CONF       = 0.65
-    GLASS_DOOR_MIN_FRAMES_SEEN = 2     # pseudo-track must be matched
-                                        # on ≥ 2 frames before a side-flip fires
+    GLASS_DOOR_MIN_CONF = 0.65
+    # Default kept at 1 because at the platform's 1-2 fps inference
+    # rate a real person passes through the door in a single frame;
+    # requiring >1 frames_seen blocks every legitimate crossing while
+    # the 0.65 confidence threshold already filters reflections.
+    # Env-overridable via GLASS_DOOR_MIN_FRAMES (resolved at evaluate
+    # time so a config change picks up without restarting the worker).
+    GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT = 1
+
+    @classmethod
+    def _glass_door_min_frames(cls) -> int:
+        try:
+            from app.config import settings
+            return max(1, int(getattr(settings, "glass_door_min_frames",
+                                       cls.GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT)))
+        except Exception:
+            return cls.GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT
 
     def __init__(self):
         # (camera_id, zone_id) → list[{cx, cy, side, last_seen, last_fired}]
@@ -262,12 +276,14 @@ class EntryExitDetector(Detector):
                 # Crossing = side genuinely flipped. Skip when either
                 # side is in the deadband — wait for a clean read.
                 # For glass-door zones, ALSO require the pseudo-track
-                # to have been matched on ≥ GLASS_DOOR_MIN_FRAMES_SEEN
+                # to have been matched on ≥ settings.glass_door_min_frames
                 # frames so a reflection that appears for a single
-                # frame can't trigger a crossing.
+                # frame can't trigger a crossing. Default 1 — see
+                # GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT comment above.
+                glass_min_frames = self._glass_door_min_frames() if is_glass_door else 1
                 glass_persistence_ok = (
                     (not is_glass_door)
-                    or entry["frames_seen"] >= self.GLASS_DOOR_MIN_FRAMES_SEEN
+                    or entry["frames_seen"] >= glass_min_frames
                 )
                 if (side_now != 0 and prev_side != 0 and side_now != prev_side
                         and now - entry["last_fired"] >= self.REFIRE_COOLDOWN

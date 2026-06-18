@@ -169,6 +169,17 @@ class Settings(BaseSettings):
     retrain_min_feedback: int = 20
     retrain_max_days: int = 7
 
+    # --- Glass-door detector tuning ---
+    # Minimum frames a pseudo-track must be matched on before a side-
+    # flip on a glass_door zone is allowed to fire a crossing.
+    # At the default 1-2 fps inference rate a person walks through the
+    # door in a single frame, so a >1 requirement blocks every real
+    # crossing; the 0.65-confidence threshold is what actually filters
+    # reflections. Raise this to 2 only if inference fps is raised
+    # above ~2 fps where a real person reliably appears in multiple
+    # consecutive frames. Env: GLASS_DOOR_MIN_FRAMES.
+    glass_door_min_frames: int = 1
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"
