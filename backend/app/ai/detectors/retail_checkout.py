@@ -169,9 +169,19 @@ class CheckoutDwellDetector(Detector):
     # ------------------------------------------------------------------
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
+        # The till point ONLY. A zone qualifies when it is tagged
+        # `counter` AND is not tagged with anything that would make
+        # a long presence there normal:
+        #   - `staff_zone` / `staff_area`: staff working behind the
+        #     counter all shift is `staff_present`, not a transaction
+        #   - `queue`: queue-wait-time is QueueDetector's job
+        # The legacy operator-drawn "counter" zones with no modifier
+        # tags are the only ones we want to time.
+        EXCLUDE_TAGS = {"staff_zone", "staff_area", "queue"}
         counter_zones = [
             z for z in ctx.zones
             if "counter" in (z.get("detection_types_json") or [])
+            and not (EXCLUDE_TAGS & set(z.get("detection_types_json") or []))
         ]
         if not counter_zones:
             return []
