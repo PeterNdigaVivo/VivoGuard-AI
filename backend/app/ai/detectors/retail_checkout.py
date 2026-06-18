@@ -92,18 +92,24 @@ class CheckoutDwellDetector(Detector):
         return lo, hi
 
     def _publish_open(self, r, cam: int, zone: int, track: int,
-                       entry_ts: float, store_id: int | None) -> None:
+                       entry_ts: float, store_id: int | None,
+                       *, min_alert_seconds: int = 0) -> None:
         if r is None:
             return
         try:
             r.set(
                 REDIS_OPEN_KEY_FMT.format(cam=cam, zone=zone, track=track),
                 json.dumps({
-                    "entry_ts":  float(entry_ts),
-                    "store_id":  store_id,
-                    "camera_id": cam,
-                    "zone_id":   zone,
-                    "track_id":  track,
+                    "entry_ts":          float(entry_ts),
+                    "store_id":          store_id,
+                    "camera_id":         cam,
+                    "zone_id":           zone,
+                    "track_id":          track,
+                    # Floor used by alerting.checkout_long_session_check
+                    # to override the global threshold for sessions where
+                    # the participant looks like medium-confidence staff
+                    # (longer grace before raising attention).
+                    "min_alert_seconds": int(min_alert_seconds),
                 }),
                 ex=REDIS_OPEN_TTL_SECONDS,
             )
@@ -196,6 +202,30 @@ class CheckoutDwellDetector(Detector):
             if det.get("cls") in COCO_PERSON
         ]
 
+        # Per-frame cache: classify each track at most once even when
+        # multiple counter zones contain the same person. classify()
+        # is cheap relative to YOLO inference but the HSV sampling
+        # still touches the frame pixels, so caching matters on busy
+        # multi-zone tills.
+        from app.ai.detectors import staff_identity
+        verdict_cache: dict[int, str] = {}
+
+        def _level_for(track_id: int, det: dict) -> str:
+            """Return the staff_identity level for this track this
+            frame. Failure → 'unknown' (normal customer behaviour),
+            matching the spec's "if classify fails treat as unknown"
+            rule."""
+            cached = verdict_cache.get(track_id)
+            if cached is not None:
+                return cached
+            try:
+                v = staff_identity.classify(ctx, det, track_id, now) or {}
+                lvl = v.get("level") or "unknown"
+            except Exception:
+                lvl = "unknown"
+            verdict_cache[track_id] = lvl
+            return lvl
+
         # Pass 1 — observe current frame, open new sessions, refresh
         # last_seen_ts on continuing ones.
         active_keys: set[tuple[int, int, int]] = set()
@@ -213,18 +243,55 @@ class CheckoutDwellDetector(Detector):
                 if not bbox_in_zone(bbox, poly):
                     continue
                 key = (ctx.camera_id, int(track_id), int(z["id"]))
+
+                # Confirmed staff at the till — don't time them.
+                # If a session was already open for this track (started
+                # before classification landed HIGH), drop it silently
+                # so it never emits a checkout_dwell_seconds row OR a
+                # long-session alert.
+                level = _level_for(int(track_id), det)
+                if level == "high":
+                    if key in self._sessions:
+                        self._sessions.pop(key, None)
+                        self._clear_open(r, ctx.camera_id, int(z["id"]),
+                                          int(track_id))
+                        log.debug("checkout: dropped session for confirmed "
+                                  "staff cam=%s zone=%s track=%s",
+                                  ctx.camera_id, z["id"], track_id)
+                    continue   # not in active_keys → close logic skipped
+
+                # MEDIUM-staff sessions get a 5-min floor on the
+                # alert threshold so a staff member serving a tricky
+                # customer doesn't trigger the 8-min default.
+                min_alert = 5 * 60 if level == "medium" else 0
+
                 active_keys.add(key)
                 sess = self._sessions.get(key)
                 if sess is None:
                     sess = {"entry_ts": now, "last_seen_ts": now,
-                            "store_id": ctx.store_id}
+                            "store_id": ctx.store_id,
+                            "min_alert_seconds": min_alert,
+                            "staff_level": level}
                     self._sessions[key] = sess
                     self._publish_open(r, ctx.camera_id, int(z["id"]),
-                                        int(track_id), now, ctx.store_id)
-                    log.debug("checkout: open cam=%s zone=%s track=%s",
-                              ctx.camera_id, z["id"], track_id)
+                                        int(track_id), now, ctx.store_id,
+                                        min_alert_seconds=min_alert)
+                    log.debug("checkout: open cam=%s zone=%s track=%s "
+                              "level=%s", ctx.camera_id, z["id"],
+                              track_id, level)
                 else:
                     sess["last_seen_ts"] = now
+                    # Upgrade an existing session to the MEDIUM floor
+                    # if the track has since been re-classified — the
+                    # Redis payload needs to track the change so the
+                    # alerter sees the new threshold.
+                    if min_alert > sess.get("min_alert_seconds", 0):
+                        sess["min_alert_seconds"] = min_alert
+                        sess["staff_level"] = level
+                        self._publish_open(
+                            r, ctx.camera_id, int(z["id"]),
+                            int(track_id), sess["entry_ts"], ctx.store_id,
+                            min_alert_seconds=min_alert)
 
         # Pass 2 — close any session whose track is no longer in its
         # zone OR has aged out beyond TRACK_LOST_GRACE_SECONDS. We

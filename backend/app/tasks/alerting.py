@@ -173,7 +173,13 @@ def checkout_long_session_check() -> None:
                 continue
             entry_ts = float(payload.get("entry_ts") or 0.0)
             age = now_ts - entry_ts
-            if age < threshold_seconds:
+            # Per-session floor stamped by CheckoutDwellDetector for
+            # medium-confidence-staff sessions — they get more grace
+            # than the global threshold so a staff member serving a
+            # tricky customer doesn't trip the 8-min default.
+            session_floor = int(payload.get("min_alert_seconds") or 0)
+            effective_threshold = max(threshold_seconds, session_floor)
+            if age < effective_threshold:
                 continue
             candidates.append({
                 "key": (key.decode() if isinstance(key, bytes) else key),
