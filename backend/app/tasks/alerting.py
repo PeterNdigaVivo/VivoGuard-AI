@@ -1340,6 +1340,22 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     opened_at_eat = earliest_period.astimezone(eat)
     peak_value = max(float(s[1]) for s in samples)
 
+    # OPENING-WINDOW GATE (on the inferred OPEN TIME, not the current
+    # clock). This function is the not-opened safety net and is called
+    # by _shop_not_opened_for_store AT / AFTER the cutoff, so we must
+    # NOT gate it on `now` — that would disable the guard and fire
+    # false "Store Not Opened" URGENTs. Instead we require the inferred
+    # opened_at to fall inside the opening window [earliest_open,
+    # cutoff]. `_morning_window_utc` already bounds the sample query to
+    # that window, so this is a belt-and-braces guard that keeps the
+    # alert semantically "store opened during the opening window".
+    earliest_t = cfg.get("earliest_open_t")
+    cutoff_t   = cfg.get("not_open_cutoff_t")
+    if earliest_t is not None and cutoff_t is not None:
+        ot = opened_at_eat.time()
+        if not (earliest_t <= ot <= cutoff_t):
+            return None
+
     # Find a camera that contributed (preferring an entrance cam if
     # one of them recorded occupancy).
     entrance_set = set(entrance_cam_ids)
@@ -1660,21 +1676,41 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     if shop_state.store_opened_today(store.id, day_iso) is not None:
         return
 
-    # Don't bother before the earliest reasonable opening time —
-    # security / cleaning before 07:00 EAT shouldn't trigger.
+    # OPENING-WINDOW GATE. Store-opening inference is only meaningful
+    # between earliest_open (07:00) and not_open_cutoff (09:30) EAT.
+    # Outside that window we skip entirely — without the upper bound
+    # this fired "Store Opened — inferred (16:52)" on ordinary
+    # afternoon traffic.
+    #   t < 07:00  → too early (security / cleaning)
+    #   t > 09:30  → past cutoff (store already confirmed open by the
+    #                crossing/occupancy paths, or genuinely not opened
+    #                and handled by the URGENT not-opened check)
     cfg = shop_state._read_cfg(None)
     earliest_t = cfg.get("earliest_open_t")
     if earliest_t is None:
         from datetime import time as _time
         earliest_t = _time(7, 0)
+    cutoff_t = cfg.get("not_open_cutoff_t")
+    if cutoff_t is None:
+        from datetime import time as _time
+        cutoff_t = _time(9, 30)
     today_local_00 = now_eat.replace(hour=0, minute=0, second=0, microsecond=0)
     window_start_local = today_local_00.replace(
         hour=earliest_t.hour, minute=earliest_t.minute)
+    window_end_local = today_local_00.replace(
+        hour=cutoff_t.hour, minute=cutoff_t.minute)
     if now_eat < window_start_local:
-        return
+        return       # too early
+    if now_eat > window_end_local:
+        return       # past the opening cutoff — don't infer all day
 
     window_start_utc = window_start_local.astimezone(timezone.utc)
+    # Cap the event-scan upper bound at the cutoff (not "now") so the
+    # sliding window can never include post-cutoff traffic even on a
+    # late beat tick / clock skew.
+    window_end_utc   = window_end_local.astimezone(timezone.utc)
     now_utc          = now_eat.astimezone(timezone.utc)
+    scan_end_utc     = min(now_utc, window_end_utc)
 
     # ENTRANCE CAMERAS ONLY. A person detected in a stockroom or
     # behind the counter must not satisfy the "store opened" rule —
@@ -1694,7 +1730,7 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
               .filter(DetectionEvent.camera_id.in_(cam_ids),
                       DetectionEvent.detection_type == "person",
                       DetectionEvent.timestamp >= window_start_utc,
-                      DetectionEvent.timestamp <= now_utc)
+                      DetectionEvent.timestamp <= scan_end_utc)
               .order_by(asc(DetectionEvent.timestamp))
               .all())
     if len(rows) < PERSON_OPEN_THRESHOLD:
