@@ -1292,8 +1292,13 @@ def add_note(alert_id: int, body: AlertNoteIn,
     # Re-fetch with joins so the response shape matches /alerts.
     from app.models import Store as _Store
     ev = db.get(DetectionEvent, a.event_id)
-    cam = db.get(Camera, ev.camera_id) if ev and ev.camera_id else None
-    zone = db.get(Zone, ev.zone_id) if ev and ev.zone_id else None
+    if not ev:
+        # Orphaned alert — its DetectionEvent was pruned. _to_alert_out
+        # dereferences event.camera_id unguarded, so bail with a clean
+        # 404 instead of a 500.
+        raise HTTPException(404, "alert event not found")
+    cam = db.get(Camera, ev.camera_id) if ev.camera_id else None
+    zone = db.get(Zone, ev.zone_id) if ev.zone_id else None
     store = db.get(_Store, cam.store_id) if (cam and cam.store_id) else None
     return _to_alert_out(a, ev, cam, zone, store)
 

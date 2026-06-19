@@ -59,8 +59,13 @@ export default function LiveViewPage() {
   const [viewMode, setViewMode] = useState<LiveViewMode>('cameras')
   const toast = useToast()
 
-  useEffect(() => { camsApi.list().then(setCams) }, [])
-  useEffect(() => { storesApi.list().then(setStores) }, [])
+  // api() throws on non-2xx — without a .catch a failed fetch becomes
+  // an unhandled rejection and the page silently shows the empty state.
+  useEffect(() => {
+    camsApi.list().then(setCams)
+      .catch(e => toast.push(`Could not load cameras: ${e}`, 'err'))
+  }, [])
+  useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
 
   // Persist on change.
   useEffect(() => {

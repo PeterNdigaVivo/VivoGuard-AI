@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera.
     inference_fps_default: int = 2
+    # Duration of one per-camera inference task before it exits and the
+    # supervisor re-queues it. Lowered from the old hard-coded 540s to
+    # 120s so a config/zone change reaches a camera within ~2 min
+    # instead of up to 9. The task ALWAYS releases its Redis lock on
+    # exit (inference.py finally-block), so the supervisor re-acquires
+    # immediately; LOCK_TTL tracks this value + 60s purely as a
+    # crashed-worker safety net. Env: INFERENCE_RUN_SECONDS.
+    inference_run_seconds: int = 120
 
     # --- Notifications ---
     smtp_host: str = ""

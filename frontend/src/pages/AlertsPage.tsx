@@ -52,7 +52,7 @@ export default function AlertsPage() {
       since: range.since,
       until: range.until,
       limit: 500,
-    }).then(setItems)
+    }).then(setItems).catch(() => {})
     alertsApi.summary(storeId ? Number(storeId) : undefined).then(setSummary).catch(() => {})
   }
   useEffect(() => { reload() }, [storeId, range.since, range.until])  // eslint-disable-line react-hooks/exhaustive-deps

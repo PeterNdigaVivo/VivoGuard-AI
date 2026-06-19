@@ -131,6 +131,14 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
 _SKIP_ALERT_TYPES: set[str] = {
     "heatmap", "customer_journey", "unique_visitor", "entry_exit",
     "demographic", "occupancy_metrics",
+    # checkout_dwell `checkout_complete` events are metric-only (every
+    # session ≥30s emits one). The operator-facing long-session
+    # ATTENTION alert is fired separately + gated at 8 min by
+    # alerting.checkout_long_session_check. Without this skip, every
+    # completed checkout created an ungated alert (the 41s / 148s
+    # false alerts). DetectionEvent + metric_snapshots writes are
+    # unaffected — the skip only suppresses Alert-row creation.
+    "checkout_dwell",
 }
 
 

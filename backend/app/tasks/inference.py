@@ -32,8 +32,10 @@ log = logging.getLogger(__name__)
 # ---- Tunables -----------------------------------------------------------
 # Each per-camera task runs this long then exits. Keep it well under the
 # supervisor lock TTL so we don't end up with double-coverage.
-RUN_SECONDS    = 540        # 9 minutes
-LOCK_TTL       = 600        # 10 minutes — outlives RUN_SECONDS by 1 min
+RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridable
+LOCK_TTL       = RUN_SECONDS + 60                  # outlives RUN_SECONDS by 1 min
+                                                    # (crashed-worker safety net;
+                                                    #  normal exit releases the lock)
 LOCK_KEY_FMT   = "vg:inference-lock:{camera_id}"
 HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # heartbeat (debug only)
 

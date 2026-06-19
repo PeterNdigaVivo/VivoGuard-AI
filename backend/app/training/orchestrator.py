@@ -53,11 +53,21 @@ MIN_NEW_SAMPLES_PER_RETRAIN = _retrain_thresholds()[0]
 
 
 def _last_fine_tune_completion(db: Session, detection_type: str) -> datetime | None:
-    """When did the last fine-tune that touched this detection type
-    complete? Used as the "new samples since" cutoff."""
+    """When did the last fine-tune FOR THIS detection type complete?
+    Used as the "new samples since" cutoff.
+
+    Previously this ignored detection_type and returned the most
+    recent incremental fine-tune of ANY type — so a fine-tune of
+    'uniform' reset the cutoff for every other type, under-counting
+    their new samples and potentially starving a due retrain. The
+    job now stamps `detection_type` into config_json (see
+    enqueue_fine_tune_if_due) so we can filter on it. Jobs queued
+    before that stamp landed return NULL here → since=None → counts
+    all samples ever (safe: errs toward firing)."""
     j = (db.query(TrainingJob)
            .filter(TrainingJob.status == "done")
            .filter(TrainingJob.config_json.op("->>")("incremental_finetune") == "true")
+           .filter(TrainingJob.config_json.op("->>")("detection_type") == detection_type)
            .order_by(TrainingJob.completed_at.desc())
            .first())
     return j.completed_at if j else None
@@ -163,6 +173,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         Dataset.name == f"feedback-negative-{detection_type}").first()
     cfg = {
         "incremental_finetune":       True,
+        "detection_type":             detection_type,   # cutoff filter key
         "resume_from_model_id":       parent.id,
         "extra_negative_dataset_ids": [neg_ds.id] if neg_ds else [],
         "max_neg_ratio":              3.0,
