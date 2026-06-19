@@ -208,23 +208,25 @@ class CheckoutDwellDetector(Detector):
         # still touches the frame pixels, so caching matters on busy
         # multi-zone tills.
         from app.ai.detectors import staff_identity
-        verdict_cache: dict[int, str] = {}
+        # Cache the full verdict dict (not just level) because the
+        # suppression rule below reads `in_pure_staff_zone_now` as
+        # well as `level`.
+        verdict_cache: dict[int, dict] = {}
 
-        def _level_for(track_id: int, det: dict) -> str:
-            """Return the staff_identity level for this track this
-            frame. Failure → 'unknown' (normal customer behaviour),
-            matching the spec's "if classify fails treat as unknown"
-            rule."""
+        def _verdict_for(track_id: int, det: dict) -> dict:
+            """Return the staff_identity verdict for this track this
+            frame. Failure → empty dict (treated as level='unknown' /
+            in_pure_staff_zone_now=False), matching the spec's "if
+            classify fails treat as unknown" rule."""
             cached = verdict_cache.get(track_id)
             if cached is not None:
                 return cached
             try:
                 v = staff_identity.classify(ctx, det, track_id, now) or {}
-                lvl = v.get("level") or "unknown"
             except Exception:
-                lvl = "unknown"
-            verdict_cache[track_id] = lvl
-            return lvl
+                v = {}
+            verdict_cache[track_id] = v
+            return v
 
         # Pass 1 — observe current frame, open new sessions, refresh
         # last_seen_ts on continuing ones.
@@ -244,20 +246,25 @@ class CheckoutDwellDetector(Detector):
                     continue
                 key = (ctx.camera_id, int(track_id), int(z["id"]))
 
-                # Confirmed staff at the till — don't time them.
-                # If a session was already open for this track (started
-                # before classification landed HIGH), drop it silently
-                # so it never emits a checkout_dwell_seconds row OR a
-                # long-session alert.
-                level = _level_for(int(track_id), det)
-                if level == "high":
+                # Confirmed staff at the till — don't time them — but
+                # ONLY when the HIGH classification is grounded in a
+                # PURE staff zone (staff_zone / staff_area). A HIGH
+                # classification at a pure counter zone is most often
+                # a dark-clothed customer or a staff member on the
+                # customer side of the till — neither should be
+                # silently dropped, or the checkout-dwell pipeline
+                # records zero sessions (the f8ee2e8 regression).
+                v = _verdict_for(int(track_id), det)
+                level = v.get("level") or "unknown"
+                in_pure_staff_zone = bool(v.get("in_pure_staff_zone_now"))
+                if level == "high" and in_pure_staff_zone:
                     if key in self._sessions:
                         self._sessions.pop(key, None)
                         self._clear_open(r, ctx.camera_id, int(z["id"]),
                                           int(track_id))
                         log.debug("checkout: dropped session for confirmed "
-                                  "staff cam=%s zone=%s track=%s",
-                                  ctx.camera_id, z["id"], track_id)
+                                  "staff (in staff_zone) cam=%s zone=%s "
+                                  "track=%s", ctx.camera_id, z["id"], track_id)
                     continue   # not in active_keys → close logic skipped
 
                 # MEDIUM-staff sessions get a 5-min floor on the

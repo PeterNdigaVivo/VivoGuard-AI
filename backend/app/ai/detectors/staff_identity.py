@@ -44,6 +44,14 @@ from app.ai.zone_logic import bbox_in_zone, iou
 
 # Tags treated as "staff-only" floor area.
 STAFF_ZONE_TAGS = ("staff_zone", "counter")
+# Stricter subset used by the fast zone-boost branches in classify()
+# (commit f8ee2e8). A counter zone is NOT a staff area — customers
+# stand at counters to pay — so a person there in dark clothes must
+# not be promoted to HIGH staff instantly. The original 5-min dwell-
+# at-counter → MEDIUM path (the P5 false-alert fix) is unaffected:
+# `time_in_any_staff_zone` still walks STAFF_ZONE_TAGS and accumulates
+# counter time.
+PURE_STAFF_ZONE_TAGS = ("staff_zone", "staff_area")
 # How long in a staff/counter zone before time-alone makes the person
 # staff regardless of what they're wearing (spec rule 1a).
 TIME_BASED_STAFF_SECONDS = 5 * 60
@@ -148,14 +156,25 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
     dual_black  = bool(feats.get("dual_black")) if feats else False
     confidence  = float(feats.get("confidence", 0.0)) if feats else 0.0
     elapsed = time_in_any_staff_zone(ctx.camera_id, track_id, now)
+    # Two zone-membership facts, deliberately distinct:
+    #   in_zone_now            — staff_zone OR counter (kept for
+    #                             dashboards / IntrusionDetector etc.)
+    #   in_pure_staff_zone_now — staff_zone / staff_area only.
+    #                             The fast zone-boost paths below use
+    #                             this so a customer paying at a counter
+    #                             can't be promoted to HIGH staff just
+    #                             for wearing dark clothes.
     in_zone_now, zone_tag_now = is_in_staff_or_counter_zone(
+        ctx, det["bbox_norm"])
+    in_pure_staff_zone_now, pure_zone_tag_now = is_in_pure_staff_zone(
         ctx, det["bbox_norm"])
 
     base = {"top_ok": top_ok, "has_lanyard": has_lanyard,
             "has_nametag": has_nametag, "dual_black": dual_black,
             "confidence": confidence,
             "time_in_staff_zone_s": elapsed,
-            "in_staff_zone_now": in_zone_now}
+            "in_staff_zone_now":      in_zone_now,
+            "in_pure_staff_zone_now": in_pure_staff_zone_now}
 
     def _finalize(level: str, reason: str) -> dict:
         v = {**base, "level": level, "reason": reason}
@@ -164,28 +183,30 @@ def classify(ctx: DetectorContext, det: dict, track_id: int,
         if level == "high":
             mark_staff_track(ctx, track_id, source=("uniform_dual_black"
                                                      if dual_black else "uniform"))
-            if in_zone_now and dual_black:
+            # Auto-label harvest narrowed to PURE staff_zone — must not
+            # train the "vivo_all_black" pool on dark-clothed customers
+            # standing at a counter.
+            if in_pure_staff_zone_now and dual_black:
                 _maybe_harvest_staff_zone_crop(ctx, det, track_id, now)
         return v
 
-    # HIGHEST evidence — all-black uniform AND currently in a staff/
-    # counter zone. The Vivo uniform is unambiguous and the zone
-    # itself is staff-only; no need to wait for the dwell timer.
-    if dual_black and in_zone_now:
-        return _finalize("high", f"dual_black+in_{zone_tag_now}")
+    # HIGHEST evidence — all-black uniform AND currently in a PURE
+    # staff zone (not just at a counter). The Vivo uniform is
+    # unambiguous and an actual staff zone is genuinely staff-only;
+    # no need to wait for the dwell timer.
+    if dual_black and in_pure_staff_zone_now:
+        return _finalize("high", f"dual_black+in_{pure_zone_tag_now}")
 
     # HIGH confidence: correct uniform AND (lanyard visible OR long dwell)
     if top_ok and (has_lanyard or elapsed >= TIME_BASED_STAFF_SECONDS):
         return _finalize("high",
                           "uniform+lanyard" if has_lanyard else "uniform+dwell")
 
-    # Zone-boosted MEDIUM — uniform colour reads AND person is currently
-    # in a staff/counter zone (no dwell required). Was previously
-    # MEDIUM "uniform-only"; the explicit zone-membership signal makes
-    # the classification stronger but we keep MEDIUM (not HIGH) when
-    # the bottom half doesn't also confirm.
-    if top_ok and in_zone_now:
-        return _finalize("medium", f"uniform+in_{zone_tag_now}")
+    # Zone-boosted MEDIUM — uniform colour reads AND person is in a
+    # PURE staff zone (counter alone does NOT boost). Counter dwell
+    # ≥5 min still raises MEDIUM via the elapsed-only branch below.
+    if top_ok and in_pure_staff_zone_now:
+        return _finalize("medium", f"uniform+in_{pure_zone_tag_now}")
 
     # MEDIUM confidence: time alone (rule 1a) — uniform unknown / not read.
     if elapsed >= TIME_BASED_STAFF_SECONDS:
@@ -263,6 +284,22 @@ def is_in_staff_or_counter_zone(ctx: DetectorContext, bbox_norm) -> tuple[bool, 
             continue
         if bbox_in_zone(bbox_norm, z.get("polygon_coords_json")):
             for t in STAFF_ZONE_TAGS:
+                if t in tags:
+                    return True, t
+    return False, None
+
+
+def is_in_pure_staff_zone(ctx: DetectorContext, bbox_norm) -> tuple[bool, str | None]:
+    """Narrower variant — True only inside a `staff_zone` / `staff_area`
+    tagged zone. Counter zones are excluded because customers stand
+    at the counter to pay; treating that as staff turf produced false
+    HIGH-staff classifications for dark-clothed customers."""
+    for z in ctx.zones:
+        tags = set(z.get("detection_types_json") or [])
+        if not (tags & set(PURE_STAFF_ZONE_TAGS)):
+            continue
+        if bbox_in_zone(bbox_norm, z.get("polygon_coords_json")):
+            for t in PURE_STAFF_ZONE_TAGS:
                 if t in tags:
                     return True, t
     return False, None
