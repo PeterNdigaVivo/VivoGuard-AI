@@ -1249,6 +1249,7 @@ def chain_dataset_summary(db: Session = Depends(get_db),
     from app.models import Store, TrainingSample
     from app.tasks.chain_training import (
         MIN_PER_LABEL, UNIFORM_LABELS, SHUTTER_LABELS, UNIFORM_ALIASES,
+        _ALLOWED_SAMPLE_SOURCES,
     )
 
     store_names = {s.id: s.name for s in db.query(Store).all()}
@@ -1261,8 +1262,7 @@ def chain_dataset_summary(db: Session = Depends(get_db),
                   .filter(TrainingSample.detector_type == detector_type,
                           or_(TrainingSample.approved.is_(True),
                               TrainingSample.approved.is_(None)),
-                          TrainingSample.source.in_(
-                              ("capture", "upload", "camera_crop")))
+                          TrainingSample.source.in_(_ALLOWED_SAMPLE_SOURCES))
                   .group_by(TrainingSample.label, TrainingSample.store_id)
                   .all())
         by_label: dict[str, int] = {l: 0 for l in labels}
@@ -1369,13 +1369,42 @@ def chain_models(detector_type: str | None = None,
     return out
 
 
+def _is_classifier_weights(m: AIModel | None) -> bool:
+    """A chain model trained from yolov8*-cls is a CLASSIFICATION
+    model — `.predict()` returns `.probs`, not `.boxes`. The
+    inference worker calls `infer()` expecting boxes, so loading
+    such a model as a camera detector silently turns the camera
+    into a zero-detection black hole. The chain uniform + shutter
+    models are both classifiers (chain_training:90,99) — we use
+    the base_model / weights_path string to detect."""
+    if m is None:
+        return False
+    bm = (m.base_model    or "").lower()
+    wp = (m.weights_path  or "").lower()
+    return ("-cls" in bm or "_cls" in bm or "-cls" in wp or "_cls" in wp)
+
+
 @router.post("/chain/deploy")
 def chain_deploy(detector_type: str, model_id: int,
                  db: Session = Depends(get_db),
                  _u=Depends(require_role("admin", "operator"))):
     """Set ai_model_id on every camera whose zones target this
     detector. Marks the model deployed=True and undeploys the previous
-    chain model for the same detector."""
+    chain model for the same detector.
+
+    REFUSES classifier (yolov8*-cls) models — those are consumed by
+    the per-detector evaluator (UniformComplianceDetector etc.)
+    internally, not as the camera's main detection weights. Loading
+    a classifier as the main detector silently turns the camera
+    into a zero-detection black hole because `.predict()` returns
+    `.probs` instead of `.boxes`.
+
+    ALSO repairs any camera currently pointing at a classifier
+    chain model for this detector_type — sets ai_model_id=NULL so
+    those cameras fall back to the base detector. Runs on every
+    call, not just the refusal path, so a single chain_deploy POST
+    heals existing damage even if the operator is trying to deploy
+    a non-classifier."""
     detector_type = (detector_type or "").lower().strip()
     if detector_type not in CHAIN_DETECTOR_TYPES:
         raise HTTPException(
@@ -1386,6 +1415,37 @@ def chain_deploy(detector_type: str, model_id: int,
     if not (model.is_chain_model and model.detector_type == detector_type):
         raise HTTPException(
             400, "model is not a chain model for this detector_type")
+
+    # REPAIR — always. Find every chain model for this detector_type
+    # that's a classifier, then NULL ai_model_id on every camera
+    # currently pointing at any of them.
+    candidate_chain_models = (
+        db.query(AIModel)
+          .filter(AIModel.is_chain_model == True,                       # noqa: E712
+                  AIModel.detector_type == detector_type)
+          .all()
+    )
+    bad_ids = [m.id for m in candidate_chain_models
+               if _is_classifier_weights(m)]
+    repaired = 0
+    if bad_ids:
+        repaired = (db.query(Camera)
+                      .filter(Camera.ai_model_id.in_(bad_ids))
+                      .update({Camera.ai_model_id: None},
+                              synchronize_session=False))
+
+    # GUARD — refuse classifier deploys. Commit any repair done above
+    # so the cleanup persists even though the request errors out.
+    if _is_classifier_weights(model):
+        if repaired:
+            db.commit()
+        raise HTTPException(
+            400,
+            "Cannot deploy a classifier model as a camera detector. "
+            "Uniform chain models are consumed by UniformComplianceDetector "
+            "internally, not via camera ai_model_id. "
+            f"(repaired {repaired} camera(s) silently broken by prior deploys)"
+        )
 
     cam_ids = _chain_camera_targets(db, detector_type)
     cams = db.query(Camera).filter(Camera.id.in_(cam_ids)).all() if cam_ids else []
@@ -1405,6 +1465,8 @@ def chain_deploy(detector_type: str, model_id: int,
         "detector_type": detector_type,
         "deployed_to": [c.id for c in cams],
         "camera_count": len(cams),
+        "repaired_camera_count": repaired,   # cameras nulled out of a
+                                               # prior broken classifier deploy
     }
 
 

@@ -52,6 +52,11 @@ COLOR_ONLY        = "color_only"
 NON_COMPLIANT     = "non_compliant"
 CIVILIAN          = "customer"
 UNCERTAIN         = "uncertain"
+# Vivo all-black auto-harvest class (chain_training UNIFORM_LABELS).
+# Treated identically to FULL_COMPLIANT for live-evaluation purposes:
+# never fires a violation alert and marks the track as staff so the
+# visitor count excludes it.
+STAFF             = "staff"
 
 # Legacy aliases kept so older callers / cached UI bundles keep working.
 OK         = FULL_COMPLIANT       # uniform_ok
@@ -301,17 +306,27 @@ class UniformComplianceDetector(Detector):
             scored += 1
             # "OK-like" = anyone in the right uniform colour, whether
             # they have the lanyard/tag or not. Used for the rolling
-            # compliance metric.
-            if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY):
+            # compliance metric. STAFF (Vivo all-black) is the strongest
+            # ok-like signal — same accounting as FULL_COMPLIANT.
+            if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY, STAFF):
                 ok_like += 1
 
             # Staff exclusion — anyone scoring as uniformed staff (any
-            # of the three uniform-present states) is excluded from the
-            # visitor / dwell counts via the staff_tracks roster the
-            # analytics endpoints LEFT-JOIN against. NON_COMPLIANT
-            # stays a potential customer / unidentified person.
-            if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY):
-                staff_identity.mark_staff_track(ctx, tid, source="uniform")
+            # of the three uniform-present states plus the explicit
+            # STAFF class) is excluded from the visitor / dwell counts
+            # via the staff_tracks roster the analytics endpoints
+            # LEFT-JOIN against. NON_COMPLIANT stays a potential
+            # customer / unidentified person.
+            if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY, STAFF):
+                staff_identity.mark_staff_track(
+                    ctx, tid, source=("staff_class" if state == STAFF else "uniform"))
+
+            # STAFF short-circuits the rest of the per-person logic —
+            # no violation evaluation, no lanyard nag, no further alert
+            # paths. The dual-region black uniform reading is the
+            # strongest staff signal we have.
+            if state == STAFF:
+                continue
 
             # Confirmed-staff gate (P5 false-alert fix). A
             # NON_COMPLIANT reading on someone who just walked into
@@ -346,28 +361,36 @@ class UniformComplianceDetector(Detector):
     # ---- classification --------------------------------------------
 
     def _classify(self, ctx: DetectorContext, det: dict, cfg: dict) -> str:
-        """Six-state classification: FULL_COMPLIANT / PARTIAL_COMPLIANT
-        / COLOR_ONLY / NON_COMPLIANT / CUSTOMER / UNCERTAIN.
+        """Seven-state classification: FULL_COMPLIANT / PARTIAL_COMPLIANT
+        / COLOR_ONLY / NON_COMPLIANT / CUSTOMER / UNCERTAIN / STAFF.
 
         Model-class first, then the colour rule-based fallback."""
         extra = cfg.get("extra") or {}
         thr = float(cfg.get("confidence_threshold", 0.5))
-        # Mode 1: custom model emitting the six (or legacy four) classes.
-        labels = {
-            FULL_COMPLIANT:    extra.get("class_full_compliant",    "full_compliant"),
-            PARTIAL_COMPLIANT: extra.get("class_partial_compliant", "partial_compliant"),
-            COLOR_ONLY:        extra.get("class_color_only",        "color_only"),
-            NON_COMPLIANT:     extra.get("class_non_compliant",     "non_compliant"),
-            CIVILIAN:          extra.get("class_customer",          "customer"),
-            UNCERTAIN:         extra.get("class_uncertain",         "uncertain"),
+        # Mode 1: custom model emitting the seven canonical classes
+        # OR the legacy four. List of (state, class-name) — was a dict,
+        # but dict keys silently overwrote: the three legacy aliases
+        # at the bottom (uniform_ok / no_lanyard / uniform_violation)
+        # were stomping the canonical names above, so any chain model
+        # emitting "full_compliant" / "partial_compliant" / "non_compliant"
+        # would never match. The list form preserves every entry.
+        labels = [
+            (FULL_COMPLIANT,    extra.get("class_full_compliant",    "full_compliant")),
+            (PARTIAL_COMPLIANT, extra.get("class_partial_compliant", "partial_compliant")),
+            (COLOR_ONLY,        extra.get("class_color_only",        "color_only")),
+            (NON_COMPLIANT,     extra.get("class_non_compliant",     "non_compliant")),
+            (CIVILIAN,          extra.get("class_customer",          "customer")),
+            (UNCERTAIN,         extra.get("class_uncertain",         "uncertain")),
+            (STAFF,             extra.get("class_staff",             "staff")),
             # Legacy 4-class names kept so older deployed models keep
-            # mapping correctly.
-            FULL_COMPLIANT:    extra.get("class_ok",        "uniform_ok"),
-            PARTIAL_COMPLIANT: extra.get("class_no_lanyard","no_lanyard"),
-            NON_COMPLIANT:     extra.get("class_violation", "uniform_violation"),
-        }
+            # mapping correctly. Each maps to the closest canonical
+            # state.
+            (FULL_COMPLIANT,    extra.get("class_ok",        "uniform_ok")),
+            (PARTIAL_COMPLIANT, extra.get("class_no_lanyard","no_lanyard")),
+            (NON_COMPLIANT,     extra.get("class_violation", "uniform_violation")),
+        ]
         best_state, best_conf = None, 0.0
-        for state, label in labels.items():
+        for state, label in labels:
             for d in ctx.raw_detections:
                 if d["cls"] == label and d["conf"] >= thr:
                     if iou(d["bbox_norm"], det["bbox_norm"]) > 0.3 and d["conf"] > best_conf:

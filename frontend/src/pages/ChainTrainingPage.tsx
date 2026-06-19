@@ -75,13 +75,14 @@ interface ChainModel {
 const LABEL_TEXT: Record<string, string> = {
   // shutter
   open: 'Open', closed: 'Closed', partial: 'Partial',
-  // uniform (P5 6-class)
+  // uniform (P5 six-class + the seventh auto-harvest class)
   full_compliant:    '✅ Full Uniform',
   partial_compliant: '⚠️ Uniform, No Tag',
   color_only:        '🎨 Right Color Only',
   non_compliant:     '❌ Wrong/No Uniform',
   customer:          '👤 Customer',
   uncertain:         '❓ Unclear',
+  staff:             '👔 Staff uniform',
 }
 
 function fmtPct(v: number | null | undefined): string {
