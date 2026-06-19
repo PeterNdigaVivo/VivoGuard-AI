@@ -48,14 +48,33 @@ log = logging.getLogger(__name__)
 
 SHUTTER_LABELS = ("open", "closed", "partial")
 UNIFORM_LABELS = ("full_compliant", "partial_compliant", "color_only",
-                  "non_compliant", "customer", "uncertain")
+                  "non_compliant", "customer", "uncertain",
+                  # New class — populated by the staff_identity auto-
+                  # harvest path (Vivo all-black, in staff_zone). Adding
+                  # this changes the trained model's output cardinality
+                  # from 6 → 7, so inference-side consumers that switch
+                  # on class names must learn "staff" BEFORE the next
+                  # chain model is promoted.
+                  "staff")
 
 UNIFORM_ALIASES = {
     "uniform_ok":        "full_compliant",
     "no_lanyard":        "partial_compliant",
     "uniform_violation": "non_compliant",
     "civilian":          "customer",
+    # Vivo-specific all-black uniform crops auto-harvested from
+    # staff_zone presence (staff_identity._maybe_harvest_staff_zone_crop).
+    "vivo_all_black":    "staff",
 }
+
+
+# Sources that count as approved training data for the chain trainer.
+# Kept as a single tuple so all three call sites (sample collection +
+# the two "has new samples?" checks) stay in lock-step.
+_ALLOWED_SAMPLE_SOURCES = ("capture", "upload", "camera_crop",
+                            # Auto-harvest from staff_identity when a
+                            # dual_black HIGH person is in a staff_zone.
+                            "auto_staff_zone")
 
 # Per-(label, store) cap so one busy store can't dominate the dataset.
 PER_STORE_PER_LABEL_CAP = 500
@@ -137,8 +156,7 @@ def _collect_samples(detector_type: str):
                .filter(TrainingSample.detector_type == detector_type,
                        or_(TrainingSample.approved.is_(True),
                            TrainingSample.approved.is_(None)),
-                       TrainingSample.source.in_(
-                           ("capture", "upload", "camera_crop"))))
+                       TrainingSample.source.in_(_ALLOWED_SAMPLE_SOURCES)))
         for s in q.all():
             lbl = _canon_label(detector_type, s.label)
             if not lbl:
@@ -443,8 +461,7 @@ def _has_grown_since_last_train(detector_type: str) -> bool:
                      .filter(TrainingSample.detector_type == detector_type,
                              or_(TrainingSample.approved.is_(True),
                                  TrainingSample.approved.is_(None)),
-                             TrainingSample.source.in_(
-                                 ("capture", "upload", "camera_crop")))
+                             TrainingSample.source.in_(_ALLOWED_SAMPLE_SOURCES))
                      .scalar() or 0)
         if latest is None or latest.sample_count is None:
             return current > 0
@@ -496,8 +513,7 @@ def chain_retrain_due() -> None:
                                  .filter(TrainingSample.detector_type == detector_type,
                                          or_(TrainingSample.approved.is_(True),
                                              TrainingSample.approved.is_(None)),
-                                         TrainingSample.source.in_(
-                                             ("capture", "upload", "camera_crop")))
+                                         TrainingSample.source.in_(_ALLOWED_SAMPLE_SOURCES))
                                  .scalar()) or 0)
 
             if latest is None:
