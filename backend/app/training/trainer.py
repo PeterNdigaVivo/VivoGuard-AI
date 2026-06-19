@@ -61,6 +61,50 @@ def _make_callback(job_id: int):
     return on_train_epoch_end
 
 
+def _extract_yolo_metrics(results) -> dict:
+    """Pull validation metrics from an Ultralytics training results
+    object. Tolerant to API drift between Ultralytics minor versions:
+    tries the object-attribute path first (`results.box.map50` etc.),
+    falls back to the flat `results.results_dict` keys. Each metric
+    is float-or-None — every accessor is wrapped so a missing
+    attribute or non-numeric value never propagates."""
+    out: dict[str, float | None] = {
+        "map50": None, "map50_95": None,
+        "precision": None, "recall": None,
+    }
+    if results is None:
+        return out
+    # Object-attr path (detection — results.box is a Metric).
+    box = getattr(results, "box", None)
+    if box is not None:
+        for k, attr in (("map50", "map50"), ("map50_95", "map"),
+                         ("precision", "mp"), ("recall", "mr")):
+            try:
+                v = getattr(box, attr, None)
+                if v is not None:
+                    out[k] = float(v)
+            except Exception:
+                pass
+    # Flat results_dict fallback — survives object-attr drift.
+    # The "(B)" suffix marks the Box (detection) head's metrics.
+    rd = getattr(results, "results_dict", None) or {}
+    flat_keys = {
+        "map50":     "metrics/mAP50(B)",
+        "map50_95":  "metrics/mAP50-95(B)",
+        "precision": "metrics/precision(B)",
+        "recall":    "metrics/recall(B)",
+    }
+    for k, src in flat_keys.items():
+        if out[k] is None:
+            try:
+                v = rd.get(src) if isinstance(rd, dict) else None
+                if v is not None:
+                    out[k] = float(v)
+            except Exception:
+                pass
+    return out
+
+
 def run_job(job_id: int) -> None:
     """Synchronous training job runner; intended to be invoked by Celery."""
     with SessionLocal() as db:
@@ -156,7 +200,11 @@ def run_job(job_id: int) -> None:
         )
         if lr and lr != "auto":
             train_kwargs["lr0"] = float(lr)
-        model.train(**train_kwargs)
+        # Bind the return value — it's the validation Metrics from the
+        # final epoch. Previously discarded, leaving AIModel.map50 /
+        # precision / recall NULL and starving the promotion gate.
+        results = model.train(**train_kwargs)
+        final_metrics = _extract_yolo_metrics(results)
 
         # Find best.pt produced by ultralytics.
         best = next(out_dir.rglob("best.pt"), None)
@@ -168,6 +216,14 @@ def run_job(job_id: int) -> None:
             if job2:
                 job2.status       = "done"
                 job2.completed_at = datetime.now(timezone.utc)
+                # Refresh best_map50 from the FINAL validation read —
+                # the per-epoch callback only fires for epochs that
+                # ran validation, so the final value can exceed the
+                # callback's running max. Keep the larger of the two.
+                final_m = final_metrics["map50"]
+                if final_m is not None:
+                    if (job2.best_map50 or 0) < final_m:
+                        job2.best_map50 = final_m
             ds2 = db.get(Dataset, job2.dataset_id) if job2 else None
             # Auto-version: next vN for this model name. v1 if first.
             model_name = job2.model_name if job2 else f"model-{job_id}"
@@ -175,6 +231,8 @@ def run_job(job_id: int) -> None:
                           .filter(AIModel.name == model_name)
                           .all())
             next_version = f"v{len(existing) + 1}"
+            # All four metrics persisted on the AIModel row so the
+            # promotion gate can actually compare candidates.
             ai_model = AIModel(
                 name=model_name,
                 version=next_version,
@@ -183,12 +241,18 @@ def run_job(job_id: int) -> None:
                 weights_path=str(best),
                 export_format="pt",
                 training_job_id=job_id,
-                map50=(job2.best_map50 if job2 else None),
+                map50=(final_metrics["map50"]
+                        if final_metrics["map50"] is not None
+                        else (job2.best_map50 if job2 else None)),
+                map50_95=final_metrics["map50_95"],
+                precision=final_metrics["precision"],
+                recall=final_metrics["recall"],
             )
             db.add(ai_model)
             db.commit()
         _publish(f"vg:pub:training:{job_id}",
-                 {"event": "done", "weights": str(best)})
+                 {"event": "done", "weights": str(best),
+                  "metrics": final_metrics})
 
     except Exception as e:
         log.exception("training job %s failed: %s", job_id, e)
