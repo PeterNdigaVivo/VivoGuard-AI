@@ -3,21 +3,26 @@
 Two tasks here:
 
   inference.supervise_all  — short, fires every 30s via Celery beat.
-                             Lists every `ai_enabled` camera and enqueues
-                             a long-running `run_camera_inference` task
-                             for any camera that isn't already covered.
-                             Uses a Redis lock per camera so concurrent
-                             beat ticks (and worker restarts) don't
-                             double-queue.
+                             Lists every `ai_enabled` camera, sweeps
+                             stale locks, then enqueues a long-running
+                             `run_camera_inference` task for any
+                             camera that isn't already covered. The
+                             stale-lock sweep is the self-healing
+                             primitive that lets the system recover
+                             from worker crashes / OOM / SIGKILL
+                             without manual intervention — the only
+                             remaining downtime is bounded by
+                             LOCK_TTL (150s).
 
   inference.run_camera     — long-running task; pulls frames from the
                              Redis frame buffer for one camera and runs
-                             the full detector chain. Returns after
-                             `max_seconds` so the supervisor re-queues
-                             it cleanly (lock TTL > max_seconds so the
-                             camera stays covered across the handoff).
+                             the full detector chain. ALWAYS releases
+                             its lock on exit via try/finally; the
+                             stale-lock sweep covers the cases where
+                             finally itself can't run (SIGKILL etc.).
 """
 from __future__ import annotations
+import json
 import logging
 import time
 
@@ -33,15 +38,91 @@ log = logging.getLogger(__name__)
 # Each per-camera task runs this long then exits. Keep it well under the
 # supervisor lock TTL so we don't end up with double-coverage.
 RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridable
-LOCK_TTL       = RUN_SECONDS + 60                  # outlives RUN_SECONDS by 1 min
-                                                    # (crashed-worker safety net;
-                                                    #  normal exit releases the lock)
+# Tightened from RUN_SECONDS+60 to RUN_SECONDS+30. A lock that outlives
+# its task by >30s is stale by definition; the self-healing sweep clears
+# it before TTL expiry anyway, this just bounds the worst case when
+# Redis-side TTL is the only remaining safety net (e.g. supervisor itself
+# down).
+LOCK_TTL       = RUN_SECONDS + 30                  # 150s
+# Heartbeat TTL must comfortably exceed LOCK_TTL so a missing-hb on a
+# still-live lock is unambiguously "task is dead", never a race.
+HB_TTL         = LOCK_TTL + 30                     # 180s
 LOCK_KEY_FMT   = "vg:inference-lock:{camera_id}"
-HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # heartbeat (debug only)
+HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # set once at task start
+HEALTH_KEY     = "vg:inference:health"             # supervisor breadcrumb
+LOCK_KEY_PREFIX = "vg:inference-lock:"
+
+# Sweep safety — we only clear a lock when hb is missing AND the lock
+# has ≤ this many seconds of TTL left. The lock-TTL grace prevents
+# racing a still-starting task whose hb hasn't landed yet.
+SWEEP_TTL_THRESHOLD_S = 30
 
 
 def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url)
+
+
+def _sweep_stale_locks(r: redis.Redis) -> int:
+    """Self-healing sweep. A lock is stale when its heartbeat key is
+    missing AND the lock has ≤ SWEEP_TTL_THRESHOLD_S seconds remaining.
+
+    Why both conditions are required for safety (no double-inference):
+      • HB_TTL (180s) > LOCK_TTL (150s) > RUN_SECONDS (120s). A live
+        worker's hb cannot expire mid-run.
+      • If hb is missing, the task is dead OR never started. Cannot be
+        running.
+      • The lock-TTL grace (≤30s) avoids deleting a lock during the
+        first ~120s of its life when a real task could theoretically
+        still be starting up between `.set(lock)` and `r.set(hb)`.
+        Worst case the sweep waits one extra tick (30s) before clearing
+        — bounded latency, zero risk.
+
+    Returns the count of locks cleared (also surfaced in the health
+    breadcrumb for the URGENT alerter).
+    """
+    cleared = 0
+    try:
+        for key in r.scan_iter(match=f"{LOCK_KEY_PREFIX}*", count=200):
+            try:
+                key_s = key.decode() if isinstance(key, bytes) else key
+                cam_id = int(key_s.rsplit(":", 1)[-1])
+            except Exception:
+                continue
+            hb_present = bool(r.get(HB_KEY_FMT.format(camera_id=cam_id)))
+            if hb_present:
+                continue                # live worker — leave alone
+            ttl = r.ttl(key)            # remaining lock TTL in seconds
+            if ttl is None or ttl < 0:
+                continue                # already expiring / Redis quirk
+            if ttl <= SWEEP_TTL_THRESHOLD_S:
+                if r.delete(key):
+                    cleared += 1
+                    log.warning(
+                        "supervise_all: cleared stale lock cam=%s "
+                        "(no hb, ttl was %ss)", cam_id, ttl)
+    except Exception as e:
+        # Sweep failure must not kill the supervisor — the normal
+        # SET NX path still works without the heal.
+        log.warning("supervise_all: stale-lock sweep failed: %s", e)
+    return cleared
+
+
+def _write_health(r: redis.Redis, *,
+                  cameras_total: int, cameras_enqueued: int,
+                  cameras_already_running: int, stale_cleared: int) -> None:
+    """Heartbeat for the inference pipeline. The
+    alerting.inference_pipeline_health_check beat task fires URGENT
+    when this key ages past 10 min."""
+    try:
+        r.set(HEALTH_KEY, json.dumps({
+            "last_run_ts":             int(time.time()),
+            "cameras_total":           cameras_total,
+            "cameras_enqueued":        cameras_enqueued,
+            "cameras_already_running": cameras_already_running,
+            "stale_locks_cleared":     stale_cleared,
+        }), ex=24 * 3600)
+    except Exception as e:
+        log.debug("supervise_all: health write failed: %s", e)
 
 
 # -------------------------------------------------------------------------
@@ -52,26 +133,53 @@ def _redis() -> redis.Redis:
 def supervise_all() -> None:
     """Enqueue an inference task for every active camera that isn't
     currently covered. Cheap — runs in ~milliseconds; the heavy lifting
-    is done by the per-camera tasks it enqueues."""
+    is done by the per-camera tasks it enqueues.
+
+    Self-healing: sweeps stale locks (worker crashed without releasing)
+    BEFORE attempting the per-camera acquire. A camera whose lock was
+    stale will be picked up on the same tick that clears it."""
     from app.database import SessionLocal
     from app.models import Camera
 
     r = _redis()
+    stale_cleared = _sweep_stale_locks(r)
     enqueued: list[int] = []
     skipped:  list[int] = []
     with SessionLocal() as db:
         cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
     for cam in cams:
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
-        # SET NX with TTL — atomic acquire. Returns truthy only when we
-        # actually took the lock.
-        if r.set(lock, "1", ex=LOCK_TTL, nx=True):
-            run_camera_inference.delay(cam.id, max_seconds=RUN_SECONDS)
-            enqueued.append(cam.id)
+        # SET NX with TTL — atomic acquire. Value is a placeholder until
+        # we know the real task_id; stamped below.
+        placeholder = f"pending:{int(time.time())}"
+        if r.set(lock, placeholder, ex=LOCK_TTL, nx=True):
+            try:
+                ar = run_camera_inference.apply_async(
+                    args=[cam.id],
+                    kwargs={"max_seconds": RUN_SECONDS},
+                    queue="inference",
+                )
+                # Stamp the lock with the real task_id (refresh TTL).
+                r.set(lock, ar.id, ex=LOCK_TTL)
+                enqueued.append(cam.id)
+            except Exception as e:
+                # apply_async failed (broker hiccup). Release the lock
+                # so the next tick re-acquires immediately rather than
+                # waiting LOCK_TTL.
+                log.exception("supervise_all: enqueue failed cam=%s: %s",
+                              cam.id, e)
+                try: r.delete(lock)
+                except Exception: pass
         else:
             skipped.append(cam.id)
-    log.info("inference.supervise_all: enqueued=%s, already_running=%s",
-             enqueued, skipped)
+    log.info("inference.supervise_all: enqueued=%s, already_running=%s, "
+             "stale_locks_cleared=%d",
+             enqueued, skipped, stale_cleared)
+    _write_health(r,
+                  cameras_total=len(cams),
+                  cameras_enqueued=len(enqueued),
+                  cameras_already_running=len(skipped),
+                  stale_cleared=stale_cleared)
 
 
 # -------------------------------------------------------------------------
@@ -81,7 +189,9 @@ def supervise_all() -> None:
 @celery_app.task(name="inference.run_camera", bind=True, ignore_result=True)
 def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS) -> None:
     """Pull frames + run detectors for one camera. Always releases its
-    Redis lock on exit (normal or exceptional)."""
+    Redis lock on exit (normal or exceptional). The stale-lock sweep
+    in supervise_all covers the cases where this `finally` can't run
+    (SIGKILL, OOM-kill, container hard restart, C-level segfault)."""
     from app.ai.inference_worker import run_for_camera
     r = _redis()
     lock = LOCK_KEY_FMT.format(camera_id=camera_id)
@@ -89,19 +199,24 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
     log.info("inference.run_camera camera=%s max_seconds=%s start", camera_id, max_seconds)
     started = time.time()
     try:
-        # Heartbeat key for the System Health page / debugging.
-        r.set(hb, int(started), ex=max(60, max_seconds + 60))
+        # Heartbeat — set BEFORE any heavy work so the sweep can use
+        # its presence as proof the task is alive. HB_TTL > LOCK_TTL
+        # so a missing hb on a live lock is unambiguous.
+        r.set(hb, int(started), ex=HB_TTL)
         run_for_camera(camera_id, max_seconds=max_seconds)
     except Exception as e:
         log.exception("inference.run_camera camera=%s failed: %s", camera_id, e)
         # Don't auto-retry the whole task — the supervisor will re-enqueue
-        # on the next 30-second tick once the lock expires.
+        # on the next 30-second tick once the lock is released below
+        # (or, on SIGKILL, cleared by the sweep).
     finally:
         # Release the lock so the supervisor can re-enqueue immediately
-        # rather than waiting for TTL to elapse.
-        try:
-            r.delete(lock)
-        except Exception:
-            pass
+        # rather than waiting for TTL to elapse. Also clear the hb —
+        # avoids a freshly-acquired lock by a subsequent task seeing
+        # the dead task's hb and being misclassified as live.
+        try: r.delete(lock)
+        except Exception: pass
+        try: r.delete(hb)
+        except Exception: pass
         log.info("inference.run_camera camera=%s exited after %.1fs",
                  camera_id, time.time() - started)

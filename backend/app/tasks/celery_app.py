@@ -66,6 +66,7 @@ celery_app.conf.update(
         "alerting.camera_health_check":         {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
+        "alerting.inference_pipeline_health_check": {"queue": "alerts"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
@@ -86,6 +87,7 @@ celery_app.conf.update(
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
+        "maintenance.cameras_status_sync":    {"queue": "beat"},
         "queue_report.fire_due":              {"queue": "beat"},
         "staff_classifier.classify_today":    {"queue": "beat"},
         "heatmap.snapshot_all":               {"queue": "beat"},
@@ -100,6 +102,21 @@ celery_app.conf.update(
         "refresh-ddns-every-5min": {
             "task": "maintenance.refresh_ddns",
             "schedule": 300.0,
+        },
+        # Reconciles cameras.status from the Redis frame-buffer key so
+        # the dashboard health pill matches reality. Also deletes
+        # orphaned detection_configs whose camera no longer exists.
+        # Routed to `beat` queue.
+        "cameras-status-sync-every-5min": {
+            "task": "maintenance.cameras_status_sync",
+            "schedule": 300.0,
+        },
+        # Early-warning URGENT for inference-pipeline stalls. Reads the
+        # vg:inference:health breadcrumb written by inference.supervise_all
+        # every 30s; fires when it ages past 10 min. Per-30-min dedup.
+        "inference-pipeline-health-every-60s": {
+            "task": "alerting.inference_pipeline_health_check",
+            "schedule": 60.0,
         },
         # Alert history retention — prune alerts + snapshots older than
         # 90 days once a day (relative to worker boot).

@@ -126,6 +126,129 @@ def queue_escalation_check() -> None:
             r.set(sent_key, "1", ex=QUEUE_DEDUP_TTL_SECONDS)
 
 
+# ---- Inference pipeline health (URGENT) -----------------------------
+#
+# The supervisor (inference.supervise_all) writes vg:inference:health
+# every 30s. If that key ages past 10 min the inference pipeline is
+# stalled — the supervisor itself is down, or every worker that runs
+# the `inference` queue is down. Either way the camera fleet is going
+# uncovered RIGHT NOW and ops must know.
+
+INFERENCE_STALL_THRESHOLD_S      = 10 * 60   # 10 min
+INFERENCE_STALL_DEDUP_TTL_S      = 30 * 60   # one URGENT per 30 min
+
+
+@celery_app.task(name="alerting.inference_pipeline_health_check",
+                  ignore_result=True)
+def inference_pipeline_health_check() -> None:
+    """Fire URGENT when the supervisor health breadcrumb ages past
+    INFERENCE_STALL_THRESHOLD_S. Per-30-min dedup. Early warning
+    before a full outage."""
+    from zoneinfo import ZoneInfo
+    r = _redis()
+    if r is None:
+        return
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    try:
+        raw = r.get("vg:inference:health")
+    except Exception as e:
+        log.exception("inference_pipeline_health_check: redis read failed: %s", e)
+        return
+
+    last_run_ts: float | None = None
+    cameras_total: int = 0
+    if raw:
+        try:
+            payload = json.loads(raw)
+            last_run_ts = float(payload.get("last_run_ts") or 0) or None
+            cameras_total = int(payload.get("cameras_total") or 0)
+        except Exception:
+            last_run_ts = None
+
+    age = (now_ts - last_run_ts) if last_run_ts else None
+    healthy = age is not None and age <= INFERENCE_STALL_THRESHOLD_S
+    if healthy:
+        # Clear dedup when health is back so the NEXT outage can fire.
+        try: r.delete("vg:inference_pipeline_alert:sent")
+        except Exception: pass
+        return
+
+    sent_key = "vg:inference_pipeline_alert:sent"
+    if r.get(sent_key):
+        return
+
+    from app.database import SessionLocal
+    from app.models import Camera
+    # The health breadcrumb may be missing (supervisor never ran since
+    # deploy) — fall back to the live count of ai_enabled cameras so
+    # the body still says something useful.
+    if not cameras_total:
+        try:
+            with SessionLocal() as db:
+                cameras_total = (db.query(Camera)
+                                  .filter(Camera.ai_enabled == True)        # noqa: E712
+                                  .count())
+        except Exception:
+            cameras_total = 0
+
+    when = (datetime.fromtimestamp(last_run_ts, tz=timezone.utc)
+                  .astimezone(ZoneInfo("Africa/Nairobi"))
+                  .strftime("%H:%M EAT")
+            if last_run_ts else "unknown")
+    age_min = int((age or 0) / 60)
+    body = (f"Inference pipeline stalled — {cameras_total} cameras "
+            f"not being monitored. Last successful supervisor tick: "
+            f"{when} ({age_min} min ago).")
+    extra = {
+        "priority":   "high",
+        "rule":       "inference_pipeline_stalled",
+        "store_id":   None,
+        "title":      "🚨 AI inference pipeline stalled",
+        "message":    body,
+        "what_to_do": [
+            "Check that the worker-inference container is running",
+            "Check Redis connectivity from the worker host",
+            "Restart the worker-inference container if both look fine",
+        ],
+        "cameras_total":     cameras_total,
+        "last_run_age_sec":  int(age) if age else None,
+    }
+    # No camera_id → use the first ai_enabled camera as an FK anchor
+    # (matches the shop_not_opened URGENT pattern; the alert is fleet-
+    # scoped but the schema needs a camera_id).
+    anchor_cam_id = None
+    try:
+        from app.database import SessionLocal as _SL
+        from app.models import Camera as _Cam
+        with _SL() as db:
+            row = (db.query(_Cam.id)
+                     .filter(_Cam.ai_enabled == True)                      # noqa: E712
+                     .order_by(_Cam.id.asc()).first())
+            anchor_cam_id = int(row[0]) if row else None
+            if anchor_cam_id:
+                _create_info_alert(
+                    db, camera_id=anchor_cam_id, zone_id=None, store_id=None,
+                    detection_type="system_health",
+                    cls="inference_pipeline_stalled", extra=extra,
+                )
+                db.commit()
+    except Exception as e:
+        log.exception("inference_pipeline_health_check: alert write failed: %s", e)
+        return
+
+    try:
+        recipients = _dashboard_recipients()
+        if recipients:
+            _send_whatsapp(recipients, f"🚨 {body}")
+    except Exception:
+        pass
+
+    r.set(sent_key, "1", ex=INFERENCE_STALL_DEDUP_TTL_S)
+    log.warning("inference_pipeline_stalled: cameras=%d age_min=%d",
+                cameras_total, age_min)
+
+
 # ---- Checkout dwell (long-session ATTENTION alert) -------------------
 #
 # The CheckoutDwellDetector publishes a per-session Redis key when a

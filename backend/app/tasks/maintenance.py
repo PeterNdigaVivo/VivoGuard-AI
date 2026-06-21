@@ -70,3 +70,79 @@ def bootstrap_buckets() -> None:
     from app.storage.minio_client import ensure_buckets
     ensure_buckets()
     log.info("bootstrap_buckets done (endpoint=%s)", settings.s3_endpoint)
+
+
+@celery_app.task(name="maintenance.cameras_status_sync", ignore_result=True)
+def cameras_status_sync() -> None:
+    """Reconcile `cameras.status` with the actual streaming state.
+
+    Until now this column was set on operator CRUD only — never by the
+    runtime — so the dashboard's health pill drifted out of sync within
+    minutes of a camera going up or down. We now sync it from the
+    frame-buffer Redis key (`vg:frame:{id}`, TTL 30s):
+        frame present       → status = "online"
+        frame absent        → status = "offline"
+
+    Operator-intent states (`pending`, `degraded`) are NEVER overwritten
+    — they're set manually for cameras being onboarded or flagged for
+    maintenance, and the sync respects them.
+
+    Also: deletes orphaned `detection_configs` rows whose camera no
+    longer exists (a camera DELETE relied on CASCADE which isn't always
+    on, and even when on, the rows can accumulate from old migrations).
+    """
+    import redis as _redis_mod
+    from app.database import SessionLocal
+    from app.models import Camera
+    from sqlalchemy import text
+
+    try:
+        r = _redis_mod.from_url(settings.redis_url)
+    except Exception as e:
+        log.warning("cameras_status_sync: redis unavailable: %s", e)
+        return
+
+    transitions_online  = 0
+    transitions_offline = 0
+    inspected           = 0
+    with SessionLocal() as db:
+        cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
+        for cam in cams:
+            inspected += 1
+            try:
+                frame_present = bool(r.get(f"vg:frame:{cam.id}"))
+            except Exception:
+                continue
+            current = cam.status
+            # Only manage online ↔ offline. Leave pending / degraded
+            # alone — those are operator intent.
+            if frame_present and current != "online":
+                if current in ("offline",):
+                    cam.status = "online"
+                    transitions_online += 1
+            elif not frame_present and current == "online":
+                cam.status = "offline"
+                transitions_offline += 1
+        if transitions_online or transitions_offline:
+            db.commit()
+
+        # Orphaned detection_configs (camera deleted, config row left).
+        # ON DELETE CASCADE handles this when the FK is enforced, but
+        # legacy rows from before the constraint existed can persist.
+        try:
+            res = db.execute(text("""
+                DELETE FROM detection_configs
+                 WHERE camera_id NOT IN (SELECT id FROM cameras)
+            """))
+            orphans = res.rowcount or 0
+            if orphans:
+                db.commit()
+                log.warning("cameras_status_sync: removed %d orphaned "
+                            "detection_configs", orphans)
+        except Exception as e:
+            db.rollback()
+            log.warning("cameras_status_sync: orphan cleanup failed: %s", e)
+            orphans = 0
+
+    log.info("cameras_status_sync: inspected=%d online+=%d offline+=%d orphans=%d",
+             inspected, transitions_online, transitions_offline, orphans)
