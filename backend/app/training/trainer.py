@@ -141,6 +141,18 @@ def run_job(job_id: int) -> None:
                 raise RuntimeError(job.error_message)
             resume_weights = parent.weights_path
 
+        # DATASET PRE-FLIGHT — fail clean with a useful error_message
+        # before any YOLO/torch import or split work runs, so operators
+        # don't have to dig through ultralytics tracebacks for "image
+        # not found" / "empty dataset" cases.
+        ds_root = dataset_root(ds.id)
+        if not ds_root.exists():
+            job.status, job.error_message = "failed", (
+                f"dataset directory missing: {ds_root}")
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise RuntimeError(job.error_message)
+
         try:
             split_dataset(db, ds.id,
                           train=float(cfg.get("split_train", 0.7)),
@@ -157,6 +169,35 @@ def run_job(job_id: int) -> None:
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             raise
+
+        # Manifest pre-flight — `write_yolo_dataset_yaml` writes
+        # train.txt unconditionally even when the SQL query returns
+        # zero qualifying images. Without this, YOLO loads an empty
+        # manifest and the loader either crashes opaquely or trains
+        # on nothing. Fail clean with a specific error_message.
+        train_txt = ds_root / "train.txt"
+        if not train_txt.exists():
+            job.status, job.error_message = "failed", (
+                f"dataset prep produced no train.txt at {train_txt}")
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise RuntimeError(job.error_message)
+        lines = [ln for ln in train_txt.read_text().splitlines() if ln.strip()]
+        if not lines:
+            job.status, job.error_message = "failed", (
+                f"train.txt has 0 image paths — dataset has no labelled "
+                f"images for this detection_type")
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise RuntimeError(job.error_message)
+        first = Path(lines[0])
+        if not first.exists():
+            job.status, job.error_message = "failed", (
+                f"first training image not found on disk: {first} "
+                f"(dataset/storage out of sync)")
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise RuntimeError(job.error_message)
 
     # Heavy import deferred so the rest of the app boots without torch.
     from ultralytics import YOLO

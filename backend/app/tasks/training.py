@@ -25,6 +25,12 @@ _STALE_RUNNING_HOURS = 12
 # Cap per-tick dispatches so a 100-job backlog doesn't slam the
 # worker-alerts pool all at once.
 _DISPATCH_MAX_PER_TICK = 3
+# Circuit breaker — when a dataset has accumulated this many failed
+# TrainingJobs (all-time, not consecutive), the next dispatch is
+# short-circuited to `failed` and the Dataset.description is stamped
+# with a `[suspended]` marker. Operators clear the marker to re-enable.
+_MAX_FAILURES_PER_DATASET = 3
+_SUSPENDED_MARKER = "[suspended]"
 
 
 @celery_app.task(name="training.dispatch_queued_jobs", ignore_result=True)
@@ -77,7 +83,52 @@ def dispatch_queued_jobs() -> None:
                    .limit(_DISPATCH_MAX_PER_TICK)
                    .all())
         dispatched: list[int] = []
+        suspended: list[int] = []
         for j in picks:
+            # Defense in depth — the query above already filters
+            # status='queued', but in case anything flips a failed
+            # job back to queued by hand (or a SQLAlchemy session
+            # cache returns a stale row), re-check here. Failed jobs
+            # NEVER auto-retry through this path.
+            if j.status != "queued":
+                continue
+
+            # Circuit breaker — count all-time failures on this
+            # dataset. Once we hit the threshold, this job and any
+            # future queued job for the same dataset short-circuit
+            # to `failed` until an operator clears the `[suspended]`
+            # marker from Dataset.description.
+            from app.models import Dataset as _Dataset
+            ds = db.get(_Dataset, j.dataset_id) if j.dataset_id else None
+            already_suspended = bool(
+                ds and (ds.description or "").startswith(_SUSPENDED_MARKER)
+            )
+            failures = (db.query(TrainingJob)
+                          .filter(TrainingJob.dataset_id == j.dataset_id,
+                                  TrainingJob.status == "failed")
+                          .count())
+            if already_suspended or failures >= _MAX_FAILURES_PER_DATASET:
+                if ds is not None and not already_suspended:
+                    prior = ds.description or "(none)"
+                    ds.description = (
+                        f"{_SUSPENDED_MARKER} {failures} training failures — "
+                        f"operator review required. Prior description: {prior}"
+                    )
+                j.status = "failed"
+                j.error_message = (
+                    f"Dataset has {failures} prior failures "
+                    f"(>= {_MAX_FAILURES_PER_DATASET}) — auto-suspended. "
+                    f"Clear the {_SUSPENDED_MARKER} prefix from the dataset "
+                    f"description to re-enable training."
+                )
+                j.completed_at = _dt.now(_tz.utc)
+                db.commit()
+                suspended.append(j.id)
+                log.error("dispatcher: dataset=%s suspended after %d failures; "
+                          "job=%s short-circuited to failed",
+                          j.dataset_id, failures, j.id)
+                continue
+
             # Flip status BEFORE .apply_async so a re-entrant tick
             # never picks the same job twice. The trainer also sets
             # `status='running'` at the top of run_job — both writes
@@ -96,6 +147,9 @@ def dispatch_queued_jobs() -> None:
                 db.commit()
                 log.exception("dispatcher: apply_async failed for job=%s: %s",
                               j.id, e)
+        if suspended:
+            log.warning("dispatcher: %d job(s) short-circuited via circuit "
+                        "breaker: %s", len(suspended), suspended)
         if dispatched:
             log.info("dispatcher: dispatched %d jobs %s",
                      len(dispatched), dispatched)

@@ -51,6 +51,13 @@ def _retrain_thresholds() -> tuple[int, int]:
 # attribute so existing callers don't need updating.
 MIN_NEW_SAMPLES_PER_RETRAIN = _retrain_thresholds()[0]
 
+# YOLO fine-tune floor. Below this many positive images, validation
+# metrics are essentially random and the gradient updates overfit on
+# the tiny set — worse-than-useless training run. We bail BEFORE
+# creating a TrainingJob row so the dispatcher / circuit breaker
+# don't have to deal with predictable failures.
+MIN_DATASET_IMAGES = 30
+
 
 def _last_fine_tune_completion(db: Session, detection_type: str) -> datetime | None:
     """When did the last fine-tune FOR THIS detection type complete?
@@ -171,6 +178,24 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         Dataset.name == f"feedback-{detection_type}").first()
     neg_ds = db.query(Dataset).filter(
         Dataset.name == f"feedback-negative-{detection_type}").first()
+
+    # Minimum-size guard. Counts POSITIVES only — a 1-positive +
+    # 29-negative dataset would otherwise sneak past, train on noise
+    # and crash on validation. Bail before creating the TrainingJob
+    # so we don't leave failing-job rows behind.
+    if pos_ds is not None:
+        pos_count = (db.query(TrainingImage)
+                       .filter(TrainingImage.dataset_id == pos_ds.id).count())
+        if pos_count < MIN_DATASET_IMAGES:
+            log.warning(
+                "orchestrator: dataset too small for training "
+                "(%d images, need %d+) — detection_type=%s dataset_id=%s",
+                pos_count, MIN_DATASET_IMAGES, detection_type, pos_ds.id)
+            return {"detection_type": detection_type,
+                    "status": "skipped",
+                    "reason": (f"dataset too small ({pos_count} images, "
+                                f"need {MIN_DATASET_IMAGES}+)"),
+                    "positives_total": pos_count}
     cfg = {
         "incremental_finetune":       True,
         "detection_type":             detection_type,   # cutoff filter key
