@@ -265,3 +265,104 @@ def create_campaign(payload: CampaignIn, db: Session = Depends(get_db),
     c = Campaign(**payload.model_dump())
     db.add(c); db.commit(); db.refresh(c)
     return c
+
+
+# ---------- zone-health rollup (Feature 4) ----------
+
+@router.get("/zone-health")
+def stores_zone_health(db: Session = Depends(get_db),
+                       _u=Depends(get_current_user)) -> list[dict]:
+    """Per-store zone-health rollup powering the Zone Health dashboard.
+
+    One bulk read (stores → cameras → zones) + per-store pure scoring.
+    Returns one row per ACTIVE store with score, badge, per-tag-present
+    map, camera counts, and a structured `issues` list (missing tags,
+    per-camera duplicates, typo names with suggested rename, offline
+    cameras). Empty-camera stores return score=0 / badge=critical /
+    "no_cameras" issue rather than crashing.
+    """
+    from app.models import Camera, Zone
+    from app.utils.zone_health import score_store
+
+    stores = (db.query(Store)
+                .filter(Store.is_active == True)                          # noqa: E712
+                .order_by(Store.name.asc())
+                .all())
+    if not stores:
+        return []
+    store_ids = [s.id for s in stores]
+
+    cams = (db.query(Camera)
+              .filter(Camera.store_id.in_(store_ids))
+              .all())
+    cams_by_store: dict[int, list[dict]] = {}
+    for c in cams:
+        cams_by_store.setdefault(int(c.store_id), []).append({
+            "id":     c.id,
+            "name":   c.name,
+            "status": c.status,
+        })
+
+    cam_ids = [c.id for c in cams]
+    zones = (db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+             if cam_ids else [])
+    cam_to_store = {int(c.id): int(c.store_id) for c in cams}
+    zones_by_store: dict[int, list[dict]] = {}
+    for z in zones:
+        sid = cam_to_store.get(int(z.camera_id))
+        if sid is None:
+            continue
+        zones_by_store.setdefault(sid, []).append({
+            "id":                   z.id,
+            "camera_id":            z.camera_id,
+            "name":                 z.name,
+            "detection_types_json": z.detection_types_json or [],
+        })
+
+    out: list[dict] = []
+    for s in stores:
+        out.append(score_store(
+            store_id=int(s.id), store_name=s.name,
+            cameras=cams_by_store.get(int(s.id), []),
+            zones=zones_by_store.get(int(s.id), []),
+        ))
+    return out
+
+
+@router.get("/zone-health.csv")
+def stores_zone_health_csv(db: Session = Depends(get_db),
+                           _u=Depends(get_current_user)):
+    """CSV export of the zone-health rollup. Columns mirror the
+    dashboard table so operators can hand a sheet to ops/IT directly.
+    Issues collapse to a `;`-separated list."""
+    import csv
+    import io
+    from fastapi.responses import Response
+
+    rows = stores_zone_health(db=db, _u=_u)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "store_id", "store_name", "score", "badge",
+        "footfall", "checkout", "staff", "shutter",
+        "cameras_total", "cameras_online", "cameras_offline",
+        "issue_count", "issues",
+    ])
+    for r in rows:
+        per = r["per_tag_present"]
+        w.writerow([
+            r["store_id"], r["store_name"], r["score"], r["badge"],
+            "yes" if per.get("entry_exit") else "no",
+            "yes" if per.get("queue")      else "no",
+            "yes" if per.get("staff_zone") else "no",
+            "yes" if per.get("shutter")    else "no",
+            r["cameras_total"], r["cameras_online"], r["cameras_offline"],
+            len(r["issues"]),
+            "; ".join(i.get("message", "") for i in r["issues"]),
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition":
+                 'attachment; filename="zone_health.csv"'},
+    )
