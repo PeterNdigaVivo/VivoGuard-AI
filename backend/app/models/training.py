@@ -40,6 +40,15 @@ class TrainingImage(Base):
     # timestamp_iso, store_name, camera_name. Lets dataset curators
     # dedup + filter without re-joining back to the alert row.
     source_extra:Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # FK to the alert whose verdict (confirm/dismiss) created this
+    # row. Lets feedback_loop.revert_verdict() find + delete this
+    # image when the operator undoes a sprint label. SET NULL on
+    # alert deletion — the image survives a retention prune; the
+    # NULL just means we can no longer trace back to the alert.
+    source_alert_id: Mapped[int | None] = mapped_column(
+        ForeignKey("alerts.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     dataset     = relationship("Dataset", back_populates="images")

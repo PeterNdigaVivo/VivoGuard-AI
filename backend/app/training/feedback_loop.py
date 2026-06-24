@@ -111,6 +111,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         file_path=ev.thumbnail_path,
         labeled=True,
         source_extra=_build_source_extra(db, ev, a, "correct"),
+        source_alert_id=a.id,           # for revert_verdict
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
@@ -154,6 +155,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         file_path=ev.thumbnail_path,
         labeled=True,           # labelled as background — no Annotation rows
         source_extra=_build_source_extra(db, ev, a, "false"),
+        source_alert_id=a.id,           # for revert_verdict
     ))
     a.feedback_used_for_training = True
     db.commit()
@@ -180,3 +182,46 @@ def pending_retraining_count(db: Session, detection_type: str) -> dict:
             out[kind] = (db.query(TrainingImage)
                             .filter(TrainingImage.dataset_id == ds.id).count())
     return out
+
+
+def revert_verdict(db: Session, alert_id: int) -> bool:
+    """Delete the TrainingImage row(s) created by absorb_confirmed /
+    mark_dismissed for this alert.
+
+    Called by the Part 5 sprint /undo endpoint when an operator
+    reverses a verdict. Returns True when at least one image was
+    deleted, False when the alert had no associated training images
+    (the absorb call may have failed silently when the verdict was
+    originally recorded — see the log.exception path in
+    services/alert_feedback.record_verdict — OR the alert predates
+    migration 0025 so its image has source_alert_id=NULL).
+
+    Annotation rows hanging off each TrainingImage CASCADE on delete
+    via the existing FK (models/training.py — Annotation.image_id
+    ondelete=CASCADE). No manual annotation cleanup needed.
+
+    Also clears the alert's feedback_used_for_training flag so the
+    next labelling attempt (either direction) is not a no-op on the
+    absorb_* side.
+    """
+    imgs = (db.query(TrainingImage)
+              .filter(TrainingImage.source_alert_id == alert_id)
+              .all())
+    a = db.get(Alert, alert_id)
+    if not imgs:
+        # Still flip the alert flag — the operator's verdict was
+        # already reversed by the sprint endpoint; we just have
+        # nothing to clean up in the pool.
+        if a is not None and a.feedback_used_for_training:
+            a.feedback_used_for_training = False
+            db.commit()
+        return False
+
+    for img in imgs:
+        db.delete(img)        # Annotations CASCADE via FK
+    if a is not None:
+        a.feedback_used_for_training = False
+    db.commit()
+    log.info("feedback: reverted verdict alert=%s training_images_removed=%d",
+             alert_id, len(imgs))
+    return True
