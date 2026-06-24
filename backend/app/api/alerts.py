@@ -1191,37 +1191,17 @@ def list_alerts(
 @router.post("/{alert_id}/confirm", response_model=AlertActionOut)
 def confirm(alert_id: int, db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
-    a = db.get(Alert, alert_id)
-    if not a:
-        raise HTTPException(404, "alert not found")
-    a.status = "confirmed"
-    a.assigned_to = user.id
-    a.acknowledged_at = datetime.now(timezone.utc)
-    try:
-        from app.training.feedback_loop import absorb_confirmed
-        absorb_confirmed(db, a.id)
-    except Exception:
-        pass
-    db.commit()
-    return AlertActionOut(id=a.id, status=a.status)
+    # Single source of truth for confirm/dismiss/sprint-label.
+    # See app/services/alert_feedback.py for the rationale.
+    from app.services.alert_feedback import record_verdict
+    return record_verdict(db, alert_id, "confirm", user)
 
 
 @router.post("/{alert_id}/dismiss", response_model=AlertActionOut)
 def dismiss(alert_id: int, db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
-    a = db.get(Alert, alert_id)
-    if not a:
-        raise HTTPException(404, "alert not found")
-    a.status = "dismissed"
-    a.assigned_to = user.id
-    a.acknowledged_at = datetime.now(timezone.utc)
-    try:
-        from app.training.feedback_loop import mark_dismissed
-        mark_dismissed(db, a.id)
-    except Exception:
-        pass
-    db.commit()
-    return AlertActionOut(id=a.id, status=a.status)
+    from app.services.alert_feedback import record_verdict
+    return record_verdict(db, alert_id, "dismiss", user)
 
 
 @router.post("/{alert_id}/resolve", response_model=AlertActionOut)
