@@ -303,7 +303,7 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         # All variants today are "long session" alerts. If the schema
         # grows more rules (e.g. abandoned-basket), branch on
         # extra.rule here.
-        return "Long Checkout Transaction"
+        return "Checkout Taking Too Long"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
 
 
@@ -623,7 +623,7 @@ def _title(event: DetectionEvent, camera: Camera | None,
         # camera; they care which store has a stuck checkout.
         store_name = (store.name if store else None) \
                       or (extra.get("store_name")) or "Unknown store"
-        return f"{icon} Long Checkout Transaction — {store_name}"
+        return f"{icon} Checkout Taking Too Long — {store_name}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -801,11 +801,9 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         store_name = (store.name if store else None) \
                       or extra.get("store_name") or "the store"
         return (
-            f"A customer has been at the checkout counter at "
-            f"{store_name} for {duration_str}. This could be:\n"
-            f"- A payment issue or declined card needing attention\n"
-            f"- A customer with a query or exchange request\n"
-            f"- A staff member working at the counter (not a customer)"
+            f"Someone has been at the till at {store_name} for "
+            f"{duration_str}. Open the live camera to check and "
+            f"assist if needed."
         )
 
     return "Review the footage and decide whether to confirm or dismiss."
