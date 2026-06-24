@@ -49,9 +49,10 @@ def _snapshot_root() -> Path:
 
 # BGR colours for the per-person snapshot boxes.
 _BOX_COLORS = {
-    "green": (0, 200, 0),     # staff
-    "blue":  (235, 130, 0),   # customer (BGR → orange-blue)
-    "red":   (0, 0, 255),     # empty / detection
+    "green":  (0, 200, 0),     # staff
+    "blue":   (235, 130, 0),   # customer
+    "red":    (0, 0, 255),     # empty / detection
+    "orange": (0, 165, 255),   # uniform-classified staff (preview signal)
 }
 
 

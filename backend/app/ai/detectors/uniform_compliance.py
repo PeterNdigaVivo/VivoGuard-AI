@@ -339,6 +339,30 @@ class UniformComplianceDetector(Detector):
 
             evt = self._maybe_alert(ctx, det, tid, state, now)
             if evt is not None:
+                # Detection-time uniform-colour stamp (Part 6) — the
+                # single source of truth read later by:
+                #   • capture_alert_snapshot → paints orange box on the
+                #     alert thumbnail via `extra.boxes`
+                #   • absorb_confirmed / absorb_dismissed →
+                #     label_from_uniform_color(extra.uniform_color)
+                # for the preview-pair file.
+                if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY, STAFF):
+                    feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
+                    color = None
+                    if feats:
+                        if feats.get("top_is_black"):
+                            color = "black"
+                        elif feats.get("top_maroon_share", 0.0) >= 0.20:
+                            color = "maroon"
+                    if color:
+                        merged = dict(evt.extra or {})
+                        merged["uniform_color"] = color
+                        merged["boxes"] = [{
+                            "bbox":  det["bbox_norm"],
+                            "color": "orange",
+                            "label": f"{color.capitalize()} Uniform",
+                        }]
+                        evt.extra = merged
                 out.append(evt)
 
             # Camera-zone training crop harvest — save a per-person crop
@@ -492,6 +516,30 @@ class UniformComplianceDetector(Detector):
             )
             ctx.db.add(sample)
             ctx.db.flush()
+            # Preview crop (Part 6) — orange overlay for operator
+            # review. Best-effort: must not block the clean save.
+            # Re-derive colour family from uniform_features so the
+            # label is precise; absent for civilians (label="").
+            try:
+                from app.training.image_preview import write_preview, label_from_uniform_color
+                feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
+                color = None
+                if feats:
+                    if feats.get("top_is_black"):
+                        color = "black"
+                    elif feats.get("top_maroon_share", 0.0) >= 0.20:
+                        color = "maroon"
+                preview = write_preview(
+                    path,
+                    label=label_from_uniform_color(color),
+                    bbox_norm=None,
+                )
+                if preview:
+                    sample.preview_path = preview
+                    ctx.db.flush()
+            except Exception:
+                log.exception("uniform-compliance harvest: preview write "
+                              "failed cam=%s tid=%s", ctx.camera_id, tid)
             self._last_cropped[tid] = now
         except Exception:
             try: ctx.db.rollback()

@@ -363,6 +363,18 @@ def _maybe_harvest_staff_zone_crop(ctx: DetectorContext, det: dict,
         )
         ctx.db.add(sample)
         ctx.db.flush()
+        # Preview crop (Part 6) — orange overlay for operator review.
+        # dual_black auto-harvest always has a colour family by
+        # construction, so the label is unconditional.
+        try:
+            from app.training.image_preview import write_preview
+            preview = write_preview(path, label="Black Uniform", bbox_norm=None)
+            if preview:
+                sample.preview_path = preview
+                ctx.db.flush()
+        except Exception:
+            log.exception("staff-zone harvest: preview write failed cam=%s",
+                          ctx.camera_id)
         _last_staff_crop[key] = now
     except Exception:
         try: ctx.db.rollback()

@@ -27,6 +27,13 @@ class TrainingImage(Base):
     dataset_id:  Mapped[int]   = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
     camera_id:   Mapped[int | None] = mapped_column(ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True)
     file_path:   Mapped[str]   = mapped_column(Text)             # local path or s3 key
+    # Operator-review crop with an orange bbox overlay drawn on it.
+    # Best-effort sibling of file_path written at harvest time. NEVER
+    # fed to YOLO — drawing a box on training data teaches the model
+    # to detect orange boxes, not uniforms. Used by future "browse
+    # training pool" UI; the /sprint UI shows live alert snapshots
+    # (orange painted via the snapshot `boxes` payload).
+    preview_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     width:       Mapped[int | None] = mapped_column(Integer, nullable=True)
     height:      Mapped[int | None] = mapped_column(Integer, nullable=True)
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -90,6 +97,10 @@ class TrainingSample(Base):
     camera_id:     Mapped[int | None] = mapped_column(ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True)
     store_id:      Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
     frame_path:    Mapped[str]   = mapped_column(Text)
+    # Operator-review crop with orange bbox overlay (preview-pair
+    # mirror of TrainingImage.preview_path). Never fed to the chain
+    # classifier — orange would become a learned class. Best-effort.
+    preview_path:  Mapped[str | None] = mapped_column(Text, nullable=True)
     captured_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     labeled_by:    Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # How the sample arrived in the dataset. 'capture' = grabbed live
