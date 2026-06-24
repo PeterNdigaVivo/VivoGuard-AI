@@ -3,6 +3,7 @@
 // numbers move as operators triage alerts and the orchestrator runs.
 
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Badge, Card, PageHeader } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
 
@@ -128,6 +129,12 @@ export default function AILearningPage() {
                 className="px-3 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200 disabled:opacity-50">
           ▶ Run weekly orchestrator
         </button>
+        {/* Sprint entry point — gives operators a one-click path from
+            "I see my training pool is too small" to the labelling UI. */}
+        <Link to="/sprint"
+              className="px-3 py-1 rounded bg-sky-100 text-sky-800 hover:bg-sky-200 ml-auto">
+          🎯 Open labelling sprint →
+        </Link>
       </div>
 
       {err && <Card className="p-3 text-rose-700">Failed to load: {err}</Card>}

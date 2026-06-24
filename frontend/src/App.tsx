@@ -30,6 +30,7 @@ const TrainingStudioPage   = lazy(() => import('@/pages/TrainingStudioPage'))
 const AnnotationPage       = lazy(() => import('@/pages/AnnotationPage'))
 const TrainingDashboardPage= lazy(() => import('@/pages/TrainingDashboardPage'))
 const AILearningPage       = lazy(() => import('@/pages/AILearningPage'))
+const SprintPage           = lazy(() => import('@/pages/SprintPage'))
 const ShutterTrainingPage  = lazy(() => import('@/pages/ShutterTrainingPage'))
 const UniformTrainingPage  = lazy(() => import('@/pages/UniformTrainingPage'))
 const ChainTrainingPage    = lazy(() => import('@/pages/ChainTrainingPage'))
@@ -102,6 +103,7 @@ export default function App() {
               <Route path="/training/datasets/:dsId"  element={<AnnotationPage />} />
               <Route path="/training/jobs/:jobId"     element={<TrainingDashboardPage />} />
               <Route path="/ai-learning"              element={<AILearningPage />} />
+              <Route path="/sprint"                   element={<SprintPage />} />
               <Route path="/models"                   element={<ModelsPage />} />
               <Route path="/system"                   element={<SystemHealthPage />} />
             </Route>
