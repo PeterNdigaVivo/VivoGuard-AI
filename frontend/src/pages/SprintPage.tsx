@@ -157,6 +157,8 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
     : alert.severity_4 === 'MEDIUM'   ? 'amber'
     :                                   'slate'
 
+  const snapshotCount = alert.snapshot_count ?? 0
+
   return (
     <Card className="p-0 overflow-hidden">
       {/* Snapshot */}
@@ -166,6 +168,33 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
                  className="w-full h-full object-contain" />
           : <div className="text-slate-500 text-sm">No snapshot</div>}
       </div>
+
+      {/* Checkout-dwell timeline filmstrip (one JPEG per 60s).
+          Scrolls horizontally; click any thumbnail to lightbox. */}
+      {snapshotCount > 0 && (
+        <div className="bg-slate-100 px-3 py-2 border-b border-slate-200">
+          <div className="text-xs text-slate-500 mb-1.5">
+            Timeline — {snapshotCount} snapshot{snapshotCount === 1 ? '' : 's'}
+            <span className="text-slate-400"> · one every 60s from arrival to departure</span>
+          </div>
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {Array.from({ length: snapshotCount }, (_, i) => (
+              <a key={i}
+                 href={`/api/alerts/${alert.id}/snapshot/${i}`}
+                 target="_blank"
+                 rel="noopener noreferrer"
+                 className="shrink-0 block w-20 h-14 bg-black rounded overflow-hidden
+                            border border-slate-300 hover:border-sky-500
+                            transition-colors">
+                <img src={`/api/alerts/${alert.id}/snapshot/${i}`}
+                     alt={`Frame ${i + 1}`}
+                     loading="lazy"
+                     className="w-full h-full object-cover" />
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Metadata strip */}
       <div className="p-4 border-b border-slate-200">

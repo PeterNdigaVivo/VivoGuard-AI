@@ -929,6 +929,12 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.what_to_do     = _what_to_do(event, store, zone)
     item.time_range     = _time_range(event, store)
     item.snapshot_url   = _snapshot_url(alert.id, event)
+    # Checkout-dwell timeline (NULL for every other alert type).
+    # Pass the raw path list AND a count so the frontend can render
+    # the filmstrip without a separate length query.
+    sp = list(alert.snapshot_paths or [])
+    item.snapshot_paths  = sp or None
+    item.snapshot_count  = len(sp) or None
     return item
 
 
@@ -1316,3 +1322,25 @@ def alert_snapshot(alert_id: int, db: Session = Depends(get_db),
             return Response(content=cached, media_type="image/jpeg")
 
     raise HTTPException(404, "no snapshot available")
+
+
+@router.get("/{alert_id}/snapshot/{idx}")
+def alert_snapshot_at(alert_id: int, idx: int,
+                      db: Session = Depends(get_db),
+                      _u: User = Depends(get_current_user)):
+    """Return the Nth checkout-dwell timeline snapshot for the alert.
+    Indices are 0-based and chronological (filenames embed the
+    capture epoch). 404 on missing alert / out-of-range index / file
+    pruned. Hidden filesystem path — operators only see indices."""
+    from fastapi.responses import FileResponse
+    import os
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    paths = list(a.snapshot_paths or [])
+    if idx < 0 or idx >= len(paths):
+        raise HTTPException(404, "snapshot index out of range")
+    target = paths[idx]
+    if not os.path.exists(target):
+        raise HTTPException(404, "snapshot file missing (pruned?)")
+    return FileResponse(target, media_type="image/jpeg")

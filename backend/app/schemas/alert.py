@@ -59,6 +59,14 @@ class AlertOut(BaseModel):
     # itself doesn't carry a stored thumbnail.
     snapshot_url: str | None = None
 
+    # Checkout-dwell timeline snapshots — one JPEG per 60s of
+    # session, from counter-zone arrival to departure. NULL for
+    # every other alert type. Fetch each frame via
+    # GET /alerts/{id}/snapshot/{idx}  (0 ≤ idx < snapshot_count).
+    # Path list is server-internal; the frontend renders indices.
+    snapshot_paths: list[str] | None = None
+    snapshot_count: int       | None = None
+
 
 class AlertActionOut(BaseModel):
     id: int

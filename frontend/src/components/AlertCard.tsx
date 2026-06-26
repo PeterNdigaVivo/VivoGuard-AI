@@ -357,7 +357,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
           )}
         </div>
 
-        {/* Right: thumbnail */}
+        {/* Right: thumbnail (+ checkout-dwell filmstrip when present) */}
         <div className="sm:w-40 sm:flex-shrink-0">
           {snapUrl && !snapFailed && !snapAuthFailed ? (
             <img src={snapUrl}
@@ -370,6 +370,30 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               <div className="text-2xl">📷</div>
               <div className="text-[10px] mt-1">
                 {alert.camera_name ?? 'Snapshot'}
+              </div>
+            </div>
+          )}
+          {/* Checkout-dwell timeline — one JPEG per 60s from arrival
+              to departure. NULL for all other alert types. */}
+          {(alert.snapshot_count ?? 0) > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] text-slate-500 mb-1">
+                Timeline · {alert.snapshot_count} snapshot{alert.snapshot_count === 1 ? '' : 's'}
+              </div>
+              <div className="flex gap-1 overflow-x-auto">
+                {Array.from({ length: alert.snapshot_count ?? 0 }, (_, i) => (
+                  <a key={i}
+                     href={`/api/alerts/${alert.id}/snapshot/${i}`}
+                     target="_blank"
+                     rel="noopener noreferrer"
+                     className="shrink-0 block w-12 h-9 rounded overflow-hidden
+                                bg-black border border-slate-300 hover:border-sky-500">
+                    <img src={`/api/alerts/${alert.id}/snapshot/${i}`}
+                         alt={`Frame ${i + 1}`}
+                         loading="lazy"
+                         className="w-full h-full object-cover" />
+                  </a>
+                ))}
               </div>
             </div>
           )}

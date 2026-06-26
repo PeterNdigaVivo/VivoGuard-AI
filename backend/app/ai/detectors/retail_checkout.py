@@ -33,6 +33,11 @@ from app.ai.zone_logic import bbox_in_zone
 
 log = logging.getLogger(__name__)
 
+# Timeline-snapshot cadence — kept module-level so the session-open
+# block can initialise last_snapshot_ts = -INTERVAL (sentinel that
+# triggers the first capture at arrival t=0).
+from app.ai.detectors.checkout_snapshots import SNAPSHOT_INTERVAL_S
+
 # `vg:checkout_open:{cam}:{zone}:{track}` → JSON {entry_ts, store_id}
 REDIS_OPEN_KEY_FMT = "vg:checkout_open:{cam}:{zone}:{track}"
 # Key expires automatically so the alerting beat task never picks up
@@ -130,6 +135,12 @@ class CheckoutDwellDetector(Detector):
         if sess is None:
             return None
         cam, track, zone = key
+        # Snapshot finalisation BEFORE we clear the open-session key —
+        # _finalise_snapshots reads alert_id from it. Promotes pending
+        # frames to the alert folder when the alerter linked an alert,
+        # discards them otherwise. Runs on every close path (including
+        # under-min and over-max-dwell drops below).
+        self._finalise_snapshots(cam, track, zone, r)
         self._clear_open(r, cam, zone, track)
         duration = float(exit_ts - sess["entry_ts"])
         lo, hi = self._thresholds()
@@ -171,6 +182,59 @@ class CheckoutDwellDetector(Detector):
                 "store_id":      sess.get("store_id"),
             },
         )
+
+    # ------------------------------------------------------------------
+
+    def _finalise_snapshots(self, cam: int, track: int, zone: int, r) -> None:
+        """At session close: if the alerter linked an alert_id to
+        this session via the Redis open-session payload, move any
+        remaining pending JPEGs into the alert folder and atomically
+        extend Alert.snapshot_paths. Otherwise discard the pending
+        folder so we don't leak disk on routine queueing sessions."""
+        from app.ai.detectors.checkout_snapshots import (
+            promote_to_alert, discard_pending, delete_alert_folder,
+        )
+        alert_id: int | None = None
+        if r is not None:
+            try:
+                raw = r.get(REDIS_OPEN_KEY_FMT.format(
+                    cam=cam, zone=zone, track=track))
+                if raw:
+                    payload = json.loads(raw)
+                    alert_id = payload.get("alert_id")
+            except Exception:
+                alert_id = None
+        if not alert_id:
+            discard_pending(cam, track, zone)
+            return
+        new_paths = promote_to_alert(
+            camera_id=cam, track_id=track, zone_id=zone,
+            alert_id=int(alert_id),
+        )
+        if not new_paths:
+            return
+        # Append to the alert row, dedup'd against what the alerter
+        # already wrote at fire time. Best-effort: a DB failure must
+        # not crash the inference loop.
+        try:
+            from app.database import SessionLocal
+            from app.models import Alert
+            with SessionLocal() as db:
+                a = db.get(Alert, int(alert_id))
+                if a is None:
+                    # Alert deleted (retention prune?) — clean files.
+                    delete_alert_folder(int(alert_id))
+                    return
+                existing = list(a.snapshot_paths or [])
+                seen = set(existing)
+                for p in new_paths:
+                    if p not in seen:
+                        existing.append(p)
+                a.snapshot_paths = existing
+                db.commit()
+        except Exception:
+            log.exception("checkout snapshot append failed alert=%s",
+                          alert_id)
 
     # ------------------------------------------------------------------
 
@@ -278,7 +342,18 @@ class CheckoutDwellDetector(Detector):
                     sess = {"entry_ts": now, "last_seen_ts": now,
                             "store_id": ctx.store_id,
                             "min_alert_seconds": min_alert,
-                            "staff_level": level}
+                            "staff_level": level,
+                            # Last 60s-snapshot timestamp (Q1 spec —
+                            # gated on SESSION time, not inference fps).
+                            # Sentinel `-INTERVAL` so the FIRST evaluate()
+                            # tick captures arrival (now - (-60) >= 60),
+                            # honouring "from the first time the customer
+                            # is at the checkout queue" per Q2.
+                            "last_snapshot_ts": -SNAPSHOT_INTERVAL_S,
+                            # Carried for _finalise_snapshots without
+                            # destructuring the dict key tuple again.
+                            "track_id": int(track_id),
+                            "zone_id":  int(z["id"])}
                     self._sessions[key] = sess
                     self._publish_open(r, ctx.camera_id, int(z["id"]),
                                         int(track_id), now, ctx.store_id,
@@ -299,6 +374,21 @@ class CheckoutDwellDetector(Detector):
                             r, ctx.camera_id, int(z["id"]),
                             int(track_id), sess["entry_ts"], ctx.store_id,
                             min_alert_seconds=min_alert)
+
+                # Per-spec Q1: one snapshot every 60 SESSION seconds
+                # (not every inference cycle — at 2 fps the cycle is
+                # 0.5s; gating here would write 120 snaps/min/session).
+                from app.ai.detectors.checkout_snapshots import capture_pending
+                if (now - sess.get("last_snapshot_ts", 0.0)) >= SNAPSHOT_INTERVAL_S:
+                    written = capture_pending(
+                        ctx.frame_bgr,
+                        camera_id=ctx.camera_id,
+                        track_id=int(track_id),
+                        zone_id=int(z["id"]),
+                        epoch_ts=int(now),
+                    )
+                    if written is not None:
+                        sess["last_snapshot_ts"] = now
 
         # Pass 2 — close any session whose track is no longer in its
         # zone OR has aged out beyond TRACK_LOST_GRACE_SECONDS. We

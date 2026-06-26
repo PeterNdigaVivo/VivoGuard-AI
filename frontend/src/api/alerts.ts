@@ -33,6 +33,10 @@ export interface Alert {
   // the camera's store-local timezone.
   time_range: string | null
   snapshot_url: string | null
+  // Checkout-dwell timeline filmstrip (NULL for other alert types).
+  // Render via /api/alerts/{id}/snapshot/{idx} — paths stay server-side.
+  snapshot_paths: string[] | null
+  snapshot_count: number   | null
 }
 
 export const alerts = {

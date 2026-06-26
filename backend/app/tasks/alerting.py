@@ -359,7 +359,7 @@ def checkout_long_session_check() -> None:
                     "Mark resolved once the customer has been served",
                 ],
             }
-            _create_info_alert(
+            ev_rec = _create_info_alert(
                 db, camera_id=cam_id or None, zone_id=zone_id or None,
                 store_id=store_id, detection_type="checkout_dwell",
                 cls="checkout_dwell_long", extra=extra,
@@ -368,6 +368,73 @@ def checkout_long_session_check() -> None:
             r.set(sent_key, "1", ex=CHECKOUT_ALERT_DEDUP_TTL_SECONDS)
             log.info("checkout_dwell_long: store=%s cam=%s zone=%s "
                      "duration=%dm", store_name, cam_id, zone_id, minutes)
+
+            # Promote any pending timeline snapshots into the alert
+            # folder and stamp Alert.snapshot_paths. Also write
+            # `alert_id` back into the open-session Redis payload so
+            # the detector's session-close hook can append late
+            # frames to the same alert row.
+            try:
+                from app.ai.detectors.checkout_snapshots import promote_to_alert
+                from app.ai.detectors.retail_checkout import (
+                    REDIS_OPEN_KEY_FMT as _CK_KEY,
+                    REDIS_OPEN_TTL_SECONDS as _CK_TTL,
+                )
+                from app.models import Alert as _Alert
+                track_id_int = int(c.get("track_id") or 0) if c.get("track_id") is not None else 0
+                # Look up the Alert row by event_id — _create_info_alert
+                # returned the DetectionEvent, not the Alert.
+                alert_row = (db.query(_Alert)
+                               .filter(_Alert.event_id == ev_rec.id)
+                               .first())
+                if alert_row and track_id_int:
+                    paths = promote_to_alert(
+                        camera_id=cam_id, track_id=track_id_int,
+                        zone_id=zone_id, alert_id=alert_row.id,
+                    )
+                    if paths:
+                        alert_row.snapshot_paths = paths
+                        db.commit()
+                    # Stamp alert_id into the open-session key so the
+                    # detector's _finalise_snapshots can find it later.
+                    open_key = _CK_KEY.format(
+                        cam=cam_id, zone=zone_id, track=track_id_int)
+                    raw = r.get(open_key)
+                    if raw:
+                        payload = json.loads(raw)
+                        payload["alert_id"] = int(alert_row.id)
+                        r.set(open_key, json.dumps(payload), ex=_CK_TTL)
+            except Exception:
+                log.exception("checkout_dwell_long: snapshot promote "
+                              "failed event=%s", getattr(ev_rec, "id", None))
+
+
+# ---- Checkout snapshot retention (24h prune) -------------------------
+
+@celery_app.task(name="alerting.prune_checkout_snapshots",
+                  ignore_result=True)
+def prune_checkout_snapshots() -> None:
+    """Delete checkout-dwell timeline snapshot files + null
+    Alert.snapshot_paths for alerts older than 24h. Per the Q4
+    spec: retention is measured from Alert.created_at. Idempotent —
+    re-running over already-pruned rows is a no-op."""
+    from app.database import SessionLocal
+    from app.models import Alert
+    from app.ai.detectors.checkout_snapshots import delete_alert_folder
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    with SessionLocal() as db:
+        stale = (db.query(Alert)
+                   .filter(Alert.snapshot_paths.isnot(None))
+                   .filter(Alert.created_at < cutoff)
+                   .all())
+        n_files = 0
+        for a in stale:
+            n_files += delete_alert_folder(int(a.id))
+            a.snapshot_paths = None
+        if stale:
+            db.commit()
+        log.info("prune_checkout_snapshots: alerts=%d files=%d",
+                 len(stale), n_files)
 
 
 # ---- Camera health ----------------------------------------------------

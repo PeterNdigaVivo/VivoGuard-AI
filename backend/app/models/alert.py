@@ -1,6 +1,6 @@
 """Alerts — operator-facing surface for events that warrant attention."""
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -30,5 +30,13 @@ class Alert(Base):
     # how quickly real incidents were resolved.
     resolved_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at:       Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    # Timeline snapshots for checkout_dwell alerts — one JPEG per
+    # 60s from counter-zone arrival to departure. Append-only:
+    # alerter writes frames 1..N at fire time; the detector's
+    # session-close hook appends N+1..M atomically. NULL for all
+    # other alert types and for snapshot-less checkout alerts
+    # (e.g. when the camera was offline mid-session). Pruned 24h
+    # after `created_at` by alerting.prune_checkout_snapshots.
+    snapshot_paths:   Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     event = relationship("DetectionEvent", back_populates="alert")

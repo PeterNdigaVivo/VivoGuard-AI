@@ -66,6 +66,7 @@ celery_app.conf.update(
         "alerting.camera_health_check":         {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
+        "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
         "alerting.inference_pipeline_health_check": {"queue": "alerts"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
@@ -178,6 +179,14 @@ celery_app.conf.update(
         "checkout-long-session-every-60s": {
             "task": "alerting.checkout_long_session_check",
             "schedule": 60.0,
+        },
+        # Hourly 24h retention sweep of checkout-dwell timeline
+        # snapshot files (data/checkout_snaps/alerts/{alert_id}/).
+        # Deletes files older than 24h from Alert.created_at AND
+        # nulls Alert.snapshot_paths.
+        "prune-checkout-snapshots-every-1h": {
+            "task": "alerting.prune_checkout_snapshots",
+            "schedule": 60 * 60.0,
         },
         # Camera-offline WhatsApp nudge — every 60s the task scans
         # ai_enabled cameras and fires when last_seen is > 5 min stale
