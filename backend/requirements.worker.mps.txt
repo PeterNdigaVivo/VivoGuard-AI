@@ -1,0 +1,6 @@
+# Apple Silicon backend — CoreML + Neural Engine.
+-r requirements.worker.base.txt
+torch>=2.3
+torchvision>=0.18
+coremltools>=8.0
+onnxruntime-silicon>=1.16 ; platform_machine == "arm64"

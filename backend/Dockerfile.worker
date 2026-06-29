@@ -5,14 +5,22 @@
 #   torch (CPU-only by default) + ultralytics + opencv-headless + ffmpeg.
 #
 # Build args:
-#   GPU=true    → installs CUDA-enabled torch wheels (~5 GB image)
-#   GPU=false   → installs CPU-only torch wheels      (~1.5 GB image)
+#   GPU_BACKEND=cpu    → CPU-only torch + ONNX Runtime (default, ~1.5 GB)
+#   GPU_BACKEND=cuda   → CUDA 12.4 torch + TensorRT     (~5 GB)
+#   GPU_BACKEND=rocm   → ROCm 6.2 torch (PyTorch HIP)
+#   GPU_BACKEND=mps    → torch + CoreML tools (Apple Silicon hosts)
+#   GPU_BACKEND=intel  → CPU torch + OpenVINO
+#
+# Each backend installs requirements.worker.base.txt PLUS
+# requirements.worker.${GPU_BACKEND}.txt (which pins the right torch
+# wheel + index). Runtime hardware detection lives in
+# backend/app/ai/env_config.py.
 #
 # Build:
-#   docker build --build-arg GPU=false -t vivoguard/worker -f backend/Dockerfile.worker backend/
-#   docker build --build-arg GPU=true  -t vivoguard/worker-gpu ...
+#   docker build --build-arg GPU_BACKEND=cpu  -t vivoguard/worker     -f backend/Dockerfile.worker backend/
+#   docker build --build-arg GPU_BACKEND=cuda -t vivoguard/worker-gpu ...
 # =====================================================================
-ARG GPU=false
+ARG GPU_BACKEND=cpu
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -51,15 +59,14 @@ except Exception as e:
 print(f"bcrypt OK ({bcrypt.__version__}) — hash/verify round-trip works")
 PY
 
-# AI deps. CPU-only torch index is much smaller and avoids pulling CUDA
-# runtime libs when GPU is not available.
-COPY requirements.worker.txt requirements.worker.txt
-RUN if [ "$GPU" = "true" ]; then \
-        pip install -r requirements.worker.txt ; \
-    else \
-        pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-                    -r requirements.worker.txt ; \
-    fi
+# AI deps. base (backend-agnostic) + the backend-specific file, which
+# pins the right torch wheel and index. GPU_BACKEND must name an
+# existing requirements.worker.${GPU_BACKEND}.txt (cpu|cuda|rocm|mps|intel).
+# Re-declare the ARG after FROM so it's in scope for this build stage.
+ARG GPU_BACKEND=cpu
+COPY requirements.worker.base.txt           requirements.worker.base.txt
+COPY requirements.worker.${GPU_BACKEND}.txt requirements.worker.backend.txt
+RUN pip install -r requirements.worker.base.txt -r requirements.worker.backend.txt
 
 COPY app    ./app
 COPY alembic ./alembic

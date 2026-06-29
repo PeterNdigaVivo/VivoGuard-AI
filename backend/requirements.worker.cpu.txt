@@ -1,0 +1,6 @@
+# CPU-only backend (default). torch CPU wheels + ONNX Runtime.
+-r requirements.worker.base.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.3
+torchvision>=0.18
+onnxruntime>=1.17

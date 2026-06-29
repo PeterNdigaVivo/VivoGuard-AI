@@ -72,13 +72,32 @@ class Settings(BaseSettings):
     credentials_fernet_key: str = ""
 
     # --- AI / GPU ---
+    # `use_gpu` is retained for the training tasks (trainer / evaluator /
+    # chain / shutter / uniform) which still pass device="0"|"cpu" to
+    # YOLO.train(). Inference now auto-detects via env_config.HardwareEnv
+    # and ignores this flag.
     use_gpu: bool = False
     cuda_visible_devices: str = "0"
+    # Which compute backend the worker IMAGE was built for. Drives the
+    # Docker build (requirements.worker.{backend}.txt) and is logged at
+    # startup; the runtime still auto-detects actual hardware via
+    # env_config.HardwareEnv.detect(). cpu | cuda | rocm | mps | intel.
+    gpu_backend: str = "cpu"
+    # One-time export of the model to the detected backend's optimized
+    # format (TensorRT/ONNX/OpenVINO/CoreML), then load the cached
+    # artifact. False = always raw PyTorch (simpler for debugging).
+    use_optimized: bool = True
     default_model: str = "yolov8n.pt"
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
-    # tracking on a high-priority camera.
-    inference_fps_default: int = 2
+    # tracking on a high-priority camera. Accepts INFERENCE_FPS (new
+    # name in .env.example) or INFERENCE_FPS_DEFAULT (legacy) from env.
+    inference_fps_default: int = Field(
+        default=2,
+        validation_alias=AliasChoices("INFERENCE_FPS",
+                                       "INFERENCE_FPS_DEFAULT",
+                                       "inference_fps_default"),
+    )
     # Duration of one per-camera inference task before it exits and the
     # supervisor re-queues it. Lowered from the old hard-coded 540s to
     # 120s so a config/zone change reaches a camera within ~2 min

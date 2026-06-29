@@ -1,0 +1,6 @@
+# AMD ROCm 6.2 backend — PyTorch HIP (runs the raw .pt on the GPU,
+# no separate export step).
+-r requirements.worker.base.txt
+--extra-index-url https://download.pytorch.org/whl/rocm6.2
+torch>=2.4
+torchvision>=0.19

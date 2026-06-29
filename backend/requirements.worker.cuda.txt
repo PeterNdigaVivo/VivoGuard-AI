@@ -1,0 +1,7 @@
+# NVIDIA CUDA 12.4 backend — TensorRT optimized inference.
+-r requirements.worker.base.txt
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
+torchvision>=0.19
+tensorrt>=10.0
+onnxruntime-gpu>=1.17

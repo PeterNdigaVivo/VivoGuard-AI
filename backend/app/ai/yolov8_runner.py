@@ -1,6 +1,7 @@
 """YOLOv8 inference wrapper.
 
-Loads a model once per process, runs inference on numpy frames, and
+Loads a model once per process (optimized for the detected hardware
+backend via app.ai.env_config), runs inference on numpy frames, and
 returns a normalised list of detections regardless of model class set.
 
 Detections are dicts with: cls (str), conf (float), bbox_norm
@@ -9,10 +10,13 @@ Detections are dicts with: cls (str), conf (float), bbox_norm
 from __future__ import annotations
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 
 import numpy as np
+
+from app.ai.env_config import HardwareEnv
 
 log = logging.getLogger(__name__)
 
@@ -20,28 +24,39 @@ log = logging.getLogger(__name__)
 _models: dict[str, object] = {}
 _lock = threading.Lock()
 
+# Hardware backend is detected ONCE per process at first model load.
+# CUDA → ROCm → MPS → Intel OpenVINO → CPU (see env_config.detect()).
+_env: HardwareEnv | None = None
 
-def _device() -> str:
-    """`cuda:0` when GPU is available and enabled, else `cpu`."""
-    from app.config import settings
-    if not settings.use_gpu:
-        return "cpu"
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda:0"
-    except Exception:
-        pass
-    return "cpu"
+
+def _hardware() -> HardwareEnv:
+    global _env
+    if _env is None:
+        _env = HardwareEnv.detect()
+        # One-line backend banner to stderr so it shows up in
+        # `docker compose logs` regardless of log config.
+        print(
+            f"[VivoGuard AI] backend={_env.backend} device={_env.device} "
+            f"format={_env.export_format} gpu={_env.gpu_name or 'none'} "
+            f"gpu_mem_mb={_env.gpu_memory_mb} framework_ok={_env.framework_ok}",
+            file=sys.stderr, flush=True,
+        )
+    return _env
 
 
 def load_model(weights: str):
-    """Load (and cache) a YOLOv8 model from a `.pt` file path."""
+    """Load (and cache) a YOLO model for `weights`, optimized for the
+    detected backend when settings.use_optimized is True."""
     with _lock:
         if weights not in _models:
-            from ultralytics import YOLO          # heavy import — kept lazy
-            log.info("loading YOLO model: %s on %s", weights, _device())
-            model = YOLO(weights)
+            from app.config import settings
+            env = _hardware()
+            use_opt = bool(getattr(settings, "use_optimized", True))
+            model, fmt = env.load_optimized(weights, use_optimized=use_opt)
+            log.info("loaded YOLO model %s as %s (backend=%s device=%s "
+                     "export_ms=%.0f load_ms=%.0f)",
+                     weights, fmt, env.backend, env.device,
+                     env.export_ms, env.load_ms)
             _models[weights] = model
         return _models[weights]
 
@@ -65,7 +80,8 @@ def infer(frame: np.ndarray, *, weights: str | None = None,
     """Run inference on a single BGR frame.
     Returns a list of detection dicts."""
     model = load_model(resolve_weights(weights))
-    results = model.predict(frame, conf=conf, imgsz=imgsz, device=_device(),
+    device = _hardware().device
+    results = model.predict(frame, conf=conf, imgsz=imgsz, device=device,
                             verbose=False)
     out: list[dict] = []
     if not results:

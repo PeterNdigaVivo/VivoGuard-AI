@@ -45,7 +45,13 @@ x-app-env: &app-env
   CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
   USE_GPU: ${USE_GPU:-false}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+  # AI hardware backend (runtime side — mirrors the build ARG so
+  # env_config logs which backend the image was built for). Inference
+  # still auto-detects actual hardware at startup.
+  GPU_BACKEND: ${GPU_BACKEND:-cpu}
+  USE_OPTIMIZED: ${USE_OPTIMIZED:-true}
   DEFAULT_MODEL: ${DEFAULT_MODEL:-yolov8n.pt}
+  INFERENCE_FPS: ${INFERENCE_FPS:-3}
   INFERENCE_FPS_DEFAULT: ${INFERENCE_FPS_DEFAULT:-5}
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
@@ -116,7 +122,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.worker
       args:
-        GPU: "false"
+        GPU_BACKEND: ${GPU_BACKEND:-cpu}
     image: vivoguard/worker:latest
     restart: unless-stopped
     command:
@@ -134,7 +140,7 @@ services:
       redis:    { condition: service_healthy }
     networks: [vivoguard]
     # GPU passthrough — uncomment once the host has nvidia-container-toolkit
-    # and you've rebuilt with `--build-arg GPU=true`.
+    # and you've rebuilt with `GPU_BACKEND=cuda`.
     # <<: *gpu-reservation
 
   # --- Alerts / bookkeeping worker. 4 slots dedicated to the short
@@ -148,7 +154,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.worker
       args:
-        GPU: "false"
+        GPU_BACKEND: ${GPU_BACKEND:-cpu}
     image: vivoguard/worker:latest
     restart: unless-stopped
     command:
