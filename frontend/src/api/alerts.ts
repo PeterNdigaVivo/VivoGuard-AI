@@ -37,6 +37,9 @@ export interface Alert {
   // Render via /api/alerts/{id}/snapshot/{idx} — paths stay server-side.
   snapshot_paths: string[] | null
   snapshot_count: number   | null
+  // VLM scene description (Sprint 2.1). NULL until the async analysis
+  // task writes it, or when VLM is disabled / type ineligible.
+  vlm_scene: string | null
 }
 
 export const alerts = {

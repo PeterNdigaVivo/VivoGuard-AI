@@ -935,6 +935,10 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     sp = list(alert.snapshot_paths or [])
     item.snapshot_paths  = sp or None
     item.snapshot_count  = len(sp) or None
+    # VLM scene description lives in the event's extra JSON (written
+    # async by the vlm.analyse_alert_scene task). Surface just that
+    # one field — never the whole extra blob.
+    item.vlm_scene = (event.extra or {}).get("vlm_scene") if event else None
     return item
 
 

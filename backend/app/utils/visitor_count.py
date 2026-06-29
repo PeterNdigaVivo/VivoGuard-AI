@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import String, cast, distinct, func
 from sqlalchemy.orm import Session
 
 from app.models import MetricSnapshot, StaffTrack, VisitorTrack, Zone
@@ -126,8 +126,20 @@ def daily_visitor_count(
     store_id = int(store.id)
 
     # ----- 1. unique visitors via VisitorTrack ------------------------
+    # Sprint 2.2: when the Re-ID pipeline has stamped a cross-camera
+    # global_person_id, count DISTINCT identities so the same shopper seen
+    # on several cameras counts ONCE — fixing the long-standing per-camera
+    # double-count. Rows without a global id (Re-ID off, or not yet
+    # assigned) fall back to their unique row id via COALESCE, so they
+    # each still count once exactly as before. The identity is bucketed
+    # per hour, so same-hour multi-camera appearances collapse; the
+    # hourly bars still sum to the displayed total by construction.
+    _visitor_identity = func.coalesce(
+        VisitorTrack.global_person_id,
+        cast(VisitorTrack.id, String),
+    )
     rows = (db.query(_eat_hour_expr(VisitorTrack.first_seen, tz_name).label("h"),
-                     func.count(VisitorTrack.id).label("n"))
+                     func.count(distinct(_visitor_identity)).label("n"))
               .outerjoin(StaffTrack,
                          (StaffTrack.store_id == store_id)
                          & (StaffTrack.day == VisitorTrack.day)

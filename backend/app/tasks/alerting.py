@@ -408,6 +408,25 @@ def checkout_long_session_check() -> None:
                 log.exception("checkout_dwell_long: snapshot promote "
                               "failed event=%s", getattr(ev_rec, "id", None))
 
+            # VLM scene analysis — async on the alerts queue (we're
+            # already on it, but .delay keeps it non-blocking + lets
+            # the task re-check vlm_enabled / dedup). checkout_dwell is
+            # in the default vlm_alert_types.
+            try:
+                from app.config import settings as _vlm_settings
+                if (getattr(_vlm_settings, "vlm_enabled", False)
+                        and "checkout_dwell" in set(
+                            getattr(_vlm_settings, "vlm_alert_types", []) or [])):
+                    from app.models import Alert as _Alert2
+                    a2 = (db.query(_Alert2)
+                            .filter(_Alert2.event_id == ev_rec.id).first())
+                    if a2 is not None:
+                        from app.tasks.vlm_tasks import analyse_alert_scene
+                        analyse_alert_scene.delay(a2.id)
+            except Exception:
+                log.exception("checkout_dwell_long: vlm enqueue failed "
+                              "event=%s", getattr(ev_rec, "id", None))
+
 
 # ---- Checkout snapshot retention (24h prune) -------------------------
 

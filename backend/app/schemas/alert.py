@@ -67,6 +67,12 @@ class AlertOut(BaseModel):
     snapshot_paths: list[str] | None = None
     snapshot_count: int       | None = None
 
+    # VLM scene description (Sprint 2.1) — written async into
+    # DetectionEvent.extra["vlm_scene"]. NULL until the analysis task
+    # completes (the card shows "Analysing scene…" meanwhile) or when
+    # VLM is disabled / the type isn't eligible.
+    vlm_scene: str | None = None
+
 
 class AlertActionOut(BaseModel):
     id: int

@@ -31,6 +31,9 @@ aiosmtplib>=3.0
 twilio>=9.0
 websockets>=12
 Pillow>=10
+# Cloud VLM scene analysis (Sprint 2.1). Pure-Python SDK, no system
+# deps. Only invoked when VLM_ENABLED=true + ANTHROPIC_API_KEY set.
+anthropic>=0.40
 # PDF report generation for retail analytics (P4). reportlab has no
 # system dependencies so it works in the slim API image without bloat.
 reportlab>=4.0

@@ -36,6 +36,7 @@ celery_app = Celery(
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
         "app.tasks.queue_report",
+        "app.tasks.vlm_tasks",
     ],
 )
 celery_app.conf.update(
@@ -67,6 +68,7 @@ celery_app.conf.update(
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
+        "vlm.analyse_alert_scene":              {"queue": "alerts"},
         "alerting.inference_pipeline_health_check": {"queue": "alerts"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the

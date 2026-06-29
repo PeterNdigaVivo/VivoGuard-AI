@@ -87,6 +87,50 @@ const LABEL_FROM_SERVER: Record<string, string> = {
   URGENT: '🔴 URGENT', ATTENTION: '🟡 ATTENTION', INFO: '🔵 INFO',
 }
 
+// Alert types that get a VLM scene description (mirrors backend
+// VLM_ALERT_TYPES default — used only to decide whether to show the
+// transient "Analysing scene…" placeholder, never to gate the actual
+// description, which the server controls).
+const VLM_ELIGIBLE_TYPES = new Set([
+  'checkout_dwell', 'staff_present', 'trespass',
+  'uniform_compliance', 'shop_open_close',
+])
+// How long after creation we keep showing "Analysing scene…" before
+// assuming VLM is disabled/failed and hiding the box entirely.
+const SCENE_PENDING_WINDOW_MS = 3 * 60 * 1000
+
+function SceneAnalysis({ alert }: { alert: Alert }) {
+  const [open, setOpen] = useState(true)
+  if (alert.vlm_scene) {
+    return (
+      <div className="mt-2 rounded border border-sky-200 bg-sky-50">
+        <button type="button"
+                onClick={() => setOpen(o => !o)}
+                className="w-full flex items-center justify-between px-2 py-1
+                           text-xs font-semibold text-sky-800">
+          <span>🧠 AI Scene Analysis</span>
+          <span className="text-sky-500">{open ? '▾' : '▸'}</span>
+        </button>
+        {open && (
+          <div className="px-2 pb-2 text-sm text-sky-900">{alert.vlm_scene}</div>
+        )}
+      </div>
+    )
+  }
+  // No scene yet. Show a transient placeholder only for VLM-eligible
+  // types within the pending window — otherwise the box would linger
+  // forever when VLM is disabled.
+  if (!VLM_ELIGIBLE_TYPES.has(alert.detection_type ?? '')) return null
+  const ageMs = Date.now() - new Date(alert.created_at).getTime()
+  if (ageMs > SCENE_PENDING_WINDOW_MS) return null
+  return (
+    <div className="mt-2 rounded border border-sky-100 bg-sky-50/60
+                    px-2 py-1 text-xs text-sky-600 italic">
+      🧠 Analysing scene…
+    </div>
+  )
+}
+
 function sevKey(s: string | null): 'critical' | 'warning' | 'info' | 'default' {
   if (s === 'critical' || s === 'warning' || s === 'info') return s
   return 'default'
@@ -236,6 +280,13 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
           {alert.body && (
             <div className="text-sm text-slate-600 mt-1">{alert.body}</div>
           )}
+
+          {/* AI Scene Analysis (Sprint 2.1 VLM). Shows the scene
+              description once the async task writes it; a transient
+              "Analysing scene…" placeholder for VLM-eligible alerts
+              whose description hasn't landed yet (within ~3 min of
+              creation). Collapsible. */}
+          <SceneAnalysis alert={alert} />
 
           {/* What to do — plain-English steps for non-technical staff. */}
           {alert.what_to_do && alert.what_to_do.length > 0 && (

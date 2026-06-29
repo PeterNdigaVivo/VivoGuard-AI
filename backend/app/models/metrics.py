@@ -69,6 +69,11 @@ class VisitorTrack(Base):
     camera_id: Mapped[int]   = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
     day:       Mapped[date_t] = mapped_column(Date, index=True)
     track_signature: Mapped[str] = mapped_column(String(128))   # camera_id:track_id (or perceptual hash later)
+    # Sprint 2.2 cross-camera Re-ID identity. One person seen on several
+    # cameras in a store shares ONE global_person_id, so unique-visitor
+    # counting + journeys can de-duplicate across cameras. NULL when
+    # Re-ID is disabled — counting then falls back to track_signature.
+    global_person_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     first_seen:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Optional demographic snapshot taken at first-seen.
@@ -78,6 +83,8 @@ class VisitorTrack(Base):
 
 Index("ix_visitor_track_dedup_key",
       VisitorTrack.store_id, VisitorTrack.day, VisitorTrack.track_signature, unique=True)
+Index("ix_visitor_track_global_person",
+      VisitorTrack.store_id, VisitorTrack.day, VisitorTrack.global_person_id)
 
 
 class StockroomAccess(Base):

@@ -361,12 +361,19 @@ class UniqueVisitorDetector(Detector):
                 continue
             self._seen_today.add(cache_key)
 
+            # Sprint 2.2: stamp the cross-camera identity if the Re-ID
+            # loop assigned one to this track (Track.extra carries it).
+            # NULL when Re-ID is disabled — counting then falls back to
+            # the per-camera track_signature as before.
+            global_person_id = (tr.extra or {}).get("global_person_id")
+
             try:
                 vt = VisitorTrack(
                     store_id=ctx.store_id,
                     camera_id=ctx.camera_id,
                     day=today,
                     track_signature=signature,
+                    global_person_id=global_person_id,
                 )
                 ctx.db.add(vt)
                 ctx.db.flush()

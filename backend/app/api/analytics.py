@@ -2835,6 +2835,133 @@ def journeys_for_store(store_id: int, days: int = 1,
     }
 
 
+@router.get("/store/{store_id}/journeys")
+def store_reid_journeys(store_id: int,
+                        date: str = Query("today"),
+                        limit: int = Query(200, le=1000),
+                        db: Session = Depends(get_db),
+                        _u=Depends(get_current_user)):
+    """Cross-camera customer journeys for one store-day (Sprint 2.2 Re-ID).
+
+    Distinct from /analytics/journeys/{store_id}, which reconstructs
+    single-camera zone sequences. This endpoint stitches a shopper's path
+    ACROSS cameras using the Re-ID `global_person_id` stamped on
+    visitor_tracks, returning one entry per physical person with the
+    cameras they visited (in arrival order) and their in-store dwell.
+
+    Returns empty journeys when Re-ID is disabled / not yet populated —
+    the dashboard then simply hides the journey panel.
+    """
+    from collections import Counter, OrderedDict
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+
+    from app.models import Camera, StaffTrack, VisitorTrack
+
+    if date in ("today", "", None):
+        target_day = _date.today()
+    else:
+        try:
+            target_day = _date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="date must be ISO YYYY-MM-DD or 'today'")
+
+    store = db.get(Store, store_id)
+    tz_name = (getattr(store, "timezone", None) or "Africa/Nairobi") if store else "Africa/Nairobi"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Africa/Nairobi")
+
+    def _hhmm(dt):
+        if dt is None:
+            return None
+        try:
+            return dt.astimezone(tz).strftime("%H:%M")
+        except Exception:
+            return dt.strftime("%H:%M")
+
+    rows = (db.query(VisitorTrack)
+              .filter(VisitorTrack.store_id == store_id,
+                      VisitorTrack.day == target_day,
+                      VisitorTrack.global_person_id.isnot(None))
+              .all())
+
+    # Camera id -> display name.
+    cam_ids = {r.camera_id for r in rows if r.camera_id is not None}
+    cam_names: dict[int, str] = {}
+    if cam_ids:
+        for c in db.query(Camera).filter(Camera.id.in_(cam_ids)).all():
+            cam_names[c.id] = c.name
+
+    # track_signatures classified as staff today → mark those journeys.
+    staff_sigs = {
+        sig for (sig,) in
+        db.query(StaffTrack.track_signature)
+          .filter(StaffTrack.store_id == store_id,
+                  StaffTrack.day == target_day,
+                  StaffTrack.classified_as == "staff").all()
+    }
+
+    agg: "OrderedDict[str, dict]" = OrderedDict()
+    for r in rows:
+        gid = r.global_person_id
+        a = agg.get(gid)
+        if a is None:
+            a = {"global_id": gid, "_cams": [], "_seen": set(),
+                 "first_seen": r.first_seen, "last_seen": r.last_seen,
+                 "is_staff": False}
+            agg[gid] = a
+        cname = (cam_names.get(r.camera_id)
+                 or (f"Camera {r.camera_id}" if r.camera_id else "Unknown"))
+        if cname not in a["_seen"]:
+            a["_seen"].add(cname)
+            a["_cams"].append((r.first_seen, cname))
+        if r.first_seen and (a["first_seen"] is None or r.first_seen < a["first_seen"]):
+            a["first_seen"] = r.first_seen
+        if r.last_seen and (a["last_seen"] is None or r.last_seen > a["last_seen"]):
+            a["last_seen"] = r.last_seen
+        if r.track_signature in staff_sigs:
+            a["is_staff"] = True
+
+    journeys = []
+    path_counter: Counter = Counter()
+    for a in agg.values():
+        cams = [c for _, c in sorted(a["_cams"], key=lambda t: (t[0] or 0))]
+        dwell_min = 0
+        if a["first_seen"] and a["last_seen"]:
+            dwell_min = max(0, int((a["last_seen"] - a["first_seen"]).total_seconds() // 60))
+        journeys.append({
+            "global_id": a["global_id"],
+            "cameras_visited": cams,
+            "first_seen": _hhmm(a["first_seen"]),
+            "last_seen": _hhmm(a["last_seen"]),
+            "total_dwell_minutes": dwell_min,
+            "is_staff": a["is_staff"],
+        })
+        if not a["is_staff"] and len(cams) >= 2:
+            path_counter[tuple(cams)] += 1
+
+    journeys.sort(key=lambda j: (j["first_seen"] or ""))
+    top_paths = [{"path": list(seq), "count": cnt}
+                 for seq, cnt in path_counter.most_common(10)]
+
+    unique_people = len(agg)
+    unique_customers = sum(1 for a in agg.values() if not a["is_staff"])
+    camera_appearances = len(rows)
+
+    return {
+        "store_id": store_id,
+        "date": target_day.isoformat(),
+        "unique_people": unique_people,           # all global identities
+        "unique_customers": unique_customers,     # staff excluded
+        "camera_appearances": camera_appearances,  # raw visitor_track rows
+        "top_paths": top_paths,
+        "journeys": journeys[:limit],
+    }
+
+
 # ---- Backfill metric_snapshots.store_id from current camera.store_id ----
 
 @router.post("/admin/backfill-store-ids")

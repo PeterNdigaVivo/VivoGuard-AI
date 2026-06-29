@@ -369,6 +369,11 @@ export default function StoreDashboardPage() {
               firstCameraId={extractFirstCameraId(t.heatmap_thumb_url?.value as string | null)} />
           </Suspense>
         </section>
+
+        <section className="mt-6">
+          <SectionTitle>Customer journeys</SectionTitle>
+          <CustomerJourneysPanel storeId={storeId} />
+        </section>
       </ScrollMounted>
 
       {/* Edit-store modal — opens from the pen icon next to the title.
@@ -409,6 +414,88 @@ function PeakPredictionBanner({ storeId }: { storeId: number }) {
     <div className="rounded-md border border-sky-200 bg-sky-50 text-sky-800 px-3 py-2 text-sm">
       🔮 {pred.headline}
     </div>
+  )
+}
+
+
+// Cross-camera customer journeys (Sprint 2.2 Re-ID). Shows unique
+// people vs raw camera appearances (the de-duplication win) and the
+// most common paths through the store. Hidden entirely when Re-ID is
+// off / hasn't populated, so it never shows an empty shell.
+interface JourneyRow {
+  global_id: string
+  cameras_visited: string[]
+  first_seen: string | null
+  last_seen: string | null
+  total_dwell_minutes: number
+  is_staff: boolean
+}
+interface JourneysResponse {
+  store_id: number
+  date: string
+  unique_people: number
+  unique_customers: number
+  camera_appearances: number
+  top_paths: { path: string[]; count: number }[]
+  journeys: JourneyRow[]
+}
+function CustomerJourneysPanel({ storeId }: { storeId: number }) {
+  const [data, setData] = useState<JourneysResponse | null>(null)
+  useEffect(() => {
+    fetch(`/api/analytics/store/${storeId}/journeys?date=today`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('vg_access_token') ?? ''}` },
+    }).then(r => r.ok ? r.json() : null).then(d => { if (d) setData(d) }).catch(() => {})
+  }, [storeId])
+
+  // Nothing tracked yet (Re-ID disabled or no cross-camera matches) →
+  // hide the panel rather than render an empty card.
+  if (!data || data.unique_people === 0) return null
+
+  return (
+    <Card className="p-4 space-y-4">
+      <div className="flex flex-wrap gap-6">
+        <div>
+          <div className="text-2xl font-semibold text-slate-800">{data.unique_customers}</div>
+          <div className="text-xs text-slate-500">unique visitors today</div>
+        </div>
+        <div>
+          <div className="text-2xl font-semibold text-slate-400">{data.camera_appearances}</div>
+          <div className="text-xs text-slate-500">camera appearances</div>
+        </div>
+        <div className="text-xs text-slate-400 self-end pb-1">
+          Cross-camera de-duplicated · {data.date}
+        </div>
+      </div>
+
+      {data.top_paths.length > 0 && (
+        <div>
+          <div className="text-xs font-medium text-slate-500 mb-1">Most common paths</div>
+          <ul className="space-y-1">
+            {data.top_paths.map((p, i) => (
+              <li key={i} className="text-sm text-slate-700">
+                {p.path.join(' → ')}
+                <span className="text-slate-400"> · {p.count}×</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {data.journeys.length > 0 && (
+        <div>
+          <div className="text-xs font-medium text-slate-500 mb-1">Recent journeys</div>
+          <ul className="space-y-1">
+            {data.journeys.filter(j => !j.is_staff).slice(0, 8).map(j => (
+              <li key={j.global_id} className="text-sm text-slate-600">
+                <span className="text-slate-400">{j.first_seen}</span>{' '}
+                {j.cameras_visited.join(' → ')}
+                <span className="text-slate-400"> · {j.total_dwell_minutes} min</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
   )
 }
 

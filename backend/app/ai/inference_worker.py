@@ -25,7 +25,7 @@ from PIL import Image
 from sqlalchemy.orm import Session
 
 from app.ai.detectors import DetectorRegistry
-from app.ai.detectors.base import DetectorContext
+from app.ai.detectors.base import COCO_PERSON, DetectorContext
 from app.ai.snapshot import SNAPSHOT_TYPES
 from app.ai.tracker import IOUTracker
 from app.ai.yolov8_runner import infer
@@ -177,9 +177,24 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # DetectionEvent itself is still persisted so the detector activity
     # table and ML-feedback paths see every event.
     if ev.detection_type not in _SKIP_ALERT_TYPES and not suppress_alert:
-        db.add(Alert(event_id=rec.id, status="new"))
+        alert = Alert(event_id=rec.id, status="new")
+        db.add(alert)
+        db.flush()
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
+        # VLM scene analysis — fire-and-forget on the alerts queue so
+        # the 10s cloud call never blocks this inference loop. Guarded
+        # by detection_type + a stored thumbnail; the task itself
+        # re-checks vlm_enabled. .delay() is microseconds here.
+        try:
+            from app.config import settings
+            if (getattr(settings, "vlm_enabled", False)
+                    and thumb_path
+                    and ev.detection_type in set(getattr(settings, "vlm_alert_types", []) or [])):
+                from app.tasks.vlm_tasks import analyse_alert_scene
+                analyse_alert_scene.delay(alert.id)
+        except Exception:
+            pass
     return rec.id
 
 
@@ -256,6 +271,22 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
     buffer   = FrameBuffer()
     pub      = redis.from_url(settings.redis_url)
     started  = time.time()
+
+    # Sprint 2.2 cross-camera Re-ID. Encoder + gallery are lazily/best-
+    # effort built; both stay None and the whole feature no-ops when
+    # REID_ENABLED is false or torchvision is missing.
+    reid_encoder = None
+    reid_xtracker = None
+    if settings.reid_enabled:
+        try:
+            from app.ai.reid_encoder import get_reid_encoder
+            from app.ai.reid_tracker import CrossCameraTracker
+            reid_encoder = get_reid_encoder()
+            reid_xtracker = CrossCameraTracker(pub)
+        except Exception as _reid_init_exc:             # noqa: BLE001
+            log.warning("Re-ID init failed cam=%s (disabled): %s",
+                        camera_id, _reid_init_exc)
+            reid_encoder = reid_xtracker = None
     last_seen_ts: float = 0.0
     frame_idx = 0
 
@@ -331,6 +362,49 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                     business_hours = store.business_hours_json
                     store_tz = store.timezone or "Africa/Nairobi"
                     store_name = store.name
+
+            # --- Sprint 2.2: cross-camera Re-ID (best-effort, OFF the hot
+            # path) ----------------------------------------------------
+            # Encode 1-of-N frames per person track into a 512-d
+            # appearance vector, match against the store-wide gallery, and
+            # stash the resulting global_person_id on the Track.extra dict.
+            # UniqueVisitorDetector reads it back and writes it onto the
+            # VisitorTrack row, so unique-visitor counting + journeys can
+            # de-duplicate the same shopper across cameras. Track.extra
+            # persists frame-to-frame (IOUTracker reuses Track objects),
+            # which is what makes the every-Nth-frame skip safe.
+            if reid_encoder is not None and reid_xtracker is not None and store_id is not None:
+                try:
+                    _H, _W = frame.shape[:2]
+                    _every = max(1, int(settings.reid_encode_every_n_frames))
+                    for _tr, _det in tracks:
+                        if _tr.cls not in COCO_PERSON:
+                            continue
+                        _n = int(_tr.extra.get("_reid_n", 0)) + 1
+                        _tr.extra["_reid_n"] = _n
+                        # Encode on the 1st sighting then every Nth after,
+                        # so a brief track still gets one embedding. Using
+                        # (n-1) % every == 0 keeps the 1st-frame encode and
+                        # still works when every == 1 (encode every frame).
+                        if (_n - 1) % _every != 0:
+                            continue
+                        _bb = _tr.bbox_norm or []
+                        if len(_bb) != 4:
+                            continue
+                        _x1 = max(0, int(_bb[0] * _W)); _y1 = max(0, int(_bb[1] * _H))
+                        _x2 = min(_W, int(_bb[2] * _W)); _y2 = min(_H, int(_bb[3] * _H))
+                        # Skip degenerate / tiny crops — too small to ID.
+                        if _x2 - _x1 < 16 or _y2 - _y1 < 32:
+                            continue
+                        _emb = reid_encoder.encode(frame[_y1:_y2, _x1:_x2])
+                        if _emb is None:
+                            continue
+                        _gid = reid_xtracker.match_or_register(
+                            _emb, store_id, camera_id, bbox=[_x1, _y1, _x2, _y2])
+                        if _gid:
+                            _tr.extra["global_person_id"] = _gid
+                except Exception as _reid_exc:           # noqa: BLE001
+                    log.debug("reid loop skipped cam=%s: %s", camera_id, _reid_exc)
 
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),

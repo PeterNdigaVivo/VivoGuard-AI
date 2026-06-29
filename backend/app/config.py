@@ -4,7 +4,7 @@ Single source of truth for every tunable. Imported via `from app.config
 import settings` everywhere else; never read os.environ directly.
 """
 from functools import lru_cache
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -98,6 +98,64 @@ class Settings(BaseSettings):
                                        "INFERENCE_FPS_DEFAULT",
                                        "inference_fps_default"),
     )
+
+    # --- VLM scene understanding (Sprint 2.1) ---
+    # Cloud Vision-LM that adds a natural-language scene description to
+    # alert-worthy events. Runs ASYNC on the alerts queue (never on the
+    # inference hot path). Off by default; needs anthropic_api_key.
+    vlm_enabled: bool = False
+    vlm_provider: str = "anthropic"
+    vlm_model: str = "claude-haiku-4-5"
+    # Secret — env-only, never logged or committed.
+    anthropic_api_key: str = ""
+    vlm_timeout_seconds: int = 10
+    vlm_alert_types: list[str] = Field(
+        default_factory=lambda: [
+            "checkout_dwell", "staff_present", "trespass",
+            "uniform_compliance", "shop_open_close",
+        ],
+        validation_alias=AliasChoices("VLM_ALERT_TYPES", "vlm_alert_types"),
+    )
+
+    @field_validator("vlm_alert_types", mode="before")
+    @classmethod
+    def _split_vlm_alert_types(cls, v):
+        # Accept a comma-separated env string OR a JSON list. A bare
+        # comma list (VLM_ALERT_TYPES=a,b,c) is friendlier than JSON in
+        # .env, so coerce it here.
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                import json
+                try:
+                    return json.loads(s)
+                except Exception:
+                    pass
+            return [t.strip() for t in s.split(",") if t.strip()]
+        return v
+
+    # --- Cross-camera person Re-ID (Sprint 2.2) ---
+    # Matches the SAME person across cameras via appearance embeddings so
+    # we count unique visitors (not per-camera appearances) and can draw
+    # customer journeys. Runs on the worker via a CPU ResNet18 embedder,
+    # only every Nth frame per track — negligible load. Off by default;
+    # needs torchvision (present in the CPU worker image).
+    reid_enabled: bool = False
+    # Cosine-similarity cut-off for "same person". Higher = stricter
+    # (fewer false merges, more split identities). 0.75 is a sensible
+    # ImageNet-feature default; tune per deployment.
+    reid_match_threshold: float = 0.75
+    # How long a gallery entry survives without a re-match (seconds).
+    # 4h covers a long shopping trip; after that the person is treated
+    # as a new visitor. Env: REID_GALLERY_TTL_SECONDS.
+    reid_gallery_ttl_seconds: int = 14400
+    # Encode 1 of every N frames per track to bound CPU cost (ResNet18 is
+    # ~15-30ms/crop on CPU). Env: REID_ENCODE_EVERY_N_FRAMES.
+    reid_encode_every_n_frames: int = 5
+    # Soft cap on gallery entries per store; oldest are evicted past this.
+    reid_max_gallery_size: int = 500
     # Duration of one per-camera inference task before it exits and the
     # supervisor re-queues it. Lowered from the old hard-coded 540s to
     # 120s so a config/zone change reaches a camera within ~2 min
