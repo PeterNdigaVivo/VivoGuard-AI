@@ -56,6 +56,11 @@ class CrossCameraTracker:
     `redis_client` is a redis-py client (the same `pub` connection the
     inference loop already holds). Thresholds/TTL come from settings but
     can be overridden per instance for tests.
+
+    The match threshold defaults to settings.reid_match_threshold (0.70),
+    tuned for the HSV colour-histogram encoder: a colour descriptor is
+    less discriminative than a deep embedding, so the bar for "same
+    person" is set a little lower than the 0.75 a deep model would use.
     """
 
     def __init__(self, redis_client, *,

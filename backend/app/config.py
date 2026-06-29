@@ -144,9 +144,11 @@ class Settings(BaseSettings):
     # needs torchvision (present in the CPU worker image).
     reid_enabled: bool = False
     # Cosine-similarity cut-off for "same person". Higher = stricter
-    # (fewer false merges, more split identities). 0.75 is a sensible
-    # ImageNet-feature default; tune per deployment.
-    reid_match_threshold: float = 0.75
+    # (fewer false merges, more split identities). 0.70 suits the HSV
+    # colour-histogram encoder — slightly lower than a deep-embedding
+    # default because a colour descriptor is less discriminative. Tune
+    # per deployment.
+    reid_match_threshold: float = 0.70
     # How long a gallery entry survives without a re-match (seconds).
     # 4h covers a long shopping trip; after that the person is treated
     # as a new visitor. Env: REID_GALLERY_TTL_SECONDS.

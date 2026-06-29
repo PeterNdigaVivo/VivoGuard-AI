@@ -1,23 +1,28 @@
-"""Lightweight person-appearance encoder for cross-camera Re-ID (Sprint 2.2).
+"""Person-appearance encoder for cross-camera Re-ID (Sprint 2.2).
 
-A full Re-ID stack (yolov7_reid / OSNet) is too heavy for the CPU-only
-Hetzner box. Instead we reuse the torchvision ResNet18 that already ships
-in the CPU worker image (`requirements.worker.cpu.txt`: torchvision>=0.18)
-as a generic appearance embedder:
+  HSV COLOUR-HISTOGRAM encoder (Option A — zero ML, instant).
 
-    crop (BGR HxWx3 uint8)  ->  512-dim L2-normalized float32 vector
+The original ResNet18 embedder was unusable on the CPU-only Hetzner box:
+~32,000 ms per crop. A deep feature extractor is simply the wrong tool on
+this hardware. We replace it with a classic appearance descriptor — an
+HSV colour histogram — which captures "what is this person wearing"
+(shirt/trousers colour distribution) well enough to re-identify the same
+shopper across cameras minutes apart, at ~sub-millisecond cost using only
+OpenCV + NumPy (both already in the base worker image).
 
-ResNet18's penultimate layer (after global average pool, before the 1000-
-class FC head) is a 512-dim descriptor. It isn't Re-ID-fine-tuned, but for
-"is this the SAME person who was at the entrance 30s ago, in the same
-store, same clothes, same lighting" the ImageNet features cluster well
-enough at a 0.75 cosine threshold — and it costs ~15-30ms/crop on CPU,
-which we only pay every Nth frame per track.
+    crop (BGR HxWx3 uint8)  ->  128-dim L2-normalized float32 vector
+                                (64 H bins + 32 S bins + 32 V bins)
 
-Everything here is BEST-EFFORT: torch may be absent (api-only image),
-weights may fail to download, a crop may be degenerate. Every public
-entry point returns None on any failure and NEVER raises into the
-inference hot path.
+Trade-off vs deep embeddings: a colour histogram is less discriminative
+(two people in the same uniform look alike), so the matcher uses a
+slightly lower cosine threshold (0.70) to compensate. For Vivo's use case
+— de-duplicating one shopper across a handful of store cameras within a
+4h window — colour appearance is a strong, cheap signal.
+
+Everything here is BEST-EFFORT: OpenCV may be absent, a crop may be
+degenerate. Every public entry point returns None on any failure and
+NEVER raises into the inference hot path. The public interface (encode,
+instance(), get_reid_encoder) is unchanged, so nothing downstream changes.
 """
 from __future__ import annotations
 
@@ -28,106 +33,85 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Embedding dimensionality of ResNet18's global-pool output.
-EMBED_DIM = 512
+# Descriptor dimensionality: 64 (H) + 32 (S) + 32 (V) = 128.
+_H_BINS, _S_BINS, _V_BINS = 64, 32, 32
+EMBED_DIM = _H_BINS + _S_BINS + _V_BINS
 
-# Person-Re-ID standard crop size (h, w). Taller-than-wide matches the
-# human silhouette better than a square ImageNet crop.
-_INPUT_H, _INPUT_W = 256, 128
-
-# ImageNet normalization — the weights were trained with these.
-_MEAN = (0.485, 0.456, 0.406)
-_STD = (0.229, 0.224, 0.225)
+# OpenCV HSV ranges: H is 0-179 (8-bit), S and V are 0-255.
+_H_RANGE = [0, 180]
+_SV_RANGE = [0, 256]
 
 
 class ReIDEncoder:
-    """Singleton wrapper around a CPU ResNet18 feature extractor.
+    """Singleton HSV-histogram appearance encoder.
 
-    The model loads lazily on first `encode()` so importing this module
-    is cheap and safe even where torch isn't installed. All torch usage
-    is contained behind try/except — a missing dependency degrades Re-ID
-    to a no-op rather than crashing the worker.
+    Kept as a class with the same shape as the previous deep-model
+    version so the inference loop and tracker need no changes. There's no
+    model to load now, so construction is free; the singleton pattern is
+    retained purely for interface stability.
     """
 
     _instance: "ReIDEncoder | None" = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._model = None          # torch.nn.Module once loaded
-        self._torch = None          # the torch module handle
-        self._transform = None      # (mean, std) tensors, built with the model
-        self._load_failed = False   # latch so we don't retry a broken import every frame
+        self._cv2 = None             # lazily imported OpenCV handle
+        self._load_failed = False    # latch so a missing cv2 doesn't retry every frame
         self._lock = threading.Lock()
 
     # -- construction -------------------------------------------------
     @classmethod
     def instance(cls) -> "ReIDEncoder":
-        """Process-wide singleton — weights load once per worker."""
+        """Process-wide singleton."""
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
 
-    def _ensure_model(self) -> bool:
-        """Lazily build the model. Returns True when usable."""
-        if self._model is not None:
+    def _ensure_cv2(self) -> bool:
+        """Lazily import OpenCV. Returns True when usable."""
+        if self._cv2 is not None:
             return True
         if self._load_failed:
             return False
         with self._lock:
-            if self._model is not None:
+            if self._cv2 is not None:
                 return True
             if self._load_failed:
                 return False
             try:
-                import torch
-                from torchvision.models import ResNet18_Weights, resnet18
-
-                model = resnet18(weights=ResNet18_Weights.DEFAULT)
-                # Drop the 1000-class classifier; keep the 512-dim
-                # global-pool descriptor as the network's output.
-                model.fc = torch.nn.Identity()
-                model.eval()
-                # CPU-only by design; never grab a GPU even if present so
-                # we don't contend with training jobs.
-                model.to("cpu")
-
-                self._torch = torch
-                self._model = model
-                self._mean = torch.tensor(_MEAN).view(1, 3, 1, 1)
-                self._std = torch.tensor(_STD).view(1, 3, 1, 1)
-                log.info("ReIDEncoder: ResNet18 feature extractor ready (CPU, %d-dim)", EMBED_DIM)
+                import cv2
+                self._cv2 = cv2
+                log.info("ReIDEncoder: HSV colour-histogram encoder ready (%d-dim)", EMBED_DIM)
                 return True
             except Exception as e:                      # noqa: BLE001
                 self._load_failed = True
-                log.warning("ReIDEncoder unavailable (Re-ID disabled): %s", e)
+                log.warning("ReIDEncoder unavailable — OpenCV missing (Re-ID disabled): %s", e)
                 return False
 
     # -- inference ----------------------------------------------------
     def encode(self, crop_bgr: np.ndarray) -> np.ndarray | None:
-        """Encode a single person crop to a unit-length 512-d embedding.
+        """Encode a single person crop to a unit-length 128-d histogram.
 
         `crop_bgr` is an HxWx3 uint8 BGR array (a slice of the inference
-        frame). Returns float32[512] L2-normalized, or None on any
-        failure (bad crop, model unavailable, runtime error).
+        frame). Returns float32[128] L2-normalized, or None on any
+        failure (bad crop, OpenCV unavailable, runtime error).
         """
-        if crop_bgr is None or not self._ensure_model():
+        if crop_bgr is None or not self._ensure_cv2():
             return None
         try:
             if crop_bgr.ndim != 3 or crop_bgr.shape[0] < 4 or crop_bgr.shape[1] < 4:
                 return None
-            torch = self._torch
-            # BGR -> RGB, HWC uint8 -> CHW float[0,1].
-            rgb = np.ascontiguousarray(crop_bgr[:, :, ::-1])
-            t = torch.from_numpy(rgb).permute(2, 0, 1).float().div_(255.0).unsqueeze(0)
-            # Resize to the Re-ID input size, then ImageNet-normalize.
-            t = torch.nn.functional.interpolate(
-                t, size=(_INPUT_H, _INPUT_W), mode="bilinear", align_corners=False)
-            t = (t - self._mean) / self._std
-            with torch.no_grad():
-                feat = self._model(t)          # [1, 512]
-            vec = feat.squeeze(0).cpu().numpy().astype(np.float32)
+            cv2 = self._cv2
+            hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+            # Per-channel 1-D histograms, then concatenate. Computing
+            # three small 1-D histograms (128 bins total) is far cheaper
+            # and less sparse than one 3-D histogram.
+            h = cv2.calcHist([hsv], [0], None, [_H_BINS], _H_RANGE)
+            s = cv2.calcHist([hsv], [1], None, [_S_BINS], _SV_RANGE)
+            v = cv2.calcHist([hsv], [2], None, [_V_BINS], _SV_RANGE)
+            vec = np.concatenate([h, s, v]).astype(np.float32).ravel()
             norm = float(np.linalg.norm(vec))
             if norm < 1e-6:
                 return None
