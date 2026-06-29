@@ -17,12 +17,36 @@ interface SystemHealth {
   alerts_today: number
 }
 
+// Sprint 1.2 inference-latency telemetry (GET /analytics/perf).
+interface PerfCamera {
+  camera_id: number; camera_name: string | null; store_name: string | null
+  p50_ms: number; p95_ms: number; p99_ms: number; avg_ms: number
+  frame_count: number; backend: string | null; format: string | null
+  last_seen: string | null
+}
+interface PerfReport {
+  window_hours: number
+  chain: {
+    avg_ms: number | null; p95_ms_worst_cam: number | null
+    p99_ms_worst_cam: number | null; cameras_reporting: number; frames: number
+  }
+  per_camera: PerfCamera[]
+  slowest: PerfCamera[]
+}
+
 export default function SystemHealthPage() {
   const [data, setData] = useState<SystemHealth | null>(null)
+  const [perf, setPerf] = useState<PerfReport | null>(null)
   useEffect(() => {
     const fetch = () => api<SystemHealth>('/system/health').then(setData).catch(console.error)
     fetch()
     const t = setInterval(fetch, 5000)
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => {
+    const f = () => api<PerfReport>('/analytics/perf?hours=24').then(setPerf).catch(() => {})
+    f()
+    const t = setInterval(f, 60_000)
     return () => clearInterval(t)
   }, [])
 
@@ -62,6 +86,55 @@ export default function SystemHealthPage() {
           <div className="text-3xl font-semibold">{data.alerts_today}</div>
         </Card>
       </div>
+
+      {/* Inference performance (Sprint 1.2 PerfTracker) */}
+      <Card className="p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-slate-700">
+            Inference Performance
+            <span className="text-slate-400 font-normal"> · last 24h</span>
+          </div>
+          {perf && perf.per_camera[0]?.backend && (
+            <Badge color="slate">
+              {perf.per_camera[0].backend}/{perf.per_camera[0].format ?? '—'}
+            </Badge>
+          )}
+        </div>
+        {!perf || perf.chain.cameras_reporting === 0 ? (
+          <div className="text-sm text-slate-400">
+            No telemetry yet — populates after cameras process ~100 frames.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <div className="text-xs text-slate-500">Chain-wide avg inference</div>
+              <div className="text-2xl font-semibold">
+                {perf.chain.avg_ms != null ? `${perf.chain.avg_ms} ms` : '—'}
+              </div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {perf.chain.cameras_reporting} cameras · {perf.chain.frames.toLocaleString()} frames
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="text-xs text-slate-500 mb-1">Slowest cameras (p99)</div>
+              <table className="w-full text-xs">
+                <tbody>
+                  {perf.slowest.map(c => (
+                    <tr key={c.camera_id} className="border-t border-slate-100">
+                      <td className="py-1">{c.camera_name ?? `Cam ${c.camera_id}`}</td>
+                      <td className="py-1 text-slate-500">{c.store_name ?? ''}</td>
+                      <td className="py-1 text-right tabular-nums">p99 {c.p99_ms} ms</td>
+                      <td className="py-1 text-right tabular-nums text-slate-500">
+                        p50 {c.p50_ms} ms
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </Card>
 
       <Card>
         <table className="w-full text-sm">

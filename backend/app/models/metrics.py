@@ -151,3 +151,29 @@ class Campaign(Base):
     end_date:  Mapped[date_t] = mapped_column(Date)
     description: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InferencePerfLog(Base):
+    """Per-camera inference-latency window (Sprint 1.2 PerfTracker).
+
+    One row per 100-frame flush, holding the TOTAL-stage latency
+    percentiles. Per-stage breakdown lives in Redis vg:perf:{id}.
+    """
+    __tablename__ = "inference_perf_log"
+
+    id:          Mapped[int]   = mapped_column(primary_key=True)
+    camera_id:   Mapped[int]   = mapped_column(
+        ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True)
+    timestamp:   Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True)
+    frame_count: Mapped[int]   = mapped_column(Integer, default=0, server_default="0")
+    p50_ms:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    p95_ms:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    p99_ms:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_ms:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    backend:     Mapped[str | None] = mapped_column(String(16), nullable=True)
+    format:      Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
+Index("ix_inference_perf__cam_ts",
+      InferencePerfLog.camera_id, InferencePerfLog.timestamp)

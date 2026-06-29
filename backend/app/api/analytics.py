@@ -4354,3 +4354,99 @@ def roi_report(db: Session = Depends(get_db),
             "queue":         int(_settings.roi_queue_per_incident_kes),
         },
     }
+
+
+# ---- Inference latency telemetry (Sprint 1.2 PerfTracker) ------------
+
+@router.get("/perf")
+def inference_perf(hours: int = 24,
+                   db: Session = Depends(get_db),
+                   _u=Depends(get_current_user)):
+    """Per-camera inference latency over the last `hours` plus a
+    chain-wide rollup. Reads InferencePerfLog (the historical
+    100-frame windows written by PerfTracker). Each row already holds
+    pre-computed total-stage percentiles; the chain `p95`/`p99` here
+    are the MAX across cameras' window percentiles (a conservative
+    "worst camera" headline), and `avg_ms` is the frame-weighted mean
+    — both labelled so the UI doesn't over-claim a true global
+    percentile (which would need the raw samples we don't keep)."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from app.models import Camera, InferencePerfLog, Store
+
+    hours = max(1, min(int(hours), 24 * 30))
+    since = _dt.now(_tz.utc) - _td(hours=hours)
+
+    rows = (db.query(InferencePerfLog)
+              .filter(InferencePerfLog.timestamp >= since)
+              .all())
+    if not rows:
+        return {"window_hours": hours,
+                "chain": {"avg_ms": None, "p95_ms": None, "p99_ms": None,
+                          "cameras_reporting": 0, "frames": 0},
+                "per_camera": [], "slowest": []}
+
+    # Aggregate per camera: frame-weighted avg, max of window p95/p99.
+    by_cam: dict[int, dict] = {}
+    for r in rows:
+        c = by_cam.setdefault(int(r.camera_id), {
+            "camera_id": int(r.camera_id), "frames": 0,
+            "avg_weighted": 0.0, "p50_ms": 0.0, "p95_ms": 0.0,
+            "p99_ms": 0.0, "backend": r.backend, "format": r.format,
+            "last_seen": None,
+        })
+        n = int(r.frame_count or 0)
+        c["frames"] += n
+        c["avg_weighted"] += float(r.avg_ms or 0.0) * n
+        c["p50_ms"] = max(c["p50_ms"], float(r.p50_ms or 0.0))
+        c["p95_ms"] = max(c["p95_ms"], float(r.p95_ms or 0.0))
+        c["p99_ms"] = max(c["p99_ms"], float(r.p99_ms or 0.0))
+        c["backend"] = r.backend or c["backend"]
+        c["format"]  = r.format  or c["format"]
+        ts = r.timestamp
+        if c["last_seen"] is None or (ts and ts > c["last_seen"]):
+            c["last_seen"] = ts
+
+    # Names in one query.
+    cam_ids = list(by_cam.keys())
+    cams = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(cam_ids)).all()}
+    store_ids = {c.store_id for c in cams.values() if c.store_id}
+    stores = ({s.id: s.name for s in db.query(Store).filter(Store.id.in_(store_ids)).all()}
+              if store_ids else {})
+
+    per_camera = []
+    total_frames = 0
+    weighted_sum = 0.0
+    for cid, c in by_cam.items():
+        frames = c["frames"] or 1
+        avg = round(c["avg_weighted"] / frames, 2)
+        total_frames += c["frames"]
+        weighted_sum += c["avg_weighted"]
+        cam = cams.get(cid)
+        per_camera.append({
+            "camera_id":   cid,
+            "camera_name": cam.name if cam else None,
+            "store_name":  stores.get(cam.store_id) if (cam and cam.store_id) else None,
+            "p50_ms":      round(c["p50_ms"], 2),
+            "p95_ms":      round(c["p95_ms"], 2),
+            "p99_ms":      round(c["p99_ms"], 2),
+            "avg_ms":      avg,
+            "frame_count": c["frames"],
+            "backend":     c["backend"],
+            "format":      c["format"],
+            "last_seen":   c["last_seen"].isoformat() if c["last_seen"] else None,
+        })
+
+    per_camera.sort(key=lambda x: (x["p99_ms"] or 0), reverse=True)
+    chain_avg = round(weighted_sum / total_frames, 2) if total_frames else None
+    return {
+        "window_hours": hours,
+        "chain": {
+            "avg_ms":            chain_avg,
+            "p95_ms_worst_cam":  max((c["p95_ms"] for c in per_camera), default=None),
+            "p99_ms_worst_cam":  max((c["p99_ms"] for c in per_camera), default=None),
+            "cameras_reporting": len(per_camera),
+            "frames":            total_frames,
+        },
+        "per_camera": per_camera,
+        "slowest":    per_camera[:5],
+    }

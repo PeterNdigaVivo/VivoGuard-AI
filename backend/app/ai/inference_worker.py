@@ -259,15 +259,26 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
     last_seen_ts: float = 0.0
     frame_idx = 0
 
-    while True:
+    # Sprint 1.2 latency telemetry. Backend/format from HardwareEnv so
+    # each perf row records which compute path produced the numbers.
+    from app.ai.perf_tracker import PerfTracker
+    from app.ai.env_config import HardwareEnv
+    _env = HardwareEnv.detect()
+    perf = PerfTracker(camera_id, backend=_env.backend,
+                       fmt=_env.export_format, redis_client=pub)
+
+    # try/finally guarantees emit_final() flushes the tail window on
+    # BOTH exit paths (max_seconds reached AND camera gone / no frame).
+    try:
+      while True:
         if max_seconds and time.time() - started >= max_seconds:
-            return
+            break
 
         with SessionLocal() as db:
             cam, zones, cfg, weights = _load_camera_state(db, camera_id)
             if not cam:
                 log.info("camera %s gone or disabled", camera_id)
-                return
+                break
 
             # Detect on pristine pixels — never read the overlay frame
             # the QueueDetector writes back, or YOLO would re-detect on
@@ -284,7 +295,9 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 continue
             last_seen_ts = ts
             frame_idx += 1
+            _t_iter = time.perf_counter()        # total-stage start
 
+            _t0 = time.perf_counter()
             try:
                 img = Image.open(io.BytesIO(jpeg)).convert("RGB")
             except Exception as e:
@@ -292,14 +305,18 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 time.sleep(poll_interval)
                 continue
             frame = np.array(img)[:, :, ::-1]   # RGB → BGR for OpenCV/YOLO
+            perf.record("frame_read", (time.perf_counter() - _t0) * 1000.0)
 
+            _t0 = time.perf_counter()
             try:
                 raw = infer(frame, weights=weights, conf=0.25)
             except Exception as e:
                 log.exception("camera %s: inference failed: %s", camera_id, e)
                 time.sleep(1.0)
                 continue
+            perf.record("inference", (time.perf_counter() - _t0) * 1000.0)
 
+            _t_post = time.perf_counter()       # postprocess-stage start
             tracks = tracker.update(raw)
 
             # Store metadata — cached per-frame so detectors don't each hit Postgres.
@@ -437,6 +454,9 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                     except Exception:
                         pass
 
+            perf.record("postprocess", (time.perf_counter() - _t_post) * 1000.0)
+
+            _t_emit = time.perf_counter()        # emit-stage start
             try:
                 db.commit()
             except Exception as e:
@@ -480,4 +500,17 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 except Exception:
                     pass
 
+            # Telemetry: close the emit + total stages and tick the
+            # frame counter (flushes percentiles every 100 frames).
+            perf.record("emit", (time.perf_counter() - _t_emit) * 1000.0)
+            perf.record("total", (time.perf_counter() - _t_iter) * 1000.0)
+            perf.record_frame()
+
         time.sleep(poll_interval)
+    finally:
+        # Guarantees the tail window is flushed on BOTH exit paths
+        # (max_seconds reached AND camera-gone / no-frame break).
+        try:
+            perf.emit_final()
+        except Exception:
+            pass
