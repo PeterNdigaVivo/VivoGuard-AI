@@ -29,6 +29,7 @@ Writes the `uniform_compliance_pct` metric (rolling avg, 1.0 ok /
 Dedup: same track + same violation, max once per 30 min.
 """
 from __future__ import annotations
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -36,6 +37,8 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.zone_logic import bbox_in_zone, iou
+
+log = logging.getLogger(__name__)
 
 
 # Compliance state constants — also the alert `cls` strings.
