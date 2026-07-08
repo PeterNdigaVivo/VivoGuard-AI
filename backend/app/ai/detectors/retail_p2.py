@@ -330,6 +330,12 @@ class StaffPresenceDetector(Detector):
                 continue
             if in_opening_grace or in_closing_grace:
                 continue
+            # No point alerting that the counter is unstaffed before the
+            # store opens or after it closes — staff aren't expected. The
+            # grace check above only covers the ±minutes around open/close;
+            # this suppresses the whole closed period (e.g. 07:37 EAT).
+            if self._store_closed_now(ctx):
+                continue
             below_since = state.get("below_40_since")
             if below_since is None:
                 continue
@@ -400,6 +406,27 @@ class StaffPresenceDetector(Detector):
             return opening, closing
         except Exception:
             return False, False
+
+    def _store_closed_now(self, ctx: DetectorContext) -> bool:
+        """True when the store is currently CLOSED, so a counter-unstaffed
+        alert (expected overnight / before opening) is suppressed.
+
+        Unlike `_opening_closing_grace`, which only covers the ±minutes
+        around open/close, this covers the ENTIRE closed period. Uses the
+        store's configured business hours when available, else a default
+        08:00-21:00 EAT window. If the timezone can't be resolved it
+        treats the store as open (returns False) so a config error never
+        silently silences alerts."""
+        tz = ctx.store_timezone or "Africa/Nairobi"
+        try:
+            from app.utils.business_hours import is_open, localised_now
+            now_local = localised_now(tz)
+        except Exception:
+            return False
+        if ctx.business_hours:
+            return not is_open(ctx.business_hours, now_local)
+        # No configured hours → default EAT operating window.
+        return not (8 <= now_local.hour < 21)
 
 
 # ---------------------------------------------------------------------------

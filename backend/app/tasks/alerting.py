@@ -21,6 +21,7 @@ import redis
 from app.config import settings
 from app.tasks.celery_app import celery_app
 from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
+from app.utils.business_hours import is_store_open
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,40 @@ def _dashboard_recipients() -> list[str]:
         if norm:
             out.append(norm)
     return out
+
+
+# ---- Business-hours gate for operational alerts -----------------------
+#
+# Retail operational alerts (long checkout, counter unstaffed, uniform
+# violation) are meaningless before a store opens — staff arrive early,
+# tills sit empty overnight. This gate suppresses them outside operating
+# hours so we stop firing e.g. the 07:37 EAT "checkout taking too long"
+# nudge before the doors open. Safety alerts (weapon, intrusion, fire)
+# are NOT routed through this gate — they must fire 24/7.
+DEFAULT_OPEN_HOUR_EAT  = 8    # 08:00 — used only when a store has no
+DEFAULT_CLOSE_HOUR_EAT = 21   # 21:00   business_hours_json configured.
+
+
+def _within_operating_hours(store) -> bool:
+    """True if the store is currently within operating hours, in its own
+    timezone (Africa/Nairobi / EAT by default).
+
+    - Store WITH configured business_hours_json → exact per-day windows
+      via is_store_open (respects split shifts and closed days).
+    - Store with no configured hours, or a storeless legacy camera →
+      default EAT window DEFAULT_OPEN_HOUR_EAT..DEFAULT_CLOSE_HOUR_EAT.
+    - Timezone unresolvable → returns True (do not suppress) so a config
+      error never silences alerts silently.
+    """
+    if store is not None and getattr(store, "business_hours_json", None):
+        return is_store_open(store)
+    tz_name = getattr(store, "timezone", None) or "Africa/Nairobi"
+    try:
+        from zoneinfo import ZoneInfo
+        now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+    except Exception:
+        return True
+    return DEFAULT_OPEN_HOUR_EAT <= now_local.hour < DEFAULT_CLOSE_HOUR_EAT
 
 
 # ---- Queue escalation -------------------------------------------------
@@ -330,6 +365,12 @@ def checkout_long_session_check() -> None:
                 continue
 
             store = db.get(Store,  store_id) if store_id else None
+            # Don't alert outside store hours — a "checkout taking too
+            # long" nudge before opening (e.g. 07:37 EAT) is noise. Skip
+            # WITHOUT setting the dedup marker so it can still fire once
+            # the store is open and the session is genuinely long.
+            if not _within_operating_hours(store):
+                continue
             zone  = db.get(Zone,   zone_id)  if zone_id  else None
             cam   = db.get(Camera, cam_id)   if cam_id   else None
             store_name = (store.name if store else None) or "Unknown store"
@@ -560,6 +601,11 @@ def uniform_violation_check() -> None:
             if r.get(sent_key):
                 continue
             store = db.get(Store, store_id)
+            # Staff aren't expected before opening, so a uniform-
+            # compliance nudge outside store hours is noise. Skip without
+            # setting the dedup marker.
+            if not _within_operating_hours(store):
+                continue
             store_name = store.name if store else f"store {store_id}"
             rule = (ev.extra or {}).get("rule", "uniform_violation")
             if rule == "no_lanyard":
