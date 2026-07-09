@@ -233,8 +233,21 @@ class EntryExitDetector(Detector):
             )
 
             for det_idx, det in enumerate(zone_persons):
+                # Centroid drives pseudo-track matching + stored position
+                # below — leave it untouched so track continuity is
+                # unaffected.
                 cx, cy = bbox_centre(det["bbox_norm"])
-                dist_to_line = _segment_distance((cx, cy), a, b)
+                # Foot point (bottom-centre of the bbox) drives the SIDE
+                # test ONLY. On angled/high entrance cameras the box
+                # centroid can stay on one side of the line even as the
+                # person physically crosses (their feet cross first), so
+                # the side sign never flips and no crossing fires. The
+                # foot point crosses the entrance line reliably.
+                # bbox_norm is [x1, y1, x2, y2]; y increases downward, so
+                # y2 (the 4th value) is the bottom of the box = the feet.
+                bx1, by1, bx2, by2 = det["bbox_norm"]
+                fx, fy = (bx1 + bx2) / 2.0, by2
+                dist_to_line = _segment_distance((fx, fy), a, b)
                 if (dist_to_line <= self.NEAR_LINE_THRESHOLD
                         and self._near_due(ctx.camera_id, det_idx, now)):
                     log.info("EntryExit camera=%s person near line zone=%s "
@@ -242,10 +255,10 @@ class EntryExitDetector(Detector):
                              det_idx, dist_to_line)
 
                 # Side with a deadband near the line so sub-pixel
-                # jitter on a centroid sitting right on the line
+                # jitter on a foot point sitting right on the line
                 # doesn't generate phantom crossings.
                 side_now = 0 if dist_to_line < self.SIDE_DEADBAND \
-                              else _side((cx, cy), a, b)
+                              else _side((fx, fy), a, b)
 
                 # Match to nearest pseudo-track within MATCH_RADIUS,
                 # skipping ones already claimed by another detection
