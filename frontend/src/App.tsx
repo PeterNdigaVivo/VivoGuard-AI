@@ -36,6 +36,7 @@ const UniformTrainingPage  = lazy(() => import('@/pages/UniformTrainingPage'))
 const ChainTrainingPage    = lazy(() => import('@/pages/ChainTrainingPage'))
 const ModelsPage           = lazy(() => import('@/pages/ModelsPage'))
 const SystemHealthPage     = lazy(() => import('@/pages/SystemHealthPage'))
+const AgentsPage           = lazy(() => import('@/pages/AgentsPage'))
 const StoresPage           = lazy(() => import('@/pages/StoresPage'))
 const StoreDashboardPage   = lazy(() => import('@/pages/StoreDashboardPage'))
 const StoreDetailPage      = lazy(() => import('@/pages/StoreDetailPage'))
@@ -106,6 +107,7 @@ export default function App() {
               <Route path="/sprint"                   element={<SprintPage />} />
               <Route path="/models"                   element={<ModelsPage />} />
               <Route path="/system"                   element={<SystemHealthPage />} />
+              <Route path="/agents"                   element={<AgentsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

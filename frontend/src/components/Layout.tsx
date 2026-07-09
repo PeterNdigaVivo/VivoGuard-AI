@@ -27,6 +27,7 @@ const NAV = [
   { to: '/models',   label: 'Models' },
   { to: '/users',    label: 'Users' },
   { to: '/system',   label: 'System' },
+  { to: '/agents',   label: 'Agents' },
 ]
 
 export default function Layout() {

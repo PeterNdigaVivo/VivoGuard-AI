@@ -37,6 +37,7 @@ celery_app = Celery(
         "app.tasks.chain_training",
         "app.tasks.queue_report",
         "app.tasks.vlm_tasks",
+        "app.tasks.agents",
     ],
 )
 celery_app.conf.update(
@@ -95,6 +96,19 @@ celery_app.conf.update(
         "staff_classifier.classify_today":    {"queue": "beat"},
         "heatmap.snapshot_all":               {"queue": "beat"},
         "heatmap.snapshot_grids_hourly":      {"queue": "beat"},
+        # Autonomous monitoring agents — ALL on the alerts pool so they
+        # never compete with camera inference (RULE 5). Short (<60s) tasks.
+        "agents.ml_dataset":       {"queue": "alerts"},
+        "agents.training":         {"queue": "alerts"},
+        "agents.backend_health":   {"queue": "alerts"},
+        "agents.frontend":         {"queue": "alerts"},
+        "agents.db_admin":         {"queue": "alerts"},
+        "agents.streamer":         {"queue": "alerts"},
+        "agents.simulation":       {"queue": "alerts"},
+        "agents.detector_alerts":  {"queue": "alerts"},
+        "agents.retail_standards": {"queue": "alerts"},
+        "agents.inspection":       {"queue": "alerts"},
+        "agents.agent_watchdog":   {"queue": "alerts"},
     },
     timezone=settings.app_timezone,
     beat_schedule={
@@ -303,6 +317,58 @@ celery_app.conf.update(
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),
+        },
+
+        # ── Autonomous monitoring agents ──────────────────────────────
+        # Clock-aligned/daily agents use crontab() (celery timezone is
+        # Africa/Nairobi = EAT, so hour= is EAT). Sub-hour agents use
+        # plain intervals. Staggered per the resource plan so they never
+        # wake up simultaneously. The watchdog re-enqueues any agent whose
+        # heartbeat lapses — so if the embedded -B beat ever fails to pick
+        # up a crontab entry, the agent still recovers.
+        "agents-ml-dataset-6h": {          # 00:00 06:00 12:00 18:00 EAT
+            "task": "agents.ml_dataset",
+            "schedule": crontab(minute=0, hour="0,6,12,18"),
+        },
+        "agents-db-admin-6h": {            # 00:30 06:30 12:30 18:30 EAT
+            "task": "agents.db_admin",
+            "schedule": crontab(minute=30, hour="0,6,12,18"),
+        },
+        "agents-simulation-6h": {          # 01:00 07:00 13:00 19:00 EAT
+            "task": "agents.simulation",
+            "schedule": crontab(minute=0, hour="1,7,13,19"),
+        },
+        "agents-training-1h": {            # :00 past every hour
+            "task": "agents.training",
+            "schedule": crontab(minute=0),
+        },
+        "agents-frontend-1h": {            # :15 past every hour
+            "task": "agents.frontend",
+            "schedule": crontab(minute=15),
+        },
+        "agents-retail-standards-daily": {  # 05:00 EAT
+            "task": "agents.retail_standards",
+            "schedule": crontab(minute=0, hour=5),
+        },
+        "agents-inspection-daily": {        # 06:00 EAT
+            "task": "agents.inspection",
+            "schedule": crontab(minute=0, hour=6),
+        },
+        "agents-backend-health-30min": {
+            "task": "agents.backend_health",
+            "schedule": timedelta(minutes=30),
+        },
+        "agents-streamer-5min": {
+            "task": "agents.streamer",
+            "schedule": timedelta(minutes=5),
+        },
+        "agents-detector-alerts-15min": {
+            "task": "agents.detector_alerts",
+            "schedule": timedelta(minutes=15),
+        },
+        "agents-watchdog-10min": {
+            "task": "agents.agent_watchdog",
+            "schedule": timedelta(minutes=10),
         },
     },
 )
