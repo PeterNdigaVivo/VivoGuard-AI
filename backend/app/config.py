@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     # Secret — env-only, never logged or committed.
     anthropic_api_key: str = ""
     vlm_timeout_seconds: int = 10
+
+    # ── Autonomous AI monitoring agents (app/tasks/agents.py) ──────────
+    # When enabled (and anthropic_api_key is set), each domain agent hands
+    # its deterministic telemetry to Claude for reasoning/diagnosis and
+    # natural-language recommendations. When disabled or the API is
+    # unreachable, agents fall back to their rule-based verdict so they
+    # never break. Shares anthropic_api_key with the VLM.
+    agents_llm_enabled: bool = True
+    # Default (Sonnet) model — used by the two daily strategic agents
+    # (retail standards, inspection). The analytical agents override to
+    # claude-haiku-4-5 in agents.py.
+    agents_llm_model: str = "claude-sonnet-4-6"
+    agents_llm_timeout_seconds: int = 45
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",

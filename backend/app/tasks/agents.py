@@ -1,9 +1,21 @@
-"""Autonomous monitoring agents.
+"""Autonomous AI monitoring agents.
 
 Ten domain agents plus a watchdog, each a Celery beat task on the `alerts`
-queue (so they never compete with camera inference). Every agent checks its
-domain, takes safe corrective action where it can, and writes one structured
-row to `agent_reports`.
+queue (so they never compete with camera inference). Each domain agent works
+in two stages:
+
+  1. SENSE  — gather deterministic telemetry for its domain (bounded DB /
+     Redis reads only; the `_run_*` / `_sense_*` functions below).
+  2. REASON — hand that telemetry to Claude (`_ai_reason`), which diagnoses
+     status, root cause, gaps, and natural-language recommendations. This is
+     what makes them AI agents rather than threshold scripts.
+
+If the LLM is disabled or unreachable, the agent falls back to its rule-based
+verdict, so the "never break" guarantees still hold. The watchdog stays fully
+deterministic ON PURPOSE — the component that detects dead agents must not
+itself depend on an external API.
+
+Every run writes one structured row to `agent_reports`.
 
 Resilience (see RULE 1-5 in the build spec):
   * heartbeat — each agent stamps vg:agent:hb:{name} at the START of a run
@@ -62,6 +74,43 @@ CIRCUIT_MAX_FAILS = 5
 SUSPEND_SECONDS   = 3600
 FAILS_TTL_SECONDS = 24 * 3600
 SIM_MAX_CAMERAS   = 20
+
+# ── AI reasoning layer ───────────────────────────────────────────────────
+# The role each agent adopts when it reasons with Claude. Every domain agent
+# is AI-backed; the watchdog is not (see module docstring).
+AGENT_ROLES: dict[str, str] = {
+    "ml_dataset":       "ML Dataset Curator",
+    "training":         "ML Training Operations analyst",
+    "backend_health":   "Backend Reliability engineer",
+    "frontend":         "Frontend / edge-delivery analyst",
+    "db_admin":         "Database Administrator",
+    "streamer":         "Camera-streaming reliability analyst",
+    "simulation":       "Detector QA / simulation analyst",
+    "detector_alerts":  "Detection & alerts analyst",
+    "retail_standards": "Retail standards & store-operations analyst",
+    "inspection":       "Chief inspection analyst compiling the daily brief",
+}
+# Hybrid (Option B):
+#   * RULE-BASED (no LLM) — high-frequency / liveness agents where reasoning
+#     adds latency+cost but no value: backend_health, streamer,
+#     detector_alerts (+ the watchdog, which is always deterministic).
+#   * HAIKU — the analytical agents: ml_dataset, training, frontend, db_admin,
+#     simulation.
+#   * SONNET (the default model) — the two daily strategic agents:
+#     retail_standards and inspection.
+# Inspection reasons INSIDE _run_inspection (so its Claude narrative can be
+# sent over WhatsApp), so it is intentionally NOT in AI_AGENTS — that keeps
+# the generic layer from making a second LLM call.
+AI_AGENTS = {"ml_dataset", "training", "frontend", "db_admin", "simulation",
+             "retail_standards"}
+AGENT_MODEL_OVERRIDES: dict[str, str] = {
+    "ml_dataset": "claude-haiku-4-5",
+    "training":   "claude-haiku-4-5",
+    "frontend":   "claude-haiku-4-5",
+    "db_admin":   "claude-haiku-4-5",
+    "simulation": "claude-haiku-4-5",
+    # retail_standards + inspection use the Sonnet default (agents_llm_model).
+}
 
 
 # ── shared infra ─────────────────────────────────────────────────────────
@@ -173,6 +222,113 @@ def _safe(findings: dict, key: str, fn):
         findings.setdefault("_errors", {})[key] = str(e)
 
 
+# ── AI reasoning (the "agent brain") ─────────────────────────────────────
+def _extract_json(text: str) -> dict | None:
+    """Pull the first JSON object out of an LLM response (tolerates code
+    fences / stray prose)."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _ai_reason(name: str, role: str, telemetry: dict,
+               *, model: str | None = None) -> dict | None:
+    """Ask Claude to diagnose this agent's telemetry. Returns a dict
+    {status, summary, findings, gaps, recommended_actions} or None if the
+    LLM is disabled / no key / SDK missing / any error (caller falls back
+    to the rule-based verdict). Never raises."""
+    if not getattr(settings, "agents_llm_enabled", True):
+        return None
+    api_key = getattr(settings, "anthropic_api_key", "") or ""
+    if not api_key:
+        return None
+    try:
+        import anthropic
+    except Exception:
+        log.warning("agents: anthropic SDK not installed — LLM reasoning off")
+        return None
+    mdl = model or getattr(settings, "agents_llm_model", "claude-sonnet-5")
+    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    system = (
+        f"You are the {role} for VivoGuard-AI, an AI video-surveillance and "
+        "retail-intelligence platform running ~102 cameras across ~26 Vivo "
+        "fashion stores in Kenya/Uganda/Rwanda on CPU-only inference. You are "
+        "an autonomous monitoring agent. You are given a JSON snapshot of your "
+        "domain's telemetry. Reason about it like an expert on call: judge "
+        "health, infer likely root cause, and give concrete next actions. "
+        "Respond with ONLY a JSON object (no markdown, no prose outside it) "
+        "with keys: status ('ok'|'warning'|'critical'), summary (one plain-"
+        "English sentence), findings (object of the notable facts), gaps "
+        "(array of short strings — problems/risks), recommended_actions "
+        "(array of short imperative strings). Ground every statement in the "
+        "telemetry; never invent numbers."
+    )
+    user = ("Telemetry JSON for this run:\n"
+            + json.dumps(telemetry, default=str)[:12000])
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+        msg = client.messages.create(
+            model=mdl, max_tokens=1024, system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = " ".join(getattr(b, "text", "") or "" for b in (msg.content or [])).strip()
+        return _extract_json(text)
+    except Exception as e:
+        log.warning("agent %s LLM reasoning failed (model=%s): %s", name, mdl, e)
+        return None
+
+
+def _apply_ai(name: str, result: dict) -> dict:
+    """Overlay Claude's diagnosis on the deterministic result. The rule-based
+    `result` is the telemetry + fallback verdict; if the LLM answers we let
+    it set status/gaps/recommendations, otherwise we keep the fallback."""
+    telemetry = result.get("findings", {}) or {}
+    verdict = _ai_reason(name, AGENT_ROLES.get(name, "monitoring agent"),
+                         telemetry, model=AGENT_MODEL_OVERRIDES.get(name))
+    if not verdict:
+        findings = dict(telemetry)
+        findings["ai"] = {"used": False, "reason": "llm unavailable/disabled"}
+        result["findings"] = findings
+        return result
+    status = verdict.get("status")
+    if status not in ("ok", "warning", "critical"):
+        status = result.get("status", "ok")
+    gaps = list(result.get("gaps") or [])
+    for g in (verdict.get("gaps") or []):
+        if g not in gaps:
+            gaps.append(g)
+    actions: dict = {}
+    prior = result.get("actions_taken")
+    if isinstance(prior, dict):
+        actions.update(prior)
+    elif prior:
+        actions["deterministic"] = prior
+    if verdict.get("recommended_actions"):
+        actions["ai_recommendations"] = verdict["recommended_actions"]
+    return {
+        "status": status,
+        "findings": {"telemetry": telemetry,
+                     "ai": {"used": True,
+                            "model": AGENT_MODEL_OVERRIDES.get(
+                                name, getattr(settings, "agents_llm_model", "")),
+                            "summary": verdict.get("summary"),
+                            "findings": verdict.get("findings")}},
+        "gaps": gaps or None,
+        "actions_taken": actions or None,
+    }
+
+
 # ── the wrapper (RULE 1) ─────────────────────────────────────────────────
 def _execute(task, name: str, fn) -> None:
     """Shared agent lifecycle: suspend-check → heartbeat → run → report,
@@ -186,6 +342,11 @@ def _execute(task, name: str, fn) -> None:
     _heartbeat(r, name)
     try:
         result = fn() or {}
+        # AI reasoning layer — hand the deterministic telemetry to Claude
+        # for diagnosis. Falls back to the rule-based result when the LLM
+        # is disabled/unreachable, so the agent never breaks.
+        if name in AI_AGENTS:
+            result = _apply_ai(name, result)
         _write_report(
             name, result.get("status", "ok"),
             result.get("findings", {}),
@@ -536,16 +697,37 @@ def _run_inspection() -> dict:
                      .delete(synchronize_session=False))
         db.commit()
         actions.append({"pruned_reports": int(deleted)})
-    # Build + send digest (WhatsApp channel is currently a logging no-op).
     crit = sum(v.get("critical", 0) for v in f["summary_24h"].values())
     warn = sum(v.get("warning", 0) for v in f["summary_24h"].values())
-    body = (f"Daily agent inspection — {f['agents_reporting']}/10 agents "
-            f"reported in 24h, {crit} critical, {warn} warnings"
-            + (f", missing: {', '.join(f['agents_missing_24h'])}"
-               if f["agents_missing_24h"] else ""))
+
+    # AI narrative (Sonnet) BEFORE sending, so the WhatsApp digest IS the
+    # Claude-written brief. Falls back to a deterministic one-liner if the
+    # LLM is unavailable — the digest always goes out.
+    status: str | None = None
+    verdict = _ai_reason("inspection", AGENT_ROLES["inspection"], f)
+    if verdict and verdict.get("summary"):
+        body = "🤖 " + str(verdict["summary"])
+        recs = verdict.get("recommended_actions") or []
+        if recs:
+            body += "\nActions: " + "; ".join(str(x) for x in recs[:5])
+        f["ai"] = {"used": True, "model": getattr(settings, "agents_llm_model", ""),
+                   "summary": verdict.get("summary"),
+                   "findings": verdict.get("findings"),
+                   "recommended_actions": recs or None}
+        if verdict.get("status") in ("ok", "warning", "critical"):
+            status = verdict["status"]
+    else:
+        body = (f"Daily agent inspection — {f['agents_reporting']}/10 agents "
+                f"reported in 24h, {crit} critical, {warn} warnings"
+                + (f", missing: {', '.join(f['agents_missing_24h'])}"
+                   if f["agents_missing_24h"] else ""))
+        f["ai"] = {"used": False, "reason": "llm unavailable/disabled"}
+
     _ops_alert("DAILY INSPECTION", body)
     actions.append({"digest_sent": True})
-    status = "critical" if (crit or f["agents_missing_24h"]) else ("warning" if warn else "ok")
+    if status is None:
+        status = "critical" if (crit or f["agents_missing_24h"]) else \
+                 ("warning" if warn else "ok")
     return {"status": status, "findings": f, "actions_taken": actions}
 
 

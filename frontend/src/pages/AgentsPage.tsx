@@ -39,6 +39,28 @@ function countKeys(obj: unknown): number {
   return 0
 }
 
+// The AI reasoning layer stores its diagnosis under findings.ai.
+function aiSummary(rep: AgentReport | null | undefined): string | null {
+  const f = rep?.findings
+  if (f && typeof f === 'object' && 'ai' in f) {
+    const ai = (f as Record<string, unknown>).ai
+    if (ai && typeof ai === 'object' && 'summary' in ai) {
+      const s = (ai as Record<string, unknown>).summary
+      return typeof s === 'string' ? s : null
+    }
+  }
+  return null
+}
+
+function aiRecommendations(rep: AgentReport | null | undefined): string[] {
+  const a = rep?.actions_taken
+  if (a && typeof a === 'object' && 'ai_recommendations' in a) {
+    const recs = (a as Record<string, unknown>).ai_recommendations
+    if (Array.isArray(recs)) return recs.filter((x): x is string => typeof x === 'string')
+  }
+  return []
+}
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentLatest[]>([])
   const [loading, setLoading] = useState(true)
@@ -139,6 +161,11 @@ export default function AgentsPage() {
                 <span>last run {relTime(rep?.run_at ?? null)}</span>
                 <span>{rep?.duration_ms != null ? `${rep.duration_ms}ms` : '—'}</span>
               </div>
+              {aiSummary(rep) && (
+                <p className="text-xs text-slate-300 italic leading-snug">
+                  🤖 {aiSummary(rep)}
+                </p>
+              )}
               <div className="text-xs text-slate-500">
                 {gaps > 0 ? `${gaps} gap${gaps === 1 ? '' : 's'}` : 'no gaps'}
                 {rep?.error_message ? ` · ${rep.error_message.slice(0, 60)}` : ''}
@@ -167,7 +194,7 @@ export default function AgentsPage() {
                   <th className="px-3 py-2">Run at</th>
                   <th className="px-3 py-2">Status</th>
                   <th className="px-3 py-2">Duration</th>
-                  <th className="px-3 py-2">Findings</th>
+                  <th className="px-3 py-2">AI analysis</th>
                   <th className="px-3 py-2">Gaps</th>
                 </tr>
               </thead>
@@ -181,10 +208,15 @@ export default function AgentsPage() {
                     <td className="px-3 py-2 text-slate-400">
                       {r.duration_ms != null ? `${r.duration_ms}ms` : '—'}
                     </td>
-                    <td className="px-3 py-2 text-slate-400">
-                      <pre className="whitespace-pre-wrap break-words max-w-md text-xs">
-                        {JSON.stringify(r.findings, null, 1)}
-                      </pre>
+                    <td className="px-3 py-2 text-slate-300 max-w-md">
+                      {aiSummary(r)
+                        ? <p className="italic">🤖 {aiSummary(r)}</p>
+                        : <span className="text-slate-500">rule-based (no LLM)</span>}
+                      {aiRecommendations(r).length > 0 && (
+                        <ul className="mt-1 list-disc pl-4 text-xs text-slate-400">
+                          {aiRecommendations(r).map((rec, i) => <li key={i}>{rec}</li>)}
+                        </ul>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-amber-300">
                       <pre className="whitespace-pre-wrap break-words max-w-xs text-xs">
