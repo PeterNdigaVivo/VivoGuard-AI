@@ -292,12 +292,16 @@ def inference_pipeline_health_check() -> None:
 #
 # This task scans those keys every 60s. When ANY live session's age
 # exceeds settings.checkout_alert_minutes, it fires ONE ATTENTION
-# alert per (camera, zone) and stamps a 30-minute dedup key so the
-# same prolonged transaction doesn't repeat-fire — and so a second
-# track at the same till during the dedup window is suppressed.
+# alert per STORE and stamps a 30-minute dedup key so the same
+# prolonged transaction doesn't repeat-fire — and so further long
+# checkouts at ANY till in that store during the window are suppressed.
+# Previously deduped per (store, camera, zone), which let every till
+# fire independently and flooded the feed (257 alerts/day). Coarsening
+# to per-store collapses that to one checkout nudge per store / 30 min.
 #
 # Dedup key:
-#   vg:checkout_alert:sent:{store_id}:{cam}:{zone}  (TTL = 30 min)
+#   vg:checkout_alert:sent:{store_id}          (TTL = 30 min)
+#   vg:checkout_alert:sent:cam:{cam_id}        (storeless legacy cameras)
 
 CHECKOUT_ALERT_DEDUP_TTL_SECONDS = 30 * 60
 
@@ -359,8 +363,13 @@ def checkout_long_session_check() -> None:
             cam_id   = c["camera_id"]
             zone_id  = c["zone_id"]
             store_id = c["store_id"]
-            sent_key = (f"vg:checkout_alert:sent:"
-                         f"{store_id or 0}:{cam_id}:{zone_id}")
+            # One checkout-dwell alert per STORE per 30 min (see
+            # CHECKOUT_ALERT_DEDUP_TTL_SECONDS). Storeless legacy cameras
+            # have no store to group by, so they fall back to per-camera
+            # dedup rather than collapsing into one shared bucket.
+            sent_key = (f"vg:checkout_alert:sent:{store_id}"
+                        if store_id else
+                        f"vg:checkout_alert:sent:cam:{cam_id}")
             if r.get(sent_key):
                 continue
 
