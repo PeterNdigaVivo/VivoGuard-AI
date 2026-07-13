@@ -6,3 +6,7 @@ numpy>=1.26
 opencv-python-headless>=4.10
 ultralytics>=8.3
 ffmpeg-python>=0.2
+# Anthropic SDK — the monitoring agents (app/tasks/agents.py) and the VLM
+# analyst reason via Claude, and both run in the WORKER image (alerts
+# queue). Without this the agents silently fall back to rule-based.
+anthropic>=0.40

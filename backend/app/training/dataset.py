@@ -1,6 +1,7 @@
 """Dataset helpers — directory layout, image ingestion, train/val/test split."""
 from __future__ import annotations
 import logging
+import os
 import random
 import shutil
 import zipfile
@@ -142,45 +143,98 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     train_list, val_list, test_list = [], [], []
     out_lists = {"train": train_list, "val": val_list, "test": test_list}
 
+    def _stage_image(img) -> str | None:
+        """Copy the source image into <root>/images/<img.id><ext> so YOLO's
+        images/ -> labels/ path-swap resolves to the label we write. We COPY
+        (never symlink) — symlinks don't survive crossing Docker volume
+        boundaries. Filenames are keyed on TrainingImage.id (globally unique),
+        so two snapshots sharing a basename can no longer overwrite each
+        other's label. Returns the staged path, or None if the source file is
+        missing/unreadable."""
+        src = Path(img.file_path)
+        if not src.exists():
+            log.warning("dataset %s: training image %s missing on disk (%s) — skipped",
+                        dataset_id, img.id, src)
+            return None
+        ext = src.suffix.lower() or ".jpg"
+        staged = root / "images" / f"{img.id}{ext}"
+        try:
+            shutil.copy2(src, staged)
+        except Exception as e:
+            log.warning("dataset %s: failed to stage image %s (%s): %s",
+                        dataset_id, img.id, src, e)
+            return None
+        return str(staged)
+
     for split, bucket in by_split.items():
         target = out_lists.get(split, train_list)
-        # Positives: write label file with each annotation as a YOLO row.
+        # Positives: stage the image, then write its YOLO label to
+        # <root>/labels/<img.id>.txt so YOLO's images/->labels/ swap on the
+        # STAGED path finds it. (Listing the original file_path — an alert
+        # snapshot outside <root>/images/ — is what silently zeroed mAP.)
         for img, anns in bucket["pos"]:
-            rel = Path(img.file_path).resolve()
-            label_path = root / "labels" / (Path(img.file_path).stem + ".txt")
-            label_path.parent.mkdir(parents=True, exist_ok=True)
+            staged = _stage_image(img)
+            if staged is None:
+                continue
+            label_path = root / "labels" / f"{img.id}.txt"
             with label_path.open("w") as f:
                 for a in anns:
                     if a.class_label not in cls_map:
                         continue
                     cx, cy, w, h = a.bbox_json
                     f.write(f"{cls_map[a.class_label]} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
-            target.append(str(rel))
+            target.append(staged)
 
-        # Negatives: capped at max_neg_ratio × positives. Empty .txt
+        # Negatives: capped at max_neg_ratio × positives. An EMPTY label
         # file is YOLO's "background" convention.
         pos_count = len(bucket["pos"])
         neg_cap = int(pos_count * float(max_neg_ratio)) if pos_count else 0
         # Edge case — a feedback-only fine-tune with zero positives:
-        # still allow up to max_neg_ratio*1 negatives so the trainer
-        # has SOMETHING to learn from.
+        # still allow a few negatives so the trainer has SOMETHING.
         if pos_count == 0 and bucket["neg"]:
             neg_cap = int(max_neg_ratio) or 1
         for img in bucket["neg"][:neg_cap]:
-            rel = Path(img.file_path).resolve()
-            label_path = root / "labels" / (Path(img.file_path).stem + ".txt")
-            label_path.parent.mkdir(parents=True, exist_ok=True)
-            label_path.write_text("")          # empty = background
-            target.append(str(rel))
+            staged = _stage_image(img)
+            if staged is None:
+                continue
+            (root / "labels" / f"{img.id}.txt").write_text("")   # background
+            target.append(staged)
 
     def _write(name: str, items: list[str]) -> Path:
         p = root / f"{name}.txt"
         p.write_text("\n".join(items))
         return p
 
+    # SECONDARY FIX — never validate on the training set. The old
+    # `val_list or train_list` fallback silently made val == train, which
+    # corrupts mAP. Require a real held-out val set; refuse to train
+    # otherwise (belt-and-braces behind the orchestrator's 30-image floor).
+    MIN_VAL_IMAGES = 5
+    if len(val_list) < MIN_VAL_IMAGES:
+        raise ValueError(
+            f"insufficient validation images: {len(val_list)} < {MIN_VAL_IMAGES} "
+            f"(train={len(train_list)}, test={len(test_list)}). Refusing to "
+            f"train: a val set this small yields meaningless mAP and the "
+            f"previous train-set fallback corrupted metrics. Add more labelled "
+            f"images, or lower split_val so more land in the val split."
+        )
+
     train_txt = _write("train", train_list)
-    val_txt   = _write("val", val_list or train_list)        # never leave val empty
+    val_txt   = _write("val", val_list)      # NO train fallback (secondary fix)
     test_txt  = _write("test", test_list)
+
+    # Diagnostic — confirm images are staged and their labels resolve via
+    # YOLO's images/ -> labels/ swap (the bug that zeroed every mAP).
+    def _yolo_label_path(img_path: str) -> Path:
+        sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"
+        return Path(sb.join(img_path.rsplit(sa, 1))).with_suffix(".txt")
+
+    sample = (train_list[:1] or ["-"])[0]
+    label_ok = _yolo_label_path(sample).exists() if sample != "-" else False
+    log.info("write_yolo_dataset_yaml ds=%s: train.txt=%d val.txt=%d test.txt=%d "
+             "images; sample img=%s label_exists=%s",
+             dataset_id, len(train_list), len(val_list), len(test_list),
+             sample, label_ok)
 
     yaml_path = root / "data.yaml"
     yaml_path.write_text(

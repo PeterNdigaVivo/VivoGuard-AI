@@ -245,6 +245,12 @@ def run_job(job_id: int) -> None:
         # final epoch. Previously discarded, leaving AIModel.map50 /
         # precision / recall NULL and starving the promotion gate.
         results = model.train(**train_kwargs)
+        # Diagnostic — surface exactly what the results object exposes so a
+        # future metrics regression (like the all-zero mAP bug) is visible in
+        # the worker log instead of being silently stored as 0/None.
+        log.info("YOLO results for job %s: box=%s results_dict_keys=%s",
+                 job_id, getattr(results, "box", None),
+                 list(getattr(results, "results_dict", {}) or {}))
         final_metrics = _extract_yolo_metrics(results)
 
         # Find best.pt produced by ultralytics.
