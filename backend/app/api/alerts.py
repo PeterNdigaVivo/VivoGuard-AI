@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc
+from sqlalchemy import case, desc
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -60,6 +60,13 @@ _SEVERITY: dict[str, str] = {
     "shop_open_close":   "info",
     "sales_floor_insight": "info",
 }
+
+# Detection types by severity bucket — used to sort the alerts feed so
+# high-priority security/safety alerts (intrusion, weapon, fire, shrinkage,
+# …) always surface within the query's limit and can never be buried by a
+# high-frequency low-priority type like checkout_dwell.
+_CRITICAL_TYPES = [dt for dt, sev in _SEVERITY.items() if sev == "critical"]
+_WARNING_TYPES  = [dt for dt, sev in _SEVERITY.items() if sev == "warning"]
 
 
 def _severity(detection_type: str | None) -> str:
@@ -1172,7 +1179,17 @@ def list_alerts(
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:
         q = q.filter(DetectionEvent.timestamp <= until)
-    q = q.order_by(desc(Alert.created_at)).limit(limit)
+    # Order by severity rank (critical → warning → info) THEN recency, so a
+    # flood of high-frequency info alerts (e.g. checkout_dwell) can't push
+    # trespass / intrusion / shrinkage out of the returned window. When the
+    # caller filters to one detection_type the rank is uniform and this
+    # collapses to pure recency order.
+    severity_rank = case(
+        (DetectionEvent.detection_type.in_(_CRITICAL_TYPES), 0),
+        (DetectionEvent.detection_type.in_(_WARNING_TYPES), 1),
+        else_=2,
+    )
+    q = q.order_by(severity_rank.asc(), desc(Alert.created_at)).limit(limit)
 
     rows = q.all()
     # Bulk-fetch zones AND stores referenced by these events so
