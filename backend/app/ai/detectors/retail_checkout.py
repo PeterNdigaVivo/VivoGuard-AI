@@ -310,25 +310,32 @@ class CheckoutDwellDetector(Detector):
                     continue
                 key = (ctx.camera_id, int(track_id), int(z["id"]))
 
-                # Confirmed staff at the till — don't time them — but
-                # ONLY when the HIGH classification is grounded in a
-                # PURE staff zone (staff_zone / staff_area). A HIGH
-                # classification at a pure counter zone is most often
-                # a dark-clothed customer or a staff member on the
-                # customer side of the till — neither should be
-                # silently dropped, or the checkout-dwell pipeline
-                # records zero sessions (the f8ee2e8 regression).
+                # Never time STAFF as a checkout. We drop the session only
+                # on RELIABLE staff markers a customer can't trigger, so a
+                # dark-clothed CUSTOMER — who reads as HIGH via uniform+dwell
+                # after 5 min at the counter (the f8ee2e8 regression) and is
+                # exactly the long-checkout we must alert on — is NOT dropped:
+                #   • physically inside a staff_zone / staff_area polygon
+                #     (customers stand on the customer side, never in it), OR
+                #   • HIGH classification grounded in a visible lanyard
+                #     (customers don't wear store lanyards).
+                # A bare HIGH at a pure counter (uniform colour + dwell) is
+                # NOT treated as staff — that's the stuck-customer case.
                 v = _verdict_for(int(track_id), det)
                 level = v.get("level") or "unknown"
                 in_pure_staff_zone = bool(v.get("in_pure_staff_zone_now"))
-                if level == "high" and in_pure_staff_zone:
+                has_lanyard = bool(v.get("has_lanyard"))
+                is_staff = in_pure_staff_zone or (level == "high" and has_lanyard)
+                if is_staff:
                     if key in self._sessions:
                         self._sessions.pop(key, None)
                         self._clear_open(r, ctx.camera_id, int(z["id"]),
                                           int(track_id))
-                        log.debug("checkout: dropped session for confirmed "
-                                  "staff (in staff_zone) cam=%s zone=%s "
-                                  "track=%s", ctx.camera_id, z["id"], track_id)
+                        log.debug("checkout: dropped session for staff "
+                                  "(pure_staff_zone=%s lanyard=%s level=%s) "
+                                  "cam=%s zone=%s track=%s",
+                                  in_pure_staff_zone, has_lanyard, level,
+                                  ctx.camera_id, z["id"], track_id)
                     continue   # not in active_keys → close logic skipped
 
                 # MEDIUM-staff sessions get a 5-min floor on the
