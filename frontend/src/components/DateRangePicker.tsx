@@ -141,18 +141,21 @@ export function rangeFor(key: DateRangeKey, customSince?: string, customUntil?: 
       until = eatMidnight(thisFirst)
       break
     }
+    // "Last N days" spans exactly N calendar days INCLUSIVE of today.
+    // until is the half-open next-midnight (= end of today); since is the
+    // start of the day (N-1) days ago. Using -N here spanned N+1 days.
     case 'last_7_days': {
-      since = eatMidnight(addDays(t, -7))
+      since = eatMidnight(addDays(t, -6))
       until = eatMidnight(addDays(t, 1))
       break
     }
     case 'last_30_days': {
-      since = eatMidnight(addDays(t, -30))
+      since = eatMidnight(addDays(t, -29))
       until = eatMidnight(addDays(t, 1))
       break
     }
     case 'last_90_days': {
-      since = eatMidnight(addDays(t, -90))
+      since = eatMidnight(addDays(t, -89))
       until = eatMidnight(addDays(t, 1))
       break
     }
