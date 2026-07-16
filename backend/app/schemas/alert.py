@@ -67,6 +67,10 @@ class AlertOut(BaseModel):
     snapshot_paths: list[str] | None = None
     snapshot_count: int       | None = None
 
+    # Recorded video clip for this alert, when the recorder extracted one
+    # from the active window recording. Served by GET /alerts/{id}/clip.
+    clip_url: str | None = None
+
     # VLM scene description (Sprint 2.1) — written async into
     # DetectionEvent.extra["vlm_scene"]. NULL until the analysis task
     # completes (the card shows "Analysing scene…" meanwhile) or when

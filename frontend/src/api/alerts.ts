@@ -37,6 +37,10 @@ export interface Alert {
   // Render via /api/alerts/{id}/snapshot/{idx} — paths stay server-side.
   snapshot_paths: string[] | null
   snapshot_count: number   | null
+  // Recorded video clip for this alert, when the recorder extracted one.
+  // Play via <video src={clip_url}>. NULL when no clip (falls back to
+  // the snapshot thumbnail/filmstrip).
+  clip_url: string | null
   // VLM scene description (Sprint 2.1). NULL until the async analysis
   // task writes it, or when VLM is disabled / type ineligible.
   vlm_scene: string | null

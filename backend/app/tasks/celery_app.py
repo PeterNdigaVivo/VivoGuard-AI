@@ -38,6 +38,7 @@ celery_app = Celery(
         "app.tasks.queue_report",
         "app.tasks.vlm_tasks",
         "app.tasks.agents",
+        "app.tasks.recorder",
     ],
 )
 celery_app.conf.update(
@@ -111,6 +112,12 @@ celery_app.conf.update(
         "agents.retail_standards": {"queue": "alerts"},
         "agents.inspection":       {"queue": "alerts"},
         "agents.agent_watchdog":   {"queue": "alerts"},
+        # Rolling recorder — runs in the dedicated `recorder` compose service
+        # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
+        "recorder.tick":                  {"queue": "recorder"},
+        "recorder.extract_pending_clips": {"queue": "recorder"},
+        "recorder.prune_alert_clips":     {"queue": "recorder"},
+        "recorder.storage_health_check":  {"queue": "recorder"},
     },
     timezone=settings.app_timezone,
     beat_schedule={
@@ -384,6 +391,28 @@ celery_app.conf.update(
         "agents-watchdog-10min": {
             "task": "agents.agent_watchdog",
             "schedule": timedelta(minutes=10),
+        },
+
+        # ── Rolling recorder ──────────────────────────────────────────
+        # Interval tick (NOT crontab) — window start/end/delete is gated on
+        # the EAT wall clock inside the task, so it's correct even though
+        # celery's timezone is UTC on this deployment. Executed by the
+        # dedicated `recorder` worker.
+        "recorder-tick-every-60s": {
+            "task": "recorder.tick",
+            "schedule": 60.0,
+        },
+        "recorder-extract-clips-every-60s": {
+            "task": "recorder.extract_pending_clips",
+            "schedule": 60.0,
+        },
+        "recorder-prune-alert-clips-hourly": {
+            "task": "recorder.prune_alert_clips",
+            "schedule": 60 * 60.0,
+        },
+        "recorder-storage-health-every-30min": {
+            "task": "recorder.storage_health_check",
+            "schedule": timedelta(minutes=30),
         },
     },
 )

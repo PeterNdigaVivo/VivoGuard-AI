@@ -172,6 +172,33 @@ services:
       redis:    { condition: service_healthy }
     networks: [vivoguard]
 
+  # --- Recorder: rolling video recording of KEY cameras during business
+  # hours. Dedicated service on its OWN queue so its long-lived ffmpeg
+  # subprocesses survive rebuilds of the inference/alerts workers. Uses the
+  # worker image (has ffmpeg + backend code). No `-B` — Beat (owned by the
+  # inference worker) dispatches recorder.* tasks onto the `recorder` queue.
+  # Concurrency 2: the tick and clip-extraction tasks are light; the actual
+  # recordings are detached ffmpeg processes, not celery task runtime.
+  recorder:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args:
+        GPU_BACKEND: ${GPU_BACKEND:-cpu}
+    image: vivoguard/worker:latest
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - "celery -A app.tasks.celery_app worker -Q recorder --loglevel=info --concurrency=${RECORDER_CONCURRENCY:-2} -n recorder@%h"
+    environment: *app-env
+    volumes:
+      - ./data/recordings:/data/recordings
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [vivoguard]
+
   # --- Streamer: ffmpeg subprocess pool. Slim image, no torch.
   #
   # Horizontal scaling: each replica claims `id % SHARD_COUNT == SHARD_INDEX`.

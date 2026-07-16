@@ -459,30 +459,47 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
         </div>
       )}
 
-      {/* Clip modal — clip recording isn't implemented yet so we
-          surface a clear "unavailable" state with the live-view
-          fallback, instead of silently doing nothing. */}
+      {/* Clip modal — plays the recorded clip when one exists, otherwise
+          the "unavailable" state with a live-view fallback. */}
       {clipModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-6"
              onClick={() => setClipModal(false)}>
-          <div className="bg-white rounded p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
-            <div className="text-lg font-semibold mb-2">Clip unavailable</div>
-            <div className="text-sm text-slate-600 mb-4">
-              Recording isn't enabled for this camera yet. You can watch
-              the live feed instead.
-            </div>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setClipModal(false)}
-                      className="px-3 py-1.5 rounded bg-slate-100 hover:bg-slate-200 text-sm">
-                Close
-              </button>
-              {alert.camera_id && (
-                <Link to="/live" onClick={() => setClipModal(false)}
-                      className="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-500 text-sm">
-                  Open live view →
-                </Link>
-              )}
-            </div>
+          <div className={'bg-white rounded p-4 w-full ' + (alert.clip_url ? 'max-w-2xl' : 'max-w-md')}
+               onClick={e => e.stopPropagation()}>
+            {alert.clip_url ? (
+              <>
+                <div className="text-sm font-semibold mb-2 flex items-center justify-between">
+                  <span>📹 Recorded clip{alert.camera_name ? ` — ${alert.camera_name}` : ''}</span>
+                  <button onClick={() => setClipModal(false)}
+                          className="text-slate-400 hover:text-slate-700 text-xl leading-none px-1">×</button>
+                </div>
+                {/* Authenticated file endpoint; controls + fullscreen, no autoplay. */}
+                <video src={`${alert.clip_url}`} controls preload="metadata"
+                       className="w-full rounded bg-black aspect-video">
+                  Your browser can’t play this clip.
+                </video>
+              </>
+            ) : (
+              <>
+                <div className="text-lg font-semibold mb-2">Clip unavailable</div>
+                <div className="text-sm text-slate-600 mb-4">
+                  No recording was captured for this alert (recording runs on key
+                  cameras during business hours). You can watch the live feed instead.
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setClipModal(false)}
+                          className="px-3 py-1.5 rounded bg-slate-100 hover:bg-slate-200 text-sm">
+                    Close
+                  </button>
+                  {alert.camera_id && (
+                    <Link to="/live" onClick={() => setClipModal(false)}
+                          className="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-500 text-sm">
+                      Open live view →
+                    </Link>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

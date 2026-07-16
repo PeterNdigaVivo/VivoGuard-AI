@@ -305,6 +305,17 @@ class Settings(BaseSettings):
     # this many seconds (the detector re-fires roughly every 30s per zone).
     after_hours_present_grace_sec: int = 150
 
+    # --- Rolling recording system (recorder service) ---
+    # Records KEY cameras (counter / entry_exit / staff_zone) on substream
+    # during business hours in rolling windows; each window is deleted at the
+    # next transition. See app/tasks/recorder.py.
+    recording_enabled: bool = True
+    recording_business_start_eat: int = 9    # 09:00 EAT
+    recording_business_end_eat: int = 20     # 20:00 EAT
+    recording_max_used_gb_warning: int = 550
+    recording_max_used_gb_critical: int = 580
+    recording_alert_clip_retention_hours: int = 48
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"

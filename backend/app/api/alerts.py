@@ -942,6 +942,10 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     sp = list(alert.snapshot_paths or [])
     item.snapshot_paths  = sp or None
     item.snapshot_count  = len(sp) or None
+    # Recorded clip (if the recorder extracted one for this alert). We only
+    # expose the URL — the path stays server-side.
+    item.clip_url = (f"/api/alerts/{alert.id}/clip"
+                     if (event.extra or {}).get("alert_clip_path") else None)
     # VLM scene description lives in the event's extra JSON (written
     # async by the vlm.analyse_alert_scene task). Surface just that
     # one field — never the whole extra blob.
@@ -1365,3 +1369,22 @@ def alert_snapshot_at(alert_id: int, idx: int,
     if not os.path.exists(target):
         raise HTTPException(404, "snapshot file missing (pruned?)")
     return FileResponse(target, media_type="image/jpeg")
+
+
+@router.get("/{alert_id}/clip")
+def alert_clip(alert_id: int, db: Session = Depends(get_db),
+               _u: User = Depends(get_current_user)):
+    """Stream the recorded video clip for an alert. The path lives in the
+    event's extra JSON (written by recorder.extract_pending_clips). 404 when
+    the alert has no clip or it was pruned (48h retention). Auth required."""
+    from fastapi.responses import FileResponse
+    import os
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    ev = db.get(DetectionEvent, a.event_id)
+    path = (ev.extra or {}).get("alert_clip_path") if ev else None
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "clip not available")
+    return FileResponse(path, media_type="video/mp4",
+                        filename=f"alert_{alert_id}.mp4")

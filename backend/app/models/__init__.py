@@ -18,6 +18,7 @@ from app.models.metrics   import (
 from app.models.scheduled import ScheduledReport, CustomerJourney
 from app.models.staff     import StaffTrack
 from app.models.agent_report import AgentReport
+from app.models.recording import RecordingClip, RECORDING_CLIP_STATUSES
 
 __all__ = [
     "User",
@@ -35,4 +36,5 @@ __all__ = [
     "ScheduledReport", "CustomerJourney",
     "StaffTrack",
     "AgentReport",
+    "RecordingClip", "RECORDING_CLIP_STATUSES",
 ]
