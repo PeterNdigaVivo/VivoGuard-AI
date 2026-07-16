@@ -293,6 +293,18 @@ class Settings(BaseSettings):
     checkout_max_dwell_seconds: int = 900
     checkout_alert_minutes:     int = 8
 
+    # --- After-hours intrusion snapshot filmstrip ---
+    # One intrusion alert per closed store with a person present; up to
+    # `after_hours_max_snapshots` snapshots, the first immediately then one
+    # every `after_hours_snapshot_interval_min` minutes, from the best
+    # available store camera. See app/tasks/alerting.after_hours_intrusion_check.
+    after_hours_snapshot_enabled: bool = True
+    after_hours_snapshot_interval_min: int = 5
+    after_hours_max_snapshots: int = 6
+    # A person counts as "still present" if an intrusion event landed within
+    # this many seconds (the detector re-fires roughly every 30s per zone).
+    after_hours_present_grace_sec: int = 150
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"

@@ -2061,3 +2061,209 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     db.commit()
     log.info("shop_open_inference: store=%s opened_at=%s (cam=%s)",
              store.id, opened_at.isoformat(), anchor_cam_id)
+
+
+# ── After-hours intrusion snapshot filmstrip ───────────────────────────
+# When a person is present after the store has closed (per the store's own
+# business_hours_json), fire ONE intrusion alert per store per night and
+# attach up to 6 snapshots — the first immediately, then one every 5 min —
+# from the best available store camera. Reuses Alert.snapshot_paths (the
+# same filmstrip checkout-dwell uses), so no schema or UI change.
+#
+# Presence signal = recent `intrusion` DetectionEvents (produced by
+# IntrusionDetector while the store is closed). Per-store session state
+# lives in Redis so the beat task is stateless across worker restarts.
+
+AFTER_HOURS_SNAP_INTERVAL_S  = int(getattr(settings, "after_hours_snapshot_interval_min", 5)) * 60
+AFTER_HOURS_MAX_SNAPS        = int(getattr(settings, "after_hours_max_snapshots", 6))
+AFTER_HOURS_PRESENT_GRACE_S  = int(getattr(settings, "after_hours_present_grace_sec", 150))
+AFTER_HOURS_SESSION_TTL_S    = 12 * 60 * 60      # safety net; cleared when store opens
+AFTER_HOURS_SNAP_RETENTION_S = 24 * 60 * 60
+
+
+def _afterhours_key(store_id: int) -> str:
+    return f"vg:afterhours:open:{store_id}"
+
+
+def _afterhours_body(store_name: str, n: int, minutes: int) -> str:
+    return (f"Someone is in {store_name} after closing time. "
+            f"{n} snapshot{'s' if n != 1 else ''} captured over "
+            f"{max(minutes, 0)} minute{'s' if minutes != 1 else ''}.")
+
+
+def _best_store_camera_jpeg(db, store_id: int):
+    """(camera_id, jpeg_bytes) for the best available camera in a store.
+    Prefers cameras carrying an `entry_exit` zone (they see the door/aisle),
+    then any ai-enabled camera; among those with a fresh Redis frame the
+    largest JPEG wins as a rough 'clearest / highest-res' proxy. Returns
+    (None, None) when nothing is streaming."""
+    from app.models import Camera, Zone
+    from app.stream.frame_buffer import FrameBuffer
+    cams = (db.query(Camera)
+              .filter(Camera.store_id == store_id, Camera.ai_enabled.is_(True))
+              .all())
+    if not cams:
+        return None, None
+    cam_ids = [c.id for c in cams]
+    entry_cam_ids = {
+        z.camera_id for z in db.query(Zone.camera_id, Zone.detection_types_json)
+                                .filter(Zone.camera_id.in_(cam_ids)).all()
+        if "entry_exit" in (z.detection_types_json or [])
+    }
+    fb = FrameBuffer()
+    best = (None, None, -1)   # (cam_id, jpeg, score)
+    for c in cams:
+        jpeg = fb.latest_jpeg(c.id)
+        if not jpeg:
+            continue
+        # entry_exit cameras get a large bonus so they win regardless of size.
+        score = len(jpeg) + (10_000_000 if c.id in entry_cam_ids else 0)
+        if score > best[2]:
+            best = (c.id, jpeg, score)
+    return best[0], best[1]
+
+
+@celery_app.task(name="alerting.after_hours_intrusion_check", ignore_result=True)
+def after_hours_intrusion_check() -> None:
+    """Every 60s: for each closed store with a person present, create or
+    extend an after-hours intrusion filmstrip (<=6 snapshots — one
+    immediately, then every 5 min)."""
+    if not bool(getattr(settings, "after_hours_snapshot_enabled", True)):
+        return
+    from app.database import SessionLocal
+    from app.models import Alert, Camera, DetectionEvent, Store
+    from app.ai.after_hours_snapshots import save_snapshot
+
+    r = _redis()
+    if r is None:
+        return
+    now = datetime.now(timezone.utc)
+    now_ts = now.timestamp()
+    present_cutoff = now - timedelta(seconds=AFTER_HOURS_PRESENT_GRACE_S)
+
+    with SessionLocal() as db:
+        for store in db.query(Store).filter(Store.is_active.is_(True)).all():
+            skey = _afterhours_key(store.id)
+            # Store OPEN now → end the night session (staff have arrived).
+            if is_store_open(store, now):
+                r.delete(skey)
+                continue
+            # Most recent intrusion event across this store's cameras — both
+            # the "is someone here right now" signal AND the anchor camera
+            # for the alert row (DetectionEvent.camera_id is NOT NULL).
+            recent = (db.query(DetectionEvent)
+                        .join(Camera, Camera.id == DetectionEvent.camera_id)
+                        .filter(Camera.store_id == store.id,
+                                DetectionEvent.detection_type == "intrusion",
+                                DetectionEvent.timestamp >= present_cutoff)
+                        .order_by(DetectionEvent.timestamp.desc())
+                        .first())
+            if recent is None:
+                continue   # nobody present right now — leave session, don't snap
+
+            try:
+                raw = r.get(skey)
+                sess = json.loads(raw) if raw else None
+            except Exception:
+                sess = None
+
+            # ── First detection this night → new alert + snapshot #1 ──
+            if sess is None:
+                best_cam, jpeg = _best_store_camera_jpeg(db, store.id)
+                anchor_cam = recent.camera_id      # guaranteed non-null
+                extra = {
+                    "priority":    "high",
+                    "rule":        "after_hours_intrusion",
+                    "after_hours": True,
+                    "store_id":    store.id,
+                    "store_name":  store.name,
+                    "title":       f"Person Detected After Hours — {store.name}",
+                    "message":     _afterhours_body(store.name, 1, 0),
+                    "what_to_do": [
+                        "Open the live camera for this store",
+                        "Verify whether the person is staff or an intruder",
+                        "Escalate to security / call the manager if unrecognised",
+                    ],
+                }
+                ev = _create_info_alert(
+                    db, camera_id=anchor_cam, zone_id=None, store_id=store.id,
+                    detection_type="intrusion", cls="after_hours_intrusion",
+                    extra=extra, capture_snapshot=True,
+                )
+                db.flush()
+                alert = db.query(Alert).filter(Alert.event_id == ev.id).first()
+                if alert is None:
+                    db.commit(); continue
+                path = (save_snapshot(jpeg, store_id=store.id, alert_id=alert.id,
+                                      epoch_ts=int(now_ts)) if jpeg else None)
+                if path:
+                    alert.snapshot_paths = [path]
+                db.commit()
+                r.set(skey, json.dumps({
+                    "alert_id":     alert.id,
+                    "event_id":     ev.id,
+                    "started_ts":   now_ts,
+                    "last_snap_ts": now_ts if path else 0,
+                    "snap_count":   1 if path else 0,
+                }), ex=AFTER_HOURS_SESSION_TTL_S)
+                log.info("after-hours: opened intrusion filmstrip store=%s alert=%s",
+                         store.id, alert.id)
+                continue
+
+            # ── Existing session → one snapshot per 5 min, capped at 6 ──
+            if int(sess.get("snap_count", 0)) >= AFTER_HOURS_MAX_SNAPS:
+                continue
+            if now_ts - float(sess.get("last_snap_ts") or 0) < AFTER_HOURS_SNAP_INTERVAL_S:
+                continue
+            _best_cam, jpeg = _best_store_camera_jpeg(db, store.id)
+            if not jpeg:
+                continue
+            alert = db.get(Alert, int(sess["alert_id"]))
+            if alert is None:
+                r.delete(skey); continue
+            path = save_snapshot(jpeg, store_id=store.id,
+                                 alert_id=alert.id, epoch_ts=int(now_ts))
+            if not path:
+                continue
+            paths = list(alert.snapshot_paths or [])
+            paths.append(path)
+            alert.snapshot_paths = paths
+            n = len(paths)
+            minutes = int((now_ts - float(sess.get("started_ts") or now_ts)) / 60)
+            ev = db.get(DetectionEvent, int(sess["event_id"]))
+            if ev is not None:
+                ev.extra = {**(ev.extra or {}), "message": _afterhours_body(store.name, n, minutes)}
+            db.commit()
+            sess["snap_count"] = n
+            sess["last_snap_ts"] = now_ts
+            r.set(skey, json.dumps(sess), ex=AFTER_HOURS_SESSION_TTL_S)
+            log.info("after-hours: snapshot %d/%d store=%s alert=%s",
+                     n, AFTER_HOURS_MAX_SNAPS, store.id, sess["alert_id"])
+
+
+@celery_app.task(name="alerting.after_hours_prune", ignore_result=True)
+def after_hours_prune() -> None:
+    """24h retention for after-hours filmstrips — mirrors
+    prune_checkout_snapshots. Any intrusion alert carrying a filmstrip is an
+    after-hours one (regular intrusion alerts have no snapshot_paths)."""
+    from app.database import SessionLocal
+    from app.models import Alert, DetectionEvent
+    from app.ai.after_hours_snapshots import delete_alert_folder
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=AFTER_HOURS_SNAP_RETENTION_S)
+    with SessionLocal() as db:
+        rows = (db.query(Alert, DetectionEvent)
+                  .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+                  .filter(DetectionEvent.detection_type == "intrusion",
+                          Alert.created_at < cutoff,
+                          Alert.snapshot_paths.isnot(None))
+                  .all())
+        cleared = 0
+        for alert, ev in rows:
+            if (ev.extra or {}).get("rule") != "after_hours_intrusion":
+                continue
+            delete_alert_folder(int((ev.extra or {}).get("store_id") or 0), alert.id)
+            alert.snapshot_paths = None
+            cleared += 1
+        if cleared:
+            db.commit()
+            log.info("after-hours prune: cleared %d filmstrips", cleared)

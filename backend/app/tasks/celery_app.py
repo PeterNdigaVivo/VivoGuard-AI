@@ -72,6 +72,8 @@ celery_app.conf.update(
         "vlm.analyse_alert_scene":              {"queue": "alerts"},
         "alerting.inference_pipeline_health_check": {"queue": "alerts"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
+        "alerting.after_hours_intrusion_check": {"queue": "alerts"},
+        "alerting.after_hours_prune":           {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
         "briefings.daily_fire_due":           {"queue": "beat"},
@@ -217,6 +219,19 @@ celery_app.conf.update(
         "uniform-violation-every-60s": {
             "task": "alerting.uniform_violation_check",
             "schedule": 60.0,
+        },
+        # After-hours intrusion filmstrip — every 60s, creates one intrusion
+        # alert per closed store with a person present and attaches up to 6
+        # snapshots (first immediately, then every 5 min). Reuses
+        # Alert.snapshot_paths; per-store Redis session dedups.
+        "after-hours-intrusion-every-60s": {
+            "task": "alerting.after_hours_intrusion_check",
+            "schedule": 60.0,
+        },
+        # 24h retention sweep for the after-hours filmstrip JPEGs.
+        "after-hours-prune-every-1h": {
+            "task": "alerting.after_hours_prune",
+            "schedule": 60 * 60.0,
         },
         # Daily Queue Intelligence report — fires once per store after
         # 21:00 store-local. 5-min beat tick + per-store Redis dedup.
