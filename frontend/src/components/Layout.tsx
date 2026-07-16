@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
+import { useTheme } from '@/contexts/ThemeContext'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
 
 const NAV = [
@@ -32,6 +33,7 @@ const NAV = [
 
 export default function Layout() {
   const { user, logout } = useAuth()
+  const { theme, toggle } = useTheme()
   const nav = useNavigate()
 
   // Sidebar badge + the chain-wide UrgentRibbon both read from
@@ -90,6 +92,14 @@ export default function Layout() {
           ))}
         </nav>
         <div className="p-3 border-t border-slate-700 text-xs text-slate-400">
+          {/* Light / dark toggle: ☀️ in dark → go light, 🌙 in light → go dark. */}
+          <button onClick={toggle}
+                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  className="mb-3 flex items-center gap-2 text-slate-300 hover:text-white transition-colors">
+            <span className="text-base leading-none">{theme === 'dark' ? '☀️' : '🌙'}</span>
+            <span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
+          </button>
           <div className="truncate">{user?.email}</div>
           <div className="text-slate-500 mb-2 capitalize">{user?.role}</div>
           <button onClick={() => { logout(); nav('/login') }}
@@ -98,7 +108,7 @@ export default function Layout() {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 overflow-auto bg-slate-100">
+      <main className="flex-1 overflow-auto bg-slate-100 dark:bg-slate-950 transition-colors duration-200">
         <UrgentRibbon urgent={urgentCount} critical={criticalCount} />
         <Outlet />
       </main>

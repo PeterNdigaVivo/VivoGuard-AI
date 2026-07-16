@@ -7,7 +7,7 @@ export function Button(p: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 
   const { variant = 'primary', className = '', ...rest } = p
   const styles = {
     primary: 'bg-sky-600 hover:bg-sky-500 text-white',
-    ghost:   'bg-slate-200 hover:bg-slate-300 text-slate-800',
+    ghost:   'bg-slate-200 hover:bg-slate-300 text-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-100',
     danger:  'bg-red-600 hover:bg-red-500 text-white',
   }[variant]
   return (
@@ -21,6 +21,7 @@ export function Input(p: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input {...rest}
       className={`bg-white border border-slate-300 rounded px-2 py-1 text-sm
+                  dark:bg-slate-800 dark:border-slate-600 dark:text-slate-100
                   focus:ring-2 ring-sky-500 outline-none ${className}`} />
   )
 }
@@ -29,7 +30,8 @@ export function Select(p: SelectHTMLAttributes<HTMLSelectElement>) {
   const { className = '', ...rest } = p
   return (
     <select {...rest}
-      className={`bg-white border border-slate-300 rounded px-2 py-1 text-sm ${className}`} />
+      className={`bg-white border border-slate-300 rounded px-2 py-1 text-sm
+                  dark:bg-slate-800 dark:border-slate-600 dark:text-slate-100 ${className}`} />
   )
 }
 
@@ -59,7 +61,7 @@ export function PageHeader({ title, actions }: { title: string; actions?: ReactN
 
 // Skeleton block — used while data is loading (Rule 9 of the overhaul).
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse bg-slate-200 rounded ${className}`} />
+  return <div className={`animate-pulse bg-slate-200 dark:bg-slate-700 rounded ${className}`} />
 }
 
 // Traffic-light status pill for store dashboards (Rule 4).
