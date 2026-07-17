@@ -61,6 +61,40 @@ function useSnapshot(alertId: number, url: string | null) {
   return { src, failed }
 }
 
+// Alert video clip. Same bearer-header problem as snapshots (a bare
+// <video src> can't send the JWT → 401), but clips are multi-MB so we
+// fetch LAZILY only when `enabled` (the modal is open) and REVOKE the
+// object URL on close to free memory (no module cache).
+function useClip(alertId: number, url: string | null, enabled: boolean) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!enabled || !url) return
+    let cancelled = false
+    let created: string | null = null
+    setLoading(true); setFailed(false)
+    const tok = localStorage.getItem('vg_access_token') ?? ''
+    fetch(url, { headers: { Authorization: `Bearer ${tok}` } })
+      .then(r => (r.ok ? r.blob() : null))
+      .then(blob => {
+        if (cancelled) return
+        if (!blob) { setFailed(true); setLoading(false); return }
+        created = URL.createObjectURL(blob)
+        setSrc(created); setLoading(false)
+      })
+      .catch(() => { if (!cancelled) { setFailed(true); setLoading(false) } })
+    return () => {
+      cancelled = true
+      if (created) URL.revokeObjectURL(created)
+      setSrc(null)
+    }
+  }, [alertId, url, enabled])
+
+  return { src, loading, failed }
+}
+
 
 const SEVERITY_BAR: Record<'critical' | 'warning' | 'info' | 'default', string> = {
   critical: 'bg-red-500',
@@ -232,6 +266,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
   }
 
   const { src: snapUrl, failed: snapAuthFailed } = useSnapshot(alert.id, alert.snapshot_url)
+  // Lazily loads the authenticated clip blob only while the modal is open.
+  const { src: clipSrc, loading: clipLoading, failed: clipFailed } =
+    useClip(alert.id, alert.clip_url, clipModal)
 
   return (
     <div className={'relative bg-white rounded border border-slate-200 overflow-hidden transition-opacity '
@@ -473,11 +510,27 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                   <button onClick={() => setClipModal(false)}
                           className="text-slate-400 hover:text-slate-700 text-xl leading-none px-1">×</button>
                 </div>
-                {/* Authenticated file endpoint; controls + fullscreen, no autoplay. */}
-                <video src={`${alert.clip_url}`} controls preload="metadata"
-                       className="w-full rounded bg-black aspect-video">
-                  Your browser can’t play this clip.
-                </video>
+                {/* Loaded via authenticated fetch → blob URL (a bare
+                    <video src> can't carry the JWT). Controls + fullscreen,
+                    no autoplay. */}
+                {clipFailed ? (
+                  <div className="text-sm text-slate-600">
+                    Couldn’t load the clip — it may have expired (clips are kept 48h).
+                    {alert.camera_id && (
+                      <> <Link to="/live" onClick={() => setClipModal(false)}
+                               className="text-sky-600 hover:underline">Open live view →</Link></>
+                    )}
+                  </div>
+                ) : !clipSrc ? (
+                  <div className="w-full aspect-video flex items-center justify-center bg-black rounded text-slate-300 text-sm">
+                    {clipLoading ? 'Loading clip…' : 'Preparing…'}
+                  </div>
+                ) : (
+                  <video src={clipSrc} controls preload="metadata"
+                         className="w-full rounded bg-black aspect-video">
+                    Your browser can’t play this clip.
+                  </video>
+                )}
               </>
             ) : (
               <>
