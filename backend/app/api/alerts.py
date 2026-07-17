@@ -1217,6 +1217,26 @@ def list_alerts(
     ]
 
 
+@router.get("/{alert_id}", response_model=AlertOut)
+def get_alert(alert_id: int, db: Session = Depends(get_db),
+              _u: User = Depends(get_current_user)):
+    """Single alert by id — same shape as the list endpoint, including
+    clip_url and the snapshot fields. Registered AFTER the string routes
+    (/summary, /export.xlsx) so those still match first. 404 when the alert
+    or its underlying event is missing."""
+    from app.models import Store as _Store
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    ev = db.get(DetectionEvent, a.event_id)
+    if not ev:
+        raise HTTPException(404, "alert event not found")
+    cam = db.get(Camera, ev.camera_id) if ev.camera_id else None
+    zone = db.get(Zone, ev.zone_id) if ev.zone_id else None
+    store = db.get(_Store, cam.store_id) if (cam and cam.store_id) else None
+    return _to_alert_out(a, ev, cam, zone, store)
+
+
 @router.post("/{alert_id}/confirm", response_model=AlertActionOut)
 def confirm(alert_id: int, db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
