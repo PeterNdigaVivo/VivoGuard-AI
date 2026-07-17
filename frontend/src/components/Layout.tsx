@@ -69,12 +69,14 @@ export default function Layout() {
 
   return (
     <div className="h-full flex">
-      {/* Sidebar */}
-      <aside className="w-56 bg-slate-900 text-slate-200 flex flex-col">
-        <div className="px-4 py-5 text-lg font-semibold border-b border-slate-700">
+      {/* Sidebar — always dark (bg-slate-900, no dark: variant) in both themes. */}
+      <aside className="w-56 shrink-0 bg-slate-900 text-slate-200 flex flex-col">
+        <div className="px-4 py-5 text-lg font-semibold border-b border-slate-700 shrink-0">
           🎥 VivoGuard
         </div>
-        <nav className="flex-1 p-2 space-y-1">
+        {/* min-h-0 + overflow-y-auto so a long nav scrolls instead of pushing
+            the bottom items (Users / System / Agents) under the footer. */}
+        <nav className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
           {NAV.map(item => (
             <NavLink key={item.to} to={item.to}
               className={({ isActive }) =>
@@ -91,7 +93,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="p-3 border-t border-slate-700 text-xs text-slate-400">
+        <div className="shrink-0 p-3 border-t border-slate-700 text-xs text-slate-400">
           {/* Light / dark toggle: ☀️ in dark → go light, 🌙 in light → go dark. */}
           <button onClick={toggle}
                   title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}

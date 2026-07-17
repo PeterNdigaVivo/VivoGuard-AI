@@ -3,24 +3,30 @@
 @tailwind components;
 @tailwind utilities;
 
-/* App-wide tweaks. */
-html, body, #root { height: 100%; }
+/* App-wide tweaks. Full-height AND min-height so the themed canvas always
+   covers the whole scroll range (no white gaps on overscroll / short pages). */
+html, body, #root { height: 100%; min-height: 100%; }
 body { font-family: ui-sans-serif, system-ui, sans-serif; }
 
 /* ---- Theme (light default; `.dark` on <html> via ThemeContext) ---- */
-html { color-scheme: light; }
-html.dark { color-scheme: dark; }
-/* Base canvas so overscroll / unpainted areas match the theme, with a
-   smooth 200ms switch. Surfaces use Tailwind `dark:` + `transition-colors`. */
+/* Paint the HTML element (the true root behind all scrolling) so any
+   overscroll or unpainted gap shows the theme colour, never white. The
+   scroll container (<main>) sets its own bg via Tailwind on top of this. */
+html {
+  color-scheme: light;
+  background-color: #f1f5f9;                /* slate-100 (light) */
+  transition: background-color 200ms ease;
+}
+html.dark {
+  color-scheme: dark;
+  background-color: #020617;                /* slate-950 (dark) */
+}
 body {
-  background-color: #f1f5f9;               /* slate-100 (light) */
-  color: #0f172a;                          /* slate-900 */
-  transition: background-color 200ms ease, color 200ms ease;
+  background-color: inherit;                /* follow <html> — no white gap */
+  color: #0f172a;                           /* slate-900 */
+  transition: color 200ms ease;
 }
-html.dark body {
-  background-color: #020617;               /* slate-950 (dark) */
-  color: #e2e8f0;                          /* slate-200 */
-}
+html.dark body { color: #e2e8f0; }          /* slate-200 */
 @media (prefers-reduced-motion: reduce) {
-  body { transition: none; }
+  html { transition: none; }
 }
