@@ -312,15 +312,17 @@ services:
     image: nginx:alpine
     container_name: vivoguard-nginx
     restart: unless-stopped
-    # TLS terminated here — nginx.conf has an 80→443 redirect + a 443 ssl
-    # server block using the Let's Encrypt certs mounted read-only below.
+    # TLS terminated here. Config is mounted at conf.d/default.conf — the
+    # path the stock nginx image actually reads (its base nginx.conf
+    # includes conf.d/*.conf). 80→443 redirect + 443 ssl using the Let's
+    # Encrypt certs mounted read-only below.
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./deploy/ssl:/etc/nginx/ssl:ro
-      # Let's Encrypt certs from the host (read-only) — nginx.conf points at
+      # Let's Encrypt certs from the host (read-only) — default.conf points at
       # /etc/letsencrypt/live/vivoops.vivofashiongroup.net/{fullchain,privkey}.pem
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
