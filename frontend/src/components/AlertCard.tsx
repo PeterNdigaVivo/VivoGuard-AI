@@ -420,7 +420,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               </ActionBtn>
             )}
             {alert.camera_id && (
-              <Link to={`/live`}
+              <Link to={`/live?camera_id=${alert.camera_id}`}
                     className="px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">
                 📹 See Live Camera
               </Link>

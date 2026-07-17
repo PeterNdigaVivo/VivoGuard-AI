@@ -15,6 +15,7 @@
 // server. True paging caps it at 16.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
@@ -59,6 +60,13 @@ export default function LiveViewPage() {
   const [viewMode, setViewMode] = useState<LiveViewMode>('cameras')
   const toast = useToast()
 
+  // Deep-link from an alert's "See Live Camera" button (/live?camera_id=N):
+  // scope the grid to that camera's store AND jump straight to it
+  // full-screen (paging-proof — the tile need not be on the current page).
+  // Applied once cams load; an unknown id falls back to the normal grid.
+  const [searchParams] = useSearchParams()
+  const appliedDeepLink = useRef<number | null>(null)
+
   // api() throws on non-2xx — without a .catch a failed fetch becomes
   // an unhandled rejection and the page silently shows the empty state.
   useEffect(() => {
@@ -66,6 +74,18 @@ export default function LiveViewPage() {
       .catch(e => toast.push(`Could not load cameras: ${e}`, 'err'))
   }, [])
   useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
+
+  useEffect(() => {
+    const raw = searchParams.get('camera_id')
+    const camId = raw ? Number(raw) : NaN
+    if (!Number.isFinite(camId) || !cams.length) return
+    if (appliedDeepLink.current === camId) return   // apply once per id
+    const cam = cams.find(c => c.id === camId)
+    if (!cam) return                                // unknown → fall back to grid
+    appliedDeepLink.current = camId
+    if (cam.store_id != null) setStoreFilter(cam.store_id)
+    setFullscreenId(camId)
+  }, [cams, searchParams])
 
   // Persist on change.
   useEffect(() => {
