@@ -199,9 +199,12 @@ def _write_report(name: str, status: str, findings: dict | None = None, *,
 
 
 def _eat_now() -> datetime:
+    # Always Africa/Nairobi (EAT) — NOT settings.app_timezone, which is UTC
+    # on this deployment. The daily agents' "today" boundaries + digests must
+    # be EAT regardless of the app's clock.
     try:
         from zoneinfo import ZoneInfo
-        return datetime.now(timezone.utc).astimezone(ZoneInfo(settings.app_timezone))
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Africa/Nairobi"))
     except Exception:
         return datetime.now(timezone.utc)
 
@@ -224,19 +227,24 @@ def _safe(findings: dict, key: str, fn):
 
 # ── AI reasoning (the "agent brain") ─────────────────────────────────────
 def _extract_json(text: str) -> dict | None:
-    """Pull the first JSON object out of an LLM response (tolerates code
-    fences / stray prose)."""
+    """Pull the first JSON OBJECT out of an LLM response (tolerates code
+    fences / stray prose). Returns None for a non-dict reply (a top-level
+    array or scalar) so callers cleanly fall back to the rule-based result —
+    a malformed LLM response must never crash the agent."""
     if not text:
         return None
     try:
-        return json.loads(text)
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
     except Exception:
         pass
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
         try:
-            return json.loads(text[start:end + 1])
+            data = json.loads(text[start:end + 1])
+            return data if isinstance(data, dict) else None
         except Exception:
             return None
     return None

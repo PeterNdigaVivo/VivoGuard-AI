@@ -157,26 +157,49 @@ def _start_window(db, r, window_id: str, seconds: int) -> int:
     return started
 
 
+def _pid_is_ffmpeg(pid: int) -> bool:
+    """True if `pid` is alive AND is one of our ffmpeg recorders. Guards
+    against acting on a PID that a stale Redis key names but which, after a
+    container restart, now belongs to an unrelated (reused) process."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return b"ffmpeg" in fh.read()
+    except Exception:
+        return False
+
+
+def _any_recording_alive(r) -> bool:
+    """True if at least one tracked ffmpeg recorder is still running."""
+    for key in r.scan_iter(match="vg:recording:pid:*", count=200):
+        try:
+            pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
+        except Exception:
+            pid = 0
+        if pid and _pid_is_ffmpeg(pid):
+            return True
+    return False
+
+
 def _stop_all(r) -> None:
-    """SIGTERM every tracked ffmpeg, then SIGKILL survivors after a grace."""
+    """SIGTERM every tracked ffmpeg, then SIGKILL survivors after a grace.
+    Only signals PIDs verified to be ffmpeg (a stale key after a restart
+    could otherwise name a reused, unrelated PID)."""
     pids: list[int] = []
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
             pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
         except Exception:
             pid = 0
-        if pid:
+        if pid and _pid_is_ffmpeg(pid):
             pids.append(pid)
         r.delete(key)
     for pid in pids:
         try: os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError: pass
         except Exception: pass
     if pids:
         time.sleep(3)   # brief grace; most self-terminated at -t already
     for pid in pids:
         try: os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError: pass
         except Exception: pass
 
 
@@ -220,9 +243,22 @@ def tick() -> None:
             r.delete(_CURRENT_WINDOW_KEY)
         return
 
-    window_id, seconds, _start = win
+    window_id, seconds, wstart = win
     if prev == window_id:
-        return   # already recording this window — nothing to do
+        # Already the current window. Normally nothing to do — but if the
+        # recorder container restarted mid-window, the Redis window marker
+        # persists while all ffmpeg children died with the old container.
+        # Detect that (no live ffmpeg) and respawn for the REMAINING window
+        # time, instead of silently recording nothing until 14:00/19:00.
+        if not _any_recording_alive(r):
+            remaining = int((wstart.timestamp() + seconds) - now_eat.timestamp())
+            if remaining > 30:
+                _stop_all(r)                     # clear stale pid keys
+                with SessionLocal() as db:
+                    _start_window(db, r, window_id, remaining)
+                log.warning("recorder: recovered mid-window %s after restart "
+                            "(%ds remaining)", window_id, remaining)
+        return
     # Transition: stop + delete previous window, start the new one.
     _stop_all(r)
     with SessionLocal() as db:

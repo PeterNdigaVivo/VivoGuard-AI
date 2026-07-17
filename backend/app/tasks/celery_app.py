@@ -119,7 +119,11 @@ celery_app.conf.update(
         "recorder.prune_alert_clips":     {"queue": "recorder"},
         "recorder.storage_health_check":  {"queue": "recorder"},
     },
-    timezone=settings.app_timezone,
+    # Pin Beat's clock to EAT (NOT settings.app_timezone, which is UTC on the
+    # box) so the crontab-scheduled agents fire at their intended EAT times
+    # (Retail Standards 05:00, Inspection 06:00, the 6h agents). Only crontab
+    # schedules use this; interval (timedelta) schedules are timezone-agnostic.
+    timezone="Africa/Nairobi",
     beat_schedule={
         "supervise-inference-every-30s": {
             "task": "inference.supervise_all",
@@ -395,8 +399,8 @@ celery_app.conf.update(
 
         # ── Rolling recorder ──────────────────────────────────────────
         # Interval tick (NOT crontab) — window start/end/delete is gated on
-        # the EAT wall clock inside the task, so it's correct even though
-        # celery's timezone is UTC on this deployment. Executed by the
+        # the EAT wall clock inside the task, so it's correct regardless of
+        # celery's / the app's timezone. Executed by the
         # dedicated `recorder` worker.
         "recorder-tick-every-60s": {
             "task": "recorder.tick",
