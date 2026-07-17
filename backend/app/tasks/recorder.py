@@ -241,46 +241,52 @@ def _clip_duration(detection_type: str, extra: dict) -> int:
 
 @celery_app.task(name="recorder.extract_pending_clips", ignore_result=True)
 def extract_pending_clips() -> None:
-    """Every 60s: for recent alerts of clip-worthy types that don't yet have a
-    clip, cut the relevant segment from that camera's active window recording.
-    Best-effort — a failure just leaves the alert with its snapshot."""
+    """Every 60s: for recent alerts whose camera has an ACTIVE recording,
+    cut the relevant segment out of that recording. Best-effort — a failure
+    just leaves the alert with its snapshot.
+
+    The recording_clips table is the single source of truth — there is NO
+    clip_pending flag and no dependency on the Redis window marker: we join
+    alerts to any camera recording that is `status='recording'` and started
+    before the alert. Works for ALL detection types (_clip_duration falls
+    back to a default). Idempotent via the alert_clip_path guard."""
     if not bool(getattr(settings, "recording_enabled", True)):
         return
     from datetime import timedelta
     from app.database import SessionLocal
     from app.models import Alert, DetectionEvent, RecordingClip
-    from app.tasks.recorder import _clips_root  # noqa: F401 (self, keeps root consistent)
-    r = _redis()
-    cur_window = r.get(_CURRENT_WINDOW_KEY)
-    if not cur_window:
-        return
-    win = _current_window(_eat_now())
-    if not win:
-        return
-    _wid, _secs, window_start_eat = win
-    window_start_utc = window_start_eat.astimezone(timezone.utc)
-    targets = set(_CLIP_DURATIONS) | {"checkout_dwell"}
-    since = datetime.now(timezone.utc) - timedelta(minutes=3)
+    since = datetime.now(timezone.utc) - timedelta(minutes=10)
     _alert_clips_root().mkdir(parents=True, exist_ok=True)
 
     with SessionLocal() as db:
-        rows = (db.query(Alert, DetectionEvent)
+        rows = (db.query(Alert, DetectionEvent, RecordingClip)
                   .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
-                  .filter(DetectionEvent.timestamp >= since,
-                          DetectionEvent.detection_type.in_(targets))
+                  .join(RecordingClip,
+                        RecordingClip.camera_id == DetectionEvent.camera_id)
+                  .filter(Alert.created_at >= since,
+                          RecordingClip.status == "recording",
+                          DetectionEvent.timestamp >= RecordingClip.started_at)
+                  .order_by(RecordingClip.started_at.desc())
                   .all())
-        for alert, ev in rows:
+        seen: set[int] = set()
+        for alert, ev, clip in rows:
+            if alert.id in seen:          # a camera can have >1 window row
+                continue
+            seen.add(alert.id)
             if (ev.extra or {}).get("alert_clip_path"):
                 continue
-            clip = (db.query(RecordingClip)
-                      .filter(RecordingClip.camera_id == ev.camera_id,
-                              RecordingClip.window_id == cur_window,
-                              RecordingClip.status == "recording")
-                      .first())
-            if clip is None or not clip.file_path or not Path(clip.file_path).exists():
+            if not clip.file_path or not Path(clip.file_path).exists():
                 continue
-            offset = max(0, int((ev.timestamp.astimezone(timezone.utc)
-                                 - window_start_utc).total_seconds()) - 5)
+            # Offset from the REAL recording start (row's started_at), not the
+            # EAT window boundary: ffmpeg for a window spawns AFTER the
+            # boundary, so a boundary offset seeks past the event / past EOF.
+            ev_ts = ev.timestamp
+            if ev_ts.tzinfo is None:
+                ev_ts = ev_ts.replace(tzinfo=timezone.utc)
+            started = clip.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            offset = max(0, int((ev_ts - started).total_seconds()) - 5)
             dur = _clip_duration(ev.detection_type, ev.extra or {})
             out = _alert_clips_root() / f"{alert.id}.mp4"
             # RE-ENCODE the alert clip (not stream-copy): the window
