@@ -72,6 +72,17 @@ x-app-env: &app-env
   MODELS_DIR: /data/models
   DATASETS_DIR: /data/datasets
   THUMBNAILS_DIR: /data/thumbnails
+  # AI / inference tuning — mirrored into the repo so a git pull never
+  # conflicts with server-side edits. All ${VAR:-default} passthroughs;
+  # real values (e.g. ANTHROPIC_API_KEY) live only in .env.
+  MODEL_CACHE_DIR: ${MODEL_CACHE_DIR:-/data/models/optimized}
+  REID_ENABLED: ${REID_ENABLED:-false}
+  VLM_ENABLED: ${VLM_ENABLED:-false}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AGENTS_LLM_ENABLED: ${AGENTS_LLM_ENABLED:-false}
+  CELERYD_CONCURRENCY: ${CELERYD_CONCURRENCY:-10}
+  CELERYD_MAX_TASKS_PER_CHILD: ${CELERYD_MAX_TASKS_PER_CHILD:-500}
+  FRAME_BUFFER_SIZE: ${FRAME_BUFFER_SIZE:-5}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation
@@ -307,6 +318,7 @@ services:
     # block in nginx.conf, and add "443:443" to the ports list.
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/ssl:/etc/nginx/ssl:ro
