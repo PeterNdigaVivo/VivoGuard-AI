@@ -312,16 +312,17 @@ services:
     image: nginx:alpine
     container_name: vivoguard-nginx
     restart: unless-stopped
-    # HTTP only — nginx.conf currently has no 443 server block. TLS is
-    # terminated upstream (Cloudflare, ALB, etc.). To add native HTTPS:
-    # drop real certs into ./deploy/ssl/, restore a `listen 443 ssl http2;`
-    # block in nginx.conf, and add "443:443" to the ports list.
+    # TLS terminated here — nginx.conf has an 80→443 redirect + a 443 ssl
+    # server block using the Let's Encrypt certs mounted read-only below.
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/ssl:/etc/nginx/ssl:ro
+      # Let's Encrypt certs from the host (read-only) — nginx.conf points at
+      # /etc/letsencrypt/live/vivoops.vivofashiongroup.net/{fullchain,privkey}.pem
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - api
       - frontend
