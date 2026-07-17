@@ -283,12 +283,22 @@ def extract_pending_clips() -> None:
                                  - window_start_utc).total_seconds()) - 5)
             dur = _clip_duration(ev.detection_type, ev.extra or {})
             out = _alert_clips_root() / f"{alert.id}.mp4"
+            # RE-ENCODE the alert clip (not stream-copy): the window
+            # recordings are fragmented mp4, which HTML5 <video> can't play
+            # directly. libx264 + aac + faststart (moov atom at the front)
+            # produces a plain, immediately-playable, seekable mp4.
+            # veryfast preset keeps CPU cheap for these short clips.
             cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
                    "-ss", str(offset), "-i", clip.file_path,
-                   "-t", str(dur), "-c", "copy", str(out)]
+                   "-t", str(dur),
+                   "-c:v", "libx264", "-preset", "veryfast",
+                   "-c:a", "aac",
+                   "-movflags", "+faststart", str(out)]
             try:
+                # Re-encode is slower than copy — allow more time than the
+                # old 30s (a 180s clip on CPU can take a while).
                 res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, timeout=30)
+                                     stderr=subprocess.DEVNULL, timeout=180)
             except Exception as e:
                 log.warning("recorder: clip extract failed alert=%s: %s", alert.id, e)
                 continue

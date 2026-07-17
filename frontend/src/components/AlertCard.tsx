@@ -269,6 +269,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
   // Lazily loads the authenticated clip blob only while the modal is open.
   const { src: clipSrc, loading: clipLoading, failed: clipFailed } =
     useClip(alert.id, alert.clip_url, clipModal)
+  // Playback error (e.g. codec the browser can't decode), distinct from a
+  // load/auth failure. Reset whenever a new clip blob is loaded.
+  const [clipPlayError, setClipPlayError] = useState(false)
+  useEffect(() => { setClipPlayError(false) }, [clipSrc])
 
   return (
     <div className={'relative bg-white rounded border border-slate-200 overflow-hidden transition-opacity '
@@ -513,9 +517,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                 {/* Loaded via authenticated fetch → blob URL (a bare
                     <video src> can't carry the JWT). Controls + fullscreen,
                     no autoplay. */}
-                {clipFailed ? (
+                {clipFailed || clipPlayError ? (
                   <div className="text-sm text-slate-600">
-                    Couldn’t load the clip — it may have expired (clips are kept 48h).
+                    {clipPlayError
+                      ? 'This clip couldn’t be played in the browser.'
+                      : 'Couldn’t load the clip — it may have expired (clips are kept 48h).'}
                     {alert.camera_id && (
                       <> <Link to="/live" onClick={() => setClipModal(false)}
                                className="text-sky-600 hover:underline">Open live view →</Link></>
@@ -526,8 +532,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                     {clipLoading ? 'Loading clip…' : 'Preparing…'}
                   </div>
                 ) : (
-                  <video src={clipSrc} controls preload="metadata"
-                         className="w-full rounded bg-black aspect-video">
+                  <video controls preload="auto"
+                         className="w-full rounded bg-black aspect-video"
+                         onError={() => setClipPlayError(true)}>
+                    <source src={clipSrc} type="video/mp4" />
                     Your browser can’t play this clip.
                   </video>
                 )}
