@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
 import { useTheme } from '@/contexts/ThemeContext'
+import AlertNotificationBell from '@/components/AlertNotificationBell'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
 
 const NAV = [
@@ -108,6 +109,9 @@ export default function Layout() {
                   className="text-sky-400 hover:underline">Sign out</button>
         </div>
       </aside>
+
+      {/* Floating alert-notification bell — shows on every page. */}
+      <AlertNotificationBell />
 
       {/* Main */}
       <main className="flex-1 overflow-auto bg-slate-100 dark:bg-slate-950 transition-colors duration-200">

@@ -11,6 +11,7 @@ import { lazy, Suspense, type ReactNode } from 'react'
 
 import { AuthProvider, useAuth } from '@/auth/AuthContext'
 import { ToastProvider } from '@/components/ui/Primitives'
+import { AlertNotificationProvider } from '@/contexts/AlertNotificationContext'
 import Layout from '@/components/Layout'
 
 // Auth screen is eager — every other user hits it before reaching
@@ -74,7 +75,7 @@ export default function App() {
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route element={<Protected><Layout /></Protected>}>
+            <Route element={<Protected><AlertNotificationProvider><Layout /></AlertNotificationProvider></Protected>}>
               <Route index element={<Navigate to="/cameras" replace />} />
               <Route path="/chain"                    element={<MultiStorePage />} />
               <Route path="/stores"                   element={<StoresPage />} />
