@@ -42,7 +42,7 @@ export default function UsersPage() {
     return (
       <div className="p-6">
         <PageHeader title="Users" />
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300 dark:bg-slate-900 dark:border-slate-800">
           Only admins can manage users. Ask your administrator if you need access.
         </Card>
       </div>
@@ -110,7 +110,7 @@ export default function UsersPage() {
       {error && <div className="text-red-600 mb-2">{error}</div>}
 
       {adding && (
-        <Card className="p-4 mb-4">
+        <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">
           <div className="font-medium mb-3">New user</div>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
             <Input placeholder="email@vivofashiongroup.com"
@@ -129,7 +129,7 @@ export default function UsersPage() {
               <Button variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
             </div>
           </div>
-          <div className="text-xs text-slate-500 mt-2">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
             <strong>viewer</strong>: read-only dashboards. <strong>operator</strong>:
             can add cameras, confirm/dismiss alerts. <strong>admin</strong>:
             full access including user management.
@@ -137,9 +137,9 @@ export default function UsersPage() {
         </Card>
       )}
 
-      <Card>
+      <Card className="dark:bg-slate-900 dark:border-slate-800">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-200">
             <tr>
               <th className="text-left p-3">Email</th>
               <th className="text-left p-3">Name</th>
@@ -151,8 +151,8 @@ export default function UsersPage() {
           </thead>
           <tbody>
             {rows.map(u => (
-              <tr key={u.id} className="border-t hover:bg-slate-50">
-                <td className="p-3 font-medium">{u.email}{u.id === me?.id && <span className="ml-2 text-xs text-slate-400">(you)</span>}</td>
+              <tr key={u.id} className="border-t dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                <td className="p-3 font-medium">{u.email}{u.id === me?.id && <span className="ml-2 text-xs text-slate-400 dark:text-slate-400">(you)</span>}</td>
                 <td className="p-3">{u.full_name ?? '—'}</td>
                 <td className="p-3">
                   <Select value={u.role}
@@ -168,7 +168,7 @@ export default function UsersPage() {
                     ? <Badge color="green">active</Badge>
                     : <Badge color="slate">disabled</Badge>}
                 </td>
-                <td className="p-3 text-xs text-slate-500">
+                <td className="p-3 text-xs text-slate-500 dark:text-slate-300">
                   {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'never'}
                 </td>
                 <td className="p-3 text-right whitespace-nowrap space-x-2">
@@ -193,7 +193,7 @@ export default function UsersPage() {
       </Card>
 
       {resetFor && (
-        <Card className="p-4 mt-4 max-w-md">
+        <Card className="p-4 mt-4 max-w-md dark:bg-slate-900 dark:border-slate-800">
           <div className="font-medium mb-2">Reset password for {resetFor.email}</div>
           <Input type="password" placeholder="new password"
                  value={resetPw} onChange={e => setResetPw(e.target.value)} />
