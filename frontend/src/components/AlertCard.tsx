@@ -597,11 +597,23 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
         {/* Right: thumbnail (+ checkout-dwell filmstrip when present) */}
         <div className="sm:w-40 sm:flex-shrink-0">
           {snapUrl && !snapFailed && !snapAuthFailed ? (
-            <img src={snapUrl}
-                 alt=""
-                 onError={() => setSnapFailed(true)}
-                 onClick={() => setLightbox(true)}
-                 className="w-full sm:w-40 aspect-video object-cover rounded bg-slate-100 cursor-zoom-in" />
+            // Clicking the main snapshot opens the navigable filmstrip
+            // lightbox at index 0 when filmstrip snapshots exist; otherwise
+            // it falls back to the single-image lightbox so it's still
+            // zoomable. A hover overlay + expand glyph hints it's clickable.
+            <div className="relative group cursor-zoom-in"
+                 onClick={() => (alert.snapshot_count ?? 0) > 0 ? setFilmIdx(0) : setLightbox(true)}>
+              <img src={snapUrl}
+                   alt=""
+                   onError={() => setSnapFailed(true)}
+                   className="w-full sm:w-40 aspect-video object-cover rounded bg-slate-100" />
+              <div className="absolute inset-0 rounded flex items-center justify-center
+                              bg-black/0 group-hover:bg-black/20 transition-colors">
+                <span className="opacity-0 group-hover:opacity-100 transition-opacity
+                                 w-8 h-8 rounded-full bg-black/55 text-white text-lg
+                                 flex items-center justify-center">⤢</span>
+              </div>
+            </div>
           ) : (
             <div className="w-full sm:w-40 aspect-video flex flex-col items-center justify-center bg-slate-100 rounded text-slate-400">
               <div className="text-2xl">📷</div>
