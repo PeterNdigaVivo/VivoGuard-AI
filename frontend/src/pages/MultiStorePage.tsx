@@ -41,6 +41,8 @@ export default function MultiStorePage() {
   const [range, setRange] = useState<DateRange>(() => rangeFor('last_7_days'))
   const [data, setData] = useState<Awaited<ReturnType<typeof analytics.multiDashboard>> | null>(null)
   const [sortBy, setSortBy] = useState<string>('rag_status')
+  // "Visitors by Store" — Top 10 by default, expandable to all stores.
+  const [showAllVisitors, setShowAllVisitors] = useState(false)
 
   const [bootstrapStores, setBootstrapStores] = useState<{ id: number; name: string; country: string }[]>([])
   useEffect(() => {
@@ -141,8 +143,10 @@ export default function MultiStorePage() {
   const maxCountryV = Math.max(1, ...byCountry.map(c => c.visitors))
 
   const coverageRisk = data.stores.filter(s => s.cameras_total > 0 && s.cameras_online === 0)
-  const topVisitors = [...data.stores].sort((a, b) => storeVisitors(b) - storeVisitors(a)).slice(0, 10)
-  const maxStoreV = Math.max(1, ...topVisitors.map(storeVisitors))
+  const sortedVisitors = [...data.stores].sort((a, b) => storeVisitors(b) - storeVisitors(a))
+  const topVisitors = sortedVisitors.slice(0, 10)      // always-shown Top 10
+  const extraVisitors = sortedVisitors.slice(10)       // revealed on "View more"
+  const maxStoreV = Math.max(1, ...sortedVisitors.map(storeVisitors))
   const attentionRows = rows.filter(r => r.rag_status !== 'green' || (r.cameras_total > 0 && r.cameras_online === 0))
 
   return (
@@ -193,19 +197,51 @@ export default function MultiStorePage() {
       {/* ── Visitors by store + country footprint ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Bento>
-          <SectionTitle icon="🏆" title="Visitors by Store — Top 10"
+          <SectionTitle icon="🏆"
+                        title={showAllVisitors ? 'Visitors by Store — All' : 'Visitors by Store — Top 10'}
                         note={range.label.toLowerCase()} />
           {topVisitors.length === 0 ? (
             <Empty text="No visitor data in this range." />
           ) : (
-            <div className="mt-3 space-y-2">
-              {topVisitors.map((s, i) => (
-                <GradientBarRow key={s.store_id} rank={i + 1}
-                  label={s.store_name} to={`/stores/${s.store_id}`}
-                  value={fmtInt(storeVisitors(s))}
-                  pct={(storeVisitors(s) / maxStoreV) * 100} gradient={GRAD_PRIMARY} />
-              ))}
-            </div>
+            <>
+              <div className="mt-3 space-y-2">
+                {topVisitors.map((s, i) => (
+                  <GradientBarRow key={s.store_id} rank={i + 1}
+                    label={s.store_name} to={`/stores/${s.store_id}`}
+                    value={fmtInt(storeVisitors(s))}
+                    pct={(storeVisitors(s) / maxStoreV) * 100} gradient={GRAD_PRIMARY} />
+                ))}
+              </div>
+
+              {/* Extra stores (rank 11+) — the grid-rows 0fr→1fr trick
+                  animates the auto height smoothly both ways. */}
+              {extraVisitors.length > 0 && (
+                <div className={'grid transition-[grid-template-rows] duration-300 ease-out '
+                                + (showAllVisitors ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]')}>
+                  <div className="overflow-hidden">
+                    <div className="space-y-2 mt-2">
+                      {extraVisitors.map((s, j) => (
+                        <GradientBarRow key={s.store_id} rank={j + 11}
+                          label={s.store_name} to={`/stores/${s.store_id}`}
+                          value={fmtInt(storeVisitors(s))}
+                          pct={(storeVisitors(s) / maxStoreV) * 100} gradient={GRAD_PRIMARY} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {extraVisitors.length > 0 && (
+                <button type="button"
+                        onClick={() => setShowAllVisitors(v => !v)}
+                        className="mt-3 w-full rounded-xl py-2 text-sm font-semibold
+                                   text-purple-700 hover:bg-purple-50 transition-colors">
+                  {showAllVisitors
+                    ? 'View less ▲'
+                    : `View more (${extraVisitors.length} more) ▼`}
+                </button>
+              )}
+            </>
           )}
         </Bento>
 
