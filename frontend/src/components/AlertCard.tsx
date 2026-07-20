@@ -96,20 +96,22 @@ function useClip(alertId: number, url: string | null, enabled: boolean) {
 }
 
 
-// Filmstrip thumbnail. The /alerts/{id}/snapshot/{idx} endpoint requires the
-// JWT bearer header, so a bare <img src> (which can't send it) 401s and shows
+// Filmstrip images. The /alerts/{id}/snapshot/{idx} endpoint requires the JWT
+// bearer header, so a bare <img src> (which can't send it) 401s and shows
 // black. Same authenticated fetch → blob-URL pattern as useSnapshot. Cached at
-// module scope keyed by alert+index so re-renders don't refetch.
+// module scope keyed by alert+index so thumbnails and the lightbox share one
+// fetch and re-renders don't refetch.
 const _filmstripCache = new Map<string, string>()
 
-function FilmstripThumb({ alertId, idx }: { alertId: number; idx: number }) {
+function useFilmstripSrc(alertId: number, idx: number) {
   const key = `${alertId}:${idx}`
   const [src, setSrc] = useState<string | null>(_filmstripCache.get(key) ?? null)
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    if (_filmstripCache.has(key)) { setSrc(_filmstripCache.get(key)!); return }
+    if (_filmstripCache.has(key)) { setSrc(_filmstripCache.get(key)!); setFailed(false); return }
     let cancelled = false
+    setSrc(null); setFailed(false)
     const tok = localStorage.getItem('vg_access_token') ?? ''
     fetch(`/api/alerts/${alertId}/snapshot/${idx}`,
           { headers: { Authorization: `Bearer ${tok}` } })
@@ -123,6 +125,14 @@ function FilmstripThumb({ alertId, idx }: { alertId: number; idx: number }) {
       .catch(() => { if (!cancelled) setFailed(true) })
     return () => { cancelled = true }
   }, [alertId, idx, key])
+
+  return { src, failed }
+}
+
+function FilmstripThumb({ alertId, idx, onOpen }: {
+  alertId: number; idx: number; onOpen: () => void
+}) {
+  const { src, failed } = useFilmstripSrc(alertId, idx)
 
   if (failed) {
     return (
@@ -138,12 +148,89 @@ function FilmstripThumb({ alertId, idx }: { alertId: number; idx: number }) {
     )
   }
   return (
-    <a href={src} target="_blank" rel="noopener noreferrer"
+    <button type="button" onClick={onOpen} aria-label={`Open snapshot ${idx + 1}`}
        className="shrink-0 block w-12 h-9 rounded overflow-hidden
-                  bg-black border border-slate-300 dark:border-slate-700 hover:border-sky-500">
+                  bg-black border border-slate-300 dark:border-slate-700 hover:border-sky-500
+                  focus:outline-none focus:ring-2 focus:ring-sky-500 cursor-zoom-in">
       <img src={src} alt={`Frame ${idx + 1}`} loading="lazy"
            className="w-full h-full object-cover" />
-    </a>
+    </button>
+  )
+}
+
+// Full-screen filmstrip viewer with prev/next navigation. Clicking a thumbnail
+// opens this at that index; ← / → (buttons or keys) step through all snapshots,
+// Esc or a click on the backdrop closes. Reuses the authenticated blob cache.
+function FilmstripLightbox({ alertId, count, index, title, onClose, onIndex }: {
+  alertId: number; count: number; index: number; title: string
+  onClose: () => void; onIndex: (i: number) => void
+}) {
+  const { src, failed } = useFilmstripSrc(alertId, index)
+  const canPrev = index > 0
+  const canNext = index < count - 1
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+      else if (e.key === 'ArrowLeft'  && index > 0)         onIndex(index - 1)
+      else if (e.key === 'ArrowRight' && index < count - 1) onIndex(index + 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [index, count, onClose, onIndex])
+
+  return (
+    <div className="fixed inset-0 bg-black/85 z-50 flex flex-col p-4" onClick={onClose}>
+      {/* Header — index label + alert title + close */}
+      <div className="flex items-center justify-between text-white mb-2 shrink-0"
+           onClick={e => e.stopPropagation()}>
+        <div className="text-sm truncate pr-3">
+          <span className="font-semibold">Snapshot {index + 1} of {count}</span>
+          {title && <span className="text-white/70"> — {title}</span>}
+        </div>
+        <button onClick={onClose} aria-label="Close"
+                className="text-white/80 hover:text-white text-3xl leading-none px-2">×</button>
+      </div>
+
+      {/* Body — arrows flanking the image. Backdrop click closes. */}
+      <div className="flex-1 min-h-0 flex items-center justify-center gap-2 sm:gap-4"
+           onClick={onClose}>
+        <button onClick={e => { e.stopPropagation(); if (canPrev) onIndex(index - 1) }}
+                disabled={!canPrev} aria-label="Previous snapshot"
+                className="shrink-0 text-white text-4xl sm:text-5xl px-2 sm:px-3 py-2 rounded
+                           hover:bg-white/10 disabled:opacity-25 disabled:hover:bg-transparent">
+          ‹
+        </button>
+
+        <div className="flex-1 h-full flex items-center justify-center min-w-0"
+             onClick={e => e.stopPropagation()}>
+          {failed ? (
+            <div className="text-white/70 text-sm">Snapshot unavailable (pruned?)</div>
+          ) : !src ? (
+            <div className="flex flex-col items-center gap-2 text-white/70">
+              <div className="w-8 h-8 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+              <div className="text-xs">Loading…</div>
+            </div>
+          ) : (
+            <img key={index} src={src} alt={`Snapshot ${index + 1}`}
+                 className="max-w-full max-h-full object-contain rounded shadow-xl animate-vg-film-fade" />
+          )}
+        </div>
+
+        <button onClick={e => { e.stopPropagation(); if (canNext) onIndex(index + 1) }}
+                disabled={!canNext} aria-label="Next snapshot"
+                className="shrink-0 text-white text-4xl sm:text-5xl px-2 sm:px-3 py-2 rounded
+                           hover:bg-white/10 disabled:opacity-25 disabled:hover:bg-transparent">
+          ›
+        </button>
+      </div>
+
+      {/* Fade between frames — keyed <img> re-mounts on index change. */}
+      <style>{`
+        @keyframes vg-film-fade { from { opacity: 0 } to { opacity: 1 } }
+        .animate-vg-film-fade { animation: vg-film-fade 160ms ease-out both; }
+      `}</style>
+    </div>
   )
 }
 
@@ -248,6 +335,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
   const isClosed    = isResolved || isDismissed
   const [lightbox, setLightbox] = useState(false)
   const [snapFailed, setSnapFailed] = useState(false)
+  // Filmstrip lightbox — null = closed, otherwise the open snapshot index.
+  const [filmIdx, setFilmIdx] = useState<number | null>(null)
   const [clipModal, setClipModal] = useState(false)
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
@@ -530,7 +619,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               </div>
               <div className="flex gap-1 overflow-x-auto">
                 {Array.from({ length: alert.snapshot_count ?? 0 }, (_, i) => (
-                  <FilmstripThumb key={i} alertId={alert.id} idx={i} />
+                  <FilmstripThumb key={i} alertId={alert.id} idx={i}
+                                  onOpen={() => setFilmIdx(i)} />
                 ))}
               </div>
             </div>
@@ -544,6 +634,18 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
              onClick={() => setLightbox(false)}>
           <img src={snapUrl} alt="" className="max-w-full max-h-full rounded shadow-xl" />
         </div>
+      )}
+
+      {/* Filmstrip lightbox — navigable viewer for the 6-frame filmstrip. */}
+      {filmIdx !== null && (alert.snapshot_count ?? 0) > 0 && (
+        <FilmstripLightbox
+          alertId={alert.id}
+          count={alert.snapshot_count ?? 0}
+          index={filmIdx}
+          title={alert.plain_title ?? alert.title ?? alert.detection_type ?? 'Alert'}
+          onClose={() => setFilmIdx(null)}
+          onIndex={setFilmIdx}
+        />
       )}
 
       {/* Clip modal — plays the recorded clip when one exists, otherwise
