@@ -322,8 +322,14 @@ def extract_pending_clips() -> None:
             started = clip.started_at
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
-            offset = max(0, int((ev_ts - started).total_seconds()) - 5)
-            dur = _clip_duration(ev.detection_type, ev.extra or {})
+            # Standardised 30s clip for ALL alert types: 10s of lead-up
+            # before the alert + 20s after, so the operator sees what led
+            # up to the incident and what happened right after.
+            pre_buffer = 10                       # seconds before the alert
+            post_buffer = 20                      # seconds after the alert
+            dur = pre_buffer + post_buffer        # 30 seconds total
+            seconds_since_recording_start = int((ev_ts - started).total_seconds())
+            offset = max(0, seconds_since_recording_start - pre_buffer)
             out = _alert_clips_root() / f"{alert.id}.mp4"
             # RE-ENCODE the alert clip (not stream-copy): the window
             # recordings are fragmented mp4, which HTML5 <video> can't play
