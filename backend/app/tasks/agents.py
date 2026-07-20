@@ -157,6 +157,9 @@ def _note_failure(r, name: str) -> None:
     if n >= CIRCUIT_MAX_FAILS:
         try:
             r.set(_suspended_key(name), int(time.time()), ex=SUSPEND_SECONDS)
+            # Reset the counter on trip so that after the 1h suspension the
+            # agent needs 5 FRESH failures to re-trip — not just one.
+            r.delete(_fails_key(name))
         except Exception:
             pass
         _ops_alert("AGENT SUSPENDED",
@@ -368,15 +371,18 @@ def _execute(task, name: str, fn) -> None:
                       duration_ms=int((time.time() - started) * 1000))
         _note_failure(r, name)
     except Exception as exc:                                   # noqa: BLE001
-        _write_report(name, "critical",
-                      {"error": str(exc), "traceback": traceback.format_exc()},
-                      duration_ms=int((time.time() - started) * 1000),
-                      error_message=str(exc)[:500])
-        _note_failure(r, name)
+        # Retry first; only WRITE the critical report + count the breaker
+        # failure ONCE, after all retries are exhausted. Doing it before the
+        # retry made each of the 4 attempts write a duplicate report and
+        # increment the counter 4x (tripping the 5-fail breaker in ~2 cycles).
         try:
             raise task.retry(exc=exc)
         except MaxRetriesExceededError:
-            pass          # report already written; give up gracefully
+            _write_report(name, "critical",
+                          {"error": str(exc), "traceback": traceback.format_exc()},
+                          duration_ms=int((time.time() - started) * 1000),
+                          error_message=str(exc)[:500])
+            _note_failure(r, name)     # one failure per beat cycle
 
 
 # ══════════════════════════════════════════════════════════════════════════

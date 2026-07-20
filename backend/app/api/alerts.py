@@ -61,12 +61,9 @@ _SEVERITY: dict[str, str] = {
     "sales_floor_insight": "info",
 }
 
-# Detection types by severity bucket — used to sort the alerts feed so
-# high-priority security/safety alerts (intrusion, weapon, fire, shrinkage,
-# …) always surface within the query's limit and can never be buried by a
-# high-frequency low-priority type like checkout_dwell.
-_CRITICAL_TYPES = [dt for dt, sev in _SEVERITY.items() if sev == "critical"]
-_WARNING_TYPES  = [dt for dt, sev in _SEVERITY.items() if sev == "warning"]
+# Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
+# (defined below) so ALL high-priority types surface — see _RANK_CRITICAL /
+# _RANK_HIGH after the _SEVERITY_4 definition.
 
 
 def _severity(detection_type: str | None) -> str:
@@ -140,6 +137,14 @@ _SEVERITY_4_COLOR: dict[str, str] = {
 _SEVERITY_4_EMOJI: dict[str, str] = {
     "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵",
 }
+
+# Feed-ordering rank buckets — derived from the 4-tier ladder so EVERY
+# critical/high detection type surfaces to the top of the alerts feed.
+# (The old hand-maintained _CRITICAL_TYPES / _WARNING_TYPES lists silently
+# dropped types like weapon_brandished / shrinkage / abandoned_object that
+# were added to _SEVERITY_4 later.)
+_RANK_CRITICAL = [dt for dt, s in _SEVERITY_4.items() if s == "CRITICAL"]
+_RANK_HIGH     = [dt for dt, s in _SEVERITY_4.items() if s == "HIGH"]
 
 
 def _severity_4_label(detection_type: str | None,
@@ -1189,8 +1194,8 @@ def list_alerts(
     # caller filters to one detection_type the rank is uniform and this
     # collapses to pure recency order.
     severity_rank = case(
-        (DetectionEvent.detection_type.in_(_CRITICAL_TYPES), 0),
-        (DetectionEvent.detection_type.in_(_WARNING_TYPES), 1),
+        (DetectionEvent.detection_type.in_(_RANK_CRITICAL), 0),
+        (DetectionEvent.detection_type.in_(_RANK_HIGH), 1),
         else_=2,
     )
     q = q.order_by(severity_rank.asc(), desc(Alert.created_at)).limit(limit)

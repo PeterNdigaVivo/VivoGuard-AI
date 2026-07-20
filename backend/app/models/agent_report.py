@@ -22,9 +22,13 @@ class AgentReport(Base):
     __tablename__ = "agent_reports"
 
     id:            Mapped[int]      = mapped_column(primary_key=True)
-    agent_name:    Mapped[str]      = mapped_column(String(64), index=True)
+    # No single-column index=True here — migration 0030 creates only the
+    # composite (agent_name, run_at) below, which covers the agent-name +
+    # latest-run queries. Declaring index=True too made create_all (sqlite
+    # edge / tests) build 3 indexes vs the migration's 1 (autogenerate drift).
+    agent_name:    Mapped[str]      = mapped_column(String(64))
     run_at:        Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True)
+        DateTime(timezone=True), server_default=func.now())
     # ok | warning | critical
     status:        Mapped[str]      = mapped_column(String(16))
     findings:      Mapped[dict | None] = mapped_column(_json(), nullable=True)
