@@ -55,6 +55,9 @@ PRE_OFFSET_S   = 10                     # snapshot 1 — before the alert
 POST_OFFSETS_S = (30, 60, 90, 120)      # snapshots 3-6 — after the alert
 MAX_SNAPSHOTS  = 6
 
+# 48h retention for the on-disk filmstrips (mirrors prune_alert_clips).
+RETENTION_HOURS = int(getattr(settings, "alert_snapshot_retention_hours", 48))
+
 
 # ── time / gating ─────────────────────────────────────────────────────────
 def _eat(dt: datetime) -> datetime:
@@ -215,3 +218,52 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
             args=[alert_id, camera_id, store_id, base + off],
             countdown=off,
         )
+
+
+# ── retention ─────────────────────────────────────────────────────────────
+@celery_app.task(name="alerting.prune_alert_snapshots", ignore_result=True)
+def prune_alert_snapshots() -> None:
+    """Hourly: delete filmstrip JPEGs under data/alert_snaps older than the
+    retention window (default 48h) and remove the now-empty {store}/{alert}
+    folders. Mirrors prune_alert_clips / prune_checkout_snapshots.
+
+    Filesystem-driven (by file mtime) rather than DB-driven: the checkout
+    pruner nulls Alert.snapshot_paths at 24h, so a query filtered on
+    snapshot_paths would miss these files and leak them. Best-effort."""
+    root = _root()
+    if not root.exists():
+        return
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=RETENTION_HOURS)).timestamp()
+    deleted = 0
+    try:
+        for store_dir in root.iterdir():
+            if not store_dir.is_dir():
+                continue
+            for alert_dir in store_dir.iterdir():
+                if not alert_dir.is_dir():
+                    continue
+                for f in alert_dir.iterdir():
+                    try:
+                        if f.is_file() and f.stat().st_mtime < cutoff:
+                            f.unlink()
+                            deleted += 1
+                    except Exception:
+                        pass
+                # Remove the alert folder once it's empty.
+                try:
+                    if not any(alert_dir.iterdir()):
+                        alert_dir.rmdir()
+                except OSError:
+                    pass
+            # Remove the store folder once it's empty.
+            try:
+                if not any(store_dir.iterdir()):
+                    store_dir.rmdir()
+            except OSError:
+                pass
+    except Exception as e:
+        log.warning("prune_alert_snapshots failed: %s", e)
+    if deleted:
+        log.info("prune_alert_snapshots: deleted %d files older than %dh",
+                 deleted, RETENTION_HOURS)

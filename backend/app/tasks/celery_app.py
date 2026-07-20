@@ -78,6 +78,7 @@ celery_app.conf.update(
         "alerting.after_hours_prune":           {"queue": "alerts"},
         "alerting.schedule_alert_filmstrip":    {"queue": "alerts"},
         "alerting.capture_filmstrip_frame":     {"queue": "alerts"},
+        "alerting.prune_alert_snapshots":       {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
         "briefings.daily_fire_due":           {"queue": "beat"},
@@ -218,6 +219,12 @@ celery_app.conf.update(
         # nulls Alert.snapshot_paths.
         "prune-checkout-snapshots-every-1h": {
             "task": "alerting.prune_checkout_snapshots",
+            "schedule": 60 * 60.0,
+        },
+        # Business-hours alert filmstrips (data/alert_snaps/{store}/{alert}/).
+        # Deletes JPEGs older than 48h by file mtime — every hour.
+        "prune-alert-snapshots-every-1h": {
+            "task": "alerting.prune_alert_snapshots",
             "schedule": 60 * 60.0,
         },
         # Camera-offline WhatsApp nudge — every 60s the task scans
