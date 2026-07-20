@@ -144,7 +144,7 @@ _SKIP_ALERT_TYPES: set[str] = {
 
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
-                   camera_name: str | None = None,
+                   camera_name: str | None = None, store_id: int | None = None,
                    suppress_alert: bool = False) -> int:
     """Always writes a DetectionEvent row. `suppress_alert` ONLY
     controls whether the companion Alert row is created — it must
@@ -182,6 +182,20 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         db.flush()
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
+        # Business-hours filmstrip — 6 smartly-timed snapshots bracketing
+        # the incident (-10s, 0, +30/60/90/120s). Fire-and-forget on the
+        # alerts queue; the task itself gates on type + the 09:00–20:00 EAT
+        # window. .delay() is microseconds and must never block inference.
+        try:
+            from app.tasks.alert_snapshots import (
+                schedule_alert_filmstrip, FILMSTRIP_TYPES,
+            )
+            if store_id is not None and ev.detection_type in FILMSTRIP_TYPES:
+                schedule_alert_filmstrip.delay(
+                    alert.id, camera_id, store_id, ev.detection_type,
+                    datetime.now(timezone.utc).timestamp())
+        except Exception:
+            pass
         # VLM scene analysis — fire-and-forget on the alerts queue so
         # the 10s cloud call never blocks this inference loop. Guarded
         # by detection_type + a stored thumbnail; the task itself
@@ -502,7 +516,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                 suppress = True
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
-                                             camera_name=cam.name,
+                                             camera_name=cam.name, store_id=store_id,
                                              suppress_alert=suppress)
                         if suppress:
                             continue  # not an operator-facing event

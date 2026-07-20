@@ -39,6 +39,7 @@ celery_app = Celery(
         "app.tasks.vlm_tasks",
         "app.tasks.agents",
         "app.tasks.recorder",
+        "app.tasks.alert_snapshots",
     ],
 )
 celery_app.conf.update(
@@ -75,6 +76,8 @@ celery_app.conf.update(
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         "alerting.after_hours_intrusion_check": {"queue": "alerts"},
         "alerting.after_hours_prune":           {"queue": "alerts"},
+        "alerting.schedule_alert_filmstrip":    {"queue": "alerts"},
+        "alerting.capture_filmstrip_frame":     {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
         "briefings.daily_fire_due":           {"queue": "beat"},
