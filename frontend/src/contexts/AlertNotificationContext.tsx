@@ -127,7 +127,13 @@ export function AlertNotificationProvider({ children }: { children: ReactNode })
   const check = useCallback(async () => {
     let rows: Alert[]
     try {
-      rows = await alertsApi.list({ status: 'new', limit: 50 })
+      // order=recent → the backend returns the newest "new" alerts of ANY
+      // severity. Without it the endpoint orders severity-first then LIMITs,
+      // so a new low-severity alert is buried behind the backlog of urgent
+      // ones and never reaches the notifier — the "no sound in All alerts
+      // mode" bug. Client-side scoping (below) still narrows to urgent when
+      // urgentOnly is set.
+      rows = await alertsApi.list({ status: 'new', order: 'recent', limit: 100 })
     } catch { return }   // poll error — retry next tick
     const s = settingsRef.current
     const urgentNew = rows.filter(a => a.severity_label === 'URGENT')

@@ -1170,6 +1170,7 @@ def list_alerts(
     since: Optional[datetime]  = Query(None),
     until: Optional[datetime]  = Query(None),
     limit: int                 = Query(100, le=500),
+    order: Optional[str]       = Query(None),
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
@@ -1188,17 +1189,24 @@ def list_alerts(
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:
         q = q.filter(DetectionEvent.timestamp <= until)
-    # Order by severity rank (critical → warning → info) THEN recency, so a
-    # flood of high-frequency info alerts (e.g. checkout_dwell) can't push
-    # trespass / intrusion / shrinkage out of the returned window. When the
-    # caller filters to one detection_type the rank is uniform and this
-    # collapses to pure recency order.
-    severity_rank = case(
-        (DetectionEvent.detection_type.in_(_RANK_CRITICAL), 0),
-        (DetectionEvent.detection_type.in_(_RANK_HIGH), 1),
-        else_=2,
-    )
-    q = q.order_by(severity_rank.asc(), desc(Alert.created_at)).limit(limit)
+    if order == "recent":
+        # Pure recency — used by the real-time notification poller. Severity-
+        # first ordering (below) would bury a NEW low-severity alert past
+        # `limit` behind a backlog of higher-severity "new" alerts, so the
+        # notifier never sees it and no sound fires in "All alerts" mode.
+        q = q.order_by(desc(Alert.created_at)).limit(limit)
+    else:
+        # Order by severity rank (critical → warning → info) THEN recency, so a
+        # flood of high-frequency info alerts (e.g. checkout_dwell) can't push
+        # trespass / intrusion / shrinkage out of the returned window. When the
+        # caller filters to one detection_type the rank is uniform and this
+        # collapses to pure recency order.
+        severity_rank = case(
+            (DetectionEvent.detection_type.in_(_RANK_CRITICAL), 0),
+            (DetectionEvent.detection_type.in_(_RANK_HIGH), 1),
+            else_=2,
+        )
+        q = q.order_by(severity_rank.asc(), desc(Alert.created_at)).limit(limit)
 
     rows = q.all()
     # Bulk-fetch zones AND stores referenced by these events so
