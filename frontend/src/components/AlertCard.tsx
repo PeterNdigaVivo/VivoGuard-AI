@@ -96,6 +96,57 @@ function useClip(alertId: number, url: string | null, enabled: boolean) {
 }
 
 
+// Filmstrip thumbnail. The /alerts/{id}/snapshot/{idx} endpoint requires the
+// JWT bearer header, so a bare <img src> (which can't send it) 401s and shows
+// black. Same authenticated fetch → blob-URL pattern as useSnapshot. Cached at
+// module scope keyed by alert+index so re-renders don't refetch.
+const _filmstripCache = new Map<string, string>()
+
+function FilmstripThumb({ alertId, idx }: { alertId: number; idx: number }) {
+  const key = `${alertId}:${idx}`
+  const [src, setSrc] = useState<string | null>(_filmstripCache.get(key) ?? null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (_filmstripCache.has(key)) { setSrc(_filmstripCache.get(key)!); return }
+    let cancelled = false
+    const tok = localStorage.getItem('vg_access_token') ?? ''
+    fetch(`/api/alerts/${alertId}/snapshot/${idx}`,
+          { headers: { Authorization: `Bearer ${tok}` } })
+      .then(r => (r.ok ? r.blob() : null))
+      .then(blob => {
+        if (cancelled || !blob) { if (!cancelled) setFailed(true); return }
+        const url = URL.createObjectURL(blob)
+        _filmstripCache.set(key, url)   // kept for future renders (not revoked)
+        setSrc(url)
+      })
+      .catch(() => { if (!cancelled) setFailed(true) })
+    return () => { cancelled = true }
+  }, [alertId, idx, key])
+
+  if (failed) {
+    return (
+      <div className="shrink-0 w-12 h-9 rounded flex items-center justify-center
+                      bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-[8px] text-slate-400">—</div>
+    )
+  }
+  if (!src) {
+    return (
+      <div className="shrink-0 w-12 h-9 rounded animate-pulse
+                      bg-black/80 border border-slate-300 dark:border-slate-700" />
+    )
+  }
+  return (
+    <a href={src} target="_blank" rel="noopener noreferrer"
+       className="shrink-0 block w-12 h-9 rounded overflow-hidden
+                  bg-black border border-slate-300 dark:border-slate-700 hover:border-sky-500">
+      <img src={src} alt={`Frame ${idx + 1}`} loading="lazy"
+           className="w-full h-full object-cover" />
+    </a>
+  )
+}
+
 const SEVERITY_BAR: Record<'critical' | 'warning' | 'info' | 'default', string> = {
   critical: 'bg-red-500',
   warning:  'bg-amber-500',
@@ -479,17 +530,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               </div>
               <div className="flex gap-1 overflow-x-auto">
                 {Array.from({ length: alert.snapshot_count ?? 0 }, (_, i) => (
-                  <a key={i}
-                     href={`/api/alerts/${alert.id}/snapshot/${i}`}
-                     target="_blank"
-                     rel="noopener noreferrer"
-                     className="shrink-0 block w-12 h-9 rounded overflow-hidden
-                                bg-black border border-slate-300 hover:border-sky-500">
-                    <img src={`/api/alerts/${alert.id}/snapshot/${i}`}
-                         alt={`Frame ${i + 1}`}
-                         loading="lazy"
-                         className="w-full h-full object-cover" />
-                  </a>
+                  <FilmstripThumb key={i} alertId={alert.id} idx={i} />
                 ))}
               </div>
             </div>
