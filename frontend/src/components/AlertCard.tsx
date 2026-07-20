@@ -414,6 +414,14 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                 ✓ Marked {isDismissed ? 'False' : 'True'}
               </span>
             )}
+            {/* View Clip — primary blue, same size/weight as the True/False
+                feedback buttons, sitting right after them. Only rendered
+                when a recorded clip actually exists for this alert. */}
+            {alert.clip_url && (
+              <FeedbackBtn onClick={() => setClipModal(true)} tone="blue" disabled={busy}>
+                🎬 View Clip
+              </FeedbackBtn>
+            )}
             {alert.status === 'new' && !alert.acknowledged_at && (
               <ActionBtn onClick={acknowledgeOne} tone="amber" disabled={busy}>
                 👁 I'm on it
@@ -427,9 +435,6 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
             )}
             <ActionBtn onClick={() => setNoteOpen(o => !o)} tone="slate" disabled={busy}>
               📋 Write a note
-            </ActionBtn>
-            <ActionBtn onClick={() => setClipModal(true)} tone="slate" disabled={busy}>
-              📹 View clip
             </ActionBtn>
           </div>
 
@@ -594,13 +599,15 @@ function ActionBtn({ onClick, tone, disabled, children }: {
 // can't miss the primary call to action.
 function FeedbackBtn({ onClick, tone, disabled, children }: {
   onClick: () => void
-  tone: 'green' | 'red'
+  tone: 'green' | 'red' | 'blue'
   disabled?: boolean
   children: React.ReactNode
 }) {
   const cls = tone === 'green'
     ? 'bg-green-600 hover:bg-green-700'
-    : 'bg-red-600 hover:bg-red-700'
+    : tone === 'blue'
+      ? 'bg-blue-600 hover:bg-blue-700'
+      : 'bg-red-600 hover:bg-red-700'
   return (
     <button onClick={onClick} disabled={disabled}
             className={'px-3 py-1.5 rounded text-white font-bold shadow-sm '

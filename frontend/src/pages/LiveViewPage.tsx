@@ -245,6 +245,26 @@ export default function LiveViewPage() {
         <ActivityGrid onPickFullscreen={setFullscreenId} />
       ) : (
       <>
+      {/* Prominent "back to all cameras" bar — shown whenever the grid is
+          scoped to a single store (e.g. after "See Live Camera" deep-links
+          in from an alert). Big, bright-orange, bold, hard to miss — same
+          weight as the True/False feedback buttons. */}
+      {storeFilter !== '' && (
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => setStoreFilter('')}
+            className="px-4 py-2 rounded-lg bg-orange-500 hover:bg-orange-600
+                       text-white font-bold text-base shadow-sm
+                       flex items-center gap-2">
+            ← Back to All Cameras
+          </button>
+          <span className="text-sm text-slate-600">
+            Filtered to <strong>{stores.find(s => s.id === storeFilter)?.name ?? 'one store'}</strong>
+            {' '}· {total} camera{total === 1 ? '' : 's'}
+          </span>
+        </div>
+      )}
+
       {/* Page navigation + auto-cycle + camera count */}
       <Card className="p-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
         <Button variant="ghost" onClick={goPrev} disabled={!hasPrev}>
@@ -265,10 +285,6 @@ export default function LiveViewPage() {
                  onChange={e => setAutoCycle(e.target.checked)} />
           🔄 Auto-cycle every 30s
         </label>
-        {storeFilter !== '' && (
-          <button onClick={() => setStoreFilter('')}
-                  className="text-sky-600 hover:underline text-xs">clear filter</button>
-        )}
       </Card>
 
       <div className="grid gap-1"
