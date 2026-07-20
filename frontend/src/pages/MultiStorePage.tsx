@@ -21,7 +21,6 @@ import { api } from '@/api/client'
 type RAG = 'red' | 'amber' | 'green'
 
 // ── Vibrant Bento tokens ──────────────────────────────────────────────
-const BG          = '#f6f5fb'
 const GRAD_PRIMARY = 'linear-gradient(135deg,#7c3aed 0%,#ec4899 100%)'
 const GRAD_BLUE    = 'linear-gradient(135deg,#3b82f6 0%,#14b8a6 100%)'
 const C = {
@@ -86,7 +85,7 @@ export default function MultiStorePage() {
   // ── Loading skeleton (keeps the bento look while metrics load) ──────
   if (!data) {
     return (
-      <div style={{ background: BG }} className="min-h-full p-6">
+      <div className="min-h-full p-6 bg-[#f6f5fb] dark:bg-slate-900">
         <ExecHeader subtitle="Loading network metrics…" />
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mt-4">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -95,10 +94,10 @@ export default function MultiStorePage() {
         </div>
         <Bento className="mt-4">
           <SectionTitle icon="🏬" title="Stores" />
-          <ul className="mt-2 divide-y divide-slate-100 text-sm">
+          <ul className="mt-2 divide-y divide-slate-100 dark:divide-slate-700 text-sm">
             {bootstrapStores.slice(0, 12).map(s => (
               <li key={s.id} className="flex justify-between py-2">
-                <span className="font-medium text-slate-700">{s.name}</span>
+                <span className="font-medium text-slate-700 dark:text-slate-200">{s.name}</span>
                 <span className="text-slate-400">{s.country} · loading…</span>
               </li>
             ))}
@@ -150,13 +149,13 @@ export default function MultiStorePage() {
   const attentionRows = rows.filter(r => r.rag_status !== 'green' || (r.cameras_total > 0 && r.cameras_online === 0))
 
   return (
-    <div style={{ background: BG }} className="min-h-full p-6 space-y-4">
+    <div className="min-h-full p-6 space-y-4 bg-[#f6f5fb] dark:bg-slate-900">
       <ExecHeader
         subtitle={`Vivo Fashion Group · ${data.totals.stores} stores · Kenya · Uganda · Rwanda`}
         right={
           <div className="flex flex-col items-end gap-1">
             <DateRangePicker value={range} onChange={setRange} />
-            <span className="text-[11px] text-slate-500">
+            <span className="text-[11px] text-slate-500 dark:text-slate-300">
               {data.totals.stores_open}/{data.totals.stores} open · updated {new Date(data.as_of).toLocaleTimeString()}
             </span>
           </div>
@@ -287,17 +286,17 @@ export default function MultiStorePage() {
               </thead>
               <tbody>
                 {attentionRows.map(r => (
-                  <tr key={r.store_id} className="border-t border-slate-100">
+                  <tr key={r.store_id} className="border-t border-slate-100 dark:border-slate-700">
                     <td className="py-2.5 pr-3 font-medium">
                       <Link to={`/stores/${r.store_id}`} className="text-purple-700 hover:underline">{r.store_name}</Link>
                     </td>
-                    <td className="py-2.5 pr-3 text-slate-500">{r.country}</td>
+                    <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-300">{r.country}</td>
                     <td className={'py-2.5 pr-3 tabular-nums ' +
-                      (r.cameras_online === 0 && r.cameras_total > 0 ? 'text-red-600 font-semibold' : 'text-slate-600')}>
+                      (r.cameras_online === 0 && r.cameras_total > 0 ? 'text-red-600 font-semibold' : 'text-slate-600 dark:text-slate-300')}>
                       {r.cameras_online}/{r.cameras_total}
                     </td>
-                    <td className="py-2.5 pr-3 tabular-nums text-slate-600">{fmtInt(storeVisitors(r))}</td>
-                    <td className="py-2.5 pr-3 tabular-nums text-slate-600">
+                    <td className="py-2.5 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{fmtInt(storeVisitors(r))}</td>
+                    <td className="py-2.5 pr-3 tabular-nums text-slate-600 dark:text-slate-300">
                       {fmt(r.kpis.staff_present_avg != null ? r.kpis.staff_present_avg * 100 : null, 0, '%')}
                     </td>
                     <td className="py-2.5 pr-3">{badgesFor(r).map((b, i) =>
@@ -337,21 +336,21 @@ export default function MultiStorePage() {
             </thead>
             <tbody>
               {rows.map(r => (
-                <tr key={r.store_id} className="border-t border-slate-100 hover:bg-purple-50/40">
+                <tr key={r.store_id} className="border-t border-slate-100 dark:border-slate-700 hover:bg-purple-50/40">
                   <td className="py-2.5 pr-3"><RagDot status={r.rag_status} /></td>
                   <td className="py-2.5 pr-3 font-medium">
                     <Link to={`/stores/${r.store_id}`} className="text-purple-700 hover:underline">{r.store_name}</Link>
                     {!r.is_open && <span className="ml-2 text-[10px] text-slate-400">closed</span>}
                   </td>
-                  <td className="py-2.5 pr-3 text-slate-500">{r.country}</td>
+                  <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-300">{r.country}</td>
                   <td className={'py-2.5 pr-3 tabular-nums ' +
-                    (r.cameras_online === 0 && r.cameras_total > 0 ? 'text-red-600 font-semibold' : 'text-slate-600')}>
+                    (r.cameras_online === 0 && r.cameras_total > 0 ? 'text-red-600 font-semibold' : 'text-slate-600 dark:text-slate-300')}>
                     {r.cameras_online}/{r.cameras_total}
                   </td>
-                  <td className="py-2.5 pr-3 tabular-nums text-slate-600">{fmtInt(storeVisitors(r))}</td>
-                  <td className="py-2.5 pr-3 tabular-nums text-slate-600">{fmt(r.kpis.occupancy_avg, 0)}</td>
-                  <td className="py-2.5 pr-3 tabular-nums text-slate-600">{fmt(r.kpis.staff_present_avg != null ? r.kpis.staff_present_avg * 100 : null, 0, '%')}</td>
-                  <td className={'py-2.5 pr-3 tabular-nums ' + (r.recent_critical_alerts > 0 ? 'text-red-600 font-semibold' : 'text-slate-600')}>
+                  <td className="py-2.5 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{fmtInt(storeVisitors(r))}</td>
+                  <td className="py-2.5 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{fmt(r.kpis.occupancy_avg, 0)}</td>
+                  <td className="py-2.5 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{fmt(r.kpis.staff_present_avg != null ? r.kpis.staff_present_avg * 100 : null, 0, '%')}</td>
+                  <td className={'py-2.5 pr-3 tabular-nums ' + (r.recent_critical_alerts > 0 ? 'text-red-600 font-semibold' : 'text-slate-600 dark:text-slate-300')}>
                     {r.recent_critical_alerts}
                   </td>
                   <td className="py-2.5 pr-3 space-x-1 space-y-1">
@@ -380,7 +379,7 @@ function ExecHeader({ subtitle, right }: { subtitle: string; right?: ReactNode }
             style={{ background: GRAD_PRIMARY, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}>
           Executive Dashboard
         </h1>
-        <p className="text-sm text-slate-500 mt-0.5">{subtitle}</p>
+        <p className="text-sm text-slate-500 dark:text-slate-300 mt-0.5">{subtitle}</p>
       </div>
       {right}
     </div>
@@ -390,6 +389,7 @@ function ExecHeader({ subtitle, right }: { subtitle: string; right?: ReactNode }
 function Bento({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
     <section className={'rounded-2xl bg-white border border-purple-100/60 p-4 ' +
+      'dark:bg-slate-800 dark:border-slate-700 ' +
       'shadow-[0_4px_24px_rgba(124,58,237,0.07)] ' + className}>
       {children}
     </section>
@@ -399,7 +399,7 @@ function Bento({ children, className = '' }: { children: ReactNode; className?: 
 function SectionTitle({ icon, title, note }: { icon: string; title: string; note?: string }) {
   return (
     <div className="flex items-baseline justify-between">
-      <div className="text-sm font-semibold text-slate-800">{icon} {title}</div>
+      <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{icon} {title}</div>
       {note && <div className="text-[11px] uppercase tracking-wide text-slate-400">{note}</div>}
     </div>
   )
@@ -415,10 +415,11 @@ function Kpi({ label, value, sub, accent, gradient, small }: {
   return (
     <Bento className="flex flex-col justify-between">
       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
-      <div className={(small ? 'text-lg leading-tight' : 'text-[26px]') + ' font-bold mt-1 truncate'}
+      <div className={(small ? 'text-lg leading-tight' : 'text-[26px]') + ' font-bold mt-1 truncate '
+             + (!gradient && !accent ? 'text-slate-800 dark:text-slate-100' : '')}
            style={gradient
              ? { background: gradient, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
-             : { color: accent ?? '#1e293b' }}
+             : accent ? { color: accent } : undefined}
            title={value}>
         {value}
       </div>
@@ -437,10 +438,10 @@ function GradientBarRow({ rank, label, value, sub, pct, gradient, to }: {
     <div className="text-sm">
       <div className="flex items-baseline gap-2">
         {rank != null && <span className="text-slate-300 tabular-nums w-4 text-right">{rank}</span>}
-        <span className="flex-1 truncate text-slate-700 font-medium">{name}</span>
-        <span className="tabular-nums text-slate-600">{value}</span>
+        <span className="flex-1 truncate text-slate-700 dark:text-slate-200 font-medium">{name}</span>
+        <span className="tabular-nums text-slate-600 dark:text-slate-300">{value}</span>
       </div>
-      <div className="mt-1 h-2.5 rounded-full bg-slate-100 overflow-hidden">
+      <div className="mt-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
         <div className="h-full rounded-full" style={{ width: `${Math.max(pct, 2)}%`, background: gradient }} />
       </div>
       {sub && <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>}
@@ -594,8 +595,8 @@ function HealthDonutBento() {
               {(Object.keys(BAND) as Band[]).map(b => (
                 <div key={b} className="flex items-center gap-2 text-sm">
                   <span className="inline-block w-3 h-3 rounded" style={{ background: BAND[b].color }} />
-                  <span className="flex-1 text-slate-600">{BAND[b].label}</span>
-                  <span className="tabular-nums font-semibold text-slate-700">{counts[b]}</span>
+                  <span className="flex-1 text-slate-600 dark:text-slate-300">{BAND[b].label}</span>
+                  <span className="tabular-nums font-semibold text-slate-700 dark:text-slate-200">{counts[b]}</span>
                 </div>
               ))}
             </div>
@@ -630,7 +631,7 @@ const OPEN_EMOJI: Record<OpeningRow['status'], string> = {
 }
 const OPEN_TONE: Record<OpeningRow['status'], string> = {
   on_time: 'text-teal-700', late: 'text-orange-700',
-  not_opened: 'text-red-700', pending: 'text-slate-500', no_data: 'text-slate-400',
+  not_opened: 'text-red-700', pending: 'text-slate-500 dark:text-slate-300', no_data: 'text-slate-400',
 }
 function OpeningStatusBento() {
   const [data, setData] = useState<OpeningRow[] | null>(null)
@@ -647,11 +648,11 @@ function OpeningStatusBento() {
       {data == null ? <Empty text="Loading…" />
         : data.length === 0 ? <Empty text="No active stores configured." />
         : (
-          <ul className="mt-3 text-sm divide-y divide-slate-100">
+          <ul className="mt-3 text-sm divide-y divide-slate-100 dark:divide-slate-700">
             {data.map(r => (
               <li key={r.store_id} className="flex items-baseline gap-3 py-1.5">
                 <span>{OPEN_EMOJI[r.status]}</span>
-                <span className="flex-1 text-slate-700">{r.store_name}</span>
+                <span className="flex-1 text-slate-700 dark:text-slate-200">{r.store_name}</span>
                 <span className={'text-xs ' + OPEN_TONE[r.status]}>{r.status_label}</span>
               </li>
             ))}
@@ -711,7 +712,7 @@ function HourlyComparisonBento() {
         {topStores.map((s, idx) => (
           <span key={s.store_id} className="inline-flex items-center gap-1.5">
             <span className="inline-block w-3 h-0.5" style={{ background: palette[idx % palette.length] }} />
-            <span className="text-slate-600">{s.store_name}</span>
+            <span className="text-slate-600 dark:text-slate-300">{s.store_name}</span>
             <span className="text-slate-400">({s.today_total})</span>
           </span>
         ))}
