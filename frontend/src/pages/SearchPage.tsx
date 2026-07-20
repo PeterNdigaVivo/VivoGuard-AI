@@ -62,7 +62,7 @@ export default function SearchPage() {
             {busy ? 'Searching…' : 'Search'}
           </Button>
         </div>
-        <div className="text-xs text-slate-500 mt-3">
+        <div className="text-xs text-slate-500 dark:text-slate-300 mt-3">
           Try: {EXAMPLES.map(s => (
             <button key={s} onClick={() => run(s)}
                     className="mr-2 mb-1 inline-block text-sky-600 hover:underline">"{s}"</button>
@@ -74,18 +74,18 @@ export default function SearchPage() {
       {data && (
         <>
           <Card className="p-3 mb-4 text-sm">
-            <div className="text-slate-500">
+            <div className="text-slate-500 dark:text-slate-300">
               Parsed filter:{' '}
               {data.matched_terms.length === 0
-                ? <span className="text-slate-400">none — showing recent of all types</span>
+                ? <span className="text-slate-400 dark:text-slate-400">none — showing recent of all types</span>
                 : data.matched_terms.map(t => <Badge key={t} color="sky">{t}</Badge>)}
             </div>
-            <div className="mt-1 text-slate-700">{data.result_count} result{data.result_count === 1 ? '' : 's'}</div>
+            <div className="mt-1 text-slate-700 dark:text-slate-200">{data.result_count} result{data.result_count === 1 ? '' : 's'}</div>
           </Card>
 
           <Card>
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600">
+              <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-200">
                 <tr>
                   <th className="text-left p-3">When</th>
                   <th className="text-left p-3">Camera</th>
@@ -97,20 +97,20 @@ export default function SearchPage() {
               </thead>
               <tbody>
                 {data.results.map(r => (
-                  <tr key={r.id} className="border-t hover:bg-slate-50">
+                  <tr key={r.id} className="border-t hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/60">
                     <td className="p-3 whitespace-nowrap">{new Date(r.timestamp).toLocaleString()}</td>
                     <td className="p-3">{r.camera_name}</td>
                     <td className="p-3">{r.zone_name ?? '—'}</td>
                     <td className="p-3"><Badge color="sky">{r.detection_type}</Badge></td>
                     <td className="p-3">{r.confidence?.toFixed(2)}</td>
-                    <td className="p-3 text-xs font-mono text-slate-500 max-w-md truncate"
+                    <td className="p-3 text-xs font-mono text-slate-500 dark:text-slate-300 max-w-md truncate"
                         title={JSON.stringify(r.extra)}>
                       {r.extra ? JSON.stringify(r.extra) : ''}
                     </td>
                   </tr>
                 ))}
                 {!data.results.length && (
-                  <tr><td colSpan={6} className="p-8 text-center text-slate-500">No matches.</td></tr>
+                  <tr><td colSpan={6} className="p-8 text-center text-slate-500 dark:text-slate-300">No matches.</td></tr>
                 )}
               </tbody>
             </table>

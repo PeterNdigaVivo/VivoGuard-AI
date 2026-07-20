@@ -36,7 +36,7 @@ export function Select(p: SelectHTMLAttributes<HTMLSelectElement>) {
 }
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`bg-white rounded-lg shadow-sm border border-slate-200 ${className}`}>{children}</div>
+  return <div className={`bg-white rounded-lg shadow-sm border border-slate-200 dark:bg-slate-900 dark:border-slate-800 ${className}`}>{children}</div>
 }
 
 export function Badge({ children, color = 'slate' }: { children: ReactNode; color?: 'green' | 'red' | 'amber' | 'slate' | 'sky' }) {

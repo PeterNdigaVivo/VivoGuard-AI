@@ -58,7 +58,7 @@ export default function ReportsPage() {
 
       <Card>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600 text-left">
+          <thead className="bg-slate-50 text-slate-600 text-left dark:bg-slate-800 dark:text-slate-200">
             <tr>
               <th className="p-3">Name</th>
               <th className="p-3">Scope</th>
@@ -71,14 +71,14 @@ export default function ReportsPage() {
           </thead>
           <tbody>
             {schedules.length === 0 && (
-              <tr><td colSpan={7} className="p-8 text-center text-slate-500">
+              <tr><td colSpan={7} className="p-8 text-center text-slate-500 dark:text-slate-300">
                 No scheduled reports yet. Click "+ New schedule" to create one.
               </td></tr>
             )}
             {schedules.map(s => (
-              <tr key={s.id} className="border-t hover:bg-slate-50">
+              <tr key={s.id} className="border-t hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/60">
                 <td className="p-3 font-medium">{s.name}
-                  {!s.is_active && <span className="ml-2 text-[10px] text-slate-400">paused</span>}
+                  {!s.is_active && <span className="ml-2 text-[10px] text-slate-400 dark:text-slate-400">paused</span>}
                 </td>
                 <td className="p-3">
                   {s.store_id
@@ -89,11 +89,11 @@ export default function ReportsPage() {
                   {s.cadence}
                   {s.time_of_day && <span className="text-slate-500"> @ {s.time_of_day.slice(0, 5)}</span>}
                   {s.day_of_week !== null && s.day_of_week !== undefined && (
-                    <span className="text-slate-500"> ({weekdayName(s.day_of_week)})</span>
+                    <span className="text-slate-500 dark:text-slate-300"> ({weekdayName(s.day_of_week)})</span>
                   )}
                 </td>
                 <td className="p-3 uppercase">{s.format}</td>
-                <td className="p-3 text-xs text-slate-600">
+                <td className="p-3 text-xs text-slate-600 dark:text-slate-300">
                   <div className="truncate max-w-[20rem]" title={s.recipients}>
                     ✉ {s.recipients}
                   </div>
@@ -104,7 +104,7 @@ export default function ReportsPage() {
                     </div>
                   )}
                 </td>
-                <td className="p-3 text-xs text-slate-500">
+                <td className="p-3 text-xs text-slate-500 dark:text-slate-300">
                   {s.last_run_at ? new Date(s.last_run_at).toLocaleString() : '—'}
                 </td>
                 <td className="p-3 text-right whitespace-nowrap">
@@ -152,21 +152,21 @@ function OnDemandDownloads({ stores }: { stores: Store[] }) {
 
   return (
     <Card className="p-4">
-      <div className="text-sm font-semibold text-slate-700 mb-2">Download historical report</div>
+      <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">Download historical report</div>
       <div className="flex flex-wrap items-end gap-3 text-sm">
         <label className="block">
-          <div className="text-xs text-slate-500 mb-1">Store</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Store</div>
           <Select value={storeId} onChange={e => setStoreId(e.target.value ? Number(e.target.value) : '')}>
             <option value="">Whole chain</option>
             {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
         </label>
         <label className="block">
-          <div className="text-xs text-slate-500 mb-1">From</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">From</div>
           <Input type="date" value={since} onChange={e => setSince(e.target.value)} />
         </label>
         <label className="block">
-          <div className="text-xs text-slate-500 mb-1">To</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">To</div>
           <Input type="date" value={until} onChange={e => setUntil(e.target.value)} />
         </label>
         <Button onClick={() => download('pdf')}>Download PDF</Button>
@@ -229,16 +229,16 @@ function ScheduleEditor({ stores, onClose, onSaved }: {
         <Card className="p-5">
           <div className="flex justify-between items-center mb-3">
             <div className="text-lg font-semibold">New scheduled report</div>
-            <button onClick={onClose} disabled={busy} className="text-slate-400 hover:text-slate-700">✕</button>
+            <button onClick={onClose} disabled={busy} className="text-slate-400 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">✕</button>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <label className="col-span-2 block">
-              <div className="text-xs text-slate-600 mb-1">Name *</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Name *</div>
               <Input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                      placeholder="Junction daily 21:00" />
             </label>
             <label className="block">
-              <div className="text-xs text-slate-600 mb-1">Scope</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Scope</div>
               <Select value={form.store_id}
                       onChange={e => setForm(f => ({ ...f, store_id: e.target.value ? Number(e.target.value) : '' }))}>
                 <option value="">Whole chain</option>
@@ -246,7 +246,7 @@ function ScheduleEditor({ stores, onClose, onSaved }: {
               </Select>
             </label>
             <label className="block">
-              <div className="text-xs text-slate-600 mb-1">Cadence</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Cadence</div>
               <Select value={form.cadence}
                       onChange={e => setForm(f => ({ ...f, cadence: e.target.value as any }))}>
                 <option value="daily">Daily</option>
@@ -256,13 +256,13 @@ function ScheduleEditor({ stores, onClose, onSaved }: {
               </Select>
             </label>
             <label className="block">
-              <div className="text-xs text-slate-600 mb-1">Fire time (store-local)</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Fire time (store-local)</div>
               <Input type="time" value={form.time_of_day}
                      onChange={e => setForm(f => ({ ...f, time_of_day: e.target.value }))} />
             </label>
             {form.cadence === 'weekly' && (
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">Day of week</div>
+                <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Day of week</div>
                 <Select value={form.day_of_week}
                         onChange={e => setForm(f => ({ ...f, day_of_week: Number(e.target.value) }))}>
                   <option value={0}>Monday</option>
@@ -276,7 +276,7 @@ function ScheduleEditor({ stores, onClose, onSaved }: {
               </label>
             )}
             <label className="block">
-              <div className="text-xs text-slate-600 mb-1">Format</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Format</div>
               <Select value={form.format}
                       onChange={e => setForm(f => ({ ...f, format: e.target.value as any }))}>
                 <option value="pdf">PDF</option>
@@ -284,17 +284,17 @@ function ScheduleEditor({ stores, onClose, onSaved }: {
               </Select>
             </label>
             <label className="col-span-2 block">
-              <div className="text-xs text-slate-600 mb-1">Email recipients * (comma-separated)</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">Email recipients * (comma-separated)</div>
               <Input value={form.recipients}
                      onChange={e => setForm(f => ({ ...f, recipients: e.target.value }))}
                      placeholder="manager@vivo.co.ke,head-office@vivo.co.ke" />
             </label>
             <label className="col-span-2 block">
-              <div className="text-xs text-slate-600 mb-1">WhatsApp recipients (optional)</div>
+              <div className="text-xs text-slate-600 mb-1 dark:text-slate-300">WhatsApp recipients (optional)</div>
               <Input value={form.whatsapp_recipients}
                      onChange={e => setForm(f => ({ ...f, whatsapp_recipients: e.target.value }))}
                      placeholder="whatsapp:+254712345678,whatsapp:+254700000000" />
-              <div className="text-xs text-slate-400 mt-1">
+              <div className="text-xs text-slate-400 mt-1 dark:text-slate-400">
                 Twilio format. Recipients receive a short headline-numbers
                 text alongside the email PDF.
               </div>

@@ -148,14 +148,14 @@ export default function CameraSetupPage() {
         actions={<>
           <Button variant="ghost" onClick={() => nav('/cameras')}>Back to cameras</Button>
           <Link to={`/cameras/${cameraId}/detection`}
-                className="text-sm text-slate-500 hover:underline self-center">Advanced settings →</Link>
+                className="text-sm text-slate-500 dark:text-slate-300 hover:underline self-center">Advanced settings →</Link>
         </>}
       />
 
       <div className="grid grid-cols-12 gap-4">
         {/* Live snapshot + draw */}
         <Card className="col-span-8 p-4">
-          <div className="text-sm text-slate-600 mb-2">
+          <div className="text-sm text-slate-600 dark:text-slate-300 mb-2">
             <ol className="list-decimal list-inside space-y-1">
               <li>Choose what this zone should do.</li>
               <li>Click on the snapshot to drop points (
@@ -166,7 +166,7 @@ export default function CameraSetupPage() {
           </div>
 
           {snap ? (
-            <div className="relative inline-block bg-slate-200 rounded overflow-hidden cursor-crosshair">
+            <div className="relative inline-block bg-slate-200 dark:bg-slate-800 rounded overflow-hidden cursor-crosshair">
               <img src={`data:image/jpeg;base64,${snap}`}
                    onClick={onClick}
                    className="block max-w-full h-auto" alt="" />
@@ -187,7 +187,7 @@ export default function CameraSetupPage() {
               </svg>
             </div>
           ) : (
-            <div className="bg-slate-200 aspect-video rounded flex items-center justify-center text-slate-500">
+            <div className="bg-slate-200 dark:bg-slate-800 aspect-video rounded flex items-center justify-center text-slate-500 dark:text-slate-300">
               No snapshot available.
             </div>
           )}
@@ -204,7 +204,7 @@ export default function CameraSetupPage() {
               ))}
             </Select>
             {purpose && (
-              <div className="mt-2 text-xs text-slate-500">{purpose.description}</div>
+              <div className="mt-2 text-xs text-slate-500 dark:text-slate-300">{purpose.description}</div>
             )}
 
             <div className="text-sm font-medium mt-4 mb-2">2. Name it</div>
@@ -244,18 +244,18 @@ export default function CameraSetupPage() {
                     <option value="http">HTTP tunnel (use when 554 is blocked)</option>
                     <option value="udp">UDP (advanced)</option>
                   </Select>
-                  <div className="text-xs text-slate-500 mt-1">
+                  <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
                     HTTP tunnel routes RTSP through the HTTP port
                     ({cam.rtsp_port}) so it works on routers that block 554.
                   </div>
                 </>
               )}
 
-              <div className="text-xs text-slate-500 mt-3">
+              <div className="text-xs text-slate-500 dark:text-slate-300 mt-3">
                 {cam.transport === 'http_snapshot' ? (
                   <>
                     Polling{' '}
-                    <code className="bg-slate-100 px-1">
+                    <code className="bg-slate-100 dark:bg-slate-800 px-1">
                       /cgi-bin/snapshot.cgi?channel={cam.channel_number ?? 1}
                     </code>{' '}
                     on port {cam.http_port}. Lower fidelity than RTSP but
@@ -281,7 +281,7 @@ export default function CameraSetupPage() {
                   {portResult.attempts && (
                     <ul className="mt-1 ml-2 space-y-0.5">
                       {portResult.attempts.map((a: any, i: number) => (
-                        <li key={i} className={a.ok ? 'text-emerald-700' : 'text-slate-500'}>
+                        <li key={i} className={a.ok ? 'text-emerald-700' : 'text-slate-500 dark:text-slate-300'}>
                           {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
                         </li>
                       ))}
@@ -294,12 +294,12 @@ export default function CameraSetupPage() {
 
           <Card className="p-4">
             <div className="text-sm font-medium mb-2">Existing zones on this camera</div>
-            {zones.length === 0 && <div className="text-slate-400 text-sm">None yet.</div>}
+            {zones.length === 0 && <div className="text-slate-400 dark:text-slate-400 text-sm">None yet.</div>}
             {zones.map(z => (
-              <div key={z.id} className="flex items-center justify-between text-sm py-1 border-t first:border-t-0">
+              <div key={z.id} className="flex items-center justify-between text-sm py-1 border-t dark:border-slate-800 first:border-t-0">
                 <div>
                   <div className="font-medium">{z.name}</div>
-                  <div className="text-xs text-slate-500">{purposeLabelOf(z.detection_types_json)}</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-300">{purposeLabelOf(z.detection_types_json)}</div>
                 </div>
                 <button className="text-red-600 hover:underline text-xs"
                         onClick={() => deleteZone(z.id)}>Remove</button>

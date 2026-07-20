@@ -54,12 +54,12 @@ export default function ModelsPage() {
       {chainModels.length > 0 && (
         <Card className="p-4 mb-4">
           <div className="font-medium mb-3">
-            🌐 Chain models <span className="text-slate-500 text-sm font-normal">
+            🌐 Chain models <span className="text-slate-500 dark:text-slate-300 text-sm font-normal">
               — pooled from every store, deploy fleet-wide</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600">
+              <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-200">
                 <tr>
                   <th className="text-left p-2">Detector</th>
                   <th className="text-left p-2">Version</th>
@@ -72,7 +72,7 @@ export default function ModelsPage() {
               </thead>
               <tbody>
                 {chainModels.map(m => (
-                  <tr key={m.id} className="border-t">
+                  <tr key={m.id} className="border-t dark:border-slate-800">
                     <td className="p-2"><Badge color="sky">{m.detector_type ?? '—'}</Badge></td>
                     <td className="p-2 font-medium">{m.version}</td>
                     <td className="p-2 text-right tabular-nums">{m.sample_count ?? '—'}</td>
@@ -85,7 +85,7 @@ export default function ModelsPage() {
                         ? <Badge color="green">Live fleet-wide</Badge>
                         : <Badge color="slate">Archived</Badge>}
                     </td>
-                    <td className="p-2 text-slate-600">
+                    <td className="p-2 text-slate-600 dark:text-slate-300">
                       {new Date(m.created_at).toLocaleString()}
                     </td>
                   </tr>
@@ -93,7 +93,7 @@ export default function ModelsPage() {
               </tbody>
             </table>
           </div>
-          <div className="text-xs text-slate-500 mt-2">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
             Manage chain models from <Link to="/training/chain" className="text-sky-600 hover:underline">
             Training → Chain</Link>.
           </div>
@@ -102,7 +102,7 @@ export default function ModelsPage() {
 
       <Card>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-200">
             <tr>
               <th className="text-left p-3">Name / version</th>
               <th className="text-left p-3">Base</th>
@@ -116,17 +116,17 @@ export default function ModelsPage() {
             {otherModels.map(m => {
               const targetIds = pendingDeploy[m.id] ?? []
               return (
-                <tr key={m.id} className="border-t align-top">
+                <tr key={m.id} className="border-t align-top dark:border-slate-800">
                   <td className="p-3">
                     <div className="font-medium">{m.name}</div>
-                    <div className="text-slate-500 text-xs">{m.version}</div>
+                    <div className="text-slate-500 dark:text-slate-300 text-xs">{m.version}</div>
                   </td>
                   <td className="p-3">{m.base_model}</td>
                   <td className="p-3">
                     {(m.classes_json || []).slice(0, 4).map(c =>
                       <Badge key={c} color="sky">{c}</Badge>)}
                     {m.classes_json?.length > 4 && (
-                      <span className="text-xs text-slate-500"> +{m.classes_json.length - 4}</span>
+                      <span className="text-xs text-slate-500 dark:text-slate-300"> +{m.classes_json.length - 4}</span>
                     )}
                   </td>
                   <td className="p-3">{m.map50?.toFixed(3) ?? '—'}</td>
@@ -159,7 +159,7 @@ export default function ModelsPage() {
               )
             })}
             {!otherModels.length && (
-              <tr><td colSpan={6} className="p-6 text-center text-slate-500">
+              <tr><td colSpan={6} className="p-6 text-center text-slate-500 dark:text-slate-300">
                 No per-store models yet. Train one in the AI Studio,
                 or use the chain trainer to build a fleet-wide model.
               </td></tr>

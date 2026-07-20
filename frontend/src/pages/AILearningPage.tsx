@@ -108,21 +108,21 @@ export default function AILearningPage() {
   return (
     <div className="space-y-3">
       <PageHeader title="🧠 AI Learning" />
-      <p className="text-sm text-slate-500 -mt-4">
+      <p className="text-sm text-slate-500 dark:text-slate-300 -mt-4">
         Self-improving training pipeline — operator feedback in, better models out.
       </p>
 
       <div className="flex flex-wrap items-center gap-3 text-sm">
-        <label className="text-slate-600">Window:</label>
+        <label className="text-slate-600 dark:text-slate-300">Window:</label>
         <select value={days} onChange={e => setDays(Number(e.target.value))}
-                className="px-2 py-1 rounded border border-slate-300">
+                className="px-2 py-1 rounded border border-slate-300 dark:border-slate-800">
           <option value={7}>last 7 days</option>
           <option value={14}>last 14 days</option>
           <option value={30}>last 30 days</option>
           <option value={60}>last 60 days</option>
         </select>
         <button onClick={() => runOrchestrator(true)} disabled={busy}
-                className="px-3 py-1 rounded bg-slate-100 hover:bg-slate-200 disabled:opacity-50">
+                className="px-3 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50">
           Preview weekly orchestrator
         </button>
         <button onClick={() => runOrchestrator(false)} disabled={busy}
@@ -153,10 +153,10 @@ export default function AILearningPage() {
 
           {/* Per-detection-type review breakdown */}
           <Card className="p-3">
-            <h3 className="font-semibold mb-2 text-slate-800">Reviews by alert type</h3>
+            <h3 className="font-semibold mb-2 text-slate-800 dark:text-slate-100">Reviews by alert type</h3>
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-500">
+                <tr className="text-left text-slate-500 dark:text-slate-300">
                   <th className="py-1">Detection type</th>
                   <th>Alerts</th><th>Correct</th><th>False</th>
                   <th>Review rate</th><th>False rate</th>
@@ -164,7 +164,7 @@ export default function AILearningPage() {
               </thead>
               <tbody>
                 {data.review_breakdown.map(r => (
-                  <tr key={r.detection_type} className="border-t border-slate-100">
+                  <tr key={r.detection_type} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="py-1 font-medium">{r.detection_type}</td>
                     <td>{r.alerts_total}</td>
                     <td className="text-emerald-700">{r.correct}</td>
@@ -174,7 +174,7 @@ export default function AILearningPage() {
                   </tr>
                 ))}
                 {data.review_breakdown.length === 0 && (
-                  <tr><td colSpan={6} className="py-2 text-slate-500">
+                  <tr><td colSpan={6} className="py-2 text-slate-500 dark:text-slate-300">
                     No alerts in this window.</td></tr>
                 )}
               </tbody>
@@ -183,12 +183,12 @@ export default function AILearningPage() {
 
           {/* Feedback pool sizes */}
           <Card className="p-3">
-            <h3 className="font-semibold mb-2 text-slate-800">
+            <h3 className="font-semibold mb-2 text-slate-800 dark:text-slate-100">
               Training pools (positives + hard negatives)
             </h3>
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-500">
+                <tr className="text-left text-slate-500 dark:text-slate-300">
                   <th className="py-1">Detection type</th>
                   <th>Positives</th><th>Hard negatives</th><th>Ratio</th>
                 </tr>
@@ -197,7 +197,7 @@ export default function AILearningPage() {
                 {data.feedback_pools.map(p => {
                   const ratio = p.positives ? (p.negatives / p.positives).toFixed(2) : '∞'
                   return (
-                    <tr key={p.detection_type} className="border-t border-slate-100">
+                    <tr key={p.detection_type} className="border-t border-slate-100 dark:border-slate-800">
                       <td className="py-1 font-medium">{p.detection_type}</td>
                       <td>{p.positives}</td><td>{p.negatives}</td>
                       <td>{ratio}</td>
@@ -205,7 +205,7 @@ export default function AILearningPage() {
                   )
                 })}
                 {data.feedback_pools.length === 0 && (
-                  <tr><td colSpan={4} className="py-2 text-slate-500">
+                  <tr><td colSpan={4} className="py-2 text-slate-500 dark:text-slate-300">
                     No feedback pools yet. Mark some alerts ✅/❌ on the
                     Alerts page to start populating.</td></tr>
                 )}
@@ -216,11 +216,11 @@ export default function AILearningPage() {
           {/* Drift series — sparkline-style table for now; replace with
               a real chart when the dashboard graduates. */}
           <Card className="p-3">
-            <h3 className="font-semibold mb-2 text-slate-800">
+            <h3 className="font-semibold mb-2 text-slate-800 dark:text-slate-100">
               Daily precision / FP-rate ({data.window_days}d)
             </h3>
             {driftByType.size === 0 && (
-              <div className="text-sm text-slate-500">
+              <div className="text-sm text-slate-500 dark:text-slate-300">
                 No model metrics yet — they appear once alerts have been triaged.
               </div>
             )}
@@ -231,7 +231,7 @@ export default function AILearningPage() {
                   <div key={t} className="text-sm">
                     <div className="flex items-center justify-between">
                       <span className="font-medium">{t}</span>
-                      <span className="text-slate-500">
+                      <span className="text-slate-500 dark:text-slate-300">
                         latest: {fmtPct(latest?.precision)} precision ·{' '}
                         {fmtPct(latest?.fp_rate)} FP rate ·{' '}
                         {latest?.alerts_total ?? 0} alerts
@@ -246,17 +246,17 @@ export default function AILearningPage() {
 
           {/* Model registry */}
           <Card className="p-3">
-            <h3 className="font-semibold mb-2 text-slate-800">Model registry</h3>
+            <h3 className="font-semibold mb-2 text-slate-800 dark:text-slate-100">Model registry</h3>
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-500">
+                <tr className="text-left text-slate-500 dark:text-slate-300">
                   <th className="py-1">Name</th><th>Version</th>
                   <th>Status</th><th>Chain</th><th>mAP50</th><th>Created</th>
                 </tr>
               </thead>
               <tbody>
                 {data.model_registry.slice(0, 20).map(m => (
-                  <tr key={m.id} className="border-t border-slate-100">
+                  <tr key={m.id} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="py-1 font-medium">{m.name}</td>
                     <td>{m.version}</td>
                     <td>{m.deployed
@@ -265,7 +265,7 @@ export default function AILearningPage() {
                     </td>
                     <td>{m.is_chain ? '✓' : ''}</td>
                     <td>{m.map50 != null ? m.map50.toFixed(3) : '—'}</td>
-                    <td className="text-slate-500">
+                    <td className="text-slate-500 dark:text-slate-300">
                       {m.created_at ? new Date(m.created_at).toLocaleDateString() : ''}
                     </td>
                   </tr>
@@ -276,10 +276,10 @@ export default function AILearningPage() {
 
           {/* Recent training jobs */}
           <Card className="p-3">
-            <h3 className="font-semibold mb-2 text-slate-800">Recent training jobs</h3>
+            <h3 className="font-semibold mb-2 text-slate-800 dark:text-slate-100">Recent training jobs</h3>
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-500">
+                <tr className="text-left text-slate-500 dark:text-slate-300">
                   <th className="py-1">Job</th><th>Model</th>
                   <th>Status</th><th>Mode</th>
                   <th>Epochs</th><th>Best mAP50</th>
@@ -287,7 +287,7 @@ export default function AILearningPage() {
               </thead>
               <tbody>
                 {data.recent_jobs.map(j => (
-                  <tr key={j.id} className="border-t border-slate-100">
+                  <tr key={j.id} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="py-1">#{j.id}</td>
                     <td>{j.model_name}</td>
                     <td>{j.status}</td>
@@ -298,7 +298,7 @@ export default function AILearningPage() {
                   </tr>
                 ))}
                 {data.recent_jobs.length === 0 && (
-                  <tr><td colSpan={6} className="py-2 text-slate-500">
+                  <tr><td colSpan={6} className="py-2 text-slate-500 dark:text-slate-300">
                     No training jobs yet.</td></tr>
                 )}
               </tbody>
@@ -318,10 +318,10 @@ function Stat({ label, value, tone }: {
 }) {
   const cls =
     tone === 'emerald' ? 'text-emerald-700' :
-    tone === 'rose'    ? 'text-rose-700'    : 'text-slate-800'
+    tone === 'rose'    ? 'text-rose-700'    : 'text-slate-800 dark:text-slate-100'
   return (
     <Card className="p-3">
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className={`text-2xl font-bold ${cls}`}>{value}</div>
     </Card>
   )

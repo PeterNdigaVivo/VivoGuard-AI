@@ -52,7 +52,7 @@ export default function RoiPage() {
       <PageHeader
         title="VivoGuard Value Report"
         actions={data && (
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-slate-500 dark:text-slate-300">
             {data.month_label} · updated {new Date(data.as_of).toLocaleTimeString()}
           </span>
         )} />
@@ -64,48 +64,48 @@ export default function RoiPage() {
       )}
 
       {!data && !error && (
-        <Card className="p-8 text-center text-slate-400">Loading…</Card>
+        <Card className="p-8 text-center text-slate-400 dark:text-slate-400">Loading…</Card>
       )}
 
       {data && (
         <>
           {/* Incidents caught */}
           <Card className="p-5">
-            <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+            <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-3">
               Incidents Caught This Month
             </div>
             <ul className="space-y-2 text-sm">
               <li className="flex items-baseline gap-2">
                 <span>🔴</span>
-                <span className="flex-1 text-slate-700">Theft alerts</span>
+                <span className="flex-1 text-slate-700 dark:text-slate-200">Theft alerts</span>
                 <span className="tabular-nums font-semibold">
                   {data.incidents.theft_alerts}
                 </span>
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-slate-500 dark:text-slate-300">
                   ({data.incidents.theft_confirmed} confirmed)
                 </span>
               </li>
               <li className="flex items-baseline gap-2">
                 <span>🟠</span>
-                <span className="flex-1 text-slate-700">Unauthorized access prevented</span>
+                <span className="flex-1 text-slate-700 dark:text-slate-200">Unauthorized access prevented</span>
                 <span className="tabular-nums font-semibold">
                   {data.incidents.unauthorised_access}
                 </span>
               </li>
               <li className="flex items-baseline gap-2">
                 <span>🟡</span>
-                <span className="flex-1 text-slate-700">Queue issues resolved</span>
+                <span className="flex-1 text-slate-700 dark:text-slate-200">Queue issues resolved</span>
                 <span className="tabular-nums font-semibold">
                   {data.incidents.queue_issues_resolved}
                 </span>
               </li>
               <li className="flex items-baseline gap-2">
                 <span>✅</span>
-                <span className="flex-1 text-slate-700">Staff uniform compliance change</span>
+                <span className="flex-1 text-slate-700 dark:text-slate-200">Staff uniform compliance change</span>
                 <span className={'tabular-nums font-semibold ' + (
                   data.incidents.uniform_compliance_change_pts > 0 ? 'text-emerald-600'
                   : data.incidents.uniform_compliance_change_pts < 0 ? 'text-red-600'
-                  : 'text-slate-600')}>
+                  : 'text-slate-600 dark:text-slate-300')}>
                   {data.incidents.uniform_compliance_change_pts > 0 ? '+' : ''}
                   {data.incidents.uniform_compliance_change_pts} pts vs last month
                 </span>
@@ -115,25 +115,25 @@ export default function RoiPage() {
 
           {/* Estimated value */}
           <Card className="p-5">
-            <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+            <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-3">
               Estimated Value Delivered
             </div>
             <table className="w-full text-sm">
               <tbody>
-                <tr className="border-b">
-                  <td className="py-1.5 text-slate-700">Theft prevention</td>
+                <tr className="border-b dark:border-slate-800">
+                  <td className="py-1.5 text-slate-700 dark:text-slate-200">Theft prevention</td>
                   <td className="py-1.5 text-right tabular-nums font-semibold">
                     KES {fmtKES(data.estimated_value_kes.theft_prevention)}
                   </td>
                 </tr>
-                <tr className="border-b">
-                  <td className="py-1.5 text-slate-700">Operational savings</td>
+                <tr className="border-b dark:border-slate-800">
+                  <td className="py-1.5 text-slate-700 dark:text-slate-200">Operational savings</td>
                   <td className="py-1.5 text-right tabular-nums font-semibold">
                     KES {fmtKES(data.estimated_value_kes.operational_savings)}
                   </td>
                 </tr>
                 <tr>
-                  <td className="py-2 text-slate-900 font-medium">
+                  <td className="py-2 text-slate-900 dark:text-slate-100 font-medium">
                     Total estimated value this month
                   </td>
                   <td className="py-2 text-right tabular-nums text-lg font-semibold text-emerald-700">
@@ -146,18 +146,18 @@ export default function RoiPage() {
 
           {/* Cost + ROI */}
           <Card className="p-5">
-            <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+            <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-3">
               Return on Investment
             </div>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
-                <div className="text-slate-500 text-xs">VivoGuard cost / month</div>
+                <div className="text-slate-500 dark:text-slate-300 text-xs">VivoGuard cost / month</div>
                 <div className="text-lg font-semibold tabular-nums">
                   KES {fmtKES(data.monthly_cost_kes)}
                 </div>
               </div>
               <div>
-                <div className="text-slate-500 text-xs">ROI</div>
+                <div className="text-slate-500 dark:text-slate-300 text-xs">ROI</div>
                 <div className="text-lg font-semibold tabular-nums text-emerald-700">
                   {data.roi_multiple == null
                     ? '—'
@@ -169,8 +169,8 @@ export default function RoiPage() {
 
           {/* Methodology — operators need to trust the numbers, so
               expose the per-incident KES assumptions used. */}
-          <Card className="p-4 text-xs text-slate-500">
-            <div className="font-medium text-slate-700 mb-1">How we estimate the value</div>
+          <Card className="p-4 text-xs text-slate-500 dark:text-slate-300">
+            <div className="font-medium text-slate-700 dark:text-slate-200 mb-1">How we estimate the value</div>
             <ul className="space-y-0.5">
               <li>• Theft prevention: confirmed shrinkage alerts × KES {fmtKES(data.per_incident_kes.theft)} per incident</li>
               <li>• Unauthorised access: trespass / intrusion / staff-zone alerts × KES {fmtKES(data.per_incident_kes.unauthorised)} per incident</li>

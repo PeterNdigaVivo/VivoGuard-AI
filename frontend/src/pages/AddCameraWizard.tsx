@@ -282,7 +282,7 @@ export default function AddCameraWizard() {
 
   // ----- Step 0: pick a store -----
   if (step === 0) {
-    if (stores === null) return <div className="p-6 text-slate-500">Loading…</div>
+    if (stores === null) return <div className="p-6 text-slate-500 dark:text-slate-300">Loading…</div>
     if (stores.length === 0) {
       return (
         <div className="p-6 max-w-2xl">
@@ -290,7 +290,7 @@ export default function AddCameraWizard() {
           <Card className="p-8 text-center">
             <div className="text-5xl mb-2">🏬</div>
             <div className="text-lg font-medium mb-1">Create a store first</div>
-            <div className="text-slate-500 mb-4">
+            <div className="text-slate-500 dark:text-slate-300 mb-4">
               Cameras attach to stores. Add at least one store before adding cameras.
             </div>
             <Link to="/stores"><Button>Go to Stores</Button></Link>
@@ -334,7 +334,7 @@ export default function AddCameraWizard() {
 
       {/* Locked-store strip */}
       {lockedStore && (
-        <div className="mb-4 text-sm text-slate-500">
+        <div className="mb-4 text-sm text-slate-500 dark:text-slate-300">
           📍 {lockedStore.name} · {lockedStore.city ?? '—'}, {lockedStore.country}
         </div>
       )}
@@ -347,7 +347,7 @@ export default function AddCameraWizard() {
             {TYPES.map(t => (
               <label key={t.value}
                      className={'p-3 rounded border cursor-pointer ' +
-                       (type.value === t.value ? 'border-sky-500 bg-sky-50' : 'border-slate-200')}>
+                       (type.value === t.value ? 'border-sky-500 bg-sky-50' : 'border-slate-200 dark:border-slate-800')}>
                 <input type="radio" name="type" className="mr-2"
                        checked={type.value === t.value}
                        onChange={() => setType(t)} />
@@ -399,7 +399,7 @@ export default function AddCameraWizard() {
                 <option value="http">HTTP tunnel (use when port 554 is blocked)</option>
                 <option value="udp">UDP (advanced)</option>
               </Select>
-              <div className="text-xs text-slate-500 mt-1">
+              <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
                 HTTP tunnel routes RTSP through the HTTP port. Use this
                 if the store router doesn't forward 554 but DOES forward
                 80/8000/8080/7000/800. FFmpeg negotiates RTSP through
@@ -416,18 +416,18 @@ export default function AddCameraWizard() {
                       disabled={busy || !form.host}>
                 {busy ? 'Probing…' : '🔍 Auto-detect snapshot ports'}
               </Button>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-slate-500 dark:text-slate-300">
                 RTSP test tries TCP then HTTP-tunnel on 80/800/8000/8080/7000.
               </span>
               {/* RTSP probe result */}
               {rtspProbe && (
-                <div className="col-span-2 w-full mt-1 text-xs border rounded p-2">
+                <div className="col-span-2 w-full mt-1 text-xs border dark:border-slate-800 rounded p-2">
                   <div className={'font-medium ' + (rtspProbe.ok ? 'text-emerald-700' : 'text-red-600')}>
                     {rtspProbe.summary}
                   </div>
                   <div className="mt-1 space-y-0.5">
                     {rtspProbe.attempts.map((a, i) => (
-                      <div key={i} className={a.ok ? 'text-emerald-600' : 'text-slate-500'}>
+                      <div key={i} className={a.ok ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
                         {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
                       </div>
                     ))}
@@ -480,7 +480,7 @@ export default function AddCameraWizard() {
             <Field label="RTSP URL override (optional)" full>
               <Input value={form.rtsp_url_override} onChange={upd('rtsp_url_override')}
                      placeholder="rtsp://user:pass@host:554/..." />
-              <div className="text-xs text-slate-500 mt-1">
+              <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
                 Leave blank to use the brand-default template (shown
                 below). Only set this for cameras that don't match
                 the standard Dahua / Hikvision / Uniview paths.
@@ -492,10 +492,10 @@ export default function AddCameraWizard() {
                 masked unless the override is also blank — there's
                 already a password field two rows up. */}
             <div className="col-span-2 -mt-1 mb-1">
-              <div className="text-xs text-slate-600 mb-1">
+              <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">
                 RTSP URL preview ({type.brand})
               </div>
-              <div className="font-mono text-[11px] break-all bg-slate-50 border rounded p-2 text-slate-700">
+              <div className="font-mono text-[11px] break-all bg-slate-50 dark:bg-slate-800 border dark:border-slate-800 rounded p-2 text-slate-700 dark:text-slate-200">
                 {form.rtsp_url_override || rtspPreview}
               </div>
             </div>
@@ -519,14 +519,14 @@ export default function AddCameraWizard() {
       {step === 3 && !type.isNvr && (
         <Card className="p-4">
           <div className="font-medium mb-3">4. Test result</div>
-          {busy && <div className="text-slate-500">Probing…</div>}
+          {busy && <div className="text-slate-500 dark:text-slate-300">Probing…</div>}
           {error && <div className="text-red-600">{error}</div>}
           {test && (
             <>
               <div className="mb-3">
                 {test.ok ? <Badge color="green">OK</Badge> : <Badge color="red">Failed</Badge>}
                 {test.device_model && (
-                  <span className="ml-2 text-sm text-slate-600">model: {test.device_model}</span>
+                  <span className="ml-2 text-sm text-slate-600 dark:text-slate-300">model: {test.device_model}</span>
                 )}
               </div>
               {test.snapshot_jpeg_b64 && (
@@ -534,7 +534,7 @@ export default function AddCameraWizard() {
                      alt="thumbnail" className="rounded border max-h-72" />
               )}
               {test.rtsp_url && (
-                <div className="mt-3 font-mono text-xs break-all bg-slate-50 p-2 rounded border">
+                <div className="mt-3 font-mono text-xs break-all bg-slate-50 dark:bg-slate-800 p-2 rounded border dark:border-slate-800">
                   {test.rtsp_url}
                 </div>
               )}
@@ -550,12 +550,12 @@ export default function AddCameraWizard() {
       {step === 3 && type.isNvr && (
         <Card className="p-4">
           <div className="font-medium mb-3">4. NVR channels</div>
-          {busy && <div className="text-slate-500">Connecting…</div>}
+          {busy && <div className="text-slate-500 dark:text-slate-300">Connecting…</div>}
           {error && <div className="text-red-600">{error}</div>}
           {nvrChannels && (
             <div className="space-y-1 max-h-96 overflow-auto">
               {nvrChannels.map(c => (
-                <label key={c.channel} className="flex items-center gap-2 p-2 hover:bg-slate-50 rounded">
+                <label key={c.channel} className="flex items-center gap-2 p-2 hover:bg-slate-50 dark:hover:bg-slate-800/60 rounded">
                   <input type="checkbox" checked={pickedChannels.has(c.channel)}
                     onChange={(e) => {
                       const next = new Set(pickedChannels)
@@ -563,8 +563,8 @@ export default function AddCameraWizard() {
                       setPickedChannels(next)
                     }} />
                   <span className="font-medium">Ch {c.channel}</span>
-                  <span className="text-slate-500">{c.name}</span>
-                  <span className="ml-auto font-mono text-xs text-slate-400 truncate" title={c.rtsp_main}>
+                  <span className="text-slate-500 dark:text-slate-300">{c.name}</span>
+                  <span className="ml-auto font-mono text-xs text-slate-400 dark:text-slate-400 truncate" title={c.rtsp_main}>
                     {c.rtsp_main}
                   </span>
                 </label>

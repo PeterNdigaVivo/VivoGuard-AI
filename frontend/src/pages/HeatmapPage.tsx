@@ -212,7 +212,7 @@ export default function HeatmapPage() {
       <div className="mb-3">
         <button
           onClick={() => navigate(backHref)}
-          className="text-sm text-slate-600 hover:text-slate-900 font-medium">
+          className="text-sm text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 font-medium">
           {backLabel}
         </button>
       </div>

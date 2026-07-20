@@ -258,7 +258,7 @@ export default function LiveViewPage() {
                        flex items-center gap-2">
             ← Back to All Cameras
           </button>
-          <span className="text-sm text-slate-600">
+          <span className="text-sm text-slate-600 dark:text-slate-300">
             Filtered to <strong>{stores.find(s => s.id === storeFilter)?.name ?? 'one store'}</strong>
             {' '}· {total} camera{total === 1 ? '' : 's'}
           </span>
@@ -273,14 +273,14 @@ export default function LiveViewPage() {
         <Button variant="ghost" onClick={goNext} disabled={total === 0}>
           {hasNext ? `Next ${Math.min(pageSize, total - pageEnd)} →` : 'Wrap to start →'}
         </Button>
-        <div className="text-slate-700">
+        <div className="text-slate-700 dark:text-slate-200">
           Cameras{' '}
           <strong>{total === 0 ? 0 : safePageStart + 1}–{pageEnd}</strong>{' '}
           of <strong>{total}</strong>
-          {total !== cams.length && <span className="text-slate-500"> (filtered from {cams.length})</span>}
-          <span className="text-slate-400"> · page {pageNumber}/{totalPages}</span>
+          {total !== cams.length && <span className="text-slate-500 dark:text-slate-300"> (filtered from {cams.length})</span>}
+          <span className="text-slate-400 dark:text-slate-400"> · page {pageNumber}/{totalPages}</span>
         </div>
-        <label className="ml-auto flex items-center gap-1 text-xs text-slate-700">
+        <label className="ml-auto flex items-center gap-1 text-xs text-slate-700 dark:text-slate-200">
           <input type="checkbox" checked={autoCycle}
                  onChange={e => setAutoCycle(e.target.checked)} />
           🔄 Auto-cycle every 30s
@@ -307,7 +307,7 @@ export default function LiveViewPage() {
       </div>
 
       {total === 0 && (
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           {storeFilter !== '' ? 'No cameras attached to this store.' : 'No cameras yet.'}
         </Card>
       )}
@@ -731,7 +731,7 @@ function ActivityGrid({ onPickFullscreen }: {
         </Card>
       )}
       {latest && slots.length === 0 && !err && (
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No cameras reporting activity right now.
         </Card>
       )}
@@ -839,8 +839,8 @@ function ActivityTile({ cam, enteredAt, onClick }: {
     <Card className="p-1 h-full flex flex-col">
       <div className="flex items-center justify-between mb-1 text-xs shrink-0">
         <div className="truncate flex-1">
-          <span className="font-medium text-slate-800">{cam.camera_name}</span>
-          <span className="text-slate-500">
+          <span className="font-medium text-slate-800 dark:text-slate-100">{cam.camera_name}</span>
+          <span className="text-slate-500 dark:text-slate-300">
             {cam.store_name ? ` · ${cam.store_name}` : ''}
           </span>
         </div>
@@ -872,11 +872,11 @@ function ActivityTile({ cam, enteredAt, onClick }: {
           so the flex column above (snapshot) doesn't steal the
           bar's height. */}
       <div className="mt-1 shrink-0">
-        <div className="h-1 w-full bg-slate-200 rounded overflow-hidden">
+        <div className="h-1 w-full bg-slate-200 dark:bg-slate-800 rounded overflow-hidden">
           <div className="h-full bg-orange-500 transition-[width] duration-1000 ease-linear"
                style={{ width: `${pct}%` }} />
         </div>
-        <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">
+        <div className="text-[10px] text-slate-500 dark:text-slate-300 mt-0.5 tabular-nums">
           {holdLabel}
         </div>
       </div>

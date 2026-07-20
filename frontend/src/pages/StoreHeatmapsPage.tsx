@@ -65,7 +65,7 @@ export default function StoreHeatmapsPage() {
       />
 
       {data.cameras.length === 0 && (
-        <Card className="p-8 text-center text-slate-500">No cameras in this store yet.</Card>
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">No cameras in this store yet.</Card>
       )}
 
       {mode === 'hotspot' ? (
@@ -176,7 +176,7 @@ function HeatmapCard({ c }: { c: CameraHeatmap }) {
         )}
       </div>
       <div className="mt-2 flex justify-between items-center text-xs">
-        <span className="text-slate-500">
+        <span className="text-slate-500 dark:text-slate-300">
           {c.hotspot ? `${c.hotspot.value} hits at brightest cell` : 'No heatmap data yet'}
         </span>
         <button onClick={download}
@@ -233,16 +233,16 @@ function FlowView({ storeId, backdrop }: {
   }, [backdrop])
 
   if (!flow) {
-    return <Card className="p-8 text-center text-slate-500">
+    return <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
       Loading customer flow…
     </Card>
   }
   if (flow.zones.length === 0 || flow.edges.length === 0) {
     return (
-      <Card className="p-8 text-center text-slate-500">
+      <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
         <div className="text-3xl mb-2">🧭</div>
-        <div className="font-medium text-slate-700 mb-1">No customer-flow data yet</div>
-        <div className="text-xs text-slate-500 max-w-md mx-auto">
+        <div className="font-medium text-slate-700 dark:text-slate-200 mb-1">No customer-flow data yet</div>
+        <div className="text-xs text-slate-500 dark:text-slate-300 max-w-md mx-auto">
           Flow arrows appear once zones are drawn on each camera AND
           customer-journey tracks have been recorded. The journey
           detector needs at least one entry zone and one destination

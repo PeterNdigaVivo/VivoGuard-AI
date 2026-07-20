@@ -144,7 +144,7 @@ export default function StoreDashboardPage() {
       (ageColor === 'green' ? 'bg-emerald-50 text-emerald-700' :
        ageColor === 'amber' ? 'bg-amber-50 text-amber-700' :
        ageColor === 'red'   ? 'bg-red-50 text-red-700' :
-                              'bg-slate-100 text-slate-500')}>
+                              'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300')}>
       <span className={'w-2 h-2 rounded-full ' +
         (ageColor === 'green' ? 'bg-emerald-500 animate-pulse' :
          ageColor === 'amber' ? 'bg-amber-500' :
@@ -162,7 +162,7 @@ export default function StoreDashboardPage() {
     return (
       <div className="p-6">
         <PageHeader title={data.store_name} actions={freshness} />
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No cameras attached to this store yet.{' '}
           <Link to="/cameras" className="text-sky-600 underline">Attach one</Link>{' '}
           to start collecting data.
@@ -209,8 +209,8 @@ export default function StoreDashboardPage() {
             <button onClick={openEdit}
                     title="Edit store details — opening hours, manager phone, queue targets"
                     aria-label="Edit store details"
-                    className="text-slate-500 hover:text-slate-900 px-2 py-1 rounded
-                               hover:bg-slate-100 text-base">
+                    className="text-slate-500 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 px-2 py-1 rounded
+                               hover:bg-slate-100 dark:hover:bg-slate-800/60 text-base">
               ✏️
             </button>
             <DateRangePicker value={range} onChange={setRange} />
@@ -219,7 +219,7 @@ export default function StoreDashboardPage() {
           </div>
         }
       />
-      <div className="text-xs text-slate-500 -mt-3 flex flex-wrap items-center gap-3">
+      <div className="text-xs text-slate-500 dark:text-slate-300 -mt-3 flex flex-wrap items-center gap-3">
         <span>Showing <strong>{range.label}</strong>. Trend arrows compare with the prior same-length window.</span>
         {data.hours_label && (
           <span>· Hours today: <strong>{data.hours_label}</strong></span>
@@ -390,7 +390,7 @@ export default function StoreDashboardPage() {
                          onSubmit={saveEdit}
                          onCancel={() => setEditing(false)} />
             ) : (
-              <Card className="p-6 text-sm text-slate-600">Loading store details…</Card>
+              <Card className="p-6 text-sm text-slate-600 dark:text-slate-300">Loading store details…</Card>
             )}
           </div>
         </div>
@@ -455,12 +455,12 @@ function CustomerJourneysPanel({ storeId }: { storeId: number }) {
     <Card className="p-4 space-y-4">
       <div className="flex flex-wrap gap-6">
         <div>
-          <div className="text-2xl font-semibold text-slate-800">{data.unique_customers}</div>
-          <div className="text-xs text-slate-500">unique visitors today</div>
+          <div className="text-2xl font-semibold text-slate-800 dark:text-slate-100">{data.unique_customers}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300">unique visitors today</div>
         </div>
         <div>
           <div className="text-2xl font-semibold text-slate-400">{data.camera_appearances}</div>
-          <div className="text-xs text-slate-500">camera appearances</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300">camera appearances</div>
         </div>
         <div className="text-xs text-slate-400 self-end pb-1">
           Cross-camera de-duplicated · {data.date}
@@ -469,10 +469,10 @@ function CustomerJourneysPanel({ storeId }: { storeId: number }) {
 
       {data.top_paths.length > 0 && (
         <div>
-          <div className="text-xs font-medium text-slate-500 mb-1">Most common paths</div>
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-300 mb-1">Most common paths</div>
           <ul className="space-y-1">
             {data.top_paths.map((p, i) => (
-              <li key={i} className="text-sm text-slate-700">
+              <li key={i} className="text-sm text-slate-700 dark:text-slate-200">
                 {p.path.join(' → ')}
                 <span className="text-slate-400"> · {p.count}×</span>
               </li>
@@ -483,10 +483,10 @@ function CustomerJourneysPanel({ storeId }: { storeId: number }) {
 
       {data.journeys.length > 0 && (
         <div>
-          <div className="text-xs font-medium text-slate-500 mb-1">Recent journeys</div>
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-300 mb-1">Recent journeys</div>
           <ul className="space-y-1">
             {data.journeys.filter(j => !j.is_staff).slice(0, 8).map(j => (
-              <li key={j.global_id} className="text-sm text-slate-600">
+              <li key={j.global_id} className="text-sm text-slate-600 dark:text-slate-300">
                 <span className="text-slate-400">{j.first_seen}</span>{' '}
                 {j.cameras_visited.join(' → ')}
                 <span className="text-slate-400"> · {j.total_dwell_minutes} min</span>
@@ -541,7 +541,7 @@ function ScrollMounted({ children }: { children: React.ReactNode }) {
 // ----- small bits -----
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">{children}</h2>
+  return <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-300 uppercase tracking-wide mb-2">{children}</h2>
 }
 
 function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
@@ -559,14 +559,14 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
   const badgeCls =
     badge?.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
     badge?.tone === 'amber'   ? 'bg-amber-50  text-amber-700  border-amber-200' :
-                                 'bg-slate-50  text-slate-600  border-slate-200'
+                                 'bg-slate-50  text-slate-600  border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-800'
   return (
     <Card className="p-4 relative">
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className={(big ? 'text-3xl' : 'text-2xl')
                        + ' font-semibold mt-1 '
                        + (dimmed ? 'text-slate-400' : '')}>{value}</div>
-      {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
+      {sub && <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">{sub}</div>}
       {trendDir && trendPct !== undefined && (
         <div className="mt-1"><Trend direction={trendDir} deltaPct={trendPct} /></div>
       )}
@@ -578,7 +578,7 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
       )}
       {dimmed && (
         <span className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded
-                         bg-slate-200 text-slate-600">
+                         bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
           Store closed
         </span>
       )}
@@ -640,12 +640,12 @@ function WeekSection({ storeId }: { storeId: number }) {
           <div className="flex items-end gap-1 h-32">
             {d.days.map(day => (
               <div key={day.date} className="flex-1 flex flex-col items-center justify-end" title={`${day.date}: ${day.value}`}>
-                <div className="text-[10px] text-slate-500 mb-0.5">{day.value > 0 ? Math.round(day.value) : ''}</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-300 mb-0.5">{day.value > 0 ? Math.round(day.value) : ''}</div>
                 <div className="w-full bg-sky-500 rounded-t"
                      style={{ height: `${(day.value / maxBar) * 100}%`,
                               minHeight: day.value > 0 ? '4px' : '1px',
                               opacity: day.value > 0 ? 1 : 0.2 }} />
-                <div className="text-[10px] text-slate-500 mt-0.5">{day.weekday}</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-300 mt-0.5">{day.weekday}</div>
               </div>
             ))}
           </div>
@@ -653,23 +653,23 @@ function WeekSection({ storeId }: { storeId: number }) {
         <Card className="p-4 text-sm space-y-2">
           {d.best_day && (
             <div>
-              <div className="text-xs text-slate-500">Best day this week</div>
+              <div className="text-xs text-slate-500 dark:text-slate-300">Best day this week</div>
               <div className="font-semibold">{d.best_day.weekday} — {Math.round(d.best_day.value)} visitors</div>
             </div>
           )}
           {d.worst_day && (
             <div>
-              <div className="text-xs text-slate-500">Quietest day</div>
+              <div className="text-xs text-slate-500 dark:text-slate-300">Quietest day</div>
               <div className="font-semibold">{d.worst_day.weekday} — {Math.round(d.worst_day.value)} visitors</div>
             </div>
           )}
           {d.top_hours.length > 0 && (
             <div>
-              <div className="text-xs text-slate-500 mt-1">Busiest hours</div>
+              <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">Busiest hours</div>
               {d.top_hours.map((h, i) => (
                 <div key={h.hour} className="flex justify-between">
                   <span>{i + 1}. {h.label}</span>
-                  <span className="text-slate-500">{h.value}</span>
+                  <span className="text-slate-500 dark:text-slate-300">{h.value}</span>
                 </div>
               ))}
             </div>
@@ -681,7 +681,7 @@ function WeekSection({ storeId }: { storeId: number }) {
       <Card className="p-4 overflow-x-auto">
         <div className="text-sm font-medium mb-2">Detector activity</div>
         <table className="w-full text-sm">
-          <thead className="text-xs text-slate-500 uppercase">
+          <thead className="text-xs text-slate-500 dark:text-slate-300 uppercase">
             <tr>
               <th className="text-left py-1">Detector</th>
               <th className="text-right py-1 w-28">Events today</th>
@@ -691,7 +691,7 @@ function WeekSection({ storeId }: { storeId: number }) {
           </thead>
           <tbody>
             {d.detector_activity.map(row => (
-              <tr key={row.detector} className="border-t border-slate-100">
+              <tr key={row.detector} className="border-t border-slate-100 dark:border-slate-800">
                 <td className="py-1">{labelForDetector(row.detector)}</td>
                 <td className="text-right py-1">{row.events_today}</td>
                 <td className="text-right py-1">{row.events_week}</td>
@@ -733,13 +733,13 @@ function AlertsFeedSection({ storeId }: { storeId: number }) {
       <Card className="p-3 space-y-2">
         {groups.length === 0 ? (
           <div className="p-3 text-sm">
-            <div className="text-slate-500">No alerts in the last window.</div>
+            <div className="text-slate-500 dark:text-slate-300">No alerts in the last window.</div>
             <div className="text-xs text-slate-400 mt-1">
               If you expect alerts but see none, check that detectors are
               enabled on each camera under{' '}
               <Link to="/detectors" className="text-sky-600 hover:underline">Detectors</Link>{' '}
               and that detection_events are being written. From the host:
-              <pre className="bg-slate-50 rounded p-2 mt-1 text-[11px] font-mono">{`docker compose exec postgres psql -U $POSTGRES_USER $POSTGRES_DB \\
+              <pre className="bg-slate-50 dark:bg-slate-800 rounded p-2 mt-1 text-[11px] font-mono">{`docker compose exec postgres psql -U $POSTGRES_USER $POSTGRES_DB \\
   -c "SELECT COUNT(*) FROM detection_events
       WHERE timestamp > now() - interval '1 hour';"`}</pre>
             </div>

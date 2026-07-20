@@ -185,7 +185,7 @@ export default function ChainTrainingPage() {
           <Link to="/training/uniform"><Button variant="ghost">Per-store uniform →</Button></Link>
         </div>} />
 
-      <p className="text-sm text-slate-600 mb-4 max-w-3xl">
+      <p className="text-sm text-slate-600 dark:text-slate-300 mb-4 max-w-3xl">
         Pool approved samples from EVERY store into one shared dataset and train a
         single chain model. The trained model can be deployed to every camera
         in the fleet with one click — no per-store retraining needed.
@@ -209,24 +209,24 @@ export default function ChainTrainingPage() {
       {/* Dataset overview */}
       <Card className="p-4 mb-4">
         <div className="font-medium mb-3">Dataset overview</div>
-        {!cur && <div className="text-slate-400 text-sm">Loading…</div>}
+        {!cur && <div className="text-slate-400 dark:text-slate-400 text-sm">Loading…</div>}
         {cur && (
           <>
             <div className="flex flex-wrap gap-6 text-sm mb-4">
               <div>
-                <div className="text-slate-500">Total samples</div>
+                <div className="text-slate-500 dark:text-slate-300">Total samples</div>
                 <div className="text-2xl font-semibold">{cur.total_samples}</div>
               </div>
               <div>
-                <div className="text-slate-500">Stores contributing</div>
+                <div className="text-slate-500 dark:text-slate-300">Stores contributing</div>
                 <div className="text-2xl font-semibold">{cur.stores_contributing.length}</div>
               </div>
               <div>
-                <div className="text-slate-500">Min per label</div>
+                <div className="text-slate-500 dark:text-slate-300">Min per label</div>
                 <div className="text-2xl font-semibold">{cur.min_per_label}</div>
               </div>
               <div>
-                <div className="text-slate-500">Status</div>
+                <div className="text-slate-500 dark:text-slate-300">Status</div>
                 <div className="mt-1">
                   {cur.ready_to_train
                     ? <Badge color="green">Ready to train</Badge>
@@ -237,7 +237,7 @@ export default function ChainTrainingPage() {
 
             {/* By-label breakdown */}
             <div className="mb-4">
-              <div className="text-sm text-slate-500 mb-2">Samples by label</div>
+              <div className="text-sm text-slate-500 dark:text-slate-300 mb-2">Samples by label</div>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                 {cur.labels.map(l => {
                   const n = cur.by_label[l] ?? 0
@@ -259,24 +259,24 @@ export default function ChainTrainingPage() {
 
             {/* Top stores bar chart */}
             <div className="mb-4">
-              <div className="text-sm text-slate-500 mb-2">
+              <div className="text-sm text-slate-500 dark:text-slate-300 mb-2">
                 Top contributing stores ({cur.stores_contributing.length} total)
               </div>
               {topStores.length === 0 && (
-                <div className="text-slate-400 text-sm">No store data yet.</div>
+                <div className="text-slate-400 dark:text-slate-400 text-sm">No store data yet.</div>
               )}
               <div className="space-y-1.5">
                 {topStores.map(s => (
                   <div key={s.store_id} className="flex items-center gap-2 text-sm">
-                    <div className="w-40 truncate text-slate-700">
+                    <div className="w-40 truncate text-slate-700 dark:text-slate-200">
                       {s.store_name || `Store #${s.store_id}`}
                     </div>
-                    <div className="flex-1 bg-slate-100 h-5 rounded overflow-hidden">
+                    <div className="flex-1 bg-slate-100 dark:bg-slate-800 h-5 rounded overflow-hidden">
                       <div
                         className="h-full bg-sky-500"
                         style={{ width: `${(s.total / maxStoreCount) * 100}%` }} />
                     </div>
-                    <div className="w-12 text-right tabular-nums text-slate-600">
+                    <div className="w-12 text-right tabular-nums text-slate-600 dark:text-slate-300">
                       {s.total}
                     </div>
                   </div>
@@ -308,18 +308,18 @@ export default function ChainTrainingPage() {
         <div className="font-medium mb-2">Training status</div>
         <div className="text-sm">
           <div className="mb-1">
-            <span className="text-slate-500">State: </span>
+            <span className="text-slate-500 dark:text-slate-300">State: </span>
             <span className="font-medium">{status.state}</span>
           </div>
-          {status.message && <div className="text-slate-700 mb-1">{status.message}</div>}
+          {status.message && <div className="text-slate-700 dark:text-slate-200 mb-1">{status.message}</div>}
           {training && status.total_epochs && (
             <div className="mt-2">
-              <div className="bg-slate-100 h-2 rounded overflow-hidden">
+              <div className="bg-slate-100 dark:bg-slate-800 h-2 rounded overflow-hidden">
                 <div
                   className="h-full bg-emerald-500 transition-all"
                   style={{ width: `${((status.epoch ?? 0) / status.total_epochs) * 100}%` }} />
               </div>
-              <div className="text-xs text-slate-500 mt-1">
+              <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
                 Epoch {status.epoch ?? 0} / {status.total_epochs}
               </div>
             </div>
@@ -336,14 +336,14 @@ export default function ChainTrainingPage() {
                 </div>
               )}
               {status.report.recommendation && (
-                <div className="col-span-full text-xs text-slate-600">
+                <div className="col-span-full text-xs text-slate-600 dark:text-slate-300">
                   {status.report.recommendation}
                 </div>
               )}
             </div>
           )}
           {status.state === 'done' && status.stats && (
-            <div className="mt-3 text-xs text-slate-500">
+            <div className="mt-3 text-xs text-slate-500 dark:text-slate-300">
               Filtered: dropped {status.stats.dropped_blurry ?? 0} blurry,
               {' '}{status.stats.dropped_dup ?? 0} duplicates,
               {' '}{status.stats.dropped_capped ?? 0} over per-store cap.
@@ -356,14 +356,14 @@ export default function ChainTrainingPage() {
       <Card className="p-4">
         <div className="font-medium mb-3">Chain models — {detector}</div>
         {models.length === 0 && (
-          <div className="text-slate-400 text-sm">
+          <div className="text-slate-400 dark:text-slate-400 text-sm">
             No chain models yet. Train one above to deploy fleet-wide.
           </div>
         )}
         {models.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600">
+              <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200">
                 <tr>
                   <th className="text-left p-2">Version</th>
                   <th className="text-left p-2">Trained</th>
@@ -376,9 +376,9 @@ export default function ChainTrainingPage() {
               </thead>
               <tbody>
                 {models.map(m => (
-                  <tr key={m.id} className="border-t">
+                  <tr key={m.id} className="border-t dark:border-slate-800">
                     <td className="p-2 font-medium">{m.version}</td>
-                    <td className="p-2 text-slate-600">
+                    <td className="p-2 text-slate-600 dark:text-slate-300">
                       {m.created_at ? new Date(m.created_at).toLocaleString() : '—'}
                     </td>
                     <td className="p-2 text-right tabular-nums">{m.sample_count ?? '—'}</td>
@@ -412,8 +412,8 @@ export default function ChainTrainingPage() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="p-2 rounded bg-slate-50">
-      <div className="text-xs text-slate-500">{label}</div>
+    <div className="p-2 rounded bg-slate-50 dark:bg-slate-800">
+      <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className="text-lg font-semibold tabular-nums">{value}</div>
     </div>
   )

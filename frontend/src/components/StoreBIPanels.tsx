@@ -30,10 +30,10 @@ function PanelShell({
       <button onClick={() => setOpen(o => !o)}
               className="w-full flex items-center justify-between mb-2 hover:opacity-80">
         <div className="text-left">
-          <div className="text-sm font-semibold text-slate-700">{title}</div>
-          {subtitle && <div className="text-xs text-slate-500">{subtitle}</div>}
+          <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">{title}</div>
+          {subtitle && <div className="text-xs text-slate-500 dark:text-slate-300">{subtitle}</div>}
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
+        <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-400">
           {busy && <span>↻</span>}
           <span className="text-base leading-none">{open ? '▾' : '▸'}</span>
         </div>
@@ -88,12 +88,12 @@ function withRange(path: string, range?: { since?: string; until?: string }): st
 }
 
 function SkeletonBlock({ height = 120 }: { height?: number }) {
-  return <div className="bg-slate-100 animate-pulse rounded" style={{ height }} />
+  return <div className="bg-slate-100 dark:bg-slate-800 animate-pulse rounded" style={{ height }} />
 }
 
 function EmptyState({ icon, text }: { icon: string; text: string }) {
   return (
-    <div className="text-center py-6 text-slate-500 text-sm">
+    <div className="text-center py-6 text-slate-500 dark:text-slate-300 text-sm">
       <div className="text-3xl mb-2">{icon}</div>
       {text}
     </div>
@@ -134,9 +134,9 @@ export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range
       {/* Three states: error → loading → render. Plain-English copy
           on error — operators are not engineers. */}
       {error ? (
-        <div className="text-sm text-slate-600 py-4 text-center">
+        <div className="text-sm text-slate-600 dark:text-slate-300 py-4 text-center">
           Visitor data not available yet.
-          <div className="text-xs text-slate-500 mt-1">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
             Check back after 9:00 AM when the store opens.
           </div>
         </div>
@@ -146,7 +146,7 @@ export function HourlyFootfallPanel({ storeId, range }: { storeId: number; range
         <>
           <SimpleLineChart payload={data} />
           {allZero && (
-            <div className="text-xs text-slate-500 text-center mt-2">
+            <div className="text-xs text-slate-500 dark:text-slate-300 text-center mt-2">
               No visitor data recorded yet for today — the chart will
               fill in as customers are detected.
             </div>
@@ -313,12 +313,12 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
       {/* Plain-language callouts so the chart is readable even if
           the SVG is glanced at quickly. */}
       {payload.data_source_label && (
-        <div className="mt-1 text-[11px] text-slate-500 italic">
+        <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-300 italic">
           {payload.data_source_label}
         </div>
       )}
       <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
-        <span><strong className="text-slate-700">Total today:</strong>{' '}
+        <span><strong className="text-slate-700 dark:text-slate-200">Total today:</strong>{' '}
           <span className="tabular-nums">{Math.round(todayTotal)}</span></span>
         {peakHasData && (
           <span>
@@ -329,7 +329,7 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
           </span>
         )}
         {hasYesterday && (
-          <span className="text-slate-500">
+          <span className="text-slate-500 dark:text-slate-300">
             <strong>Yesterday total:</strong>{' '}
             <span className="tabular-nums">{Math.round(yestTotal)}</span>
             {payload.trend_delta_pct !== null && payload.trend_delta_pct !== undefined && (
@@ -367,21 +367,21 @@ function HourlySummary({ payload }: { payload: HourlyPayload }) {
     : null)
   const total = payload.today_total ?? hrs.reduce((s, h) => s + (h.visitors || 0), 0)
   return (
-    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-700 border-t border-slate-100 pt-2">
+    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-700 dark:text-slate-200 border-t border-slate-100 dark:border-slate-800 pt-2">
       <div>
-        <span className="text-slate-500">Peak hour:</span>{' '}
+        <span className="text-slate-500 dark:text-slate-300">Peak hour:</span>{' '}
         {peak ? (
           <strong>{peak.hour.toString().padStart(2, '0')}:00 ({peak.visitors} visitors)</strong>
-        ) : <span className="text-slate-400">—</span>}
+        ) : <span className="text-slate-400 dark:text-slate-400">—</span>}
       </div>
       <div>
-        <span className="text-slate-500">Quietest:</span>{' '}
+        <span className="text-slate-500 dark:text-slate-300">Quietest:</span>{' '}
         {quiet ? (
           <strong>{quiet.hour.toString().padStart(2, '0')}:00 ({quiet.visitors} visitors)</strong>
-        ) : <span className="text-slate-400">—</span>}
+        ) : <span className="text-slate-400 dark:text-slate-400">—</span>}
       </div>
       <div>
-        <span className="text-slate-500">Total today:</span>{' '}
+        <span className="text-slate-500 dark:text-slate-300">Total today:</span>{' '}
         <strong>{total} visitors</strong>
       </div>
     </div>
@@ -402,7 +402,7 @@ function niceTicks(_min: number, max: number, count: number): number[] {
 function InsightList({ insights }: { insights: string[] }) {
   if (!insights || insights.length === 0) return null
   return (
-    <ul className="mt-3 space-y-1 text-xs text-slate-700">
+    <ul className="mt-3 space-y-1 text-xs text-slate-700 dark:text-slate-200">
       {insights.map((i, idx) => (
         <li key={idx} className="flex gap-2">
           <span className="text-sky-500">›</span>
@@ -496,21 +496,21 @@ function JourneyChart({ payload }: { payload: BehaviourPayload }) {
                     {label}
                   </span>
                   {j < labels.length - 1 && (
-                    <span className="text-slate-400 text-xs">→</span>
+                    <span className="text-slate-400 dark:text-slate-400 text-xs">→</span>
                   )}
                 </span>
               ))}
-              <div className="flex-1 mx-2 h-2 bg-slate-100 rounded min-w-[60px]">
+              <div className="flex-1 mx-2 h-2 bg-slate-100 dark:bg-slate-800 rounded min-w-[60px]">
                 <div className={'h-2 rounded ' +
                   (completed ? 'bg-emerald-500' : 'bg-slate-400')}
                      style={{ width: `${width}%` }} />
               </div>
-              <span className="text-xs text-slate-600 tabular-nums w-10 text-right">{p.count}</span>
+              <span className="text-xs text-slate-600 dark:text-slate-300 tabular-nums w-10 text-right">{p.count}</span>
             </div>
           )
         })}
       </div>
-      <div className="mt-3 text-xs text-slate-700 space-y-1">
+      <div className="mt-3 text-xs text-slate-700 dark:text-slate-200 space-y-1">
         <div>Average journey:{' '}
           <strong>{Math.floor((payload.avg_journey_seconds ?? 0) / 60)}m {(payload.avg_journey_seconds ?? 0) % 60}s</strong>
         </div>
@@ -540,7 +540,7 @@ export function HeatmapIntelligencePanel({ storeId, firstCameraId, range }: {
         {/* Thumbnail */}
         {firstCameraId !== null ? (
           <img src={`/api/analytics/heatmap/${firstCameraId}/image?alpha=0.85&window=day`}
-               alt="Heatmap" className="rounded border w-full bg-slate-900"
+               alt="Heatmap" className="rounded border dark:border-slate-800 w-full bg-slate-900"
                onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')} />
         ) : (
           <EmptyState icon="🔥" text="Add a camera with a heatmap zone to populate this view." />
@@ -576,11 +576,11 @@ export function HeatmapIntelligencePanel({ storeId, firstCameraId, range }: {
 
 function RecCard({ icon, title, body }: { icon: string; title: string; body: string }) {
   return (
-    <div className="border border-slate-200 rounded p-2 bg-slate-50">
-      <div className="font-medium text-slate-800">
+    <div className="border border-slate-200 dark:border-slate-800 rounded p-2 bg-slate-50 dark:bg-slate-800">
+      <div className="font-medium text-slate-800 dark:text-slate-100">
         <span className="mr-1">{icon}</span>{title}
       </div>
-      <div className="text-slate-600 mt-0.5">{body}</div>
+      <div className="text-slate-600 dark:text-slate-300 mt-0.5">{body}</div>
     </div>
   )
 }
@@ -628,9 +628,9 @@ export function StaffPresencePanel({ storeId, range }: { storeId: number; range?
                 </div>
               </div>
               {(data.staff_identified_total ?? 0) > 0 && (
-                <div className="mt-3 text-sm text-slate-600 flex flex-wrap gap-x-4">
+                <div className="mt-3 text-sm text-slate-600 dark:text-slate-300 flex flex-wrap gap-x-4">
                   <span>👔 Staff identified today: <strong>{data.staff_identified_total}</strong>
-                    {' '}<span className="text-slate-400">
+                    {' '}<span className="text-slate-400 dark:text-slate-400">
                       ({data.staff_by_uniform ?? 0} by uniform · {data.staff_by_zone ?? 0} by counter)
                     </span>
                   </span>
@@ -669,17 +669,17 @@ function UniformCompliance({ pct, rag, violations, count }: {
   const dot = rag === 'green' ? 'bg-emerald-500'
             : rag === 'amber' ? 'bg-amber-500' : 'bg-red-500'
   return (
-    <div className="mt-4 border-t pt-3">
+    <div className="mt-4 border-t dark:border-slate-800 pt-3">
       <div className="flex items-center gap-2 mb-1">
         <span className={'inline-block w-2.5 h-2.5 rounded-full ' + dot} />
         <span className="text-sm font-medium">Uniform compliance today</span>
         <span className={'text-sm font-semibold ml-auto ' + tone}>{pct}%</span>
       </div>
       {count > 0 ? (
-        <div className="text-xs text-slate-600">
+        <div className="text-xs text-slate-600 dark:text-slate-300">
           {count} violation{count === 1 ? '' : 's'} detected today
           {violations.length > 0 && (
-            <span className="text-slate-400">
+            <span className="text-slate-400 dark:text-slate-400">
               {' '}— {violations.slice(0, 5)
                 .map(v => v.time ? v.time.substring(11, 16) : '?')
                 .join(', ')}
@@ -687,7 +687,7 @@ function UniformCompliance({ pct, rag, violations, count }: {
           )}
         </div>
       ) : (
-        <div className="text-xs text-slate-500">No violations detected today ✅</div>
+        <div className="text-xs text-slate-500 dark:text-slate-300">No violations detected today ✅</div>
       )}
     </div>
   )
@@ -705,11 +705,11 @@ function ComplianceSummary({ uniformPct, nametagViolations, unauthorisedAccess, 
   const emoji = verdict === 'Good' ? '✅'
               : verdict === 'Needs attention' ? '⚠️' : '🔴'
   return (
-    <div className="mt-4 border-t pt-3">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+    <div className="mt-4 border-t dark:border-slate-800 pt-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
         Staff compliance today
       </div>
-      <ul className="text-sm text-slate-700 space-y-0.5">
+      <ul className="text-sm text-slate-700 dark:text-slate-200 space-y-0.5">
         {uniformPct !== null && <li>Uniform compliance: <strong>{uniformPct}%</strong></li>}
         <li>Name-tag violations: <strong>{nametagViolations}</strong> today</li>
         <li>Unauthorised access alerts: <strong>{unauthorisedAccess}</strong> today</li>
@@ -741,27 +741,27 @@ function Gauge({ pct }: { pct: number }) {
         <circle cx="80" cy="80" r="5" fill={colour} />
       </svg>
       <div className="text-2xl font-semibold mt-1" style={{ color: colour }}>{pct}%</div>
-      <div className="text-xs text-slate-500">Staff present today</div>
+      <div className="text-xs text-slate-500 dark:text-slate-300">Staff present today</div>
     </div>
   )
 }
 
 function StaffTimelineBar({ timeline }: { timeline: StaffPayload['timeline'] }) {
   if (!timeline || timeline.length === 0) {
-    return <div className="text-slate-400 text-xs">No timeline data.</div>
+    return <div className="text-slate-400 dark:text-slate-400 text-xs">No timeline data.</div>
   }
   // Render as a horizontal bar of N coloured segments.
   return (
     <div>
-      <div className="text-xs text-slate-500 mb-1">Today's coverage</div>
-      <div className="flex h-4 rounded overflow-hidden border border-slate-200">
+      <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Today's coverage</div>
+      <div className="flex h-4 rounded overflow-hidden border border-slate-200 dark:border-slate-800">
         {timeline.map((m, i) => (
           <div key={i} className={m.staffed ? 'bg-emerald-500' : 'bg-red-400'}
                style={{ flex: 1 }}
                title={`${m.minute.substring(11, 16)} — ${m.staffed ? 'staffed' : 'UNSTAFFED'}`} />
         ))}
       </div>
-      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+      <div className="flex justify-between text-[10px] text-slate-400 dark:text-slate-400 mt-0.5">
         <span>{timeline[0].minute.substring(11, 16)}</span>
         <span>{timeline[timeline.length - 1].minute.substring(11, 16)}</span>
       </div>
@@ -824,7 +824,7 @@ function ZoneIntelligenceBody({ zones }: {
     <div className="space-y-4">
       {top.length > 0 && (
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+          <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1.5">
             Top performing zones
           </div>
           <div className="space-y-1">
@@ -832,7 +832,7 @@ function ZoneIntelligenceBody({ zones }: {
               <div key={z.zone_id} className="text-sm flex flex-wrap items-baseline gap-2">
                 <span>{medals[i] ?? '•'}</span>
                 <span className="font-medium">{z.name}</span>
-                <span className="text-slate-500">
+                <span className="text-slate-500 dark:text-slate-300">
                   — Score {(z.engagement_score ?? z.engagement_pct / 100).toFixed(2)} ·
                   {' '}{Math.round(z.avg_dwell_seconds)}s avg dwell ·
                   {' '}{z.traffic_count ?? 0} visits
@@ -845,7 +845,7 @@ function ZoneIntelligenceBody({ zones }: {
       )}
       {bottom.length > 0 && bottom[0].engagement_pct < 40 && (
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+          <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1.5">
             Low engagement zones
           </div>
           <div className="space-y-1.5">
@@ -854,13 +854,13 @@ function ZoneIntelligenceBody({ zones }: {
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span>⚠️</span>
                   <span className="font-medium">{z.name}</span>
-                  <span className="text-slate-500">
+                  <span className="text-slate-500 dark:text-slate-300">
                     — Score {(z.engagement_score ?? z.engagement_pct / 100).toFixed(2)} ·
                     {' '}{Math.round(z.avg_dwell_seconds)}s avg dwell
                   </span>
                 </div>
                 {z.recommendation && (
-                  <div className="text-xs text-slate-600 pl-6">→ {z.recommendation}</div>
+                  <div className="text-xs text-slate-600 dark:text-slate-300 pl-6">→ {z.recommendation}</div>
                 )}
               </div>
             ))}
@@ -869,7 +869,7 @@ function ZoneIntelligenceBody({ zones }: {
       )}
       {bottlenecks.length > 0 && (
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+          <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1.5">
             Bottleneck alerts
           </div>
           <div className="space-y-1.5">
@@ -878,13 +878,13 @@ function ZoneIntelligenceBody({ zones }: {
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span>🚨</span>
                   <span className="font-medium">{z.name}</span>
-                  <span className="text-slate-500">
+                  <span className="text-slate-500 dark:text-slate-300">
                     — avg {Math.round(z.avg_dwell_seconds / 60)} min wait
                     {z.peak_hour ? `, peak ${z.peak_hour}` : ''}
                   </span>
                 </div>
                 {z.recommendation && (
-                  <div className="text-xs text-slate-600 pl-6">→ {z.recommendation}</div>
+                  <div className="text-xs text-slate-600 dark:text-slate-300 pl-6">→ {z.recommendation}</div>
                 )}
               </div>
             ))}
@@ -911,14 +911,14 @@ export function MerchandisingPanel({ storeId, range }: { storeId: number; range?
                 {data.zones.map(z => (
                   <div key={z.zone_id} className="flex items-center gap-2 text-sm">
                     <span className="w-32 truncate" title={z.name}>{z.name}</span>
-                    <div className="flex-1 bg-slate-100 rounded h-5 relative">
+                    <div className="flex-1 bg-slate-100 dark:bg-slate-800 rounded h-5 relative">
                       <div className={'absolute inset-y-0 left-0 rounded ' +
                         (z.rag === 'green' ? 'bg-emerald-500' :
                          z.rag === 'amber' ? 'bg-amber-500' : 'bg-red-500')}
                            style={{ width: `${Math.max(z.engagement_pct, 1)}%` }} />
                     </div>
                     <span className="w-12 text-right tabular-nums text-xs">{z.engagement_pct}%</span>
-                    <span className="w-20 text-right text-xs text-slate-500 tabular-nums">
+                    <span className="w-20 text-right text-xs text-slate-500 dark:text-slate-300 tabular-nums">
                       {Math.floor(z.avg_dwell_seconds / 60)}m{z.avg_dwell_seconds % 60}s
                     </span>
                   </div>
@@ -994,7 +994,7 @@ export function ScorecardPanel({ storeId, range }: { storeId: number; range?: Ra
           : (
             <>
               <table className="w-full text-sm">
-                <thead className="text-xs uppercase text-slate-500">
+                <thead className="text-xs uppercase text-slate-500 dark:text-slate-300">
                   <tr>
                     <th className="text-left py-1">Metric</th>
                     <th className="text-right py-1">Today</th>
@@ -1005,7 +1005,7 @@ export function ScorecardPanel({ storeId, range }: { storeId: number; range?: Ra
                 </thead>
                 <tbody>
                   {data.rows.map(r => (
-                    <tr key={r.metric} className="border-t border-slate-100">
+                    <tr key={r.metric} className="border-t border-slate-100 dark:border-slate-800">
                       {/* "Visitors" row gets relabelled to clarify
                           that staff have been excluded from the count
                           (Layer 1 of the visitor-intelligence
@@ -1014,12 +1014,12 @@ export function ScorecardPanel({ storeId, range }: { storeId: number; range?: Ra
                         {r.metric === 'Visitors'
                           ? <span title="Staff tracks excluded — see visitor intelligence band above">
                               Estimated customers
-                              <span className="text-slate-400 text-xs"> (staff excluded)</span>
+                              <span className="text-slate-400 dark:text-slate-400 text-xs"> (staff excluded)</span>
                             </span>
                           : r.metric}
                       </td>
                       <td className="text-right tabular-nums font-medium">{r.today}{r.unit}</td>
-                      <td className="text-right tabular-nums text-slate-500">{r.yesterday}{r.unit}</td>
+                      <td className="text-right tabular-nums text-slate-500 dark:text-slate-300">{r.yesterday}{r.unit}</td>
                       <td className="text-right tabular-nums">
                         <ChangeCell row={r} />
                       </td>
@@ -1057,12 +1057,12 @@ export function ScorecardPanel({ storeId, range }: { storeId: number; range?: Ra
                 const rag = data.overall_rag
                   ?? (dir === 'better' ? 'green' : dir === 'worse' ? 'red' : 'amber')
                 return (
-                  <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-2">
+                  <div className="mt-3 flex items-center gap-2 border-t border-slate-100 dark:border-slate-800 pt-2">
                     <RagDot rag={rag} big />
                     <div className={'text-sm font-semibold ' +
                       (dir === 'better' ? 'text-emerald-700' :
                        dir === 'worse'  ? 'text-red-700' :
-                                          'text-slate-700')}>
+                                          'text-slate-700 dark:text-slate-200')}>
                       vs yesterday:{' '}
                       {dir === 'better' ? '▲ Better overall'
                       : dir === 'worse' ? '▼ Worse overall'
@@ -1091,7 +1091,7 @@ function ChangeCell({ row }: { row: ScorecardRow }) {
     pct = Math.round(pct * 10) / 10
   }
   if (pct == null) {
-    return <span className="text-slate-400">—</span>
+    return <span className="text-slate-400 dark:text-slate-400">—</span>
   }
   const higher = row.higher_is_better !== false   // default true
   const better = higher ? pct > 0.5 : pct < -0.5
@@ -1102,7 +1102,7 @@ function ChangeCell({ row }: { row: ScorecardRow }) {
   if (worse) {
     return <span className="text-red-600 font-medium">▼ {Math.abs(pct)}%</span>
   }
-  return <span className="text-slate-400">→ 0%</span>
+  return <span className="text-slate-400 dark:text-slate-400">→ 0%</span>
 }
 
 // Visitor intelligence band shown above the scorecard table. Three
@@ -1248,7 +1248,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
                 busy={snapBusy || intelBusy}>
       {/* Executive paragraph first so a manager reads it before the table. */}
       {intel?.executive_summary && (
-        <div className="text-sm text-slate-700 italic mb-3">
+        <div className="text-sm text-slate-700 dark:text-slate-200 italic mb-3">
           “{intel.executive_summary}”
         </div>
       )}
@@ -1258,16 +1258,16 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
         <EmptyState icon="🏪" text="No queue activity right now. Draw a 'queue' zone on the checkout camera if you haven't already." />
       ) : (
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+          <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
             Live queue right now
           </div>
-          <div className="text-xs text-slate-500 mb-2">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-2">
             {snap.active_counters} counter{snap.active_counters === 1 ? '' : 's'} open ·
             {' '}snapshot at {new Date(snap.taken_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </div>
-          <div className="overflow-hidden rounded border border-slate-200">
+          <div className="overflow-hidden rounded border border-slate-200 dark:border-slate-800">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600 text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200 text-xs">
                 <tr>
                   <th className="text-left p-2">Customer</th>
                   <th className="text-left p-2">Waiting</th>
@@ -1276,7 +1276,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
               </thead>
               <tbody>
                 {snap.customers_in_queue.map(c => (
-                  <tr key={c.position} className="border-t">
+                  <tr key={c.position} className="border-t dark:border-slate-800">
                     <td className="p-2 font-medium">#{c.position}</td>
                     <td className="p-2 tabular-nums">{mmss(c.wait_seconds)}</td>
                     <td className="p-2">
@@ -1289,7 +1289,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
               </tbody>
             </table>
           </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs mt-2 text-slate-600">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs mt-2 text-slate-600 dark:text-slate-300">
             <span>Average wait: <strong>{snap.summary.avg_wait ?? '—'}</strong></span>
             {snap.summary.sla_target && <span>Target: under <strong>{snap.summary.sla_target}</strong></span>}
             {intel?.sla?.status && (
@@ -1301,19 +1301,19 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
               </span>
             )}
           </div>
-          {snap.note && <div className="text-[11px] text-slate-400 mt-1">{snap.note}</div>}
+          {snap.note && <div className="text-[11px] text-slate-400 dark:text-slate-400 mt-1">{snap.note}</div>}
         </div>
       )}
 
       {/* DAILY summary */}
       {intel && intel.summary && intel.sla && (
-        <div className="mt-5 border-t pt-4 space-y-3">
-          <div className="text-xs uppercase tracking-wide text-slate-500">Today's summary</div>
+        <div className="mt-5 border-t dark:border-slate-800 pt-4 space-y-3">
+          <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Today's summary</div>
 
           {/* Key metrics table — plain-English row labels. */}
-          <div className="overflow-hidden rounded border border-slate-200">
+          <div className="overflow-hidden rounded border border-slate-200 dark:border-slate-800">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600 text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200 text-xs">
                 <tr>
                   <th className="text-left p-2">What we measured</th>
                   <th className="text-left p-2">Today</th>
@@ -1347,10 +1347,10 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
 
           {intel.recommendations.length > 0 && (
             <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+              <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
                 What this means for your store
               </div>
-              <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-1.5">
+              <ol className="list-decimal ml-5 text-sm text-slate-700 dark:text-slate-200 space-y-1.5">
                 {intel.recommendations.map((r, i) => <li key={i}>{r}</li>)}
               </ol>
             </div>
@@ -1366,7 +1366,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
           {/* Hourly breakdown — padded to the canonical 09:00-21:00
               retail window so the chart always reads at the same scale. */}
           <div>
-            <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+            <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
               Hourly breakdown
             </div>
             <HourlyWaitBars hours={intel.hourly_breakdown}
@@ -1374,7 +1374,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
                             busiest={intel.peak_hour} />
           </div>
 
-          <div className="text-[11px] text-slate-400">
+          <div className="text-[11px] text-slate-400 dark:text-slate-400">
             Generated {new Date(intel.generated_at).toLocaleString()} · trend{' '}
             <strong>{intel.trend.toLowerCase()}</strong>
           </div>
@@ -1389,10 +1389,10 @@ function MetricRow({ label, today, target, ok, statusOverride }: {
   statusOverride?: string
 }) {
   return (
-    <tr className="border-t">
+    <tr className="border-t dark:border-slate-800">
       <td className="p-2">{label}</td>
       <td className="p-2 font-medium tabular-nums">{today}</td>
-      <td className="p-2 text-slate-500">{target}</td>
+      <td className="p-2 text-slate-500 dark:text-slate-300">{target}</td>
       <td className="p-2">{statusOverride ?? (ok ? '🟢' : '🔴')}</td>
     </tr>
   )
@@ -1433,8 +1433,8 @@ function HourlyWaitBars({ hours, sla, busiest }: {
         const isBusiest = busiest === h.hour
         return (
           <div key={h.hour} className="flex items-center gap-2 text-xs">
-            <span className="w-12 text-slate-500 tabular-nums">{label(h.hour)}</span>
-            <div className="flex-1 h-3 bg-slate-100 rounded">
+            <span className="w-12 text-slate-500 dark:text-slate-300 tabular-nums">{label(h.hour)}</span>
+            <div className="flex-1 h-3 bg-slate-100 dark:bg-slate-800 rounded">
               <div className={'h-3 rounded ' + fill}
                    style={{ width: `${Math.max(2, pct)}%` }} />
             </div>

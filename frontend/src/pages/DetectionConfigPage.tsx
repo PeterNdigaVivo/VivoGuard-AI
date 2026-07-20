@@ -119,7 +119,7 @@ export default function DetectionConfigPage() {
             {DETECTION_TYPES.map(t => {
               const c = config[t]; if (!c) return null
               return (
-                <div key={t} className="border rounded p-3">
+                <div key={t} className="border dark:border-slate-800 rounded p-3">
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={c.enabled}
                            onChange={e => setConfig({ ...config, [t]: { ...c, enabled: e.target.checked }})} />
@@ -158,14 +158,14 @@ export default function DetectionConfigPage() {
         {/* Zone editor */}
         <Card className="col-span-5 p-4">
           <div className="font-medium mb-3">Zones</div>
-          <div className="text-xs text-slate-500 mb-2">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-2">
             Click on the snapshot to drop polygon points. ≥ 3 for an area, 2 for a tripwire line.
           </div>
           {snap ? (
             <div className="relative">
               <img src={`data:image/jpeg;base64,${snap}`}
                    onClick={clickSnapshot}
-                   className="w-full rounded border cursor-crosshair" alt="" />
+                   className="w-full rounded border dark:border-slate-800 cursor-crosshair" alt="" />
               {/* Render in-progress polygon */}
               <svg className="absolute inset-0 w-full h-full pointer-events-none"
                    viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -179,7 +179,7 @@ export default function DetectionConfigPage() {
               </svg>
             </div>
           ) : (
-            <div className="bg-slate-200 aspect-video rounded flex items-center justify-center text-slate-500">
+            <div className="bg-slate-200 dark:bg-slate-800 aspect-video rounded flex items-center justify-center text-slate-500 dark:text-slate-300">
               Snapshot unavailable
             </div>
           )}
@@ -198,10 +198,10 @@ export default function DetectionConfigPage() {
 
           <div className="mt-4 space-y-1">
             {zones.map(z => (
-              <div key={z.id} className="flex items-center justify-between text-sm border-t pt-1">
+              <div key={z.id} className="flex items-center justify-between text-sm border-t dark:border-slate-800 pt-1">
                 <div>
                   <span className="font-medium">{z.name}</span>
-                  <span className="ml-2 text-slate-500 text-xs">{z.shape}</span>
+                  <span className="ml-2 text-slate-500 dark:text-slate-300 text-xs">{z.shape}</span>
                   <span className="ml-2">
                     {(z.detection_types_json || []).map((t: string) => <Badge key={t} color="sky">{t}</Badge>)}
                   </span>

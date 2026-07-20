@@ -181,18 +181,18 @@ export default function AnnotationPage() {
         {/* Canvas */}
         <div className="col-span-9">
           <Card className="p-3">
-            <div className="text-xs text-slate-500 mb-2">
+            <div className="text-xs text-slate-500 dark:text-slate-300 mb-2">
               Image {images.length ? idx + 1 : 0} / {images.length} —
               shortcuts: N next · P prev · D delete · S save
             </div>
-            <div ref={containerRef} className="relative bg-slate-200 select-none"
+            <div ref={containerRef} className="relative bg-slate-200 dark:bg-slate-800 select-none"
                  style={{ width: '100%', maxWidth: 960 }}
                  onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
               {currentImage ? (
                 <img ref={imgRef} src={training.imageFileUrl(datasetId, currentImage.id)}
                      className="block w-full h-auto" alt="" />
               ) : (
-                <div className="aspect-video flex items-center justify-center text-slate-500">
+                <div className="aspect-video flex items-center justify-center text-slate-500 dark:text-slate-300">
                   No images. Upload or capture above.
                 </div>
               )}
@@ -239,7 +239,7 @@ export default function AnnotationPage() {
         <div className="col-span-3 space-y-3">
           <Card className="p-3">
             <div className="text-sm font-medium mb-2">Boxes on this image</div>
-            {boxes.length === 0 && <div className="text-slate-500 text-sm">No boxes yet.</div>}
+            {boxes.length === 0 && <div className="text-slate-500 dark:text-slate-300 text-sm">No boxes yet.</div>}
             {boxes.map((b, i) => (
               <div key={i}
                    onClick={() => setSelectedBox(i)}

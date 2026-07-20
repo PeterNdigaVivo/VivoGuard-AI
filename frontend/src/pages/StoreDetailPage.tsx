@@ -89,7 +89,7 @@ export default function StoreDetailPage() {
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <div className="text-3xl font-semibold">{store.name}</div>
-          <div className="text-slate-500 mt-1">
+          <div className="text-slate-500 dark:text-slate-300 mt-1">
             {COUNTRY_FLAG[store.country] ?? '🏳️'} {store.city ?? '—'}, {store.country}
             {store.manager_name && <span className="ml-3">👤 {store.manager_name}</span>}
             {store.manager_phone && <span className="ml-3">📞 {store.manager_phone}</span>}
@@ -108,7 +108,7 @@ export default function StoreDetailPage() {
 
       {/* BUSINESS HOURS strip */}
       {store.business_hours_json && (
-        <div className="text-xs text-slate-500 -mt-2">
+        <div className="text-xs text-slate-500 dark:text-slate-300 -mt-2">
           Hours:{' '}
           {(['mon','tue','wed','thu','fri','sat','sun'] as const).map(d => {
             const wins = store.business_hours_json?.[d] ?? []
@@ -133,7 +133,7 @@ export default function StoreDetailPage() {
           <Card className="p-10 text-center">
             <div className="text-5xl mb-2">📹</div>
             <div className="text-lg font-medium mb-1">No cameras yet</div>
-            <div className="text-slate-500 mb-4">
+            <div className="text-slate-500 dark:text-slate-300 mb-4">
               Add your first camera to start collecting data for this store.
             </div>
             <Button onClick={() => nav(`/stores/${storeId}/add-camera`)}>
@@ -159,14 +159,14 @@ export default function StoreDetailPage() {
               <Mini label="Queue now" value={live.tiles.queue_length_now.value} />
             )}
           </div>
-          <div className="text-xs text-slate-500 mt-2">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
             Updated {new Date(live.as_of).toLocaleTimeString()}.
             See the <Link to={`/stores/${storeId}/analytics`} className="text-sky-600 hover:underline">full analytics</Link>.
           </div>
         </section>
       )}
       {live?.status === 'no_data_yet' && (
-        <Card className="p-4 text-slate-500 text-sm">
+        <Card className="p-4 text-slate-500 dark:text-slate-300 text-sm">
           Cameras just attached — collecting first measurements. Numbers appear within a minute or two.
         </Card>
       )}
@@ -204,7 +204,7 @@ function CameraCard({ cam }: { cam: CameraWithZones }) {
           {configured ? 'Edit zones' : 'Configure AI'}
         </Link>
         <Link to={`/cameras/${cam.id}/heatmap`}
-              className="text-sm text-slate-500 hover:underline">
+              className="text-sm text-slate-500 dark:text-slate-300 hover:underline">
           Heatmap
         </Link>
       </div>
@@ -215,7 +215,7 @@ function CameraCard({ cam }: { cam: CameraWithZones }) {
 function Mini({ label, value }: { label: string; value: any }) {
   return (
     <Card className="p-3">
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className="text-xl font-semibold mt-1">
         {value === null || value === undefined ? '0' : Math.round(Number(value) || 0)}
       </div>

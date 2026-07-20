@@ -55,20 +55,20 @@ export default function StockroomLogPage() {
 
       <Card className="p-3 mb-4 flex flex-wrap gap-3 items-end">
         <label className="text-sm">
-          <div className="text-xs text-slate-500 mb-1">Store</div>
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Store</div>
           <Select value={storeId} onChange={e => setStoreId(e.target.value)}>
             <option value="">all stores</option>
             {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
         </label>
-        <div className="text-xs text-slate-500 ml-auto">
+        <div className="text-xs text-slate-500 dark:text-slate-300 ml-auto">
           Showing <strong>{range.label}</strong> · {rows.length} entr{rows.length === 1 ? 'y' : 'ies'}
         </div>
       </Card>
 
       <Card>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-200">
             <tr>
               <th className="text-left p-3">When</th>
               <th className="text-left p-3">Camera</th>
@@ -80,7 +80,7 @@ export default function StockroomLogPage() {
           </thead>
           <tbody>
             {rows.map(r => (
-              <tr key={r.id} className="border-t hover:bg-slate-50">
+              <tr key={r.id} className="border-t dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                 <td className="p-3 whitespace-nowrap">{new Date(r.timestamp).toLocaleString()}</td>
                 <td className="p-3">cam #{r.camera_id}</td>
                 <td className="p-3">
@@ -100,7 +100,7 @@ export default function StockroomLogPage() {
               </tr>
             ))}
             {!rows.length && (
-              <tr><td colSpan={6} className="p-8 text-center text-slate-500">
+              <tr><td colSpan={6} className="p-8 text-center text-slate-500 dark:text-slate-300">
                 No stockroom access events.
               </td></tr>
             )}

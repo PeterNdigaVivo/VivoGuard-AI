@@ -173,7 +173,7 @@ export default function StoreForm({
             <option value="8000">8000 (Hikvision ISAPI)</option>
             <option value="8080">8080</option>
           </Select>
-          <div className="text-xs text-slate-500 mt-1">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
             Cameras added to this store will inherit this port. Pick
             7000 for Dahua-on-7000 stores (Moi Avenue, Junction,
             Sarit and most others in the Vivo fleet).
@@ -193,7 +193,7 @@ export default function StoreForm({
                      queue_sla_seconds: String((Number(e.target.value) || 3) * 60),
                    })}
                    placeholder="3" />
-            <div className="text-xs text-slate-500 mt-1">
+            <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
               Default 3 minutes. Waits longer than this count as an SLA breach.
             </div>
           </Field>
@@ -202,7 +202,7 @@ export default function StoreForm({
                    value={form.queue_sla_length}
                    onChange={upd('queue_sla_length')}
                    placeholder="6" />
-            <div className="text-xs text-slate-500 mt-1">
+            <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
               Default 6 people. Peaks above this show as a 🔴 on the dashboard.
             </div>
           </Field>
@@ -250,7 +250,7 @@ export default function StoreForm({
                            })} />
                   </>
                 )}
-                {!v.open && <span className="text-slate-400">closed</span>}
+                {!v.open && <span className="text-slate-400 dark:text-slate-400">closed</span>}
               </div>
             )
           })}
@@ -272,7 +272,7 @@ export default function StoreForm({
 function Field({ label, children, full }: { label: string; children: React.ReactNode; full?: boolean }) {
   return (
     <label className={'block ' + (full ? 'md:col-span-2' : '')}>
-      <div className="text-xs text-slate-600 mb-1">{label}</div>
+      <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">{label}</div>
       {children}
     </label>
   )

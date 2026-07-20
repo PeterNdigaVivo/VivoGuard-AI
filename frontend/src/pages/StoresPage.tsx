@@ -124,7 +124,7 @@ export default function StoresPage() {
       } />
 
       {/* Tab switcher */}
-      <div className="mb-4 flex items-center gap-2 border-b border-slate-200">
+      <div className="mb-4 flex items-center gap-2 border-b border-slate-200 dark:border-slate-800">
         <TabBtn active={tab === 'grid'}   onClick={() => setTab('grid')}>Stores</TabBtn>
         <TabBtn active={tab === 'health'} onClick={() => setTab('health')}>
           Zone Health{healthByStoreId.size ? ` (${healthByStoreId.size})` : ''}
@@ -161,7 +161,7 @@ function TabBtn({ active, onClick, children }: {
             className={'px-3 py-2 text-sm border-b-2 -mb-px '
               + (active
                   ? 'border-sky-600 text-sky-700 font-semibold'
-                  : 'border-transparent text-slate-500 hover:text-slate-700')}>
+                  : 'border-transparent text-slate-500 dark:text-slate-300 hover:text-slate-700 dark:hover:text-slate-200')}>
       {children}
     </button>
   )
@@ -190,7 +190,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
         <Card className="p-12 text-center">
           <div className="text-5xl mb-3">🏬</div>
           <div className="text-lg font-medium mb-1">No stores yet</div>
-          <div className="text-slate-500 mb-4">
+          <div className="text-slate-500 dark:text-slate-300 mb-4">
             Start by adding your first store. Cameras attach to stores.
           </div>
           <Button onClick={onCreate}>+ Add your first store</Button>
@@ -209,12 +209,12 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
           {query && (
             <button
               onClick={() => setQuery('')}
-              className="text-sm text-slate-500 hover:text-slate-700">
+              className="text-sm text-slate-500 dark:text-slate-300 hover:text-slate-700 dark:hover:text-slate-200">
               Clear
             </button>
           )}
           {query && filtered && (
-            <span className="text-sm text-slate-500">
+            <span className="text-sm text-slate-500 dark:text-slate-300">
               {filtered.length} of {list.length}
             </span>
           )}
@@ -222,7 +222,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
       )}
 
       {list && list.length > 0 && filtered && filtered.length === 0 && (
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No stores match “{query}”.
         </Card>
       )}
@@ -241,7 +241,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
                         {h && <span title={`Zone health ${h.score}/100`}>{BADGE_ICON[h.badge]}</span>}
                         {s.name}
                       </div>
-                      <div className="text-sm text-slate-500">
+                      <div className="text-sm text-slate-500 dark:text-slate-300">
                         {COUNTRY_FLAG[s.country] ?? '🏳️'} {s.city ?? '—'}, {s.country}
                       </div>
                     </div>
@@ -249,8 +249,8 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
                       ? <Badge color="green">active</Badge>
                       : <Badge color="slate">disabled</Badge>}
                   </div>
-                  {s.code && <div className="text-xs font-mono text-slate-400 mb-3">{s.code}</div>}
-                  <div className="text-xs text-slate-500 space-y-0.5">
+                  {s.code && <div className="text-xs font-mono text-slate-400 dark:text-slate-400 mb-3">{s.code}</div>}
+                  <div className="text-xs text-slate-500 dark:text-slate-300 space-y-0.5">
                     {s.manager_name && <div>👤 {s.manager_name}</div>}
                     {s.manager_phone && <div>📞 {s.manager_phone}</div>}
                     {s.capacity && <div>👥 capacity: {s.capacity}</div>}
@@ -295,15 +295,15 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
           {loading ? 'Refreshing…' : '↻ Refresh'}
         </Button>
         <a href="/api/stores/zone-health.csv"
-           className="px-3 py-1.5 text-sm rounded bg-slate-100 text-slate-700 hover:bg-slate-200">
+           className="px-3 py-1.5 text-sm rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700">
           ⬇ Export CSV
         </a>
         {health && (
-          <span className="text-sm text-slate-500">
+          <span className="text-sm text-slate-500 dark:text-slate-300">
             {countByBadge(health, 'critical')} critical · {countByBadge(health, 'warn')} need attention · {countByBadge(health, 'healthy')} healthy
           </span>
         )}
-        <span className="text-xs text-slate-400 ml-auto">
+        <span className="text-xs text-slate-400 dark:text-slate-400 ml-auto">
           Polls every 60s
         </span>
       </div>
@@ -318,7 +318,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
       {sorted && (
         <Card className="overflow-x-auto p-0">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 border-b border-slate-200">
+            <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800">
               <tr className="text-left">
                 <Th>Store</Th>
                 <Th>Score</Th>
@@ -333,7 +333,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
             </thead>
             <tbody>
               {sorted.map(r => (
-                <tr key={r.store_id} className="border-b border-slate-100 hover:bg-slate-50">
+                <tr key={r.store_id} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                   <td className="px-3 py-2 font-medium">
                     <span className="mr-1.5">{BADGE_ICON[r.badge]}</span>
                     {r.store_name || `Store ${r.store_id}`}
@@ -345,7 +345,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
                   <Cell ok={r.per_tag_present.queue} />
                   <Cell ok={r.per_tag_present.staff_zone} />
                   <Cell ok={r.per_tag_present.shutter} />
-                  <td className="px-3 py-2 text-slate-600 tabular-nums">
+                  <td className="px-3 py-2 text-slate-600 dark:text-slate-300 tabular-nums">
                     {r.cameras_online}/{r.cameras_total}
                     {r.cameras_offline > 0 && (
                       <span className="ml-1 text-rose-600">
@@ -353,7 +353,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
                       </span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-slate-700 max-w-md">
+                  <td className="px-3 py-2 text-slate-700 dark:text-slate-200 max-w-md">
                     <IssueChips issues={r.issues} />
                   </td>
                   <td className="px-3 py-2 text-right">
@@ -365,7 +365,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
                 </tr>
               ))}
               {sorted.length === 0 && (
-                <tr><td colSpan={9} className="p-6 text-center text-slate-500">
+                <tr><td colSpan={9} className="p-6 text-center text-slate-500 dark:text-slate-300">
                   No active stores.
                 </td></tr>
               )}
@@ -392,7 +392,7 @@ function Th({ children, className = '', title }: {
 }) {
   return (
     <th title={title}
-        className={'px-3 py-2 text-xs font-medium text-slate-500 ' + className}>
+        className={'px-3 py-2 text-xs font-medium text-slate-500 dark:text-slate-300 ' + className}>
       {children}
     </th>
   )
@@ -428,19 +428,19 @@ function ScorePill({ score, badge }: {
 
 
 function IssueChips({ issues }: { issues: ZoneHealthIssue[] }) {
-  if (issues.length === 0) return <span className="text-slate-400">—</span>
+  if (issues.length === 0) return <span className="text-slate-400 dark:text-slate-400">—</span>
   const head = issues.slice(0, 2)
   const more = issues.length - head.length
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {head.map((i, idx) => (
         <span key={idx}
-              className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
+              className="text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
           {i.message}
         </span>
       ))}
       {more > 0 && (
-        <span className="text-xs text-slate-500">+{more} more</span>
+        <span className="text-xs text-slate-500 dark:text-slate-300">+{more} more</span>
       )}
     </div>
   )
@@ -462,19 +462,19 @@ function FixDrawer({ row, onClose }: {
       <div className="fixed inset-0 bg-slate-900/40 z-40"
            onClick={onClose} />
       <aside className="fixed top-0 right-0 bottom-0 w-full sm:w-[480px]
-                        bg-white shadow-xl z-50 overflow-y-auto p-5">
+                        bg-white dark:bg-slate-900 shadow-xl z-50 overflow-y-auto p-5">
         <div className="flex items-start justify-between mb-3">
           <div>
-            <div className="text-xs text-slate-500">Zone health</div>
+            <div className="text-xs text-slate-500 dark:text-slate-300">Zone health</div>
             <div className="text-lg font-semibold">
               {BADGE_ICON[row.badge]} {row.store_name || `Store ${row.store_id}`}
             </div>
-            <div className="text-sm text-slate-500">
+            <div className="text-sm text-slate-500 dark:text-slate-300">
               Score {row.score}/100 · {row.cameras_online}/{row.cameras_total} cameras online
             </div>
           </div>
           <button onClick={onClose}
-                  className="text-slate-500 hover:text-slate-800 text-xl leading-none">
+                  className="text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-slate-100 text-xl leading-none">
             ✕
           </button>
         </div>
@@ -483,10 +483,10 @@ function FixDrawer({ row, onClose }: {
           <Section title="Missing zones">
             {missing.map((i, idx) => (
               <div key={idx} className="flex items-center justify-between
-                                         py-2 border-b border-slate-100">
+                                         py-2 border-b border-slate-100 dark:border-slate-800">
                 <div>
                   <div className="font-medium">No {i.tag} zone</div>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-xs text-slate-500 dark:text-slate-300">
                     Add this zone to any camera in the store.
                   </div>
                 </div>
@@ -503,12 +503,12 @@ function FixDrawer({ row, onClose }: {
           <Section title="Duplicate zones (same-camera)">
             {dups.map((i, idx) => (
               <div key={idx} className="flex items-center justify-between
-                                         py-2 border-b border-slate-100">
+                                         py-2 border-b border-slate-100 dark:border-slate-800">
                 <div>
                   <div className="font-medium">
                     {i.camera_name || `Camera ${i.camera_id}`} has {i.count} {i.tag} zones
                   </div>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-xs text-slate-500 dark:text-slate-300">
                     Delete the extras — this is causing {i.tag === 'entry_exit'
                       ? 'double / triple footfall counts' : 'noisy alerts'}.
                   </div>
@@ -526,14 +526,14 @@ function FixDrawer({ row, onClose }: {
           <Section title="Typo'd zone names">
             {typos.map((i, idx) => (
               <div key={idx} className="flex items-center justify-between
-                                         py-2 border-b border-slate-100">
+                                         py-2 border-b border-slate-100 dark:border-slate-800">
                 <div className="text-sm">
                   <div className="font-medium">
                     {i.camera_name || `Camera ${i.camera_id}`}
                   </div>
                   {/* Explicit before/after — operators see exactly the
                       rename before they click. */}
-                  <div className="text-slate-600">
+                  <div className="text-slate-600 dark:text-slate-300">
                     Rename:{' '}
                     <span className="font-mono bg-rose-50 px-1 rounded text-rose-700">
                       “{i.current_name}”
@@ -543,7 +543,7 @@ function FixDrawer({ row, onClose }: {
                       “{i.suggested_name}”
                     </span>
                   </div>
-                  <div className="text-xs text-slate-400">
+                  <div className="text-xs text-slate-400 dark:text-slate-400">
                     similarity {((i.similarity ?? 0) * 100).toFixed(0)}%
                   </div>
                 </div>
@@ -560,12 +560,12 @@ function FixDrawer({ row, onClose }: {
           <Section title="Offline cameras">
             {offline.map((i, idx) => (
               <div key={idx} className="flex items-center justify-between
-                                         py-2 border-b border-slate-100">
+                                         py-2 border-b border-slate-100 dark:border-slate-800">
                 <div>
                   <div className="font-medium">
                     {i.camera_name || `Camera ${i.camera_id}`}
                   </div>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-xs text-slate-500 dark:text-slate-300">
                     Check the NVR feed for this camera.
                   </div>
                 </div>
@@ -585,10 +585,10 @@ function FixDrawer({ row, onClose }: {
         )}
 
         {/* Clone from best camera — wired in Feature 6 */}
-        <div className="mt-4 pt-4 border-t border-slate-200">
+        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800">
           <button disabled
                   title="Available when Feature 6 (Zone Cloning Tool) ships"
-                  className="w-full px-3 py-2 rounded bg-slate-100 text-slate-400
+                  className="w-full px-3 py-2 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-400
                              cursor-not-allowed text-sm">
             🔁 Clone zones from best camera (Feature 6 — coming)
           </button>
@@ -604,7 +604,7 @@ function Section({ title, children }: {
 }) {
   return (
     <div className="mb-4">
-      <div className="text-xs font-semibold text-slate-500 uppercase mb-1">
+      <div className="text-xs font-semibold text-slate-500 dark:text-slate-300 uppercase mb-1">
         {title}
       </div>
       <div>{children}</div>

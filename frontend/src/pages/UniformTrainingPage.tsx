@@ -262,7 +262,7 @@ export default function UniformTrainingPage() {
       </Card>
 
       {/* How staff identification works — so operators know what this unlocks. */}
-      <Card className="p-3 bg-slate-50 text-sm text-slate-700">
+      <Card className="p-3 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-200">
         👔 <strong>How staff identification works</strong>
         <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
           <li>A person in a <strong>counter / staff zone</strong> wearing a Vivo
@@ -280,7 +280,7 @@ export default function UniformTrainingPage() {
       </Card>
 
       {cameras.length === 0 ? (
-        <Card className="p-6 text-sm text-slate-600">
+        <Card className="p-6 text-sm text-slate-600 dark:text-slate-300">
           No AI-enabled cameras found. Enable AI on a camera that watches the
           counter, then collect uniform frames here.
         </Card>
@@ -288,13 +288,13 @@ export default function UniformTrainingPage() {
         <>
           <Card className="p-3">
             <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Store</span>
+              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Store</span>
               <select className="border rounded px-2 py-1 text-sm"
                       value={storeFilter} onChange={e => pickFirstInStore(e.target.value)}>
                 <option value="">All stores</option>
                 {storeOptions.map(([id, name]) => <option key={id} value={String(id)}>{name}</option>)}
               </select>
-              <span className="text-xs uppercase tracking-wide text-slate-500">Camera</span>
+              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Camera</span>
               <select className="border rounded px-2 py-1 text-sm min-w-[220px]"
                       value={selected ?? ''} onChange={e => selectCamera(Number(e.target.value))}>
                 {grouped.map(([storeName, cams]) => (
@@ -307,7 +307,7 @@ export default function UniformTrainingPage() {
                   </optgroup>
                 ))}
               </select>
-              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
+              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
                 <input type="checkbox" checked={autoCapture}
                        onChange={e => setAutoCapture(e.target.checked)} />
                 Auto-capture every 10 min
@@ -325,7 +325,7 @@ export default function UniformTrainingPage() {
 
           {session.length > 1 && (
             <Card className="p-3">
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">This session</div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-2">This session</div>
               <div className="flex flex-wrap gap-3 text-xs">
                 {session.map(id => {
                   const cam = cameras.find(c => c.camera_id === id)
@@ -335,7 +335,7 @@ export default function UniformTrainingPage() {
                   return (
                     <button key={id} onClick={() => selectCamera(id)}
                             className={'rounded px-2 py-1 border ' +
-                              (id === selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200')}>
+                              (id === selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200 dark:border-slate-800')}>
                       <span className="font-medium">{cam.camera_name}</span>{': '}{tot}/{MIN_PER_CLASS} {done ? '✅' : '🔄'}
                     </button>
                   )
@@ -363,13 +363,13 @@ export default function UniformTrainingPage() {
                   </button>
                 ))}
               </div>
-              {msg && <div className="text-xs text-slate-500 mt-2">{msg}</div>}
+              {msg && <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">{msg}</div>}
 
               {/* Image upload — drag a folder of phone photos in or pick
                   files with the label-tagged buttons. JPG/PNG only, 5 MB
                   max per file. */}
-              <div className="mt-3 border-t pt-3">
-                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+              <div className="mt-3 border-t dark:border-slate-800 pt-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
                   Upload training images
                 </div>
                 <UploadDropZone busy={busy} onDrop={uploadFiles} />
@@ -391,7 +391,7 @@ export default function UniformTrainingPage() {
                     </label>
                   ))}
                 </div>
-                <div className="text-[11px] text-slate-400 mt-1">
+                <div className="text-[11px] text-slate-400 dark:text-slate-400 mt-1">
                   JPG / PNG · up to 5 MB each · phone photos, screenshots,
                   WhatsApp images all work
                 </div>
@@ -408,11 +408,11 @@ export default function UniformTrainingPage() {
                     <div key={l}>
                       <div className="flex justify-between text-xs mb-0.5">
                         <span>{LABEL_TEXT[l]}</span>
-                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500'}>
+                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
                           {n} / {MIN_PER_CLASS}
                         </span>
                       </div>
-                      <div className="h-2 bg-slate-100 rounded">
+                      <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded">
                         <div className={'h-2 rounded ' + LABEL_STYLE[l].split(' ')[0]}
                              style={{ width: `${Math.max(pct, 2)}%` }} />
                       </div>
@@ -421,40 +421,40 @@ export default function UniformTrainingPage() {
                 })}
               </div>
               <div className={'mt-3 text-sm rounded px-3 py-2 ' +
-                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600')}>
+                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300')}>
                 {ready ? '✅ Enough frames to train.'
                        : `Collect at least ${MIN_PER_CLASS} frames per class to enable training.`}
               </div>
 
-              <div className="mt-3 border-t pt-3">
+              <div className="mt-3 border-t dark:border-slate-800 pt-3">
                 <div className="flex items-center gap-3">
                   <Button onClick={startTraining} disabled={!ready || training}>
                     {training ? 'Training…' : 'Start training'}
                   </Button>
                   {train.state === 'training' && train.total_epochs ? (
-                    <span className="text-xs text-slate-600">Epoch {train.epoch ?? 0}/{train.total_epochs}</span>
+                    <span className="text-xs text-slate-600 dark:text-slate-300">Epoch {train.epoch ?? 0}/{train.total_epochs}</span>
                   ) : train.state === 'preparing' ? (
-                    <span className="text-xs text-slate-600">{train.message ?? 'Preparing…'}</span>
+                    <span className="text-xs text-slate-600 dark:text-slate-300">{train.message ?? 'Preparing…'}</span>
                   ) : null}
                 </div>
                 {train.state === 'training' && train.total_epochs ? (
-                  <div className="h-2 bg-slate-100 rounded mt-2">
+                  <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded mt-2">
                     <div className="h-2 rounded bg-blue-500"
                          style={{ width: `${Math.max(2, ((train.epoch ?? 0) / train.total_epochs) * 100)}%` }} />
                   </div>
                 ) : null}
                 {train.state === 'failed' && <div className="text-xs text-red-600 mt-2">{train.message}</div>}
                 {train.state === 'done' && train.report && (
-                  <div className="mt-3 text-sm bg-slate-50 rounded p-3">
+                  <div className="mt-3 text-sm bg-slate-50 dark:bg-slate-800 rounded p-3">
                     <div className="font-medium mb-1">Training complete</div>
-                    <div className="text-xs space-y-0.5 text-slate-700">
+                    <div className="text-xs space-y-0.5 text-slate-700 dark:text-slate-200">
                       {train.report.accuracy !== null && (
                         <div>Accuracy: <strong>{Math.round((train.report.accuracy ?? 0) * 100)}%</strong></div>
                       )}
                       {train.report.per_class && Object.entries(train.report.per_class).map(([l, pc]) => (
                         <div key={l}>{l}: {Math.round(pc.precision * 100)}% precision · {Math.round(pc.recall * 100)}% recall</div>
                       ))}
-                      <div className="mt-1 text-slate-600">{train.report.recommendation}</div>
+                      <div className="mt-1 text-slate-600 dark:text-slate-300">{train.report.recommendation}</div>
                     </div>
                     {train.model_id && train.candidate_cameras?.length ? (
                       <Button className="mt-2" onClick={deploy}>
@@ -474,15 +474,15 @@ export default function UniformTrainingPage() {
                 {LABELS.map(l => (
                   <button key={l} onClick={() => setReviewLabel(l)}
                           className={'px-2.5 py-1 rounded text-xs font-medium ' +
-                            (reviewLabel === l ? 'text-white ' + LABEL_STYLE[l].split(' ')[0] : 'bg-slate-100 text-slate-600')}>
+                            (reviewLabel === l ? 'text-white ' + LABEL_STYLE[l].split(' ')[0] : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300')}>
                     {LABEL_TEXT[l]}
                   </button>
                 ))}
               </div>
-              <span className="text-xs text-slate-400 ml-auto">Click a frame to delete it</span>
+              <span className="text-xs text-slate-400 dark:text-slate-400 ml-auto">Click a frame to delete it</span>
             </div>
             {samples.length === 0 ? (
-              <div className="text-sm text-slate-500 py-6 text-center">No {LABEL_TEXT[reviewLabel]} frames yet.</div>
+              <div className="text-sm text-slate-500 dark:text-slate-300 py-6 text-center">No {LABEL_TEXT[reviewLabel]} frames yet.</div>
             ) : (
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
                 {samples.map(s => (
@@ -521,7 +521,7 @@ function UploadDropZone({ busy, onDrop }: {
       }}
       className={'rounded border-2 border-dashed px-3 py-4 text-center text-xs transition-colors '
                  + (dragging ? 'border-blue-400 bg-blue-50 text-blue-700'
-                             : 'border-slate-300 text-slate-500')}>
+                             : 'border-slate-300 dark:border-slate-800 text-slate-500 dark:text-slate-300')}>
       📥 Drop images here — they'll be saved as{' '}
       <select value={lastLabel} onChange={e => setLastLabel(e.target.value as Label)}
               className="border rounded px-1 py-0.5 text-xs">

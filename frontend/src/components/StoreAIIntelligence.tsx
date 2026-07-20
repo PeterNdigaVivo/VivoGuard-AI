@@ -70,18 +70,18 @@ export function StaffingPredictionPanel({ storeId, range }: { storeId: number; r
     .slice(0, 5)
   return (
     <Card className="p-4">
-      <div className="text-sm font-semibold text-slate-700 mb-2">
+      <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">
         🧠 Predictive staffing — busiest upcoming slots
       </div>
       {top.length === 0 ? (
-        <div className="text-xs text-slate-500">{data.note ?? 'Not enough data yet.'}</div>
+        <div className="text-xs text-slate-500 dark:text-slate-300">{data.note ?? 'Not enough data yet.'}</div>
       ) : (
-        <ul className="text-xs text-slate-700 space-y-1">
+        <ul className="text-xs text-slate-700 dark:text-slate-200 space-y-1">
           {top.map((r, i) => (
             <li key={i} className="flex items-center gap-2">
               <span className="text-sky-500">›</span>
               <span className="flex-1">{r.headline}</span>
-              <span className="text-slate-500 tabular-nums">{r.expected_visitors} visitors</span>
+              <span className="text-slate-500 dark:text-slate-300 tabular-nums">{r.expected_visitors} visitors</span>
             </li>
           ))}
         </ul>
@@ -118,9 +118,9 @@ export function HealthScorePanel({ storeId, range }: { storeId: number; range?: 
         <div className={'text-4xl font-semibold ' +
           (rag === 'emerald' ? 'text-emerald-600' :
            rag === 'amber'   ? 'text-amber-600' : 'text-red-600')}>
-          {data.score}<span className="text-base text-slate-400">/100</span>
+          {data.score}<span className="text-base text-slate-400 dark:text-slate-400">/100</span>
         </div>
-        <div className="text-sm text-slate-600">
+        <div className="text-sm text-slate-600 dark:text-slate-300">
           Store health score{' '}
           <span className={data.delta > 0 ? 'text-emerald-600' :
                             data.delta < 0 ? 'text-red-600' : 'text-slate-400'}>
@@ -129,15 +129,15 @@ export function HealthScorePanel({ storeId, range }: { storeId: number; range?: 
           </span>
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
         {data.components.map(c => (
           <div key={c.name} className="flex items-center gap-2">
             <span className="w-28 truncate">{c.name}</span>
-            <div className="flex-1 bg-slate-100 rounded h-1.5">
+            <div className="flex-1 bg-slate-100 dark:bg-slate-800 rounded h-1.5">
               <div className="h-1.5 bg-sky-500 rounded" style={{ width: `${c.value}%` }} />
             </div>
             <span className="w-8 text-right tabular-nums">{Math.round(c.value)}</span>
-            <span className="w-8 text-right text-slate-400">×{c.weight}%</span>
+            <span className="w-8 text-right text-slate-400 dark:text-slate-400">×{c.weight}%</span>
           </div>
         ))}
       </div>
@@ -166,10 +166,10 @@ export function LossPreventionPanel({ storeId, range }: { storeId: number; range
   if (!data || data.total_alerts_this_week === 0) return null
   return (
     <Card className="p-4">
-      <div className="text-sm font-semibold text-slate-700 mb-2">
+      <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">
         🕵️ Loss prevention intelligence — last 7 days
       </div>
-      <div className="text-xs text-slate-700 space-y-1">
+      <div className="text-xs text-slate-700 dark:text-slate-200 space-y-1">
         <div><strong>{data.total_alerts_this_week}</strong> shrinkage / loitering / weapon alerts this week.</div>
         {data.headline_time && <div>⏰ {data.headline_time}</div>}
         {data.headline_camera && <div>📍 {data.headline_camera}</div>}
@@ -198,10 +198,10 @@ export function BehaviourTrendsPanel({ storeId, range }: { storeId: number; rang
   const v = data.avg_visit_seconds
   return (
     <Card className="p-4">
-      <div className="text-sm font-semibold text-slate-700 mb-2">
+      <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">
         📈 Customer behaviour trends — this week
       </div>
-      <div className="text-xs text-slate-700 space-y-1">
+      <div className="text-xs text-slate-700 dark:text-slate-200 space-y-1">
         <div>
           Avg visit duration:{' '}
           <strong>{Math.floor((v.this_week || 0) / 60)}m {(v.this_week || 0) % 60}s</strong>

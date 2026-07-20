@@ -48,8 +48,8 @@ function CameraThumb({ cameraId, name, onClick }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId])
 
-  const baseCls = "w-24 h-16 rounded border border-slate-200 bg-slate-100 " +
-                  "flex items-center justify-center overflow-hidden text-slate-400"
+  const baseCls = "w-24 h-16 rounded border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800 " +
+                  "flex items-center justify-center overflow-hidden text-slate-400 dark:text-slate-400"
   const interactiveCls = onClick ? " cursor-zoom-in hover:border-sky-400" : ""
 
   return (
@@ -301,7 +301,7 @@ export default function CamerasPage() {
                       className="text-xs text-sky-600 hover:underline">
                 clear
               </button>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-slate-500 dark:text-slate-300">
                 Showing <strong>{filteredCams.length}</strong> of <strong>{cams.length}</strong>
                 {' '}cameras across <strong>{Object.keys(groups).length}</strong>{' '}
                 store{Object.keys(groups).length === 1 ? '' : 's'}
@@ -338,7 +338,7 @@ export default function CamerasPage() {
             {bulkBusy ? 'Applying…' : 'Apply'}
           </Button>
         </div>
-        <div className="text-xs text-slate-500 mt-1">
+        <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
           Updates every camera whose host exactly matches. Most stores
           use Dahua on port 7000 with HTTP tunneling.
         </div>
@@ -346,11 +346,11 @@ export default function CamerasPage() {
 
       {Object.entries(groups).map(([label, list]) => (
         <Card key={label} className="mb-4">
-          <div className="px-4 py-2 bg-slate-50 text-slate-600 text-sm font-medium border-b">
+          <div className="px-4 py-2 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200 text-sm font-medium border-b dark:border-slate-800">
             {label}
           </div>
           <table className="w-full text-sm">
-            <thead className="text-slate-600">
+            <thead className="text-slate-600 dark:text-slate-300">
               <tr>
                 <th className="text-left p-3 w-28"></th>
                 <th className="text-left p-3">Name</th>
@@ -363,7 +363,7 @@ export default function CamerasPage() {
             </thead>
             <tbody>
               {list.map(c => (
-                <tr key={c.id} className="border-t hover:bg-slate-50">
+                <tr key={c.id} className="border-t dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                   <td className="p-3">
                     <CameraThumb cameraId={c.id} name={c.name}
                                  onClick={() => setZoomed(c)} />
@@ -390,7 +390,7 @@ export default function CamerasPage() {
                   <td className="p-3 text-right whitespace-nowrap">
                     <Link className="text-sky-600 hover:underline mr-3"
                           to={`/cameras/${c.id}/setup`}>Set up</Link>
-                    <Link className="text-slate-500 hover:underline text-xs mr-3"
+                    <Link className="text-slate-500 dark:text-slate-300 hover:underline text-xs mr-3"
                           to={`/cameras/${c.id}/detection`}>advanced</Link>
                     <button className="text-red-600 hover:underline"
                             onClick={() => remove(c.id)}>Remove</button>
@@ -403,7 +403,7 @@ export default function CamerasPage() {
       ))}
 
       {cams.length > 0 && filteredCams.length === 0 && (
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No cameras match "<strong>{search}</strong>".
           {' '}
           <button onClick={() => setSearch('')}
@@ -412,7 +412,7 @@ export default function CamerasPage() {
       )}
 
       {cams.length === 0 && !error && (
-        <Card className="p-8 text-center text-slate-500">
+        <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No cameras yet — click <Link to="/cameras/add" className="text-sky-600 underline">Add camera</Link>.
         </Card>
       )}
@@ -443,17 +443,17 @@ export default function CamerasPage() {
             <Card className="p-5">
               <div className="flex justify-between items-center mb-3">
                 <div className="text-lg font-semibold">⚡ Quick Add NVR</div>
-                <button className="text-slate-400 hover:text-slate-700"
+                <button className="text-slate-400 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
                         onClick={() => !qaBusy && setQuickAddOpen(false)}>✕</button>
               </div>
-            <div className="text-xs text-slate-500 mb-3">
+            <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
               Adds every channel of an NVR in one click. RTSP URLs are
               built per-brand; password is encrypted server-side; no
               probing — we trust your channel count.
             </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="col-span-2 block">
-                <div className="text-xs text-slate-600 mb-1">Store *</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">Store *</div>
                 <Select className="w-full" value={qaForm.store_id || ''}
                         onChange={e => setQaForm(f => ({ ...f, store_id: Number(e.target.value) }))}>
                   <option value="">— pick a store —</option>
@@ -465,7 +465,7 @@ export default function CamerasPage() {
                 </Select>
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">NVR brand</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">NVR brand</div>
                 <Select className="w-full" value={qaForm.brand}
                         onChange={e => setQaBrand(e.target.value as any)}>
                   <option value="dahua">Dahua</option>
@@ -474,18 +474,18 @@ export default function CamerasPage() {
                 </Select>
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">Channels *</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">Channels *</div>
                 <Input type="number" min={1} max={64} value={qaForm.channel_count}
                        onChange={e => setQaForm(f => ({ ...f, channel_count: Number(e.target.value) || 1 }))} />
               </label>
               <label className="col-span-2 block">
-                <div className="text-xs text-slate-600 mb-1">Host (public IP or DDNS) *</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">Host (public IP or DDNS) *</div>
                 <Input value={qaForm.host}
                        onChange={e => setQaForm(f => ({ ...f, host: e.target.value }))}
                        placeholder="197.155.67.50" />
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">RTSP port</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">RTSP port</div>
                 <Select className="w-full" value={qaForm.rtsp_port}
                         onChange={e => setQaForm(f => ({ ...f, rtsp_port: Number(e.target.value) }))}>
                   {[7000, 554, 80, 800, 8000, 8080].map(p => (
@@ -494,7 +494,7 @@ export default function CamerasPage() {
                 </Select>
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">RTSP transport</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">RTSP transport</div>
                 <Select className="w-full" value={qaForm.rtsp_transport}
                         onChange={e => setQaForm(f => ({ ...f, rtsp_transport: e.target.value as any }))}>
                   <option value="tcp">TCP (port 554 unblocked)</option>
@@ -503,23 +503,23 @@ export default function CamerasPage() {
                 </Select>
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">Username</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">Username</div>
                 <Input value={qaForm.username}
                        onChange={e => setQaForm(f => ({ ...f, username: e.target.value }))} />
               </label>
               <label className="block">
-                <div className="text-xs text-slate-600 mb-1">Password</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">Password</div>
                 <Input type="password" value={qaForm.password}
                        onChange={e => setQaForm(f => ({ ...f, password: e.target.value }))} />
               </label>
               <label className="col-span-2 block">
-                <div className="text-xs text-slate-600 mb-1">
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">
                   Name prefix (optional — defaults to store name)
                 </div>
                 <Input value={qaForm.name_prefix}
                        onChange={e => setQaForm(f => ({ ...f, name_prefix: e.target.value }))}
                        placeholder="Moi Avenue" />
-                <div className="text-xs text-slate-400 mt-1">
+                <div className="text-xs text-slate-400 dark:text-slate-400 mt-1">
                   Channels will be named "{qaForm.name_prefix || (stores.find(s => s.id === qaForm.store_id)?.name ?? 'Store')} - Channel N"
                 </div>
               </label>
@@ -558,17 +558,17 @@ function ZoomedSnapshot({ cam, onClose }: { cam: Camera; onClose: () => void }) 
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6"
          onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-           className="bg-white rounded shadow-lg max-w-4xl w-full">
-        <div className="flex items-center justify-between p-3 border-b">
+           className="bg-white dark:bg-slate-900 rounded shadow-lg max-w-4xl w-full">
+        <div className="flex items-center justify-between p-3 border-b dark:border-slate-800">
           <div>
             <div className="font-medium">{cam.name}</div>
-            <div className="text-xs text-slate-500 font-mono">
+            <div className="text-xs text-slate-500 dark:text-slate-300 font-mono">
               {cam.host}:{cam.rtsp_port}{cam.channel_number ? ` · ch${cam.channel_number}` : ''}
             </div>
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => setTick(t => t + 1)}>Refresh</Button>
-            <button className="text-slate-400 hover:text-slate-700 px-2"
+            <button className="text-slate-400 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 px-2"
                     onClick={onClose}>✕</button>
           </div>
         </div>

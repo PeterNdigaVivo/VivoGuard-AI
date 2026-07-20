@@ -259,7 +259,7 @@ export default function ShutterTrainingPage() {
       />
 
       {cameras.length === 0 ? (
-        <Card className="p-6 text-sm text-slate-600">
+        <Card className="p-6 text-sm text-slate-600 dark:text-slate-300">
           No AI-enabled cameras found. Enable AI on a camera that watches a
           store entrance, then come back here to collect OPEN / CLOSED /
           PARTIAL frames.
@@ -269,7 +269,7 @@ export default function ShutterTrainingPage() {
           {/* Camera picker — store filter + grouped, all AI cameras. */}
           <Card className="p-3">
             <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Store</span>
+              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Store</span>
               <select className="border rounded px-2 py-1 text-sm"
                       value={storeFilter}
                       onChange={e => pickFirstInStore(e.target.value)}>
@@ -279,7 +279,7 @@ export default function ShutterTrainingPage() {
                 ))}
               </select>
 
-              <span className="text-xs uppercase tracking-wide text-slate-500">Camera</span>
+              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Camera</span>
               <select className="border rounded px-2 py-1 text-sm min-w-[220px]"
                       value={selected ?? ''}
                       onChange={e => selectCamera(Number(e.target.value))}>
@@ -295,7 +295,7 @@ export default function ShutterTrainingPage() {
                 ))}
               </select>
 
-              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
+              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
                 <input type="checkbox" checked={autoCapture}
                        onChange={e => setAutoCapture(e.target.checked)} />
                 Auto-capture every 5 min
@@ -318,7 +318,7 @@ export default function ShutterTrainingPage() {
           {/* Multi-camera session progress strip. */}
           {session.length > 1 && (
             <Card className="p-3">
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+              <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-2">
                 This session
               </div>
               <div className="flex flex-wrap gap-3 text-xs">
@@ -364,12 +364,12 @@ export default function ShutterTrainingPage() {
                   </button>
                 ))}
               </div>
-              {msg && <div className="text-xs text-slate-500 mt-2">{msg}</div>}
+              {msg && <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">{msg}</div>}
 
               {/* Image upload — phone photos / screenshots / WhatsApp.
                   JPG/PNG, 5 MB cap per file. */}
-              <div className="mt-3 border-t pt-3">
-                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+              <div className="mt-3 border-t dark:border-slate-800 pt-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
                   Upload training images
                 </div>
                 <div className="grid grid-cols-3 gap-2">
@@ -409,11 +409,11 @@ export default function ShutterTrainingPage() {
                     <div key={l}>
                       <div className="flex justify-between text-xs mb-0.5">
                         <span className="capitalize">{l}</span>
-                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500'}>
+                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
                           {n} / {MIN_PER_CLASS}
                         </span>
                       </div>
-                      <div className="h-2 bg-slate-100 rounded">
+                      <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded">
                         <div className={'h-2 rounded ' + LABEL_STYLE[l].split(' ')[0]}
                              style={{ width: `${Math.max(pct, 2)}%` }} />
                       </div>
@@ -422,29 +422,29 @@ export default function ShutterTrainingPage() {
                 })}
               </div>
               <div className={'mt-3 text-sm rounded px-3 py-2 ' +
-                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600')}>
+                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300')}>
                 {ready
                   ? '✅ Enough frames to train.'
                   : `Collect at least ${MIN_PER_CLASS} frames per class to enable training.`}
               </div>
 
               {/* Training control + live progress + report. */}
-              <div className="mt-3 border-t pt-3">
+              <div className="mt-3 border-t dark:border-slate-800 pt-3">
                 <div className="flex items-center gap-3">
                   <Button onClick={startTraining} disabled={!ready || training}>
                     {training ? 'Training…' : 'Start training'}
                   </Button>
                   {train.state === 'training' && train.total_epochs ? (
-                    <span className="text-xs text-slate-600">
+                    <span className="text-xs text-slate-600 dark:text-slate-300">
                       Epoch {train.epoch ?? 0}/{train.total_epochs}
                     </span>
                   ) : train.state === 'preparing' ? (
-                    <span className="text-xs text-slate-600">{train.message ?? 'Preparing…'}</span>
+                    <span className="text-xs text-slate-600 dark:text-slate-300">{train.message ?? 'Preparing…'}</span>
                   ) : null}
                 </div>
 
                 {train.state === 'training' && train.total_epochs ? (
-                  <div className="h-2 bg-slate-100 rounded mt-2">
+                  <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded mt-2">
                     <div className="h-2 rounded bg-blue-500"
                          style={{ width: `${Math.max(2, ((train.epoch ?? 0) / train.total_epochs) * 100)}%` }} />
                   </div>
@@ -455,9 +455,9 @@ export default function ShutterTrainingPage() {
                 )}
 
                 {train.state === 'done' && train.report && (
-                  <div className="mt-3 text-sm bg-slate-50 rounded p-3">
+                  <div className="mt-3 text-sm bg-slate-50 dark:bg-slate-800 rounded p-3">
                     <div className="font-medium mb-1">Training complete</div>
-                    <div className="text-xs space-y-0.5 text-slate-700">
+                    <div className="text-xs space-y-0.5 text-slate-700 dark:text-slate-200">
                       {train.report.accuracy !== null && (
                         <div>Accuracy: <strong>{Math.round((train.report.accuracy ?? 0) * 100)}%</strong></div>
                       )}
@@ -466,7 +466,7 @@ export default function ShutterTrainingPage() {
                           {l}: {Math.round(pc.precision * 100)}% precision · {Math.round(pc.recall * 100)}% recall
                         </div>
                       ))}
-                      <div className="mt-1 text-slate-600">{train.report.recommendation}</div>
+                      <div className="mt-1 text-slate-600 dark:text-slate-300">{train.report.recommendation}</div>
                     </div>
                     {train.model_id && train.candidate_cameras?.length ? (
                       <Button className="mt-2" onClick={deploy}>
@@ -490,7 +490,7 @@ export default function ShutterTrainingPage() {
                           className={'px-2.5 py-1 rounded text-xs font-medium ' +
                             (reviewLabel === l
                               ? 'text-white ' + LABEL_STYLE[l].split(' ')[0]
-                              : 'bg-slate-100 text-slate-600')}>
+                              : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300')}>
                     {l.toUpperCase()}
                   </button>
                 ))}
@@ -498,7 +498,7 @@ export default function ShutterTrainingPage() {
               <span className="text-xs text-slate-400 ml-auto">Click a frame to delete it</span>
             </div>
             {samples.length === 0 ? (
-              <div className="text-sm text-slate-500 py-6 text-center">
+              <div className="text-sm text-slate-500 dark:text-slate-300 py-6 text-center">
                 No {reviewLabel.toUpperCase()} frames captured yet.
               </div>
             ) : (

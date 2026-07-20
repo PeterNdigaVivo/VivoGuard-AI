@@ -45,7 +45,7 @@ export default function DetectorsPage() {
 
       <Card>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200">
             <tr>
               <th className="text-left p-3">Detector</th>
               <th className="text-left p-3">Status</th>
@@ -55,7 +55,7 @@ export default function DetectorsPage() {
           </thead>
           <tbody>
             {entries.map(([k, v]) => (
-              <tr key={k} className="border-t">
+              <tr key={k} className="border-t dark:border-slate-800">
                 <td className="p-3 font-mono">{k}</td>
                 <td className="p-3">
                   {v.status === 'active'
@@ -70,7 +70,7 @@ export default function DetectorsPage() {
                       ? 'None — runs automatically'
                       : 'Train a custom model in AI Training'}
                 </td>
-                <td className="p-3 text-slate-600 text-xs max-w-md">
+                <td className="p-3 text-slate-600 dark:text-slate-300 text-xs max-w-md">
                   {v.training_hint ?? '—'}
                 </td>
               </tr>

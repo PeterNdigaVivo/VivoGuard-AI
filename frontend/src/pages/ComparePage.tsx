@@ -48,19 +48,19 @@ export default function ComparePage() {
       />
 
       <Card className="p-4">
-        {!data && <div className="text-slate-500">Loading…</div>}
+        {!data && <div className="text-slate-500 dark:text-slate-300">Loading…</div>}
         {data && data.stores.length === 0 && (
-          <div className="text-slate-500">No data for this metric in the selected window.</div>
+          <div className="text-slate-500 dark:text-slate-300">No data for this metric in the selected window.</div>
         )}
         <div className="space-y-2">
           {data?.stores.map(s => (
             <div key={s.store_id} className="flex items-center gap-3">
               <div className="w-40 truncate font-medium" title={s.store_name}>{s.store_name}</div>
               <Badge color="slate">{s.country}</Badge>
-              <div className="flex-1 bg-slate-100 rounded h-6 relative overflow-hidden">
+              <div className="flex-1 bg-slate-100 dark:bg-slate-800 rounded h-6 relative overflow-hidden">
                 <div className="absolute inset-y-0 left-0 bg-sky-500"
                      style={{ width: `${(s.avg / max) * 100}%` }} />
-                <div className="absolute inset-y-0 left-0 right-0 px-2 flex items-center text-xs text-slate-700">
+                <div className="absolute inset-y-0 left-0 right-0 px-2 flex items-center text-xs text-slate-700 dark:text-slate-200">
                   avg {s.avg.toFixed(2)} · peak {s.peak.toFixed(2)} · {s.samples} samples
                 </div>
               </div>

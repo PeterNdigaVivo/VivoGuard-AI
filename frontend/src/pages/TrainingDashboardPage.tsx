@@ -75,7 +75,7 @@ export default function TrainingDashboardPage() {
           <div className="text-sm">
             Epoch {job?.current_epoch ?? 0} / {job?.total_epochs ?? 0}
           </div>
-          <div className="text-sm text-slate-500">
+          <div className="text-sm text-slate-500 dark:text-slate-300">
             best mAP@50: {job?.best_map50?.toFixed(3) ?? '—'}
           </div>
         </div>
@@ -111,7 +111,7 @@ export default function TrainingDashboardPage() {
 
 function Spark({ points, color }: { points: Array<number | undefined>; color: string }) {
   const ps = points.filter((p): p is number => typeof p === 'number')
-  if (ps.length < 2) return <div className="text-slate-400 text-sm">Not enough data yet.</div>
+  if (ps.length < 2) return <div className="text-slate-400 dark:text-slate-400 text-sm">Not enough data yet.</div>
   const max = Math.max(...ps), min = Math.min(...ps)
   const W = 320, H = 80
   const path = ps.map((y, i) => {

@@ -89,7 +89,7 @@ export default function SprintPage() {
       } />
 
       {/* Progress + shortcuts */}
-      <div className="mb-3 flex items-center gap-4 text-sm text-slate-600">
+      <div className="mb-3 flex items-center gap-4 text-sm text-slate-600 dark:text-slate-300">
         <span>{reviewed} reviewed this session</span>
         <span>·</span>
         <span>{remaining} / {queue?.length ?? 0} left in batch</span>
@@ -119,7 +119,7 @@ export default function SprintPage() {
           <div className="text-lg font-medium mb-1">
             Queue is empty — nothing left to label
           </div>
-          <div className="text-slate-500 mb-4">
+          <div className="text-slate-500 dark:text-slate-300 mb-4">
             Operator feedback will appear here as new alerts fire.
           </div>
           <Button onClick={() => loadBatch()}>Refresh</Button>
@@ -172,8 +172,8 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
       {/* Checkout-dwell timeline filmstrip (one JPEG per 60s).
           Scrolls horizontally; click any thumbnail to lightbox. */}
       {snapshotCount > 0 && (
-        <div className="bg-slate-100 px-3 py-2 border-b border-slate-200">
-          <div className="text-xs text-slate-500 mb-1.5">
+        <div className="bg-slate-100 dark:bg-slate-800 px-3 py-2 border-b border-slate-200 dark:border-slate-800">
+          <div className="text-xs text-slate-500 dark:text-slate-300 mb-1.5">
             Timeline — {snapshotCount} snapshot{snapshotCount === 1 ? '' : 's'}
             <span className="text-slate-400"> · one every 60s from arrival to departure</span>
           </div>
@@ -197,13 +197,13 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
       )}
 
       {/* Metadata strip */}
-      <div className="p-4 border-b border-slate-200">
+      <div className="p-4 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-start justify-between gap-3 mb-2">
           <div>
             <div className="text-lg font-semibold">
               {alert.plain_title ?? alert.title ?? 'Alert'}
             </div>
-            <div className="text-sm text-slate-500">
+            <div className="text-sm text-slate-500 dark:text-slate-300">
               {alert.detection_type ?? '—'}
               {alert.confidence != null && ` · ${(alert.confidence * 100).toFixed(0)}%`}
               {' · Dwell '}{dwell}
@@ -213,7 +213,7 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
             <Badge color={sevColor}>{alert.severity_4}</Badge>
           )}
         </div>
-        <div className="text-sm text-slate-600 space-y-0.5">
+        <div className="text-sm text-slate-600 dark:text-slate-300 space-y-0.5">
           <div>🏬 {alert.camera_name ?? 'Unknown camera'}</div>
           {alert.zone_name && <div>📐 {alert.zone_name}</div>}
           {alert.time_range && <div>🕒 {alert.time_range}</div>}
@@ -231,7 +231,7 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
         <div className="ml-auto">
           {onUndo
             ? <button onClick={onUndo} disabled={busy}
-                      className="text-sm text-slate-600 hover:text-slate-900">
+                      className="text-sm text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100">
                 ← Undo last
               </button>
             : <span className="text-sm text-slate-400">← Undo last</span>}
@@ -245,7 +245,7 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
     <kbd className="px-1.5 py-0.5 text-xs font-mono rounded
-                    border border-slate-300 bg-slate-50 text-slate-700">
+                    border border-slate-300 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
       {children}
     </kbd>
   )

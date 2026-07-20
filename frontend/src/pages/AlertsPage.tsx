@@ -206,11 +206,11 @@ export default function AlertsPage() {
       {/* Legacy compact tally — kept beneath the bar for the operators
           who still scan for it. Drops once everyone's adopted the new
           card-style bar above. */}
-      <div className="text-xs text-slate-500 mb-3">
+      <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
         Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
         {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
         {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
-        {' · '}<strong className="text-slate-600">{summary.dismissed_today} dismissed</strong>
+        {' · '}<strong className="text-slate-600 dark:text-slate-300">{summary.dismissed_today} dismissed</strong>
       </div>
 
       {/* Simple filter bar. Each button shows a live count so the
@@ -243,14 +243,14 @@ export default function AlertsPage() {
                placeholder="Search alerts…"
                className="border rounded px-2 py-1 text-sm flex-1 min-w-[160px]" />
 
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-slate-500 dark:text-slate-300">
           {range.label} · {filtered.length} shown
         </span>
       </Card>
 
       <div className="space-y-2">
         {groups.length === 0 ? (
-          <Card className="p-8 text-center text-slate-500">No alerts to show.</Card>
+          <Card className="p-8 text-center text-slate-500 dark:text-slate-300">No alerts to show.</Card>
         ) : (
           groups.map(g => (
             <AlertCard key={g.head.id} alert={g.head}
@@ -330,9 +330,9 @@ function ExecutiveSummaryBar({ summary }: {
     : 'text-slate-500'
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white shadow-sm
+    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm
                     mb-3 px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
         Today's Store Health — {today}
       </div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
@@ -348,7 +348,7 @@ function ExecutiveSummaryBar({ summary }: {
         <span className="text-emerald-700">
           ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved
         </span>
-        <span className="text-slate-600">
+        <span className="text-slate-600 dark:text-slate-300">
           ⏱ Avg Response: <strong className="tabular-nums">{avgText}</strong>
         </span>
         {trendText && (

@@ -55,7 +55,7 @@ export default function TrainingStudioPage() {
       {/* Dataset list */}
       <Card>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200">
             <tr>
               <th className="text-left p-3">Name</th>
               <th className="text-left p-3">Classes</th>
@@ -65,15 +65,15 @@ export default function TrainingStudioPage() {
           </thead>
           <tbody>
             {datasets.map(d => (
-              <tr key={d.id} className="border-t hover:bg-slate-50">
+              <tr key={d.id} className="border-t dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                 <td className="p-3 font-medium">{d.name}</td>
                 <td className="p-3">
                   {(d.classes_json || []).map(c => (
                     <Badge key={c} color="sky">{c}</Badge>
                   ))}
-                  {!d.classes_json?.length && <span className="text-slate-400">—</span>}
+                  {!d.classes_json?.length && <span className="text-slate-400 dark:text-slate-400">—</span>}
                 </td>
-                <td className="p-3 text-slate-500">
+                <td className="p-3 text-slate-500 dark:text-slate-300">
                   {new Date(d.created_at).toLocaleString()}
                 </td>
                 <td className="p-3 text-right">
@@ -83,7 +83,7 @@ export default function TrainingStudioPage() {
               </tr>
             ))}
             {!datasets.length && (
-              <tr><td className="p-6 text-slate-500 text-center" colSpan={4}>
+              <tr><td className="p-6 text-slate-500 dark:text-slate-300 text-center" colSpan={4}>
                 No datasets yet — create one above.
               </td></tr>
             )}

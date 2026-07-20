@@ -86,13 +86,13 @@ export default function CampaignsPage() {
       <Card className="p-4 mb-6">
         <div className="font-medium mb-3">Campaign lift</div>
         <div className="flex items-center gap-2 mb-3">
-          <span className="text-sm text-slate-600">Metric:</span>
+          <span className="text-sm text-slate-600 dark:text-slate-300">Metric:</span>
           <Select value={metric} onChange={e => setMetric(e.target.value)}>
             {METRICS.map(m => <option key={m} value={m}>{m}</option>)}
           </Select>
         </div>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
+          <thead className="bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-200">
             <tr>
               <th className="text-left p-2">Campaign</th>
               <th className="text-left p-2">Store</th>
@@ -102,7 +102,7 @@ export default function CampaignsPage() {
           </thead>
           <tbody>
             {list.map(c => (
-              <tr key={c.id} className="border-t hover:bg-slate-50">
+              <tr key={c.id} className="border-t dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                 <td className="p-2 font-medium">{c.name}</td>
                 <td className="p-2">{c.store_id ?? 'all stores'}</td>
                 <td className="p-2 text-xs">{c.start_date} → {c.end_date}</td>
@@ -112,7 +112,7 @@ export default function CampaignsPage() {
               </tr>
             ))}
             {!list.length && (
-              <tr><td colSpan={4} className="p-6 text-center text-slate-500">No campaigns yet.</td></tr>
+              <tr><td colSpan={4} className="p-6 text-center text-slate-500 dark:text-slate-300">No campaigns yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -135,11 +135,11 @@ export default function CampaignsPage() {
         <div className="font-medium mb-3">Chain report — PDF / CSV</div>
         <div className="flex flex-wrap gap-3 items-end">
           <label>
-            <div className="text-xs text-slate-500 mb-1">Since</div>
+            <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Since</div>
             <Input type="datetime-local" value={since} onChange={e => setSince(e.target.value)} />
           </label>
           <label>
-            <div className="text-xs text-slate-500 mb-1">Until</div>
+            <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Until</div>
             <Input type="datetime-local" value={until} onChange={e => setUntil(e.target.value)} />
           </label>
           <a href={reportUrl('pdf')} target="_blank" rel="noreferrer">
@@ -149,7 +149,7 @@ export default function CampaignsPage() {
             <Button variant="ghost" disabled={!since || !until}>Download CSV</Button>
           </a>
         </div>
-        <div className="text-xs text-slate-500 mt-2">
+        <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
           PDF includes a chain summary table plus one detail page per store.
           CSV has one row per store with all KPIs.
         </div>
@@ -161,7 +161,7 @@ export default function CampaignsPage() {
 function Tile({ label, value, emphasis }: { label: string; value: string; emphasis?: 'green' | 'red' }) {
   return (
     <Card className="p-3">
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className={'text-xl font-semibold mt-1 ' + (emphasis === 'green' ? 'text-emerald-600' : emphasis === 'red' ? 'text-red-600' : '')}>
         {value}
       </div>
