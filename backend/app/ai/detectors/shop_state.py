@@ -125,7 +125,9 @@ def _mark_fired(camera_id: int, day_iso: str, kind: str) -> None:
 # The shop_not_opened_check task reads this to decide whether to fire
 # the URGENT — so EITHER signal satisfies it.
 
-_STORE_OPENED_KEY = "vg:shop_open_close:opened_store:{store_id}:{day_iso}"
+# day_iso is the Africa/Nairobi (EAT) calendar date — NOT UTC — so the
+# marker rolls over on the store's local midnight, avoiding boundary bugs.
+_STORE_OPENED_KEY = "vg:store:opened:{store_id}:{day_iso}"
 
 
 def store_opened_today(store_id: int, day_iso: str) -> dict | None:
@@ -175,8 +177,10 @@ def mark_store_opened(store_id: int, day_iso: str, *,
         r = _redis()
         key = _STORE_OPENED_KEY.format(store_id=int(store_id),
                                         day_iso=day_iso)
-        # 36 h TTL mirrors the per-camera dedupe key.
-        return bool(r.set(key, _json.dumps(payload), ex=36 * 3600, nx=True))
+        # SET NX + 20h TTL: only the first writer of the day claims the
+        # slot (returns True); the key expires well before the next
+        # morning's opening window.
+        return bool(r.set(key, _json.dumps(payload), ex=20 * 3600, nx=True))
     except Exception:
         # Fail OPEN — we'd rather risk a duplicate alert than silently
         # drop the only opening signal of the day.
@@ -271,10 +275,30 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
     if cutoff_t is not None and t > cutoff_t:
         return None
 
-    # One shared dedupe key across the open bands — fire ONCE per
-    # camera per day regardless of which band ended up triggering.
-    if _already_fired(ctx.camera_id, day_iso, "open"):
+    # Idempotency — fire the "Store Opened" alert exactly ONCE per store
+    # per EAT day. mark_store_opened() does a Redis SET NX on
+    # vg:store:opened:{store_id}:{date_eat}, so only the FIRST inward
+    # crossing across ALL of the store's entrance cameras claims the slot
+    # (returns True) and fires; every later crossing sees the key and
+    # returns here. Glass-door crossings record method="glass_door_crossing"
+    # so downstream consumers can see which sensor cleared the marker.
+    # With no store context we fall back to the per-camera dedupe.
+    method = "glass_door_crossing" if via_glass_door else "entry_crossing"
+    if ctx.store_id is not None:
+        claimed = mark_store_opened(
+            ctx.store_id, day_iso,
+            opened_at=now_eat,
+            method=method,
+            confidence="high",
+            camera_id=ctx.camera_id,
+        )
+        if not claimed:
+            return None
+    elif _already_fired(ctx.camera_id, day_iso, "open"):
         return None
+
+    # Per-camera marker the not-opened beat also reads (belt-and-braces).
+    _mark_fired(ctx.camera_id, day_iso, "open")
 
     glass_suffix = " — confirmed via glass door sensor" if via_glass_door else ""
     if t <= late_t:
@@ -294,20 +318,6 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
                     f"{glass_suffix} "
                     f"({minutes_late} min after {open_t.strftime('%H:%M')} start)")
 
-    _mark_fired(ctx.camera_id, day_iso, "open")
-    # Store-level marker — coordinates with the occupancy-inference
-    # task so the URGENT "not opened" check honors EITHER signal.
-    # Glass-door crossings record `method="glass_door_crossing"` so
-    # downstream consumers can see which sensor cleared the marker.
-    method = "glass_door_crossing" if via_glass_door else "entry_crossing"
-    if ctx.store_id is not None:
-        mark_store_opened(
-            ctx.store_id, day_iso,
-            opened_at=now_eat,
-            method=method,
-            confidence="high",
-            camera_id=ctx.camera_id,
-        )
     log.info("shop_open_close: %s cam=%s eat=%s via_glass_door=%s",
              kind, ctx.camera_id, now_eat.isoformat(), via_glass_door)
 
