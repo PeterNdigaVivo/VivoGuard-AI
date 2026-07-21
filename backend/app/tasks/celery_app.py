@@ -320,7 +320,7 @@ celery_app.conf.update(
         # both, otherwise messages pile up in `beat` forever.
         "sales-floor-insights-every-30min": {
             "task": "alerting.sales_floor_insights_check",
-            "schedule": timedelta(minutes=30),
+            "schedule": timedelta(minutes=15),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
         "sales-floor-daily-summary-every-5min": {

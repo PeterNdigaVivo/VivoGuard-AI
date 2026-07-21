@@ -59,6 +59,7 @@ _SEVERITY: dict[str, str] = {
     "passersby":         "info",
     "shop_open_close":   "info",
     "sales_floor_insight": "info",
+    "store_intelligence":  "info",
 }
 
 # Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
@@ -121,6 +122,7 @@ _SEVERITY_4: dict[str, str] = {
 
     "shop_open_close":    "LOW",
     "sales_floor_insight":"LOW",
+    "store_intelligence": "LOW",
     "entry_exit":         "LOW",
     "dwell":              "LOW",
     "passersby":          "LOW",
@@ -292,6 +294,10 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "shop_daily_summary":
             return "📋 Daily Open/Close Summary"
         return "Shop open/close event"
+    if dt == "store_intelligence":
+        # Worker sets the full "Store Update — {store} — {time}" title.
+        return extra.get("title") or (
+            f"Store Update — {extra.get('store_name') or (store.name if store else 'Store')}")
     if dt == "sales_floor_insight":
         # All sales-floor insight rules now share one neutral title;
         # the severity colour + body carry the rule-specific tone.
@@ -497,6 +503,7 @@ _TITLE_ICONS: dict[str, str] = {
     "shutter":           "🔒",
     "shop_open_close":   "🏬",
     "sales_floor_insight": "📊",
+    "store_intelligence":  "📊",
     "abandoned_object":  "🧳",
     "tailgating":        "⚠️",
     "staff_present":     "👤",
@@ -625,10 +632,9 @@ def _title(event: DetectionEvent, camera: Camera | None,
         if rule == "shop_daily_summary":
             return f"📋 Daily Summary — {store_name}"
         return f"{icon} Shop open/close — {cam}"
-    if dt == "sales_floor_insight":
-        # Sales-floor insight is store-scoped, not camera-scoped — the
-        # camera-suffix would be noise for managers. Pull straight from
-        # the plain-title path.
+    if dt in ("sales_floor_insight", "store_intelligence"):
+        # Store-scoped, not camera-scoped — the camera-suffix would be noise
+        # for managers. Pull straight from the plain-title path.
         return _plain_title(event, zone, store)
     if dt == "checkout_dwell":
         # Also store-scoped — the manager doesn't care which till
@@ -762,6 +768,9 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         if rule == "shop_closed":
             return f"Shop closed at {eat}."
         return "Shop open/close event recorded."
+    if dt == "store_intelligence":
+        # Worker pre-formats the full multi-section BI body.
+        return extra.get("message") or "Store intelligence update."
     if dt == "sales_floor_insight":
         # Worker pre-formats the body; pass it through. Falls back to
         # a short summary if message is missing (older row).

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 import redis
@@ -654,7 +655,8 @@ def uniform_violation_check() -> None:
 # min TTL — the bucket key already prevents collisions, the TTL is
 # just a safety net.
 
-SFI_WINDOW_MIN          = 15
+SFI_WINDOW_MIN          = 45      # one comprehensive Store Intelligence
+                                   # update per store per 45 min
 SFI_LOW_ENGAGEMENT_S    = 60.0     # avg browse time < 1 min → ATTENTION
 SFI_GOOD_ENGAGEMENT_S   = 120.0    # avg browse time ≥ 2 min → "good"
 SFI_UNATTENDED_MIN_CUST = 1        # ≥ this many customers + no staff
@@ -1018,6 +1020,123 @@ def _save_alert_thumbnail(camera_id: int, detection_type: str) -> str | None:
         return None
 
 
+# ---- Store Intelligence: Haiku BI narrative + rich body -------------------
+
+def _store_intel_ai_insight(store, summary: dict, hb: dict, local, opened) -> str | None:
+    """Best-effort Claude Haiku business-intelligence narrative for the
+    45-min Store Intelligence update. Returns a short multi-line insight, or
+    None when the LLM is unavailable (no key / SDK missing / error) so the
+    caller keeps the deterministic body only. Never raises."""
+    api_key = getattr(settings, "anthropic_api_key", "") or ""
+    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+        return None
+    try:
+        import anthropic
+    except Exception:
+        return None
+    model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
+    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    city = getattr(store, "city", None) or getattr(store, "country", "") or ""
+    winner = summary.get("winner") or {}
+    opened_at = opened.get("opened_at") if isinstance(opened, dict) else None
+    telemetry = {
+        "store":                 store.name,
+        "city":                  getattr(store, "city", None),
+        "country":               getattr(store, "country", None),
+        "time_eat":              local.strftime("%H:%M"),
+        "day_of_week":           local.strftime("%A"),
+        "opened":                bool(opened),
+        "opened_at":             opened_at,
+        "people_peak_45min":     summary.get("people_peak"),
+        "total_customers_45min": summary.get("total_customers"),
+        "avg_browse_seconds":    round(summary.get("avg_browse_s") or 0.0, 1),
+        "staff_coverage_pct":    round((summary.get("staff_coverage") or 0.0) * 100),
+        "busiest_zone":          winner.get("name"),
+        "cameras_active":        hb.get("cameras_active"),
+        "cameras_total":         hb.get("cameras_total"),
+    }
+    system = (
+        f"You are a retail business intelligence analyst for Vivo Fashion, a "
+        f"fashion retailer in {city}, Kenya/Uganda/Rwanda. Analyze the store "
+        f"telemetry and provide actionable insights. Reason ONLY from the "
+        f"telemetry plus general time-of-day / day-of-week / mall-location "
+        f"patterns for a fashion store — do NOT invent specific weather readings "
+        f"or numbers not present in the data. Respond with ONLY a JSON object "
+        f"with keys: summary (2-3 sentence BI summary), recommendation (one "
+        f"actionable step for the store manager), traffic_pattern (one sentence "
+        f"on the expected footfall for this time/day), anomaly (one short string, "
+        f"or empty string if none)."
+    )
+    user = "Telemetry JSON:\n" + json.dumps(telemetry, default=str)[:6000]
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+        msg = client.messages.create(
+            model=model, max_tokens=600, system=system,
+            messages=[{"role": "user", "content": user}])
+        text = " ".join(getattr(b, "text", "") or "" for b in (msg.content or [])).strip()
+    except Exception as e:
+        log.warning("store_intel: Haiku insight failed store=%s: %s", store.id, e)
+        return None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    lines: list[str] = []
+    if d.get("summary"):         lines.append(str(d["summary"]).strip())
+    if d.get("recommendation"):  lines.append(f"• Recommendation: {str(d['recommendation']).strip()}")
+    if d.get("traffic_pattern"): lines.append(f"• Traffic: {str(d['traffic_pattern']).strip()}")
+    if d.get("anomaly"):         lines.append(f"• ⚠️ {str(d['anomaly']).strip()}")
+    return "\n".join(lines) if lines else None
+
+
+def _store_intel_body(store, summary: dict, hb: dict, local, opened,
+                      ai_insight: str | None) -> str:
+    """Compose the rich multi-section Store Intelligence body. Deterministic
+    sections first (always present), then the AI insight when available."""
+    name = store.name or f"Store {store.id}"
+    winner = summary.get("winner") or {}
+    cov = summary.get("staff_coverage") or 0.0
+    counter = "staffed" if cov >= 0.6 else ("intermittent" if cov >= 0.3 else "unstaffed")
+    if isinstance(opened, dict) and opened.get("opened_at"):
+        try:
+            opened_line = f"open since {opened['opened_at'][11:16]} EAT"
+        except Exception:
+            opened_line = "open"
+    else:
+        opened_line = "not yet opened today"
+    cust = summary.get("total_customers") or 0
+    cov_pct = round(cov * 100)
+    ratio = (f"~1 staff : {max(1, round(cust / max(cov_pct/100*cust or 1, 1)))} cust"
+             if cov_pct and cust else "n/a")
+    lines = [
+        f"🏬 STORE HEALTH — {name} — {local.strftime('%H:%M')} EAT",
+        f"Status: {opened_line}",
+        f"People (45m peak): {summary.get('people_peak', 0)}  ·  Customers: {cust}",
+        f"Staff coverage: {cov_pct}%  ·  Counter: {counter}",
+        f"Busiest zone: {winner.get('name') or '—'}",
+        f"Cameras streaming: {hb.get('cameras_active', 0)}/{hb.get('cameras_total', 0)}",
+        "",
+        "🛍 SALES FLOOR INTELLIGENCE",
+        f"Avg dwell / browse: {_fmt_browse_time(summary.get('avg_browse_s') or 0.0)}",
+        f"Staff-to-customer: {ratio}",
+    ]
+    pz = summary.get("per_zone") or {}
+    top_zones = sorted(pz.values(), key=lambda z: z.get("avg", 0.0), reverse=True)[:3]
+    for z in top_zones:
+        if z.get("avg", 0.0) > 0:
+            lines.append(f"  · {z['name']}: {_fmt_browse_time(z['avg'])} avg dwell")
+    if ai_insight:
+        lines += ["", "🤖 AI INSIGHT", ai_insight]
+    else:
+        lines += ["", "🤖 AI INSIGHT", "(unavailable — showing metrics only)"]
+    return "\n".join(lines)
+
+
 @celery_app.task(name="alerting.sales_floor_insights_check", ignore_result=True)
 def sales_floor_insights_check() -> None:
     """Every 15 min during 09:00-21:00 EAT (per-store), create one
@@ -1106,9 +1225,12 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
                  "(local=%s)", store.id, store.name, local.strftime("%H:%M"))
         return "closed_hours"
 
-    # Per-15-min-bucket dedupe. Buckets are :00 :15 :30 :45 EAT —
-    # exactly 4 per hour per store. floor(min/15)*15 → {0,15,30,45}.
-    bucket = local.replace(minute=(local.minute // 15) * 15, second=0,
+    # Per-45-min-bucket dedupe (SFI_WINDOW_MIN). Bucket start = the
+    # 45-min slot boundary measured from local midnight, so a store gets
+    # at most one Store Intelligence update per 45 minutes.
+    _mins = local.hour * 60 + local.minute
+    _b = (_mins // SFI_WINDOW_MIN) * SFI_WINDOW_MIN
+    bucket = local.replace(hour=_b // 60, minute=_b % 60, second=0,
                            microsecond=0).strftime("%Y%m%dT%H%M")
     sent_key = f"vg:sfi:sent:{store.id}:{bucket}"
     # Debug-mode short-circuit happens BEFORE the Redis read so a
@@ -1170,15 +1292,25 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
     # not actually streaming. Otherwise we mislabel a system issue
     # as a "quiet period" (Vivo DIGO RD MSA bug, June 2026).
     hb = _sfi_heartbeat(db, store, cam_ids, now_utc)
-    rule, priority = _sfi_classify(summary, hb)
-    body = _sfi_compose_body(store.name or f"Store {store.id}",
-                             summary, rule, hb)
+    rule, _priority = _sfi_classify(summary, hb)
+    # Store Intelligence — one comprehensive INFO update per store per 45 min.
+    # Pull the store-opened marker for the health header, ask Claude Haiku for
+    # a BI narrative (best-effort), then compose the rich multi-section body.
+    try:
+        from app.ai.detectors import shop_state as _shop_state
+        opened = _shop_state.store_opened_today(store.id, local.date().isoformat())
+    except Exception:
+        opened = None
+    ai_insight = _store_intel_ai_insight(store, summary, hb, local, opened)
+    body = _store_intel_body(store, summary, hb, local, opened, ai_insight)
+    title = f"Store Update — {store.name or f'Store {store.id}'} — {local.strftime('%H:%M')}"
 
     extra = {
-        "priority":            priority,
+        "priority":            "info",           # Store Intelligence is never URGENT
         "rule":                rule,
         "store_id":            store.id,
         "store_name":          store.name,
+        "title":               title,
         "window_minutes":      SFI_WINDOW_MIN,
         "bucket_eat":          bucket,
         "avg_browse_seconds":  round(summary["avg_browse_s"], 1),
@@ -1190,13 +1322,14 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
         "cameras_active":      hb["cameras_active"],
         "cameras_total":       hb["cameras_total"],
         "last_inference_min":  hb["last_inference_min"],
+        "ai_used":             bool(ai_insight),
         "message":             body,
         "eat_time":            local.strftime("%H:%M"),
     }
     _create_info_alert(db, camera_id=anchor_cam_id,
                        zone_id=(anchor_zone.id if anchor_zone else None),
                        store_id=store.id,
-                       detection_type="sales_floor_insight",
+                       detection_type="store_intelligence",
                        cls=rule, extra=extra)
     db.commit()
     # Only mark the bucket dedupe in NORMAL mode — in debug we want

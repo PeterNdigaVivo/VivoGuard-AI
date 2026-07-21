@@ -459,7 +459,17 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
             {alert.plain_title ?? alert.title ?? (alert.detection_type ?? 'Alert')}
           </div>
           {alert.body && (
-            <div className="text-sm text-slate-600 mt-1">{alert.body}</div>
+            alert.detection_type === 'store_intelligence' ? (
+              // Rich multi-section BI update — preserve the worker's line
+              // breaks + section layout instead of collapsing to one line.
+              <pre className="mt-2 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap
+                              font-sans bg-slate-50 dark:bg-slate-800 rounded-lg p-3
+                              border border-slate-200 dark:border-slate-700 leading-relaxed">
+                {alert.body}
+              </pre>
+            ) : (
+              <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">{alert.body}</div>
+            )
           )}
 
           {/* AI Scene Analysis (Sprint 2.1 VLM). Shows the scene

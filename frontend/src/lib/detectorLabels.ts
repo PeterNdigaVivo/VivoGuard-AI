@@ -62,6 +62,7 @@ export const DETECTOR_LABELS: Record<string, string> = {
   // Shop / sales-floor heartbeats
   shop_open_close:     'Shop Open / Close',
   sales_floor_insight: 'Sales Floor Update',
+  store_intelligence:  'Store Update',
 }
 
 export function labelForDetector(type: string): string {
