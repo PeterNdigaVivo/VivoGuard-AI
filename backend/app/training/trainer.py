@@ -280,23 +280,29 @@ def run_job(job_id: int) -> None:
             device=("0" if settings.use_gpu else "cpu"),
             augment=augment,
         )
-        # Aggressive augmentation (Part 2 #3) — multiplies effective dataset
-        # size ~4-8x; critical for lighting variance across 28 stores. Only
-        # pass args the installed ultralytics actually recognises (Q1).
+        # Aggressive augmentation (Part 2 #3, Q7) — multiplies effective
+        # dataset size ~4-8x; critical for lighting variance across 28 stores.
+        # Passed DIRECTLY as train() kwargs (no separate YAML). If the
+        # installed ultralytics rejects an arg with a TypeError we log it and
+        # retry without the aug block rather than failing the job.
         _aug = dict(degrees=10.0, translate=0.1, scale=0.5, fliplr=0.5,
                     mosaic=0.5, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4)
-        try:
-            from ultralytics.cfg import DEFAULT_CFG_DICT as _DCFG
-            _aug = {k: v for k, v in _aug.items() if k in set(_DCFG.keys())}
-        except Exception:
-            pass   # can't introspect — ultralytics>=8.3 supports all of these
         train_kwargs.update(_aug)
         if lr and lr != "auto":
             train_kwargs["lr0"] = float(lr)
+        log.info("training job %s: augmentation args applied: %s",
+                 job_id, sorted(_aug.keys()))
         # Bind the return value — it's the validation Metrics from the
         # final epoch. Previously discarded, leaving AIModel.map50 /
         # precision / recall NULL and starving the promotion gate.
-        results = model.train(**train_kwargs)
+        try:
+            results = model.train(**train_kwargs)
+        except TypeError as _aug_err:
+            log.warning("training job %s: ultralytics rejected an augmentation "
+                        "arg (%s) — retrying WITHOUT the aug block", job_id, _aug_err)
+            for _k in _aug:
+                train_kwargs.pop(_k, None)
+            results = model.train(**train_kwargs)
         # Diagnostic — surface exactly what the results object exposes so a
         # future metrics regression (like the all-zero mAP bug) is visible in
         # the worker log instead of being silently stored as 0/None.

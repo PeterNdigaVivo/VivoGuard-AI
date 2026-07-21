@@ -87,11 +87,22 @@ def _ensure_dataset(db: Session, name: str, classes: list[str],
     return ds
 
 
+# Detection types that trigger an IMMEDIATE fine-tune check on feedback
+# (Part 2 #8, Q9). Others still retrain via the periodic beat.
+IMMEDIATE_RETRAIN_TYPES = {
+    "uniform_compliance", "shop_open_close", "checkout_dwell",
+    "staff_present", "trespass",
+}
+
+
 def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
     """Immediately check whether this feedback pushed the dataset over its
     training threshold and, if so, queue a fine-tune now instead of waiting
-    for the 5-min chain_retrain_due beat (Part 2 #8). Best-effort — the
-    feedback save matters more than the training trigger, so never raise."""
+    for the 5-min chain_retrain_due beat (Part 2 #8). Gated to the high-value
+    types (Q9). Best-effort — the feedback save matters more than the training
+    trigger, so never raise."""
+    if detection_type not in IMMEDIATE_RETRAIN_TYPES:
+        return
     try:
         from app.training.orchestrator import enqueue_fine_tune_if_due
         enqueue_fine_tune_if_due(db, detection_type)

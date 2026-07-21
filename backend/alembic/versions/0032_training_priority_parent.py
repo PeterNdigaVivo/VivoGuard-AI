@@ -21,25 +21,48 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _columns(bind, table: str) -> set:
+    from sqlalchemy import inspect as _inspect
+    return {c["name"] for c in _inspect(bind).get_columns(table)}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "training_jobs",
-        sa.Column("priority", sa.Integer(), nullable=False, server_default="5"),
-    )
-    op.add_column(
-        "ai_models",
-        sa.Column("parent_model_id", sa.Integer(), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_ai_models_parent_model_id",
-        "ai_models", "ai_models",
-        ["parent_model_id"], ["id"],
-        ondelete="SET NULL",
-    )
+    bind = op.get_bind()
+    tj_cols = _columns(bind, "training_jobs")
+    am_cols = _columns(bind, "ai_models")
+
+    # training_jobs.priority — add only if missing.
+    if "priority" not in tj_cols:
+        op.add_column(
+            "training_jobs",
+            sa.Column("priority", sa.Integer(), nullable=False, server_default="5"),
+        )
+
+    # ai_models.parent_model_id — Q8 says this column may already exist on the
+    # deployed DB; add it (and its self-FK) only when it's actually missing so
+    # this migration is safe to run either way.
+    if "parent_model_id" not in am_cols:
+        op.add_column(
+            "ai_models",
+            sa.Column("parent_model_id", sa.Integer(), nullable=True),
+        )
+        op.create_foreign_key(
+            "fk_ai_models_parent_model_id",
+            "ai_models", "ai_models",
+            ["parent_model_id"], ["id"],
+            ondelete="SET NULL",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_ai_models_parent_model_id", "ai_models",
-                       type_="foreignkey")
-    op.drop_column("ai_models", "parent_model_id")
-    op.drop_column("training_jobs", "priority")
+    bind = op.get_bind()
+    am_cols = _columns(bind, "ai_models")
+    if "parent_model_id" in am_cols:
+        try:
+            op.drop_constraint("fk_ai_models_parent_model_id", "ai_models",
+                               type_="foreignkey")
+        except Exception:
+            pass
+        op.drop_column("ai_models", "parent_model_id")
+    if "priority" in _columns(bind, "training_jobs"):
+        op.drop_column("training_jobs", "priority")
