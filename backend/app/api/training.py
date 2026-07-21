@@ -1517,3 +1517,141 @@ async def shutter_upload(label: str = Form(...),
             errors.append({"filename": f.filename, "error": str(e)})
     db.commit()
     return {"saved": len(out), "samples": out, "errors": errors}
+
+
+# ── AI Progress dashboard aggregate (Part 3) ───────────────────────────────
+@router.get("/progress")
+def training_progress(db: Session = Depends(get_db),
+                      _u=Depends(require_role("admin", "operator", "viewer"))):
+    """One-shot aggregate powering the /ai-progress mission-control page:
+    models, dataset health, operator-feedback impact, next-training
+    countdowns, simulation status, and learning velocity."""
+    from datetime import timedelta
+    from sqlalchemy import func
+    from app.models import Alert, DetectionEvent, AgentReport
+    from app.training.orchestrator import _min_images, TRAIN_PRIORITY
+
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+
+    # ---- models -----------------------------------------------------------
+    ai_rows = (db.query(AIModel).order_by(AIModel.created_at.asc()).all())
+    models = [{
+        "id": m.id, "version": m.version, "map50": m.map50,
+        "precision": m.precision, "recall": m.recall,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "deployed": bool(m.deployed),
+        "detection_type": (m.detector_type
+                           or (m.classes_json[0] if m.classes_json else None)),
+    } for m in ai_rows]
+
+    # ---- datasets ---------------------------------------------------------
+    datasets = []
+    for ds in db.query(Dataset).all():
+        total = (db.query(func.count(TrainingImage.id))
+                   .filter(TrainingImage.dataset_id == ds.id).scalar()) or 0
+        pos = (db.query(func.count(func.distinct(Annotation.image_id)))
+                 .join(TrainingImage, TrainingImage.id == Annotation.image_id)
+                 .filter(TrainingImage.dataset_id == ds.id).scalar()) or 0
+        dt = (ds.classes_json[0] if ds.classes_json else None)
+        last_job = (db.query(TrainingJob)
+                      .filter(TrainingJob.dataset_id == ds.id,
+                              TrainingJob.status == "done")
+                      .order_by(TrainingJob.completed_at.desc()).first())
+        datasets.append({
+            "name": ds.name, "detection_type": dt, "image_count": total,
+            "positive_count": pos, "negative_count": max(0, total - pos),
+            "last_trained": (last_job.completed_at.isoformat()
+                             if last_job and last_job.completed_at else None),
+            "suspended": (ds.description or "").startswith("[suspended]"),
+        })
+
+    # ---- feedback ---------------------------------------------------------
+    def _verdict_counts(since=None):
+        q = (db.query(DetectionEvent.detection_type, Alert.status,
+                      func.count(Alert.id))
+               .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+               .filter(Alert.status.in_(("confirmed", "dismissed"))))
+        if since is not None:
+            q = q.filter(Alert.created_at >= since)
+        return q.group_by(DetectionEvent.detection_type, Alert.status).all()
+
+    by_type: dict = {}
+    true_total = false_total = 0
+    for dtype, status, n in _verdict_counts():
+        b = by_type.setdefault(dtype or "unknown",
+                               {"confirmed": 0, "dismissed": 0})
+        if status == "confirmed":
+            b["confirmed"] += n; true_total += n
+        else:
+            b["dismissed"] += n; false_total += n
+    week_total = sum(n for _dt, _s, n in _verdict_counts(week_ago))
+    feedback = {
+        "true_alerts_total": true_total,
+        "false_alerts_total": false_total,
+        "this_week": week_total,
+        "by_detection_type": by_type,
+    }
+
+    # ---- next_training ----------------------------------------------------
+    next_training = []
+    for dt in ("uniform_compliance", "shop_open_close", "checkout_dwell",
+               "staff_present", "trespass"):
+        ds = (db.query(Dataset)
+                .filter(Dataset.name == f"feedback-{dt}").first())
+        cur = 0
+        if ds:
+            cur = (db.query(func.count(TrainingImage.id))
+                     .filter(TrainingImage.dataset_id == ds.id).scalar()) or 0
+        thr = _min_images(dt)
+        next_training.append({
+            "detection_type": dt, "current_images": cur, "threshold": thr,
+            "progress_pct": min(100, round(cur / thr * 100)) if thr else 0,
+            "images_needed": max(0, thr - cur),
+        })
+
+    # ---- simulation (QA probe today; real crops arrive in Part 6) ---------
+    sim_rep = (db.query(AgentReport)
+                 .filter(AgentReport.agent_name == "simulation")
+                 .order_by(AgentReport.run_at.desc()).first())
+    sim_find = (sim_rep.findings or {}) if sim_rep else {}
+    simulation = {
+        "last_run": sim_rep.run_at.isoformat() if sim_rep and sim_rep.run_at else None,
+        "crops_today": 0,
+        "cameras_active": int(sim_find.get("processed") or 0),
+        "staff_crops_total": 0,
+        "customer_crops_total": 0,
+        "miner_active": False,   # crop-mining pipeline lands in Part 6
+    }
+
+    # ---- velocity ---------------------------------------------------------
+    imgs_7d = (db.query(func.count(TrainingImage.id))
+                 .filter(TrainingImage.created_at >= week_ago).scalar()) or 0
+    models_7d = (db.query(func.count(AIModel.id))
+                   .filter(AIModel.created_at >= week_ago).scalar()) or 0
+    maps = [m.map50 for m in ai_rows if m.map50 is not None]
+    deltas = [b - a for a, b in zip(maps, maps[1:])]
+    avg_delta = round(sum(deltas) / len(deltas), 4) if deltas else None
+    # Project weeks until uniform detection reaches 0.90, from the recent
+    # per-run map50 gain (heuristic; null when we can't estimate).
+    proj = None
+    uni_maps = [m.map50 for m in ai_rows
+                if m.map50 is not None
+                and (m.detector_type == "uniform"
+                     or (m.classes_json and "uniform_compliance" in m.classes_json))]
+    if len(uni_maps) >= 2 and avg_delta and avg_delta > 0 and uni_maps[-1] < 0.90:
+        runs_needed = (0.90 - uni_maps[-1]) / avg_delta
+        models_per_week = models_7d or 1
+        proj = round(runs_needed / models_per_week, 1)
+    velocity = {
+        "images_per_day_7d": round(imgs_7d / 7.0, 1),
+        "models_per_week": models_7d,
+        "avg_map50_improvement": avg_delta,
+        "projected_uniform_accuracy_weeks": proj,
+    }
+
+    return {
+        "models": models, "datasets": datasets, "feedback": feedback,
+        "next_training": next_training, "simulation": simulation,
+        "velocity": velocity,
+    }
