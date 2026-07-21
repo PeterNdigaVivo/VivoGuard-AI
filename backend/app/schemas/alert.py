@@ -77,6 +77,11 @@ class AlertOut(BaseModel):
     # VLM is disabled / the type isn't eligible.
     vlm_scene: str | None = None
 
+    # Store Intelligence (Part 5) — structured BI payload for the special
+    # store_intelligence card (metric tiles + AI summary + recommendation).
+    # NULL for every other alert type.
+    store_intel: dict | None = None
+
 
 class AlertActionOut(BaseModel):
     id: int

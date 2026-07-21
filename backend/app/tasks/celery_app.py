@@ -63,6 +63,7 @@ celery_app.conf.update(
         "inference.supervise_all":            {"queue": "inference"},
         # Operator-facing alerts pool.
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
+        "alerting.store_intelligence_update":   {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
@@ -329,6 +330,13 @@ celery_app.conf.update(
         # both, otherwise messages pile up in `beat` forever.
         "sales-floor-insights-every-30min": {
             "task": "alerting.sales_floor_insights_check",
+            "schedule": timedelta(minutes=15),
+        },
+        # Store Intelligence — one rich AI BI update per active store every
+        # 45 min (Part 5). Tick every 15 min; the per-store vg:store_intel
+        # key (2700s) enforces the 45-min cadence.
+        "store-intelligence-every-15min": {
+            "task": "alerting.store_intelligence_update",
             "schedule": timedelta(minutes=15),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.

@@ -1156,6 +1156,11 @@ def sales_floor_insights_check() -> None:
     from app.database import SessionLocal
     from app.models import Store
 
+    # Part 5 (Q6): the legacy sales-floor heartbeat is disabled by default —
+    # store_intelligence_update replaces it. Re-enable via SALES_FLOOR_INSIGHT_ENABLED.
+    if not bool(getattr(settings, "sales_floor_insight_enabled", False)):
+        return
+
     try:
         r = _redis()
     except Exception as e:
@@ -2400,3 +2405,196 @@ def after_hours_prune() -> None:
         if cleared:
             db.commit()
             log.info("after-hours prune: cleared %d filmstrips", cleared)
+
+
+# ── Store Intelligence (Part 5) — 45-min AI BI update per active store ──────
+_STORE_CITY_MAP = {
+    "yaya": ("Nairobi", "Kenya"), "junction": ("Nairobi", "Kenya"),
+    "village market": ("Nairobi", "Kenya"), "runda": ("Nairobi", "Kenya"),
+    "greenwood": ("Nairobi", "Kenya"), "kileleshwa": ("Nairobi", "Kenya"),
+    "two rivers": ("Nairobi", "Kenya"), "sarit": ("Nairobi", "Kenya"),
+    "safari sarit": ("Nairobi", "Kenya"), "signature": ("Nairobi", "Kenya"),
+    "kigali": ("Kigali", "Rwanda"), "kampala": ("Kampala", "Uganda"),
+    "eldoret": ("Eldoret", "Kenya"), "kisumu": ("Kisumu", "Kenya"),
+    "nakuru": ("Nakuru", "Kenya"), "digo rd": ("Mombasa", "Kenya"),
+    "city mall msa": ("Mombasa", "Kenya"), "mombasa": ("Mombasa", "Kenya"),
+}
+_PERIOD_LABEL = {"morning_rush": "Morning rush", "lunch": "Lunch hour",
+                 "afternoon": "Afternoon", "evening_rush": "Evening rush",
+                 "off_peak": "Off-peak"}
+
+
+def _city_for(store):
+    name = (store.name or "").lower()
+    for key, (city, country) in _STORE_CITY_MAP.items():
+        if key in name:
+            return city, country
+    return (getattr(store, "city", None), getattr(store, "country", None))
+
+
+def _time_period(eat_dt) -> str:
+    h = eat_dt.hour
+    if 9 <= h < 11:  return "morning_rush"
+    if 12 <= h < 14: return "lunch"
+    if 14 <= h < 17: return "afternoon"
+    if 17 <= h < 20: return "evening_rush"
+    return "off_peak"
+
+
+def _store_intel_ai_v2(store, city, country, period_label, telemetry):
+    """Claude Haiku BI insight -> (summary, recommendation). Best-effort;
+    returns (None, None) when the LLM is unavailable."""
+    api_key = getattr(settings, "anthropic_api_key", "") or ""
+    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+        return None, None
+    try:
+        import anthropic
+    except Exception:
+        return None, None
+    model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
+    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    system = ("You are a retail business intelligence analyst for Vivo Fashion "
+              "Group, a leading fashion retailer in East Africa. Analyze store "
+              "telemetry and provide concise, actionable insights for store "
+              "managers. Be specific, practical, and encouraging. Maximum 3 "
+              "sentences. Respond with ONLY a JSON object with keys 'summary' "
+              "(a 2-3 sentence BI update) and 'recommendation' (one specific "
+              "actionable step).")
+    user = (f"Store: {store.name}, {city}, {country}\n"
+            f"Time: {telemetry['time_eat']} EAT, {telemetry['day_of_week']} "
+            f"({period_label})\n"
+            f"Hours open today: {telemetry['hours_open']}\n"
+            f"People in store: {telemetry['people_count']}\n"
+            f"Staff on floor: {telemetry['staff_count']}\n"
+            f"Counter: {telemetry['counter_status']}\n"
+            f"Busiest zone: {telemetry['busiest_zone']} "
+            f"({telemetry['busiest_dwell_s']}s avg dwell)\n"
+            f"Entries last 45min: {telemetry['entry_count_45m']}\n"
+            f"Recent alerts: {telemetry['alert_summary']}\n"
+            "Provide a 2-3 sentence business intelligence update with one "
+            "specific recommendation.")
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+        msg = client.messages.create(model=model, max_tokens=400, system=system,
+                                     messages=[{"role": "user", "content": user}])
+        text = " ".join(getattr(b, "text", "") or "" for b in (msg.content or [])).strip()
+    except Exception as e:
+        log.warning("store_intel: Haiku failed store=%s: %s", store.id, e)
+        return None, None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return (text[:400] or None), None
+    try:
+        d = json.loads(m.group(0))
+        if isinstance(d, dict):
+            return d.get("summary"), d.get("recommendation")
+    except Exception:
+        pass
+    return (text[:400] or None), None
+
+
+@celery_app.task(name="alerting.store_intelligence_update", ignore_result=True)
+def store_intelligence_update() -> None:
+    """Every 45 min: one rich AI store-intelligence update per store with live
+    camera activity. Gated on store_intelligence_enabled + >=1 detection event
+    in the last 45 min (Q5). Deduped per store via vg:store_intel:{id} (2700s)."""
+    if not bool(getattr(settings, "store_intelligence_enabled", True)):
+        return
+    from datetime import timedelta
+    from app.database import SessionLocal
+    from app.models import Store
+    from app.ai.detectors import shop_state as _shop_state
+    try:
+        r = _redis()
+    except Exception:
+        return
+    now_utc = datetime.now(timezone.utc)
+    window_start = now_utc - timedelta(minutes=45)
+    with SessionLocal() as db:
+        for store in db.query(Store).filter(Store.is_active == True).all():   # noqa: E712
+            try:
+                _emit_store_intel(db, r, store, now_utc, window_start, _shop_state)
+            except Exception as e:
+                log.exception("store_intel: store=%s failed: %s", store.id, e)
+                try: db.rollback()
+                except Exception: pass
+
+
+def _emit_store_intel(db, r, store, now_utc, window_start, _shop_state) -> None:
+    from app.models import Camera, Zone, DetectionEvent, Alert, MetricSnapshot
+    from sqlalchemy import func
+    local = _store_eat_now(store)
+    if not (9 <= local.hour < 20):
+        return
+    sent_key = f"vg:store_intel:{store.id}"
+    if r.get(sent_key):
+        return
+    cam_ids = [c.id for c in db.query(Camera).filter(Camera.store_id == store.id).all()]
+    if not cam_ids:
+        return
+    # Q5 — require >=1 detection event in the last 45 min (camera is live).
+    ev_count = (db.query(func.count(DetectionEvent.id))
+                  .filter(DetectionEvent.camera_id.in_(cam_ids),
+                          DetectionEvent.timestamp >= window_start).scalar()) or 0
+    if ev_count == 0:
+        return
+    zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
+    aisle = {z.id: (z.name or f"Zone {z.id}") for z in zones
+             if {"aisle", "dwell"} & set(z.detection_types_json or [])}
+    summary = _sfi_metric_summary(db, store, cam_ids, aisle, window_start, now_utc)
+    winner = summary.get("winner") or {}
+    cov = summary.get("staff_coverage") or 0.0
+    counter_status = ("staffed" if cov >= 0.6
+                      else "intermittent" if cov >= 0.3 else "unstaffed")
+    entry_count = (db.query(func.coalesce(func.sum(MetricSnapshot.value), 0.0))
+                     .filter(MetricSnapshot.camera_id.in_(cam_ids),
+                             MetricSnapshot.metric_type == "visitor_count_in",
+                             MetricSnapshot.period_start >= window_start).scalar()) or 0
+    alert_rows = (db.query(DetectionEvent.detection_type, func.count(Alert.id))
+                    .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+                    .filter(DetectionEvent.camera_id.in_(cam_ids),
+                            Alert.created_at >= window_start)
+                    .group_by(DetectionEvent.detection_type).all())
+    alert_count = int(sum(n for _t, n in alert_rows))
+    alert_summary = ", ".join(f"{t}:{n}" for t, n in alert_rows) or "none"
+    opened = _shop_state.store_opened_today(store.id, local.date().isoformat())
+    hours_open = "not yet opened"
+    if isinstance(opened, dict) and opened.get("opened_at"):
+        try:
+            oh = datetime.fromisoformat(opened["opened_at"])
+            hours_open = f"{max(0, int((local - oh.astimezone(local.tzinfo)).total_seconds() // 3600))}h"
+        except Exception:
+            hours_open = "open"
+    city, country = _city_for(store)
+    period = _time_period(local)
+    people = int(summary.get("people_peak") or 0)
+    staff = int(round(cov * max(1, people)))
+    telemetry = {
+        "time_eat": local.strftime("%H:%M"), "day_of_week": local.strftime("%A"),
+        "hours_open": hours_open, "people_count": people, "staff_count": staff,
+        "counter_status": counter_status,
+        "busiest_zone": winner.get("name") or "—",
+        "busiest_dwell_s": int(winner.get("avg") or 0),
+        "entry_count_45m": int(entry_count), "alert_summary": alert_summary,
+    }
+    ai_summary, recommendation = _store_intel_ai_v2(
+        store, city, country, _PERIOD_LABEL.get(period, ""), telemetry)
+    extra = {
+        "priority": "info", "rule": "store_intelligence",
+        "store_id": store.id, "store_name": store.name, "city": city,
+        "people_count": people, "staff_count": staff,
+        "counter_status": counter_status,
+        "busiest_zone": winner.get("name") or "—",
+        "entry_count_45m": int(entry_count), "alert_count_45m": alert_count,
+        "ai_summary": ai_summary, "recommendation": recommendation,
+        "hours_open": hours_open, "time_eat": local.strftime("%H:%M"),
+        "time_period": period,
+        "title": f"Store Update — {store.name or store.id} — {local.strftime('%H:%M')}",
+    }
+    _create_info_alert(db, camera_id=cam_ids[0], zone_id=None,
+                       store_id=store.id, detection_type="store_intelligence",
+                       cls="store_intelligence", extra=extra)
+    db.commit()
+    r.set(sent_key, "1", ex=2700)
+    log.info("store_intel: store=%s (%s) fired period=%s people=%d entries=%d",
+             store.id, store.name, period, people, int(entry_count))

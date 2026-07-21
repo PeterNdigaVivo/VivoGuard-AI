@@ -44,6 +44,17 @@ export interface Alert {
   // VLM scene description (Sprint 2.1). NULL until the async analysis
   // task writes it, or when VLM is disabled / type ineligible.
   vlm_scene: string | null
+  // Store Intelligence (Part 5) — structured BI payload for the special
+  // store_intelligence card. NULL for every other alert type.
+  store_intel?: {
+    store_name: string | null; city: string | null
+    time_eat: string | null; time_period: string | null
+    people_count: number | null; staff_count: number | null
+    counter_status: string | null; busiest_zone: string | null
+    entry_count_45m: number | null; alert_count_45m: number | null
+    hours_open: string | null
+    ai_summary: string | null; recommendation: string | null
+  } | null
 }
 
 export const alerts = {

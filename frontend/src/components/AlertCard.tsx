@@ -234,6 +234,48 @@ function FilmstripLightbox({ alertId, count, index, title, onClose, onIndex }: {
   )
 }
 
+// Store Intelligence — rich informational card (metric tiles + AI summary +
+// recommendation) instead of the standard alert body. Part 5.
+function StoreIntelCard({ si }: { si: NonNullable<Alert['store_intel']> }) {
+  const tiles: [string, string | number][] = [
+    ['People', si.people_count ?? '—'],
+    ['Staff', si.staff_count ?? '—'],
+    ['Counter', si.counter_status ?? '—'],
+    ['Entries', si.entry_count_45m ?? '—'],
+  ]
+  return (
+    <div className="mt-2">
+      <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+        {[si.store_name, si.city, si.time_eat && `${si.time_eat} EAT`]
+          .filter(Boolean).join(' · ')}
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {tiles.map(([label, val]) => (
+          <div key={label} className="rounded-lg border border-slate-200 dark:border-slate-700
+                                      bg-slate-50 dark:bg-slate-800 p-2 text-center">
+            <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
+            <div className="text-base font-bold text-slate-800 dark:text-slate-100 capitalize truncate">
+              {val}
+            </div>
+          </div>
+        ))}
+      </div>
+      {si.ai_summary && (
+        <div className="mt-2 rounded-lg px-3 py-2 text-sm italic
+                        bg-blue-50 text-blue-900 dark:bg-slate-800 dark:text-slate-200">
+          🤖 {si.ai_summary}
+        </div>
+      )}
+      {si.recommendation && (
+        <div className="mt-2 rounded-lg px-3 py-2 text-sm font-semibold
+                        bg-emerald-50 text-emerald-900 dark:bg-slate-800 dark:text-emerald-300">
+          ✅ {si.recommendation}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const SEVERITY_BAR: Record<'critical' | 'warning' | 'info' | 'default', string> = {
   critical: 'bg-red-500',
   warning:  'bg-amber-500',
@@ -458,19 +500,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
           <div className="font-semibold text-slate-800 text-base">
             {alert.plain_title ?? alert.title ?? (alert.detection_type ?? 'Alert')}
           </div>
-          {alert.body && (
-            alert.detection_type === 'store_intelligence' ? (
-              // Rich multi-section BI update — preserve the worker's line
-              // breaks + section layout instead of collapsing to one line.
-              <pre className="mt-2 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap
-                              font-sans bg-slate-50 dark:bg-slate-800 rounded-lg p-3
-                              border border-slate-200 dark:border-slate-700 leading-relaxed">
-                {alert.body}
-              </pre>
-            ) : (
-              <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">{alert.body}</div>
-            )
-          )}
+          {alert.detection_type === 'store_intelligence' && alert.store_intel ? (
+            <StoreIntelCard si={alert.store_intel} />
+          ) : alert.body ? (
+            <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">{alert.body}</div>
+          ) : null}
 
           {/* AI Scene Analysis (Sprint 2.1 VLM). Shows the scene
               description once the async task writes it; a transient
@@ -549,7 +583,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               "✓ Marked True/False" chip so the choice is obvious
               and can't be double-submitted. */}
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-            {alert.status === 'new' ? (
+            {/* store_intelligence is informational — no True/False verdict. */}
+            {alert.detection_type === 'store_intelligence' ? null
+              : alert.status === 'new' ? (
               <>
                 <FeedbackBtn onClick={markTrue} tone="green" disabled={busy}>
                   ✅ True Alert

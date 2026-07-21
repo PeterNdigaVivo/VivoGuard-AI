@@ -970,6 +970,24 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     # async by the vlm.analyse_alert_scene task). Surface just that
     # one field — never the whole extra blob.
     item.vlm_scene = (event.extra or {}).get("vlm_scene") if event else None
+    # Store Intelligence structured payload for the special metric-tile card.
+    if event and event.detection_type == "store_intelligence":
+        ex = event.extra or {}
+        item.store_intel = {
+            "store_name":      ex.get("store_name"),
+            "city":            ex.get("city"),
+            "time_eat":        ex.get("time_eat"),
+            "time_period":     ex.get("time_period"),
+            "people_count":    ex.get("people_count"),
+            "staff_count":     ex.get("staff_count"),
+            "counter_status":  ex.get("counter_status"),
+            "busiest_zone":    ex.get("busiest_zone"),
+            "entry_count_45m": ex.get("entry_count_45m"),
+            "alert_count_45m": ex.get("alert_count_45m"),
+            "hours_open":      ex.get("hours_open"),
+            "ai_summary":      ex.get("ai_summary"),
+            "recommendation":  ex.get("recommendation"),
+        }
     return item
 
 
