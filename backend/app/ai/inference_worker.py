@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -115,12 +116,36 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
             "detection_every_n_frames": cfg.get(t, {}).get("detection_every_n_frames", 1),
         }
 
-    weights = settings.default_model
+    # Weights resolution, in priority order:
+    #   1. the camera's explicitly-assigned model (cam.ai_model_id), if its
+    #      file is on disk;
+    #   2. otherwise the latest chain-wide DEPLOYED model
+    #      (ai_models.deployed=true), if its file is on disk — so a trained
+    #      model that's been deployed is used even for cameras that were never
+    #      individually re-pointed at it;
+    #   3. otherwise the base model (settings.default_model, yolov8n.pt).
+    weights: str | None = None
     if cam.ai_model_id:
         m = db.get(AIModel, cam.ai_model_id)
-        if m:
-            weights = m.weights_path or settings.default_model
+        if m and m.weights_path and os.path.exists(m.weights_path):
+            weights = m.weights_path
+    if weights is None:
+        weights = _deployed_weights(db)
+    if weights is None:
+        weights = settings.default_model
     return cam, zones, cfg, weights
+
+
+def _deployed_weights(db: Session) -> str | None:
+    """Latest chain-wide deployed model's weights, when the file exists on
+    disk. Returns None so callers fall back to the base model."""
+    m = (db.query(AIModel)
+           .filter(AIModel.deployed.is_(True))
+           .order_by(AIModel.id.desc())
+           .first())
+    if m and m.weights_path and os.path.exists(m.weights_path):
+        return m.weights_path
+    return None
 
 
 # Detector types that emit DetectionEvents but should NOT create an
