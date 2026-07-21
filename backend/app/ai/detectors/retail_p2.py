@@ -73,8 +73,11 @@ class StaffPresenceDetector(Detector):
     SCORE_UNATTENDED = 40
 
     # Alert timing.
-    UNATTENDED_DWELL_SECONDS = 5 * 60       # must be unattended this long
-    ABSENCE_GRACE_SECONDS    = 60           # grace after last attended frame
+    UNATTENDED_DWELL_SECONDS = 10 * 60      # must be unattended this long (10 min)
+    ABSENCE_GRACE_SECONDS    = 120          # 2-min grace after last person seen
+                                            # at the counter before the countdown
+                                            # effectively starts (occlusions,
+                                            # dropped detections, brief step-away)
     DEDUP_SECONDS            = 30 * 60      # 30 min between URGENT repeats
 
     OPENING_GRACE_SECONDS = 30 * 60
@@ -303,6 +306,15 @@ class StaffPresenceDetector(Detector):
             state = self._load_state(ctx.camera_id, z["id"])
             prev_attended = bool(state.get("attended"))
             attended = self.apply_hysteresis(score, prev_attended)
+            # Presence override: ANY person physically inside the counter
+            # polygon means the counter is attended — a customer being served
+            # or a non-uniform staffer still means someone is there. This
+            # prevents false "Counter Left Unattended" alerts when the person
+            # simply isn't uniform-classified (low score but clearly present).
+            person_in_counter = any(zid == z["id"]
+                                    for (_tid, zid) in active_track_zones)
+            if person_in_counter:
+                attended = True
             state["score"] = score
             state["attended"] = attended
 
