@@ -48,12 +48,21 @@ def write_preview(
     try:
         import cv2
     except ImportError:
+        # This process has no opencv (e.g. the API container, which
+        # intentionally omits it). Log LOUDLY — a silent None here is
+        # exactly why every preview_path was NULL. Preview generation
+        # should run on a worker via training.write_preview_for_image.
+        log.warning("preview: opencv (cv2) unavailable in this process — "
+                    "cannot generate preview for %s (run it on a worker)",
+                    clean_path)
         return None
     if not clean_path:
         return None
     try:
         img = cv2.imread(clean_path)
         if img is None:
+            log.warning("preview: cv2.imread returned None (missing/unreadable "
+                        "file?) for %s", clean_path)
             return None
         h, w = img.shape[:2]
         if bbox_norm and len(bbox_norm) == 4:
@@ -64,6 +73,8 @@ def write_preview(
             # Full-frame border (the crop IS the person).
             p1, p2 = (2, 2), (w - 2, h - 2)
         if p2[0] <= p1[0] or p2[1] <= p1[1]:
+            log.warning("preview: degenerate bbox %s for %s — skipping",
+                        bbox_norm, clean_path)
             return None
         cv2.rectangle(img, p1, p2, _ORANGE_BGR, 3)
         if label:
@@ -72,8 +83,11 @@ def write_preview(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, _ORANGE_BGR, 2, cv2.LINE_AA,
             )
         out = build_preview_path(clean_path)
+        Path(out).parent.mkdir(parents=True, exist_ok=True)   # defensive
         if not cv2.imwrite(out, img):
+            log.warning("preview: cv2.imwrite failed for %s", out)
             return None
+        log.info("preview: wrote %s", out)
         return out
     except Exception as e:
         log.warning("preview write failed for %s: %s", clean_path, e)

@@ -7,6 +7,74 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 
+@celery_app.task(name="training.write_preview_for_image", ignore_result=True)
+def write_preview_for_image(image_id: int) -> None:
+    """Generate the orange-box review preview for a TrainingImage. Runs on
+    the WORKER (which has opencv) because the API container intentionally
+    ships without it — the reason previews were never generated. Best-effort:
+    a failure never affects the already-saved training image."""
+    from app.database import SessionLocal
+    from app.models import TrainingImage
+    from app.training.image_preview import write_preview, label_from_uniform_color
+    try:
+        with SessionLocal() as db:
+            img = db.get(TrainingImage, image_id)
+            if not img or not img.file_path or img.preview_path:
+                return
+            uc = None
+            se = img.source_extra if isinstance(img.source_extra, dict) else {}
+            uc = (se or {}).get("uniform_color")
+            preview = write_preview(img.file_path,
+                                    label=label_from_uniform_color(uc),
+                                    bbox_norm=None)
+            if preview:
+                img.preview_path = preview
+                db.commit()
+                log.info("preview: set training_image=%s -> %s", image_id, preview)
+            else:
+                log.warning("preview: write returned None for training_image=%s "
+                            "path=%s", image_id, img.file_path)
+    except Exception:
+        log.exception("write_preview_for_image failed image=%s", image_id)
+
+
+@celery_app.task(name="training.backfill_previews", ignore_result=True)
+def backfill_previews(limit: int = 500) -> None:
+    """One-shot (idempotent) backfill of orange-box previews for existing
+    TrainingImage rows whose preview_path is NULL — the rows created before
+    the API-container/opencv fix. Self-limiting: processes up to `limit` NULL
+    rows per run and becomes a no-op once every row has a preview. Scheduled
+    hourly so it backfills automatically after a deploy, then costs nothing.
+    Runs on the worker (opencv present)."""
+    from app.database import SessionLocal
+    from app.models import TrainingImage
+    from app.training.image_preview import write_preview, label_from_uniform_color
+    done = 0
+    with SessionLocal() as db:
+        rows = (db.query(TrainingImage)
+                  .filter(TrainingImage.preview_path.is_(None),
+                          TrainingImage.file_path.isnot(None))
+                  .limit(limit).all())
+        for img in rows:
+            se = img.source_extra if isinstance(img.source_extra, dict) else {}
+            uc = (se or {}).get("uniform_color")
+            try:
+                preview = write_preview(img.file_path,
+                                        label=label_from_uniform_color(uc),
+                                        bbox_norm=None)
+            except Exception:
+                preview = None
+            if preview:
+                img.preview_path = preview
+                done += 1
+        if done:
+            db.commit()
+    if rows:
+        log.info("backfill_previews: generated %d/%d previews (limit=%d, "
+                 "%d remaining candidates this pass)", done, len(rows), limit,
+                 max(0, len(rows) - done))
+
+
 @celery_app.task(name="training.run_job", bind=True, ignore_result=True)
 def run_training_job(self, job_id: int) -> None:
     from app.training.trainer import run_job

@@ -87,6 +87,17 @@ def _ensure_dataset(db: Session, name: str, classes: list[str],
     return ds
 
 
+def _enqueue_preview(image_id: int) -> None:
+    """Kick the orange-box preview generation onto the WORKER (opencv lives
+    there — the API process that runs the absorb_* helpers does not have it,
+    which is why every preview_path was NULL). Best-effort — never raises."""
+    try:
+        from app.tasks.training import write_preview_for_image
+        write_preview_for_image.delay(image_id)
+    except Exception as e:
+        log.warning("preview enqueue failed image=%s: %s", image_id, e)
+
+
 def absorb_confirmed(db: Session, alert_id: int) -> None:
     """Operator confirmed the alert was a true positive — promote the
     frame to the positive pool with its detection bbox as the ground-
@@ -114,20 +125,6 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         source_alert_id=a.id,           # for revert_verdict
     )
     db.add(img); db.flush()
-    # Preview crop (Part 6) — orange overlay for operator review.
-    # Best-effort: a failure must not block the clean save / commit.
-    try:
-        from app.training.image_preview import write_preview, label_from_uniform_color
-        if ev.thumbnail_path:
-            preview = write_preview(
-                ev.thumbnail_path,
-                label=label_from_uniform_color((ev.extra or {}).get("uniform_color")),
-                bbox_norm=None,   # thumbnail IS the person crop → full-frame border
-            )
-            if preview:
-                img.preview_path = preview
-    except Exception:
-        log.exception("absorb_confirmed: preview write failed alert=%s", a.id)
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
     x1, y1, x2, y2 = ev.bbox_json
     cx = (x1 + x2) / 2
@@ -138,6 +135,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
                        bbox_json=[cx, cy, w, h], verified=True))
     a.feedback_used_for_training = True
     db.commit()
+    _enqueue_preview(img.id)     # preview runs on the worker (opencv)
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 
@@ -172,21 +170,9 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         source_alert_id=a.id,           # for revert_verdict
     )
     db.add(neg_img); db.flush()
-    # Preview crop — best-effort orange overlay (Part 6).
-    try:
-        from app.training.image_preview import write_preview, label_from_uniform_color
-        if ev.thumbnail_path:
-            preview = write_preview(
-                ev.thumbnail_path,
-                label=label_from_uniform_color((ev.extra or {}).get("uniform_color")),
-                bbox_norm=None,
-            )
-            if preview:
-                neg_img.preview_path = preview
-    except Exception:
-        log.exception("absorb_dismissed: preview write failed alert=%s", a.id)
     a.feedback_used_for_training = True
     db.commit()
+    _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

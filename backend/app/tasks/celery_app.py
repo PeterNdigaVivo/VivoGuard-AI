@@ -95,6 +95,8 @@ celery_app.conf.update(
         # alerts worker is started with `-Q alerts,beat` so this is
         # picked up there.
         "training.run_job":                   {"queue": "alerts"},
+        "training.write_preview_for_image":   {"queue": "alerts"},
+        "training.backfill_previews":         {"queue": "alerts"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -219,6 +221,13 @@ celery_app.conf.update(
         # nulls Alert.snapshot_paths.
         "prune-checkout-snapshots-every-1h": {
             "task": "alerting.prune_checkout_snapshots",
+            "schedule": 60 * 60.0,
+        },
+        # Backfill orange-box previews for TrainingImage rows created before
+        # the opencv/API fix. Idempotent + self-limiting — no-ops once done,
+        # so an hourly schedule effectively "runs once after deploy".
+        "backfill-training-previews-every-1h": {
+            "task": "training.backfill_previews",
             "schedule": 60 * 60.0,
         },
         # Business-hours alert filmstrips (data/alert_snaps/{store}/{alert}/).
