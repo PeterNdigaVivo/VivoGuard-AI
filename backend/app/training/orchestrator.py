@@ -56,7 +56,35 @@ MIN_NEW_SAMPLES_PER_RETRAIN = _retrain_thresholds()[0]
 # the tiny set — worse-than-useless training run. We bail BEFORE
 # creating a TrainingJob row so the dispatcher / circuit breaker
 # don't have to deal with predictable failures.
-MIN_DATASET_IMAGES = 30
+# Adaptive minimum positive-image floor per detection type (Part 2 #1) —
+# small, high-value detectors train sooner than the generic 30 floor.
+MIN_IMAGES = {
+    "uniform_compliance": 15,
+    "shop_open_close":    20,
+    "checkout_dwell":     20,
+    "staff_present":      20,
+    "default":            30,
+}
+
+
+def _min_images(detection_type: str) -> int:
+    return MIN_IMAGES.get(detection_type, MIN_IMAGES["default"])
+
+
+# Training-dispatch priority per detection type (lower = sooner). Part 2 #6.
+TRAIN_PRIORITY = {
+    "uniform_compliance": 1,
+    "shop_open_close":    2,
+    "checkout_dwell":     3,
+    "staff_present":      4,
+}
+
+
+def _priority_for(detection_type: str) -> int:
+    return TRAIN_PRIORITY.get(detection_type, 5)
+
+
+MIN_DATASET_IMAGES = 30   # legacy default (per-type floors above supersede)
 
 
 def _last_fine_tune_completion(db: Session, detection_type: str) -> datetime | None:
@@ -186,15 +214,16 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     if pos_ds is not None:
         pos_count = (db.query(TrainingImage)
                        .filter(TrainingImage.dataset_id == pos_ds.id).count())
-        if pos_count < MIN_DATASET_IMAGES:
+        _floor = _min_images(detection_type)
+        if pos_count < _floor:
             log.warning(
                 "orchestrator: dataset too small for training "
                 "(%d images, need %d+) — detection_type=%s dataset_id=%s",
-                pos_count, MIN_DATASET_IMAGES, detection_type, pos_ds.id)
+                pos_count, _floor, detection_type, pos_ds.id)
             return {"detection_type": detection_type,
                     "status": "skipped",
                     "reason": (f"dataset too small ({pos_count} images, "
-                                f"need {MIN_DATASET_IMAGES}+)"),
+                                f"need {_floor}+)"),
                     "positives_total": pos_count}
     cfg = {
         "incremental_finetune":       True,
@@ -202,7 +231,8 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         "resume_from_model_id":       parent.id,
         "extra_negative_dataset_ids": [neg_ds.id] if neg_ds else [],
         "max_neg_ratio":              3.0,
-        "epochs":                     10,
+        # epochs intentionally omitted — the trainer sizes it to the dataset
+        # (Part 2 #2): <50 img -> 20, <200 -> 15, else 10.
         "batch":                      16,
         "imgsz":                      640,
         "lr0":                        0.0005,
@@ -215,7 +245,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         dataset_id=pos_ds.id,
         config_json=cfg,
         status="queued",
-        total_epochs=10,
+        priority=_priority_for(detection_type),
     )
     db.add(job); db.commit(); db.refresh(job)
     from app.tasks.training import run_training_job

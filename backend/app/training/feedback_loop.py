@@ -87,6 +87,18 @@ def _ensure_dataset(db: Session, name: str, classes: list[str],
     return ds
 
 
+def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
+    """Immediately check whether this feedback pushed the dataset over its
+    training threshold and, if so, queue a fine-tune now instead of waiting
+    for the 5-min chain_retrain_due beat (Part 2 #8). Best-effort — the
+    feedback save matters more than the training trigger, so never raise."""
+    try:
+        from app.training.orchestrator import enqueue_fine_tune_if_due
+        enqueue_fine_tune_if_due(db, detection_type)
+    except Exception as e:
+        log.warning("training enqueue failed: %s", e)
+
+
 def _enqueue_preview(image_id: int) -> None:
     """Kick the orange-box preview generation onto the WORKER (opencv lives
     there — the API process that runs the absorb_* helpers does not have it,
@@ -136,6 +148,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(img.id)     # preview runs on the worker (opencv)
+    _maybe_enqueue_training(db, cls)   # immediate fine-tune if threshold crossed
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 
@@ -173,6 +186,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
+    _maybe_enqueue_training(db, cls)   # immediate fine-tune if threshold crossed
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

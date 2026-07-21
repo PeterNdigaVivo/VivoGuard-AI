@@ -73,7 +73,7 @@ AGENT_INTERVAL_SECONDS: dict[str, int] = {
 CIRCUIT_MAX_FAILS = 5
 SUSPEND_SECONDS   = 3600
 FAILS_TTL_SECONDS = 24 * 3600
-SIM_MAX_CAMERAS   = 20
+SIM_MAX_CAMERAS   = 30
 
 # ── AI reasoning layer ───────────────────────────────────────────────────
 # The role each agent adopts when it reasons with Claude. Every domain agent

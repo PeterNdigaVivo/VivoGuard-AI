@@ -379,9 +379,9 @@ celery_app.conf.update(
             "task": "agents.db_admin",
             "schedule": crontab(minute=30, hour="0,6,12,18"),
         },
-        "agents-simulation-6h": {          # 01:00 07:00 13:00 19:00 EAT
+        "agents-simulation-2h": {          # every 2 hours (Part 2 #4)
             "task": "agents.simulation",
-            "schedule": crontab(minute=0, hour="1,7,13,19"),
+            "schedule": crontab(minute=0, hour="*/2"),
         },
         "agents-training-1h": {            # :00 past every hour
             "task": "agents.training",

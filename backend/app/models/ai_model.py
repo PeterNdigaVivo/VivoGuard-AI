@@ -36,5 +36,8 @@ class AIModel(Base):
     trained_on_stores: Mapped[list | None] = mapped_column(JSON, nullable=True)
     sample_count:      Mapped[int | None] = mapped_column(Integer, nullable=True)
     training_job_id: Mapped[int | None] = mapped_column(ForeignKey("training_jobs.id", ondelete="SET NULL"), nullable=True)
+    # The model this one was incrementally fine-tuned FROM (Part 2 #7). NULL
+    # for full retrains from the base yolov8n weights.
+    parent_model_id: Mapped[int | None] = mapped_column(ForeignKey("ai_models.id", ondelete="SET NULL"), nullable=True)
 
     created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

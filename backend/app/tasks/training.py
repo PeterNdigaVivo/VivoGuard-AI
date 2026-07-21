@@ -144,15 +144,35 @@ def dispatch_queued_jobs() -> None:
         if stale:
             db.commit()
 
-        # 2) Pick up queued jobs in FIFO order, mark running, dispatch.
+        # Parallel-job lock (Part 2 #5, Q3): at most 2 running jobs at once,
+        # and never 2 on the same detection_type. Simple DB status count —
+        # no locks, no deadlock risk. worker-alerts has 4 slots so 2 training
+        # jobs still leave room for alert tasks.
+        running = (db.query(TrainingJob)
+                     .filter(TrainingJob.status == "running").all())
+        if len(running) >= 2:
+            log.info("dispatcher: %d job(s) already running (cap 2) — "
+                     "skipping this tick", len(running))
+            return
+        running_types = {(j.config_json or {}).get("detection_type")
+                         for j in running}
+
+        # 2) Pick queued jobs by PRIORITY (lower = sooner) then FIFO
+        # (Part 2 #6), mark running, dispatch.
         picks = (db.query(TrainingJob)
                    .filter(TrainingJob.status == "queued")
-                   .order_by(TrainingJob.created_at.asc())
+                   .order_by(TrainingJob.priority.asc(),
+                             TrainingJob.created_at.asc())
                    .limit(_DISPATCH_MAX_PER_TICK)
                    .all())
         dispatched: list[int] = []
         suspended: list[int] = []
         for j in picks:
+            if len(running) >= 2:
+                break
+            dtype = (j.config_json or {}).get("detection_type")
+            if dtype and dtype in running_types:
+                continue    # never run 2 jobs on the same detection_type
             # Defense in depth — the query above already filters
             # status='queued', but in case anything flips a failed
             # job back to queued by hand (or a SQLAlchemy session
@@ -207,6 +227,9 @@ def dispatch_queued_jobs() -> None:
             try:
                 run_training_job.apply_async(args=[j.id], queue="alerts")
                 dispatched.append(j.id)
+                running.append(j)               # count toward the cap of 2
+                if dtype:
+                    running_types.add(dtype)     # block same-type this tick
             except Exception as e:
                 # apply_async failed (broker down?). Roll the job
                 # back to queued so the next tick retries.

@@ -25,6 +25,29 @@ from app.training.dataset import dataset_root, split_dataset, write_yolo_dataset
 log = logging.getLogger(__name__)
 
 
+def _deployed_parent_for(detection_type: str | None):
+    """(weights_path, model_id) of the latest DEPLOYED model whose classes
+    include `detection_type`, when its weights file exists on disk — else
+    (None, None). Used so each fine-tune BUILDS on the last deployed model
+    (Part 2 #7 incremental fine-tuning)."""
+    if not detection_type:
+        return None, None
+    from app.models import AIModel
+    try:
+        with SessionLocal() as db:
+            models = (db.query(AIModel)
+                        .filter(AIModel.deployed == True)              # noqa: E712
+                        .order_by(AIModel.id.desc()).all())
+        for m in models:
+            if (detection_type in (m.classes_json or [])
+                    and m.weights_path and os.path.exists(m.weights_path)):
+                return m.weights_path, m.id
+    except Exception as e:
+        log.warning("trainer: deployed-parent lookup failed for %s: %s",
+                    detection_type, e)
+    return None, None
+
+
 def _publish(channel: str, msg: dict) -> None:
     try:
         r = redis.from_url(settings.redis_url)
@@ -183,6 +206,7 @@ def run_job(job_id: int) -> None:
             db.commit()
             raise RuntimeError(job.error_message)
         lines = [ln for ln in train_txt.read_text().splitlines() if ln.strip()]
+        image_count = len(lines)
         if not lines:
             job.status, job.error_message = "failed", (
                 f"train.txt has 0 image paths — dataset has no labelled "
@@ -205,14 +229,31 @@ def run_job(job_id: int) -> None:
     # Fine-tune mode: start from the named model's weights with a
     # low LR + short schedule. Full-retrain mode: start from the
     # configured base_model (e.g. yolov8n.pt).
+    # Base weights (Part 2 #7 — incremental fine-tuning): explicit resume >
+    # currently-deployed model for this detection_type > base yolov8n. Each
+    # run BUILDS on the last deployed model for faster convergence.
+    parent_model_id: int | None = None
     if incremental and resume_weights:
         base_model = resume_weights
-        epochs     = int(cfg.get("epochs", 10))     # ⇩ default for fine-tune
-        lr         = cfg.get("lr0", 0.0005)         # ⇩ low LR avoids forgetting
+        parent_model_id = int(resume_from) if resume_from is not None else None
+        lr         = cfg.get("lr0", 0.0005)         # low LR avoids forgetting
     else:
-        base_model = cfg.get("base_model", "yolov8n.pt")
-        epochs     = int(cfg.get("epochs", 50))
-        lr         = cfg.get("lr0", "auto")
+        dep_weights, dep_id = _deployed_parent_for(cfg.get("detection_type"))
+        if dep_weights:
+            base_model = dep_weights
+            parent_model_id = dep_id
+            lr         = cfg.get("lr0", 0.0005)
+            log.info("training job %s: incremental base = deployed model id=%s (%s)",
+                     job_id, dep_id, dep_weights)
+        else:
+            base_model = cfg.get("base_model", "yolov8n.pt")
+            lr         = cfg.get("lr0", "auto")
+    # Epochs (Part 2 #2): honour an explicit cfg override, else size to the
+    # dataset — more epochs on small sets = better learning per image.
+    if cfg.get("epochs"):
+        epochs = int(cfg["epochs"])
+    else:
+        epochs = 20 if image_count < 50 else 15 if image_count < 200 else 10
     batch      = int(cfg.get("batch", 16))
     imgsz      = int(cfg.get("imgsz", 640))
     augment    = bool(cfg.get("augment", True))
@@ -239,6 +280,17 @@ def run_job(job_id: int) -> None:
             device=("0" if settings.use_gpu else "cpu"),
             augment=augment,
         )
+        # Aggressive augmentation (Part 2 #3) — multiplies effective dataset
+        # size ~4-8x; critical for lighting variance across 28 stores. Only
+        # pass args the installed ultralytics actually recognises (Q1).
+        _aug = dict(degrees=10.0, translate=0.1, scale=0.5, fliplr=0.5,
+                    mosaic=0.5, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4)
+        try:
+            from ultralytics.cfg import DEFAULT_CFG_DICT as _DCFG
+            _aug = {k: v for k, v in _aug.items() if k in set(_DCFG.keys())}
+        except Exception:
+            pass   # can't introspect — ultralytics>=8.3 supports all of these
+        train_kwargs.update(_aug)
         if lr and lr != "auto":
             train_kwargs["lr0"] = float(lr)
         # Bind the return value — it's the validation Metrics from the
@@ -263,6 +315,7 @@ def run_job(job_id: int) -> None:
             if job2:
                 job2.status       = "done"
                 job2.completed_at = datetime.now(timezone.utc)
+                job2.total_epochs = epochs      # reflect the dataset-sized value
                 # Refresh best_map50 from the FINAL validation read —
                 # the per-epoch callback only fires for epochs that
                 # ran validation, so the final value can exceed the
@@ -284,6 +337,7 @@ def run_job(job_id: int) -> None:
                 name=model_name,
                 version=next_version,
                 base_model=base_model,
+                parent_model_id=parent_model_id,
                 classes_json=(ds2.classes_json if ds2 else []),
                 weights_path=str(best),
                 export_format="pt",

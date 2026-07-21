@@ -132,6 +132,22 @@ def promote(db: Session, candidate_id: int, *,
                           AIModel.deployed == True,                   # noqa: E712
                           AIModel.id != cand.id)
                   .all())
+
+    # Incremental-regression auto-revert (Part 2 #7, Q2): never deploy a
+    # candidate whose training map50 is BELOW the currently-deployed model.
+    # `force` (explicit operator override) bypasses this guard.
+    if not force and cand is not None and cand.map50 is not None:
+        deployed_best = max((s.map50 for s in siblings if s.map50 is not None),
+                            default=None)
+        if deployed_best is not None and cand.map50 < deployed_best:
+            log.warning("incremental regression — keeping current deployed model "
+                        "(candidate=%s map50=%.4f < deployed map50=%.4f)",
+                        candidate_id, cand.map50, deployed_best)
+            result["verdict"] = "regression"
+            result["promoted"] = False
+            result["reason"] = (f"candidate map50 {cand.map50:.4f} < deployed "
+                                f"{deployed_best:.4f} — not promoted")
+            return result
     for s in siblings:
         s.deployed = False
     cand.deployed = True

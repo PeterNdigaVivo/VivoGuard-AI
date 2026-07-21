@@ -197,12 +197,14 @@ def start_job(payload: TrainingJobIn, db: Session = Depends(get_db),
     ds = db.get(Dataset, payload.dataset_id)
     if not ds:
         raise HTTPException(404, "dataset not found")
+    from app.training.orchestrator import _priority_for
     job = TrainingJob(
         model_name=payload.model_name,
         dataset_id=payload.dataset_id,
         config_json=payload.model_dump(),
         status="queued",
         total_epochs=payload.epochs,
+        priority=_priority_for(payload.model_dump().get("detection_type")),
     )
     db.add(job); db.commit(); db.refresh(job)
 
@@ -576,12 +578,14 @@ def start_finetune_job(
         "lr0":                        float(lr0),
         "augment":                    True,
     }
+    from app.training.orchestrator import _priority_for
     job = TrainingJob(
         model_name=parent.name,        # next vN auto-assigned at run time
         dataset_id=pos_ds.id,
         config_json=cfg,
         status="queued",
         total_epochs=int(epochs),
+        priority=_priority_for(cfg.get("detection_type")),
     )
     db.add(job); db.commit(); db.refresh(job)
 

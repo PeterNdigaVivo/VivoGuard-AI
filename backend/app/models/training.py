@@ -126,6 +126,8 @@ class TrainingJob(Base):
     dataset_id:   Mapped[int]   = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
     config_json:  Mapped[dict]  = mapped_column(JSON)            # base_model, epochs, batch, imgsz, lr, splits, augment toggles
     status:       Mapped[str]   = mapped_column(String(16), default="queued")  # queued|running|done|failed|cancelled
+    # Dispatch priority (lower = sooner). Part 2 #6. Default 5 = "others".
+    priority:     Mapped[int]   = mapped_column(Integer, default=5, server_default="5")
     current_epoch:Mapped[int]   = mapped_column(Integer, default=0)
     total_epochs: Mapped[int]   = mapped_column(Integer, default=0)
     best_map50:   Mapped[float | None] = mapped_column(Float, nullable=True)
