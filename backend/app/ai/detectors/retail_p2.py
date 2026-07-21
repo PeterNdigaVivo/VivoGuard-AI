@@ -370,6 +370,15 @@ class StaffPresenceDetector(Detector):
                 xs = [pt[0] for pt in poly]; ys = [pt[1] for pt in poly]
                 boxes.append({"bbox": [min(xs), min(ys), max(xs), max(ys)],
                               "color": "red", "label": "Counter unattended"})
+            # Last time ANY person was at the counter (attended sets this,
+            # incl. the presence override) — surfaced in the alert body.
+            last_att = state.get("last_attended_at")
+            last_activity_eat = None
+            if last_att:
+                from zoneinfo import ZoneInfo
+                last_activity_eat = (datetime.fromtimestamp(last_att, tz=timezone.utc)
+                                     .astimezone(ZoneInfo("Africa/Nairobi"))
+                                     .strftime("%H:%M"))
             out.append(DetectionEvent(
                 detection_type=self.detection_type, cls="counter_unstaffed",
                 confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=z["id"],
@@ -377,6 +386,8 @@ class StaffPresenceDetector(Detector):
                     "unstaffed_seconds": int(continuous_below),
                     "unstaffed_minutes": int(continuous_below / 60),
                     "store_id":          ctx.store_id,
+                    "zone_name":         z.get("name") or "service",
+                    "last_activity_eat": last_activity_eat,
                     "boxes":             boxes,
                     "attendance_score":  int(score),
                     "rule":              "counter_unattended",

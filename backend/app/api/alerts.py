@@ -726,12 +726,18 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
 
     if dt == "staff_present":
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
+        zone = extra.get("zone_name") or "service"
+        last = extra.get("last_activity_eat")
         if mins is not None:
-            return (f"Staff has not been detected at the service counter for "
-                    f"the past {int(round(float(mins)))} minutes. Customer service "
-                    f"may be affected.")
-        return ("Staff has not been detected at the service counter. "
-                "Customer service may be affected.")
+            base = (f"No person detected at the {zone} counter for the past "
+                    f"{int(round(float(mins)))} minutes.")
+        else:
+            base = f"No person detected at the {zone} counter."
+        if last:
+            base += f" Last activity: {last}."
+        else:
+            base += " Customer service may be affected."
+        return base
     if dt in ("queue", "queue_length"):
         n = _extract(extra, "queue_length", "count", default=None)
         wait = _extract(extra, "wait_seconds", "queue_wait_seconds", default=None)
