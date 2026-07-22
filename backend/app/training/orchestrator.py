@@ -86,6 +86,19 @@ def _priority_for(detection_type: str) -> int:
 
 MIN_DATASET_IMAGES = 30   # legacy default (per-type floors above supersede)
 
+# Extra datasets folded into a detection type's fine-tune ON TOP of the
+# operator-feedback pools (Part 6 follow-up). Mined crops live in SEPARATE
+# datasets from operator feedback so quality can be tracked independently,
+# but they train together. write_yolo_dataset_yaml buckets each image as
+# positive/negative by annotation presence, so listing extra positive AND
+# negative datasets here works regardless of role.
+_EXTRA_POS_DATASETS: dict[str, list[str]] = {
+    "uniform_compliance": ["vivo_staff_uniform_v1"],
+}
+_EXTRA_NEG_DATASETS: dict[str, list[str]] = {
+    "uniform_compliance": ["feedback-negative-uniform"],
+}
+
 
 def _last_fine_tune_completion(db: Session, detection_type: str) -> datetime | None:
     """When did the last fine-tune FOR THIS detection type complete?
@@ -207,29 +220,45 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     neg_ds = db.query(Dataset).filter(
         Dataset.name == f"feedback-negative-{detection_type}").first()
 
-    # Minimum-size guard. Counts POSITIVES only — a 1-positive +
-    # 29-negative dataset would otherwise sneak past, train on noise
-    # and crash on validation. Bail before creating the TrainingJob
-    # so we don't leave failing-job rows behind.
-    if pos_ds is not None:
+    # Extra datasets folded in on top of the feedback pools (mined crops etc.).
+    extra_pos_ds = [d for d in (db.query(Dataset).filter(Dataset.name == n).first()
+                                for n in _EXTRA_POS_DATASETS.get(detection_type, []))
+                    if d is not None]
+    extra_neg_ds = [d for d in (db.query(Dataset).filter(Dataset.name == n).first()
+                                for n in _EXTRA_NEG_DATASETS.get(detection_type, []))
+                    if d is not None]
+
+    # Minimum-size guard. Counts POSITIVES across the feedback pool AND any
+    # extra positive datasets (e.g. mined vivo_staff_uniform_v1) — a 1-positive
+    # set would otherwise train on noise and crash on validation.
+    pos_dataset_ids = ([pos_ds.id] if pos_ds is not None else []) + \
+                      [d.id for d in extra_pos_ds]
+    if pos_dataset_ids:
         pos_count = (db.query(TrainingImage)
-                       .filter(TrainingImage.dataset_id == pos_ds.id).count())
+                       .filter(TrainingImage.dataset_id.in_(pos_dataset_ids)).count())
         _floor = _min_images(detection_type)
         if pos_count < _floor:
             log.warning(
                 "orchestrator: dataset too small for training "
-                "(%d images, need %d+) — detection_type=%s dataset_id=%s",
-                pos_count, _floor, detection_type, pos_ds.id)
+                "(%d images, need %d+) — detection_type=%s datasets=%s",
+                pos_count, _floor, detection_type, pos_dataset_ids)
             return {"detection_type": detection_type,
                     "status": "skipped",
                     "reason": (f"dataset too small ({pos_count} images, "
                                 f"need {_floor}+)"),
                     "positives_total": pos_count}
+    # All extra datasets (positive + negative) ride in extra_negative_dataset_ids;
+    # write_yolo_dataset_yaml classifies each image by annotation presence, so
+    # extra positives (with annotations) train as positives.
+    extra_ids = [d.id for d in extra_pos_ds]
+    if neg_ds is not None:
+        extra_ids.append(neg_ds.id)
+    extra_ids += [d.id for d in extra_neg_ds]
     cfg = {
         "incremental_finetune":       True,
         "detection_type":             detection_type,   # cutoff filter key
         "resume_from_model_id":       parent.id,
-        "extra_negative_dataset_ids": [neg_ds.id] if neg_ds else [],
+        "extra_negative_dataset_ids": extra_ids,
         "max_neg_ratio":              3.0,
         # epochs intentionally omitted — the trainer sizes it to the dataset
         # (Part 2 #2): <50 img -> 20, <200 -> 15, else 10.

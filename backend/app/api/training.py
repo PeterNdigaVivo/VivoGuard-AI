@@ -1610,18 +1610,39 @@ def training_progress(db: Session = Depends(get_db),
             "images_needed": max(0, thr - cur),
         })
 
-    # ---- simulation (QA probe today; real crops arrive in Part 6) ---------
-    sim_rep = (db.query(AgentReport)
-                 .filter(AgentReport.agent_name == "simulation")
-                 .order_by(AgentReport.run_at.desc()).first())
-    sim_find = (sim_rep.findings or {}) if sim_rep else {}
+    # ---- simulation (real mined-crop counts, Part 6 miner) ----------------
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    sim_filter = TrainingImage.source_extra.op("->>")("source") == "simulation"
+
+    def _ds_id(name: str):
+        d = db.query(Dataset).filter(Dataset.name == name).first()
+        return d.id if d else None
+    pos_ds_id = _ds_id("vivo_staff_uniform_v1")
+    neg_ds_id = _ds_id("feedback-negative-uniform")
+
+    staff_total = ((db.query(func.count(TrainingImage.id))
+                      .filter(TrainingImage.dataset_id == pos_ds_id).scalar())
+                   if pos_ds_id else 0) or 0
+    customer_total = ((db.query(func.count(TrainingImage.id))
+                         .filter(TrainingImage.dataset_id == neg_ds_id).scalar())
+                      if neg_ds_id else 0) or 0
+    crops_today = (db.query(func.count(TrainingImage.id))
+                     .filter(sim_filter,
+                             TrainingImage.created_at >= day_start).scalar()) or 0
+    cameras_today = (db.query(func.count(func.distinct(TrainingImage.camera_id)))
+                       .filter(sim_filter,
+                               TrainingImage.created_at >= day_start).scalar()) or 0
+    last_sim = (db.query(func.max(TrainingImage.created_at))
+                  .filter(sim_filter).scalar())
+    sim_any = (db.query(func.count(TrainingImage.id))
+                 .filter(sim_filter).scalar()) or 0
     simulation = {
-        "last_run": sim_rep.run_at.isoformat() if sim_rep and sim_rep.run_at else None,
-        "crops_today": 0,
-        "cameras_active": int(sim_find.get("processed") or 0),
-        "staff_crops_total": 0,
-        "customer_crops_total": 0,
-        "miner_active": False,   # crop-mining pipeline lands in Part 6
+        "last_run": last_sim.isoformat() if last_sim else None,
+        "crops_today": int(crops_today),
+        "staff_crops_total": int(staff_total),
+        "customer_crops_total": int(customer_total),
+        "cameras_active": int(cameras_today),
+        "pipeline_active": sim_any > 0,
     }
 
     # ---- velocity ---------------------------------------------------------

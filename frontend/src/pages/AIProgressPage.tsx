@@ -38,7 +38,7 @@ interface Progress {
   }[]
   simulation: {
     last_run: string | null; crops_today: number; cameras_active: number
-    staff_crops_total: number; customer_crops_total: number; miner_active: boolean
+    staff_crops_total: number; customer_crops_total: number; pipeline_active: boolean
   }
   velocity: {
     images_per_day_7d: number; models_per_week: number
@@ -225,19 +225,23 @@ export default function AIProgressPage() {
       {/* SECTION 6 — simulation */}
       <Card className="p-4 dark:bg-slate-900 dark:border-slate-800">
         <div className="font-semibold text-slate-800 dark:text-slate-100 mb-2">Simulation Pipeline</div>
-        {data.simulation.miner_active ? (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-            <Kpi label="Staff crops today" value={data.simulation.staff_crops_total} color={GREEN} />
-            <Kpi label="Customer crops today" value={data.simulation.customer_crops_total} color={BLUE} />
-            <Kpi label="Cameras contributing" value={data.simulation.cameras_active} color={BLUE} />
-            <Kpi label="Last run" value={relTime(data.simulation.last_run)} color={AXIS} small />
-          </div>
+        {data.simulation.pipeline_active ? (
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+              <Kpi label="Staff uniform crops" value={data.simulation.staff_crops_total} color={GREEN} />
+              <Kpi label="Customer crops" value={data.simulation.customer_crops_total} color={BLUE} />
+              <Kpi label="Cameras mined today" value={data.simulation.cameras_active} color={BLUE} />
+              <Kpi label="Crops today" value={data.simulation.crops_today} color={GREEN} />
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+              Last mined {relTime(data.simulation.last_run)} · the AI is automatically
+              learning uniforms from your live cameras.
+            </div>
+          </>
         ) : (
           <div className="text-sm text-slate-600 dark:text-slate-300">
-            🛰️ The QA probe last ran {relTime(data.simulation.last_run)}, scanning
-            {' '}{data.simulation.cameras_active} cameras. The automatic crop-mining
-            pipeline is <strong>not yet active</strong> — staff/customer training crops
-            will appear here once it ships.
+            🛰️ The crop-mining pipeline hasn't produced any crops yet — staff and
+            customer training crops will appear here after the first 2-hourly run.
           </div>
         )}
       </Card>
