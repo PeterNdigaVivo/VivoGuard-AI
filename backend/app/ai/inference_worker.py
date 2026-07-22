@@ -302,11 +302,33 @@ def _mark_person_alert_fired(camera_id: int) -> None:
         pass
 
 
+# Reset the tracker when frames resume after a gap this long — ByteTrack IDs
+# are meaningless across a stream outage.
+TRACKER_RESET_GAP_S = 30.0
+
+
+def _make_tracker(camera_id: int):
+    """ByteTrack (via VivoGuardTracker) when supervision is importable;
+    IOUTracker fallback otherwise. Both expose the same
+    update(raw) -> list[(Track, det)] contract, so the loop and every
+    detector are agnostic to which one is running."""
+    try:
+        from app.ai.tracker import VivoGuardTracker
+        t = VivoGuardTracker(camera_id)
+        log.info("camera %s: tracking via ByteTrack (supervision)", camera_id)
+        return t
+    except Exception as e:                                   # noqa: BLE001
+        from app.ai.tracker import IOUTracker
+        log.warning("camera %s: ByteTrack unavailable (%s) — IOUTracker fallback",
+                    camera_id, e)
+        return IOUTracker()
+
+
 def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                    poll_interval: float = 0.1) -> None:
     """Inference loop. `max_seconds=0` means run forever."""
     registry = DetectorRegistry()
-    tracker  = IOUTracker()
+    tracker  = _make_tracker(camera_id)
     buffer   = FrameBuffer()
     pub      = redis.from_url(settings.redis_url)
     started  = time.time()
@@ -327,6 +349,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         camera_id, _reid_init_exc)
             reid_encoder = reid_xtracker = None
     last_seen_ts: float = 0.0
+    last_evict_ts: float = 0.0
     frame_idx = 0
 
     # Sprint 1.2 latency telemetry. Backend/format from HardwareEnv so
@@ -363,6 +386,14 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 # Same frame as last loop — skip.
                 time.sleep(poll_interval)
                 continue
+            # Stream resumed after a long outage — reset the tracker so stale
+            # ByteTrack IDs don't bleed across the gap. (IOUTracker fallback
+            # has no reset(); guarded.)
+            gap = ts - last_seen_ts if last_seen_ts else 0.0
+            if gap > TRACKER_RESET_GAP_S and hasattr(tracker, "reset"):
+                tracker.reset()
+                log.info("camera %s: tracker reset after %.0fs frame gap",
+                         camera_id, gap)
             last_seen_ts = ts
             frame_idx += 1
             _t_iter = time.perf_counter()        # total-stage start
@@ -388,6 +419,11 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
 
             _t_post = time.perf_counter()       # postprocess-stage start
             tracks = tracker.update(raw)
+            # Evict lost tracks' confidence buffers every ~30s (ByteTrack
+            # path only; IOUTracker has no evict_lost — guarded).
+            if hasattr(tracker, "evict_lost") and (time.time() - last_evict_ts) > 30.0:
+                tracker.evict_lost({tr.track_id for tr, _ in tracks})
+                last_evict_ts = time.time()
 
             # Store metadata — cached per-frame so detectors don't each hit Postgres.
             store_id = cam.store_id
