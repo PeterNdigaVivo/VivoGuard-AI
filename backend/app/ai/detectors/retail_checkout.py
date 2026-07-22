@@ -343,8 +343,16 @@ class CheckoutDwellDetector(Detector):
                 # customer doesn't trigger the 8-min default.
                 min_alert = 5 * 60 if level == "medium" else 0
 
-                active_keys.add(key)
                 sess = self._sessions.get(key)
+                if sess is None:
+                    # P5: require an ESTABLISHED track before opening a session
+                    # — a fleeting detection / tracker glitch must not start a
+                    # checkout timer. len(history) works for both ByteTrack and
+                    # the IOUTracker fallback. Threshold from settings.
+                    from app.config import settings as _s
+                    if len(getattr(tr, "history", []) or []) < int(_s.checkout_min_frames):
+                        continue
+                active_keys.add(key)
                 if sess is None:
                     sess = {"entry_ts": now, "last_seen_ts": now,
                             "store_id": ctx.store_id,

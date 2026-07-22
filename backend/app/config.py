@@ -228,6 +228,13 @@ class Settings(BaseSettings):
     # an alert each tick. Use to confirm the task is wired up after
     # a deploy / DB restore where zones may not have been synced.
     sales_floor_debug: bool = False
+    # Tracking-accuracy gates (ByteTrack P5) — frame-count / confidence
+    # minimums per detector, tunable via env.
+    checkout_min_frames:            int   = 5
+    uniform_confidence_threshold:   float = 0.65
+    trespass_min_frames:            int   = 5
+    counter_min_empty_frames:       int   = 10
+    entry_exit_min_frames_per_side: int   = 3
     # Part 5: the legacy sales-floor heartbeat is OFF by default — replaced by
     # the store_intelligence 45-min BI update. Flip via env to re-enable.
     sales_floor_insight_enabled: bool = False

@@ -245,7 +245,18 @@ class UniformComplianceDetector(Detector):
     detection_type = "uniform_compliance"
     needs_tracking = True
 
+    # P5: only act on a staff/uniform state once the track's detection
+    # confidence has averaged >= this over >= this many frames — smooths
+    # single-frame uniform misclassification (a key source of Counter Left
+    # Unattended false alerts).
+    STABLE_MIN_FRAMES = 10
+    STABLE_MIN_AVG    = 0.65
+
     def __init__(self):
+        from collections import deque as _deque
+        # track_id -> rolling detection-confidence window (P5 stability gate).
+        self._conf_hist: dict[int, "_deque"] = {}
+        self._deque = _deque
         # (track_id, kind) -> last alert epoch.
         self._fired: dict[tuple[int, str], float] = {}
         # track_id -> (state, since_epoch) for sustained-duration alerts.
@@ -313,6 +324,21 @@ class UniformComplianceDetector(Detector):
             # ok-like signal — same accounting as FULL_COMPLIANT.
             if state in (FULL_COMPLIANT, PARTIAL_COMPLIANT, COLOR_ONLY, STAFF):
                 ok_like += 1
+
+            # P5 stability gate — require the track's detection confidence to
+            # average >= STABLE_MIN_AVG over >= STABLE_MIN_FRAMES frames before
+            # we act on this staff/uniform state (mark staff, fire violation).
+            # A single strong-looking frame can't flip a customer to "staff".
+            _buf = self._conf_hist.get(tid)
+            if _buf is None:
+                _buf = self._conf_hist[tid] = self._deque(maxlen=self.STABLE_MIN_FRAMES)
+            _buf.append(float(det.get("conf", 0.0)))
+            from app.config import settings as _s
+            _min_avg = float(getattr(_s, "uniform_confidence_threshold",
+                                     self.STABLE_MIN_AVG))
+            if len(_buf) < self.STABLE_MIN_FRAMES or \
+                    (sum(_buf) / len(_buf)) < _min_avg:
+                continue
 
             # Staff exclusion — anyone scoring as uniformed staff (any
             # of the three uniform-present states plus the explicit

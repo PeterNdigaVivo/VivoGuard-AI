@@ -89,7 +89,14 @@ class StaffPresenceDetector(Detector):
     _STATE_KEY_FMT = "vg:counter_attendance:{camera_id}:{zone_id}"
     _STATE_TTL_SECONDS = 3600
 
+    # P5: a counter must be empty for this many CONSECUTIVE tracked frames
+    # (on top of the time threshold) before "unattended" can fire. Default;
+    # settings.counter_min_empty_frames overrides at runtime.
+    MIN_EMPTY_FRAMES = 10
+
     def __init__(self):
+        # (camera_id, zone_id) → consecutive frames with NO person in zone.
+        self._empty_frames: dict[tuple[int, int], int] = {}
         # (track_id, zone_id) → entry epoch — drives the service-time metric.
         self._counter_entries: dict[tuple[int, int], float] = {}
         # (camera_id, zone_id) → state dict {score, attended,
@@ -315,6 +322,14 @@ class StaffPresenceDetector(Detector):
                                     for (_tid, zid) in active_track_zones)
             if person_in_counter:
                 attended = True
+            # P5: consecutive-empty-frame counter — reset when anyone is in
+            # the counter zone, increment when empty. Fires only after
+            # MIN_EMPTY_FRAMES consecutive empty tracked frames (below).
+            ekey = (ctx.camera_id, z["id"])
+            if person_in_counter:
+                self._empty_frames[ekey] = 0
+            else:
+                self._empty_frames[ekey] = self._empty_frames.get(ekey, 0) + 1
             state["score"] = score
             state["attended"] = attended
 
@@ -359,6 +374,13 @@ class StaffPresenceDetector(Detector):
             if continuous_below < dwell:
                 continue
             if (now - (state.get("last_alert_at") or 0.0)) <= self.DEDUP_SECONDS:
+                continue
+            # P5: require N consecutive empty tracked frames on top of the
+            # time threshold — more reliable than clock alone.
+            from app.config import settings as _s2
+            _min_empty = int(getattr(_s2, "counter_min_empty_frames",
+                                     self.MIN_EMPTY_FRAMES))
+            if self._empty_frames.get(ekey, 0) < _min_empty:
                 continue
 
             # Fire.

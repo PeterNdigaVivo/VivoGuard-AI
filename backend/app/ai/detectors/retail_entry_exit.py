@@ -92,6 +92,11 @@ class EntryExitDetector(Detector):
     # pseudo-track (so a person hovering on the line is counted once
     # per genuine crossing).
     REFIRE_COOLDOWN = 3.0
+
+    # P5: a detection gap longer than this while a crossing is pending is
+    # treated as a doorway occlusion — the strict "N frames on the new side"
+    # rule is relaxed to "≥1 frame on the new side" (see Q3 exception).
+    OCCLUSION_GAP_SECONDS = 1.0
     # If the centroid is within this distance of the line treat side
     # as 0 — prevents sub-pixel oscillation registering as a crossing.
     # Kept tight (0.5% of frame) so legitimate near-line crossings
@@ -298,60 +303,74 @@ class EntryExitDetector(Detector):
                     (not is_glass_door)
                     or entry["frames_seen"] >= glass_min_frames
                 )
+                min_side = int(getattr(settings, "entry_exit_min_frames_per_side", 3))
+                frame_gap = now - float(entry.get("last_seen", now))
+
+                # P5 (strict both-sides): a side-flip only OPENS a pending
+                # crossing once the person has dwelt >= min_side frames on the
+                # side they came FROM. It is NOT counted until the NEW side is
+                # confirmed below — kills 1-frame boundary-flicker double-counts.
                 if (side_now != 0 and prev_side != 0 and side_now != prev_side
                         and now - entry["last_fired"] >= self.REFIRE_COOLDOWN
-                        and glass_persistence_ok):
-                    direction = "in" if (side_now * inward_sign) > 0 else "out"
-                    log.info("EntryExit camera=%s CROSSING direction=%s zone=%s "
-                             "prev_side=%d new_side=%d prev=(%.3f,%.3f) "
-                             "cur=(%.3f,%.3f)",
-                             ctx.camera_id, direction, z["id"],
-                             prev_side, side_now,
-                             entry["cx"], entry["cy"], cx, cy)
+                        and glass_persistence_ok
+                        and int(entry.get("side_frames", 0)) >= min_side):
+                    entry["pending"] = {
+                        "direction": "in" if (side_now * inward_sign) > 0 else "out",
+                        "to_side":   side_now, "since": now, "new_frames": 0,
+                    }
 
-                    # Visitor counting runs UNCONDITIONALLY — the time
-                    # window gate lives in shop_state.maybe_emit_*_alert
-                    # and only suppresses the operator-facing "Store
-                    # Opened/Closed" alert, never the metric.
-                    #
-                    # dims={"source": ...} tags each metric_snapshot row
-                    # with the originating zone type so read paths can
-                    # prefer high-accuracy glass-door counts over plain
-                    # entry_exit. (Historic rows without a `dims` tag
-                    # are handled at read time via a Zone JOIN.)
-                    if ctx.db is not None:
-                        from app.analytics import recorder
-                        recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,
-                                        camera_id=ctx.camera_id, store_id=ctx.store_id,
-                                        zone_id=z["id"],
-                                        dims={"source": ("glass_door" if is_glass_door
-                                                          else "entry_exit")},
-                                        aggregator="sum")
-
-                    out.append(DetectionEvent(
-                        detection_type=self.detection_type,
-                        cls=f"crossing_{direction}",
-                        confidence=1.0, bbox_norm=det["bbox_norm"],
-                        zone_id=z["id"],
-                        extra={"direction": direction, "store_id": ctx.store_id},
-                    ))
-                    entry["last_fired"] = now
-
-                    from app.ai.detectors import shop_state
-                    shop_alert = None
-                    if direction == "in":
-                        shop_alert = shop_state.maybe_emit_open_alert(
-                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                            via_glass_door=is_glass_door)
-                    else:
-                        shop_alert = shop_state.maybe_emit_close_alert(
-                            ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                            via_glass_door=is_glass_door)
-                    if shop_alert is not None:
-                        log.info("EntryExit camera=%s shop alert raised: rule=%s",
-                                 ctx.camera_id,
-                                 (shop_alert.extra or {}).get("rule"))
-                        out.append(shop_alert)
+                # Confirm + emit a pending crossing once on the NEW side:
+                #   • strict:    >= min_side frames on the new side, OR
+                #   • occlusion: the person was solidly on the prior side
+                #     (pending <= 10s old), reappeared after a detection gap,
+                #     and shows >= 1 frame on the new side (Q3 exception).
+                pend = entry.get("pending")
+                if pend is not None and side_now != 0 and side_now == pend.get("to_side"):
+                    pend["new_frames"] = int(pend.get("new_frames", 0)) + 1
+                    strict_ok = pend["new_frames"] >= min_side
+                    occlusion_ok = (frame_gap > self.OCCLUSION_GAP_SECONDS
+                                    and (now - pend["since"]) <= 10.0
+                                    and pend["new_frames"] >= 1)
+                    if strict_ok or occlusion_ok:
+                        direction = pend["direction"]
+                        entry.pop("pending", None)
+                        log.info("EntryExit camera=%s CROSSING direction=%s zone=%s "
+                                 "mode=%s new_frames=%d gap=%.1fs",
+                                 ctx.camera_id, direction, z["id"],
+                                 "strict" if strict_ok else "occlusion",
+                                 pend["new_frames"], frame_gap)
+                        # Visitor counting is unconditional — the trading-window
+                        # gate lives in shop_state and only suppresses the
+                        # operator-facing Store Opened/Closed alert, not metrics.
+                        if ctx.db is not None:
+                            from app.analytics import recorder
+                            recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,
+                                            camera_id=ctx.camera_id, store_id=ctx.store_id,
+                                            zone_id=z["id"],
+                                            dims={"source": ("glass_door" if is_glass_door
+                                                              else "entry_exit")},
+                                            aggregator="sum")
+                        out.append(DetectionEvent(
+                            detection_type=self.detection_type,
+                            cls=f"crossing_{direction}",
+                            confidence=1.0, bbox_norm=det["bbox_norm"],
+                            zone_id=z["id"],
+                            extra={"direction": direction, "store_id": ctx.store_id},
+                        ))
+                        entry["last_fired"] = now
+                        from app.ai.detectors import shop_state
+                        if direction == "in":
+                            shop_alert = shop_state.maybe_emit_open_alert(
+                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                via_glass_door=is_glass_door)
+                        else:
+                            shop_alert = shop_state.maybe_emit_close_alert(
+                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                via_glass_door=is_glass_door)
+                        if shop_alert is not None:
+                            log.info("EntryExit camera=%s shop alert raised: rule=%s",
+                                     ctx.camera_id, (shop_alert.extra or {}).get("rule"))
+                            out.append(shop_alert)
 
                 # Always update position + last_seen. Only commit the
                 # side when it's NOT in the deadband — otherwise we'd
@@ -359,6 +378,13 @@ class EntryExitDetector(Detector):
                 entry["cx"] = cx
                 entry["cy"] = cy
                 if side_now != 0:
+                    # P5: count consecutive frames on the committed side so the
+                    # crossing gate can require the person to have genuinely
+                    # dwelt on a side (>=3 frames) rather than a 1-frame jitter.
+                    if side_now == entry.get("side"):
+                        entry["side_frames"] = int(entry.get("side_frames", 0)) + 1
+                    else:
+                        entry["side_frames"] = 1
                     entry["side"] = side_now
                 entry["last_seen"] = now
         return out

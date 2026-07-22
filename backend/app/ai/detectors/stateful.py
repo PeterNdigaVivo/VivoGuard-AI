@@ -82,6 +82,19 @@ class TrespassDetector(Detector):
     """Anything in a zone whose `detection_types_json` contains 'trespass'."""
 
     detection_type = "trespass"
+    needs_tracking = True
+
+    # P5: a person/vehicle must be tracked inside the zone for this many
+    # CONSECUTIVE frames before trespass fires — kills brief walk-through
+    # false alerts. Persistent ByteTrack IDs make the per-track counter
+    # reliable (IOUTracker fallback also supplies stable ids).
+    MIN_ZONE_FRAMES = 5
+
+    def __init__(self):
+        # (camera_id, track_id, zone_id) → consecutive frames in zone.
+        self._zone_frames: dict[tuple[int, int, int], int] = {}
+        # keys that already fired this sustained presence (reset on exit).
+        self._fired: set[tuple[int, int, int]] = set()
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -93,18 +106,32 @@ class TrespassDetector(Detector):
                  and not z.get("suppressed")]
         if not zones:
             return []
+        from app.config import settings as _s
+        min_frames = int(getattr(_s, "trespass_min_frames", self.MIN_ZONE_FRAMES))
         out: list[DetectionEvent] = []
-        for det in ctx.raw_detections:
-            if det["conf"] < thr or det["cls"] not in COCO_PERSON | COCO_VEHICLE:
+        seen_keys: set[tuple[int, int, int]] = set()
+        for tr, det in (ctx.tracks or []):
+            if det.get("conf", 0.0) < thr or det["cls"] not in COCO_PERSON | COCO_VEHICLE:
                 continue
             for z in zones:
-                if bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"]):
+                if not bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                    continue
+                key = (ctx.camera_id, tr.track_id, z["id"])
+                seen_keys.add(key)
+                n = self._zone_frames.get(key, 0) + 1
+                self._zone_frames[key] = n
+                if n >= min_frames and key not in self._fired:
+                    self._fired.add(key)
                     out.append(DetectionEvent(
                         detection_type=self.detection_type, cls=det["cls"],
-                        confidence=det["conf"], bbox_norm=det["bbox_norm"],
+                        confidence=det["conf"], bbox_norm=tr.bbox_norm,
                         zone_id=z["id"],
                     ))
-                    break
+                break
+        # Reset counters + fired flags for (track,zone) pairs no longer in a zone.
+        for key in [k for k in self._zone_frames if k not in seen_keys]:
+            self._zone_frames.pop(key, None)
+            self._fired.discard(key)
         return out
 
 
