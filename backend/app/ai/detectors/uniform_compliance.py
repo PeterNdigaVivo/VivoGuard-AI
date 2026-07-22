@@ -614,8 +614,16 @@ class UniformComplianceDetector(Detector):
                 return None
             if crop_kind == "upper":
                 py2 = py1 + int((py2 - py1) * 0.60)
-            crop = frame[py1:py2, px1:px2]
-            if crop.size == 0:
+            # P6: sv.crop_image for a clean, consistent person crop into the
+            # training pipeline; fall back to a plain array slice if
+            # supervision isn't available.
+            try:
+                import supervision as sv
+                import numpy as _np
+                crop = sv.crop_image(frame, _np.array([px1, py1, px2, py2]))
+            except Exception:
+                crop = frame[py1:py2, px1:px2]
+            if crop is None or crop.size == 0:
                 return None
             root = (Path(settings.datasets_dir).parent
                     / "training" / "uniform" / "_camera_crops")

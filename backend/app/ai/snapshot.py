@@ -89,12 +89,47 @@ def capture_alert_snapshot(frame_bgr, bbox_norm, alert_type: str,
                     cv2.putText(img, label, (p1[0], max(12, p1[1] - 5)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2, cv2.LINE_AA)
 
+        def _annotate_sv(scene, box_list) -> bool:
+            """P6: draw boxes via supervision annotators (cleaner boxes +
+            labels; orange for staff-uniform). Returns True on success so the
+            caller can fall back to the cv2 path on any failure."""
+            try:
+                import supervision as sv
+                colors = {
+                    "green":  sv.Color(r=0, g=200, b=0),
+                    "blue":   sv.Color(r=0, g=130, b=235),
+                    "red":    sv.Color(r=255, g=0, b=0),
+                    "orange": sv.Color(r=255, g=165, b=0),   # staff uniform
+                }
+                for cname in {b.get("color", "red") for b in box_list}:
+                    grp = [b for b in box_list
+                           if b.get("color", "red") == cname
+                           and b.get("bbox") and len(b["bbox"]) == 4]
+                    if not grp:
+                        continue
+                    xyxy = np.array([[max(0, b["bbox"][0]) * w, max(0, b["bbox"][1]) * h,
+                                      min(1, b["bbox"][2]) * w, min(1, b["bbox"][3]) * h]
+                                     for b in grp], dtype=float)
+                    dets = sv.Detections(xyxy=xyxy)
+                    col = colors.get(cname, colors["red"])
+                    scene = sv.BoxAnnotator(color=col, thickness=3).annotate(
+                        scene=scene, detections=dets)
+                    labels = [b.get("label", "") or "" for b in grp]
+                    if any(labels):
+                        scene = sv.LabelAnnotator(
+                            color=col, text_color=sv.Color.WHITE).annotate(
+                            scene=scene, detections=dets, labels=labels)
+                return True
+            except Exception:
+                return False
+
         if boxes:
-            for b in boxes:
-                bb = b.get("bbox")
-                if bb and len(bb) == 4:
-                    _draw(bb, _BOX_COLORS.get(b.get("color", "red"), (0, 0, 255)),
-                          b.get("label"))
+            if not _annotate_sv(img, boxes):
+                for b in boxes:      # cv2 fallback
+                    bb = b.get("bbox")
+                    if bb and len(bb) == 4:
+                        _draw(bb, _BOX_COLORS.get(b.get("color", "red"), (0, 0, 255)),
+                              b.get("label"))
         elif bbox_norm and len(bbox_norm) == 4:
             _draw(bbox_norm, (0, 0, 255))
 
