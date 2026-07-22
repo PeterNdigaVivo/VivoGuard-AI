@@ -10,3 +10,7 @@ ffmpeg-python>=0.2
 # analyst reason via Claude, and both run in the WORKER image (alerts
 # queue). Without this the agents silently fall back to rule-based.
 anthropic>=0.40
+
+# ByteTrack + Roboflow Supervision (tracking/zones). Pulls scipy +
+# defusedxml; opencv/pillow/numpy already present. Pinned during rollout.
+supervision==0.22.0

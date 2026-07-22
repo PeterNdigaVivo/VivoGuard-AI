@@ -6,3 +6,7 @@ ultralytics>=8.3
 torch>=2.3
 torchvision>=0.18
 ffmpeg-python>=0.2
+
+# ByteTrack + Roboflow Supervision (tracking/zones). Pulls scipy +
+# defusedxml; opencv/pillow/numpy already present. Pinned during rollout.
+supervision==0.22.0
