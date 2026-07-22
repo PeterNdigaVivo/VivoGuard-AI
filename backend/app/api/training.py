@@ -1655,3 +1655,13 @@ def training_progress(db: Session = Depends(get_db),
         "next_training": next_training, "simulation": simulation,
         "velocity": velocity,
     }
+
+
+# ── Manual staff-uniform crop-miner trigger (Part 6) ───────────────────────
+@router.post("/simulate/uniform")
+def simulate_uniform(_u=Depends(require_role("admin", "operator"))):
+    """Run the staff-uniform crop miner once, synchronously, and return its
+    summary (cameras processed, staff/customer crops, skipped). The same job
+    also runs automatically every 2 hours via beat."""
+    from app.tasks.uniform_miner import run_uniform_mining
+    return run_uniform_mining()

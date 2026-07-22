@@ -40,6 +40,7 @@ celery_app = Celery(
         "app.tasks.agents",
         "app.tasks.recorder",
         "app.tasks.alert_snapshots",
+        "app.tasks.uniform_miner",
     ],
 )
 celery_app.conf.update(
@@ -64,6 +65,7 @@ celery_app.conf.update(
         # Operator-facing alerts pool.
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
+        "simulation.mine_uniform_crops":        {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
@@ -338,6 +340,12 @@ celery_app.conf.update(
         "store-intelligence-every-15min": {
             "task": "alerting.store_intelligence_update",
             "schedule": timedelta(minutes=15),
+        },
+        # Staff-uniform crop miner (Part 6) — mines live frames for training
+        # data every 2 hours (30 cameras/run, rotating cursor).
+        "uniform-crop-miner-every-2h": {
+            "task": "simulation.mine_uniform_crops",
+            "schedule": timedelta(hours=2),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
         "sales-floor-daily-summary-every-5min": {
