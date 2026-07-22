@@ -17,7 +17,7 @@ from app.ai.detectors.base import (
 )
 from app.ai.detectors import staff_identity
 from app.ai.detectors.uniform_compliance import uniform_features
-from app.ai.zone_logic import bbox_in_zone
+from app.ai.zone_logic import bbox_in_zone, zone_contains
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +232,11 @@ class StaffPresenceDetector(Detector):
             except Exception:
                 pass
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
+        # P4: PolygonZone (foot-point) containment when a frame is available.
+        _wh = None
+        if ctx.frame_bgr is not None:
+            _h, _w = ctx.frame_bgr.shape[:2]
+            _wh = (_w, _h)
 
         # Per-track presence at each counter zone — used for service
         # time + dwell scoring. Also feeds the staff_identity registry
@@ -241,7 +246,8 @@ class StaffPresenceDetector(Detector):
             if tr.cls not in COCO_PERSON:
                 continue
             for z in counter_zones:
-                if bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                if zone_contains(tr.bbox_norm, z["polygon_coords_json"],
+                                 zone_id=z["id"], frame_wh=_wh):
                     key = (tr.track_id, z["id"])
                     active_track_zones.add(key)
                     self._counter_entries.setdefault(key, now)
@@ -285,7 +291,8 @@ class StaffPresenceDetector(Detector):
             for tr, _det in ctx.tracks:
                 if tr.cls not in COCO_PERSON:
                     continue
-                in_counter = bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"])
+                in_counter = zone_contains(tr.bbox_norm, z["polygon_coords_json"],
+                                           zone_id=z["id"], frame_wh=_wh)
                 in_staff = any(bbox_in_zone(tr.bbox_norm, sz["polygon_coords_json"])
                                for sz in staff_zones)
                 if not (in_counter or in_staff):

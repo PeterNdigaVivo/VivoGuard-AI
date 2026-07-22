@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 
 from app.ai.detectors.base import COCO_PERSON, COCO_VEHICLE, Detector, DetectorContext, DetectionEvent
-from app.ai.zone_logic import bbox_centre, bbox_in_zone, iou, segments_cross
+from app.ai.zone_logic import bbox_centre, bbox_in_zone, iou, segments_cross, zone_contains
 
 
 class CrowdDetector(Detector):
@@ -108,13 +108,18 @@ class TrespassDetector(Detector):
             return []
         from app.config import settings as _s
         min_frames = int(getattr(_s, "trespass_min_frames", self.MIN_ZONE_FRAMES))
+        _wh = None
+        if ctx.frame_bgr is not None:
+            _h, _w = ctx.frame_bgr.shape[:2]
+            _wh = (_w, _h)
         out: list[DetectionEvent] = []
         seen_keys: set[tuple[int, int, int]] = set()
         for tr, det in (ctx.tracks or []):
             if det.get("conf", 0.0) < thr or det["cls"] not in COCO_PERSON | COCO_VEHICLE:
                 continue
             for z in zones:
-                if not bbox_in_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                if not zone_contains(tr.bbox_norm, z["polygon_coords_json"],
+                                     zone_id=z["id"], frame_wh=_wh):
                     continue
                 key = (ctx.camera_id, tr.track_id, z["id"])
                 seen_keys.add(key)

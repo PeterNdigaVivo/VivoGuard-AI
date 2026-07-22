@@ -29,7 +29,7 @@ import time
 from typing import Any
 
 from app.ai.detectors.base import COCO_PERSON, DetectionEvent, Detector, DetectorContext
-from app.ai.zone_logic import bbox_in_zone
+from app.ai.zone_logic import bbox_in_zone, zone_contains
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +294,11 @@ class CheckoutDwellDetector(Detector):
 
         # Pass 1 — observe current frame, open new sessions, refresh
         # last_seen_ts on continuing ones.
+        # P4: PolygonZone (foot-point) containment when a frame is available.
+        _wh = None
+        if ctx.frame_bgr is not None:
+            _h, _w = ctx.frame_bgr.shape[:2]
+            _wh = (_w, _h)
         active_keys: set[tuple[int, int, int]] = set()
         for tr, det in person_tracks:
             track_id = getattr(tr, "track_id", None)
@@ -306,7 +311,7 @@ class CheckoutDwellDetector(Detector):
                 poly = z.get("polygon_coords_json")
                 if not poly:
                     continue
-                if not bbox_in_zone(bbox, poly):
+                if not zone_contains(bbox, poly, zone_id=z["id"], frame_wh=_wh):
                     continue
                 key = (ctx.camera_id, int(track_id), int(z["id"]))
 

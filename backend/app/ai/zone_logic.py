@@ -54,3 +54,48 @@ def segments_cross(p1: tuple[float, float], p2: tuple[float, float],
     def ccw(a, b, c) -> bool:
         return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
     return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
+
+
+# ── Supervision PolygonZone (P4) ───────────────────────────────────────────
+# Optional, more-accurate zone containment via sv.PolygonZone. Opt-in: callers
+# pass zone_id + frame_wh to use it; everything else keeps calling
+# bbox_in_zone() (centroid) unchanged. PolygonZone tests the detection's
+# ANCHOR (bottom-center / foot-point) against the polygon — more correct for
+# people than the centroid, but a behaviour change, so adoption is per-caller.
+#
+# Cache keyed by (zone_id, w, h) AND the polygon contents, so a re-drawn zone
+# rebuilds automatically (there is no global zone-update signal to hook).
+_polyzone_cache: dict = {}
+
+
+def zone_contains(bbox_norm: list[float], polygon: list[list[float]], *,
+                  zone_id: int | None = None,
+                  frame_wh: tuple[int, int] | None = None) -> bool:
+    """True if the detection is inside the polygon. Uses sv.PolygonZone
+    (foot-point anchor) when supervision + zone_id + frame_wh are all
+    available; otherwise falls back to the centroid test. Never raises."""
+    if zone_id is None or not frame_wh or not polygon:
+        return bbox_in_zone(bbox_norm, polygon)
+    try:
+        import numpy as np
+        import supervision as sv
+        w, h = int(frame_wh[0]), int(frame_wh[1])
+        if w <= 0 or h <= 0:
+            return bbox_in_zone(bbox_norm, polygon)
+        poly_key = tuple(tuple(round(float(c), 5) for c in pt) for pt in polygon)
+        ck = (int(zone_id), w, h)
+        cached = _polyzone_cache.get(ck)
+        if cached is None or cached[0] != poly_key:
+            pts = np.array([[p[0] * w, p[1] * h] for p in polygon], dtype=np.int64)
+            pz = sv.PolygonZone(polygon=pts)
+            _polyzone_cache[ck] = (poly_key, pz)
+        else:
+            pz = cached[1]
+        x1, y1, x2, y2 = bbox_norm
+        dets = sv.Detections(xyxy=np.array(
+            [[x1 * w, y1 * h, x2 * w, y2 * h]], dtype=float))
+        mask = pz.trigger(dets)
+        return bool(mask[0]) if len(mask) else False
+    except Exception:
+        # supervision missing / API drift / bad polygon → safe centroid path.
+        return bbox_in_zone(bbox_norm, polygon)

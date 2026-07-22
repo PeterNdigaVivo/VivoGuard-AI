@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
-from app.ai.zone_logic import bbox_in_zone, iou
+from app.ai.zone_logic import bbox_in_zone, iou, zone_contains
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +286,11 @@ class UniformComplianceDetector(Detector):
         out: list[DetectionEvent] = []
         scored = 0
         ok_like = 0
+        # P4: PolygonZone (foot-point) containment when a frame is available.
+        _wh = None
+        if ctx.frame_bgr is not None:
+            _h, _w = ctx.frame_bgr.shape[:2]
+            _wh = (_w, _h)
 
         # Each person currently standing in a staff zone gets scored.
         for det in ctx.raw_detections:
@@ -295,7 +300,8 @@ class UniformComplianceDetector(Detector):
             # also feeds the shared time-in-zone registry.
             zone_tag: str | None = None
             for z in staff_zones:
-                if bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"]):
+                if zone_contains(det["bbox_norm"], z["polygon_coords_json"],
+                                 zone_id=z["id"], frame_wh=_wh):
                     tags = set(z.get("detection_types_json") or [])
                     if "staff_zone" in tags:
                         zone_tag = "staff_zone"
