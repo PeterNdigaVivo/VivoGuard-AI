@@ -4,8 +4,8 @@ Loads a model once per process (optimized for the detected hardware
 backend via app.ai.env_config), runs inference on numpy frames, and
 returns a normalised list of detections regardless of model class set.
 
-Detections are dicts with: cls (str), conf (float), bbox_norm
-([x1,y1,x2,y2] in [0..1]). Pixel-space bbox is also included as `bbox_px`.
+Detections are dicts with: cls (str), cls_id (int COCO id), conf (float),
+bbox_norm ([x1,y1,x2,y2] in [0..1]). Pixel-space bbox is also `bbox_px`.
 """
 from __future__ import annotations
 import logging
@@ -97,7 +97,10 @@ def infer(frame: np.ndarray, *, weights: str | None = None,
     for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
         cls_name = names.get(int(k), str(int(k)))
         out.append({
-            "cls":  cls_name,
+            "cls":    cls_name,
+            "cls_id": int(k),      # int COCO id — the ByteTrack adapter builds
+                                   # sv.Detections.class_id from this (additive;
+                                   # existing consumers read `cls`).
             "conf": float(c),
             "bbox_px":   [float(x1), float(y1), float(x2), float(y2)],
             "bbox_norm": [float(x1)/w, float(y1)/h, float(x2)/w, float(y2)/h],
