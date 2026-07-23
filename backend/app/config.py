@@ -241,7 +241,10 @@ class Settings(BaseSettings):
     uniform_confidence_threshold:   float = 0.65
     trespass_min_frames:            int   = 5
     counter_min_empty_frames:       int   = 10
-    entry_exit_min_frames_per_side: int   = 3
+    entry_exit_min_frames_per_side: int   = 1   # cameras infer in short bursts;
+                                                # a real crossing is only 1-2
+                                                # frames — trust ByteTrack's
+                                                # track_id side transition.
     # Part 5: the legacy sales-floor heartbeat is OFF by default — replaced by
     # the store_intelligence 45-min BI update. Flip via env to re-enable.
     sales_floor_insight_enabled: bool = False
