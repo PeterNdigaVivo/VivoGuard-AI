@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     # artifact. False = always raw PyTorch (simpler for debugging).
     use_optimized: bool = True
     default_model: str = "yolov8n.pt"
+    # When True, cameras with no explicit model use the latest DEPLOYED model
+    # for inference. OFF by default: the deployed retail model (e.g. v25) is a
+    # specialist whose class names are NOT COCO "person", so using it for the
+    # general inference pass makes every person-based detector see 0 persons
+    # (chain-wide outage, Jul 2026). Only enable once the deployed model is
+    # confirmed to emit a COCO-"person" class.
+    use_deployed_model_for_inference: bool = False
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new

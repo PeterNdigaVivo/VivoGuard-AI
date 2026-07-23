@@ -40,6 +40,7 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.zone_logic import bbox_centre
+from app.config import settings          # used by evaluate() (P5 gate)
 
 log = logging.getLogger(__name__)
 

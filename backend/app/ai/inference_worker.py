@@ -129,7 +129,12 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
         m = db.get(AIModel, cam.ai_model_id)
         if m and m.weights_path and os.path.exists(m.weights_path):
             weights = m.weights_path
-    if weights is None:
+    # The chain-wide deployed-model fallback is OFF by default: the deployed
+    # retail model (v25) is a specialist whose classes are NOT COCO "person",
+    # so routing the GENERAL inference pass through it makes every person-based
+    # detector see 0 persons (chain-wide outage). Only used when explicitly
+    # enabled AND the deployed model is a COCO-person detector.
+    if weights is None and getattr(settings, "use_deployed_model_for_inference", False):
         weights = _deployed_weights(db)
     if weights is None:
         weights = settings.default_model
