@@ -245,7 +245,7 @@ class Settings(BaseSettings):
     # Part 5: the legacy sales-floor heartbeat is OFF by default — replaced by
     # the store_intelligence 45-min BI update. Flip via env to re-enable.
     sales_floor_insight_enabled: bool = False
-    store_intelligence_enabled:  bool = True
+    store_intelligence_enabled:  bool = False   # paused (Jul 2026)
     store_intel_llm_model: str = "claude-haiku-4-5"
 
     # --- ROI / Value Report tuning ---

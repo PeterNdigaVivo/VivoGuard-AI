@@ -88,6 +88,8 @@ x-app-env: &app-env
   TRESPASS_MIN_FRAMES: ${TRESPASS_MIN_FRAMES:-5}
   COUNTER_MIN_EMPTY_FRAMES: ${COUNTER_MIN_EMPTY_FRAMES:-10}
   ENTRY_EXIT_MIN_FRAMES_PER_SIDE: ${ENTRY_EXIT_MIN_FRAMES_PER_SIDE:-3}
+  # Store Intelligence 45-min BI update — paused by default (Jul 2026).
+  STORE_INTELLIGENCE_ENABLED: ${STORE_INTELLIGENCE_ENABLED:-false}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation
