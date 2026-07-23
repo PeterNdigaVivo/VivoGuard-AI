@@ -1720,28 +1720,36 @@ def cross_store_start(db: Session = Depends(get_db),
     with all augmentation. Auto-promotes at map50>=0.85 only when
     CROSS_STORE_AUTO_DEPLOY is set; otherwise the model is staged for a manual
     promote. Returns {store_counts, total_images, job_id}."""
-    from app.training.orchestrator import build_cross_store_dataset, CROSS_STORE_DATASET
-    res = build_cross_store_dataset(db)
-    if not res.get("dataset_id") or int(res.get("total_images", 0)) == 0:
-        raise HTTPException(400, res.get("reason", "no cross-store images available"))
-    cfg = {
-        "detection_type":       "cross_store",
-        "base_model":           getattr(settings, "cross_store_base_model", "yolov8n.pt"),
-        "incremental_finetune": False,          # full train — generalist detector
-        "epochs":               20,
-        "batch":                16,
-        "imgsz":                640,
-        "augment":              True,
-        "auto_promote_map50":   float(getattr(settings, "cross_store_promote_map50", 0.85)),
-        "origin":               "cross_store",
-    }
-    job = TrainingJob(model_name=CROSS_STORE_DATASET, dataset_id=res["dataset_id"],
-                      config_json=cfg, status="queued", priority=1, total_epochs=20)
-    db.add(job); db.commit(); db.refresh(job)
+    import traceback
     try:
-        from app.tasks.training import run_training_job
-        run_training_job.delay(job.id)
+        from app.training.orchestrator import build_cross_store_dataset, CROSS_STORE_DATASET
+        res = build_cross_store_dataset(db)
+        if not res.get("dataset_id") or int(res.get("total_images", 0)) == 0:
+            raise HTTPException(400, res.get("reason", "no cross-store images available"))
+        cfg = {
+            "detection_type":       "cross_store",
+            "base_model":           getattr(settings, "cross_store_base_model", "yolov8n.pt"),
+            "incremental_finetune": False,          # full train — generalist detector
+            "epochs":               20,
+            "batch":                16,
+            "imgsz":                640,
+            "augment":              True,
+            "auto_promote_map50":   float(getattr(settings, "cross_store_promote_map50", 0.85)),
+            "origin":               "cross_store",
+        }
+        job = TrainingJob(model_name=CROSS_STORE_DATASET, dataset_id=res["dataset_id"],
+                          config_json=cfg, status="queued", priority=1, total_epochs=20)
+        db.add(job); db.commit(); db.refresh(job)
+        try:
+            from app.tasks.training import run_training_job
+            run_training_job.delay(job.id)
+        except Exception as e:
+            log.warning("cross-store: celery enqueue failed (job stays queued): %s", e)
+        return {"store_counts": res["store_counts"],
+                "total_images": res["total_images"], "job_id": job.id}
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("cross-store: celery enqueue failed (job stays queued): %s", e)
-    return {"store_counts": res["store_counts"],
-            "total_images": res["total_images"], "job_id": job.id}
+        db.rollback()
+        log.error("cross-store start failed: %s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))

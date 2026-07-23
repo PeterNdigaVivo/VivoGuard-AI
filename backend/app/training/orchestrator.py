@@ -332,6 +332,7 @@ def build_cross_store_dataset(db: Session) -> dict:
     Returns {store_counts, total_images, dataset_id}."""
     import os
     from app.training.dataset import split_dataset
+    from app.training.feedback_loop import _ensure_dataset
 
     rows = _cross_store_query(db)
     if not rows:
