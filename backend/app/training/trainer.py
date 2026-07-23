@@ -357,6 +357,33 @@ def run_job(job_id: int) -> None:
             )
             db.add(ai_model)
             db.commit()
+
+            # Auto-promotion gate (config-driven — used by the cross-store
+            # pipeline). When a job sets cfg["auto_promote_map50"] and the
+            # trained map50 clears it, either deploy now (if
+            # settings.cross_store_auto_deploy) or stage it and log that it's
+            # ready for a manual promote.
+            _auto = cfg.get("auto_promote_map50")
+            _m50 = final_metrics.get("map50")
+            if _auto is not None and _m50 is not None and _m50 >= float(_auto):
+                from app.config import settings as _s
+                if bool(getattr(_s, "cross_store_auto_deploy", False)):
+                    sibs = (db.query(AIModel)
+                              .filter(AIModel.name == ai_model.name,
+                                      AIModel.deployed == True,            # noqa: E712
+                                      AIModel.id != ai_model.id).all())
+                    for _sib in sibs:
+                        _sib.deployed = False
+                    ai_model.deployed = True
+                    db.commit()
+                    log.info("Cross-store model promoted — now active on all "
+                             "cameras (map50=%.4f >= %.2f, model=%s)",
+                             _m50, float(_auto), ai_model.id)
+                else:
+                    log.info("Cross-store model map50=%.4f >= %.2f — ready to "
+                             "promote (staged deployed=false; set "
+                             "CROSS_STORE_AUTO_DEPLOY=true or promote manually)",
+                             _m50, float(_auto))
         _publish(f"vg:pub:training:{job_id}",
                  {"event": "done", "weights": str(best),
                   "metrics": final_metrics})

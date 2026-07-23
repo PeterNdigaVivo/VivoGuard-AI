@@ -1671,10 +1671,33 @@ def training_progress(db: Session = Depends(get_db),
         "projected_uniform_accuracy_weeks": proj,
     }
 
+    # ---- cross-store generalist model ------------------------------------
+    from app.training.orchestrator import CROSS_STORE_STORES, CROSS_STORE_DATASET
+    cs_ds = db.query(Dataset).filter(Dataset.name == CROSS_STORE_DATASET).first()
+    cs_store_counts: dict = {s: 0 for s in CROSS_STORE_STORES}
+    cs_total = 0
+    if cs_ds:
+        for (ti,) in db.query(TrainingImage.source_extra).filter(
+                TrainingImage.dataset_id == cs_ds.id):
+            cs_total += 1
+            st = (ti or {}).get("origin_store") if isinstance(ti, dict) else None
+            if st in cs_store_counts:
+                cs_store_counts[st] += 1
+    cs_model = (db.query(AIModel).filter(AIModel.name == CROSS_STORE_DATASET)
+                  .order_by(AIModel.created_at.desc()).first())
+    cross_store = {
+        "contributing_stores": CROSS_STORE_STORES,
+        "store_counts": cs_store_counts,
+        "total_images": cs_total,
+        "map50": cs_model.map50 if cs_model else None,
+        "version": cs_model.version if cs_model else None,
+        "deployed": bool(cs_model.deployed) if cs_model else False,
+    }
+
     return {
         "models": models, "datasets": datasets, "feedback": feedback,
         "next_training": next_training, "simulation": simulation,
-        "velocity": velocity,
+        "velocity": velocity, "cross_store": cross_store,
     }
 
 
@@ -1686,3 +1709,39 @@ def simulate_uniform(_u=Depends(require_role("admin", "operator"))):
     also runs automatically every 2 hours via beat."""
     from app.tasks.uniform_miner import run_uniform_mining
     return run_uniform_mining()
+
+
+# ── Cross-store generalist training (top-4 stores) ─────────────────────────
+@router.post("/cross-store/start")
+def cross_store_start(db: Session = Depends(get_db),
+                      _u=Depends(require_role("admin", "operator"))):
+    """Rebuild vivo_cross_store_v1 from the top-4 stores' confirmed images and
+    enqueue a high-priority (priority=1) 20-epoch full train from base yolov8n
+    with all augmentation. Auto-promotes at map50>=0.85 only when
+    CROSS_STORE_AUTO_DEPLOY is set; otherwise the model is staged for a manual
+    promote. Returns {store_counts, total_images, job_id}."""
+    from app.training.orchestrator import build_cross_store_dataset, CROSS_STORE_DATASET
+    res = build_cross_store_dataset(db)
+    if not res.get("dataset_id") or int(res.get("total_images", 0)) == 0:
+        raise HTTPException(400, res.get("reason", "no cross-store images available"))
+    cfg = {
+        "detection_type":       "cross_store",
+        "base_model":           getattr(settings, "cross_store_base_model", "yolov8n.pt"),
+        "incremental_finetune": False,          # full train — generalist detector
+        "epochs":               20,
+        "batch":                16,
+        "imgsz":                640,
+        "augment":              True,
+        "auto_promote_map50":   float(getattr(settings, "cross_store_promote_map50", 0.85)),
+        "origin":               "cross_store",
+    }
+    job = TrainingJob(model_name=CROSS_STORE_DATASET, dataset_id=res["dataset_id"],
+                      config_json=cfg, status="queued", priority=1, total_epochs=20)
+    db.add(job); db.commit(); db.refresh(job)
+    try:
+        from app.tasks.training import run_training_job
+        run_training_job.delay(job.id)
+    except Exception as e:
+        log.warning("cross-store: celery enqueue failed (job stays queued): %s", e)
+    return {"store_counts": res["store_counts"],
+            "total_images": res["total_images"], "job_id": job.id}

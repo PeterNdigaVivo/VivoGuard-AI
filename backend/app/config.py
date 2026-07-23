@@ -95,6 +95,14 @@ class Settings(BaseSettings):
     # (chain-wide outage, Jul 2026). Only enable once the deployed model is
     # confirmed to emit a COCO-"person" class.
     use_deployed_model_for_inference: bool = False
+    # Cross-store generalist model (top-4 stores). Full train from base
+    # yolov8n by default (a generalist person/retail detector — NOT fine-tuned
+    # from the specialist deployed model). Auto-deploy is OFF: a >=0.85 model
+    # is staged deployed=false and requires a manual promote, given the recent
+    # deployed-model outage.
+    cross_store_base_model:   str   = "yolov8n.pt"
+    cross_store_promote_map50: float = 0.85
+    cross_store_auto_deploy:  bool  = False
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new

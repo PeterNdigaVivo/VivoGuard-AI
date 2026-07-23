@@ -298,3 +298,89 @@ def run_weekly_for_all(db: Session, *, dry_run: bool = False) -> list[dict]:
                 .all())
     types = sorted({d.name[len("feedback-"):] for d in pools})
     return [enqueue_fine_tune_if_due(db, t, dry_run=dry_run) for t in types]
+
+
+# ── Cross-store generalist dataset (top-4 stores) ──────────────────────────
+# Only these stores have proven-accurate operator feedback. Edit if the DB
+# store names differ (the JOIN matches Store.name exactly).
+CROSS_STORE_STORES = ["Vivo Junction", "Vivo Runda", "Vivo Yaya", "Vivo Garden City"]
+CROSS_STORE_DATASET = "vivo_cross_store_v1"
+CROSS_STORE_MIN_IMAGES = 30
+
+
+def _cross_store_query(db: Session):
+    """Confirmed TrainingImages from the top-4 stores, newest first, joined to
+    their DetectionEvent (for the class label) + Store name."""
+    from app.models import Alert, Camera, Store
+    from app.models import DetectionEvent  # noqa: F811
+    return (db.query(TrainingImage, DetectionEvent, Store.name)
+              .join(Alert, Alert.id == TrainingImage.source_alert_id)
+              .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+              .join(Camera, Camera.id == DetectionEvent.camera_id)
+              .join(Store, Store.id == Camera.store_id)
+              .filter(Store.name.in_(CROSS_STORE_STORES),
+                      Alert.feedback_used_for_training.is_(True),
+                      TrainingImage.file_path.isnot(None))
+              .order_by(TrainingImage.created_at.desc())
+              .all())
+
+
+def build_cross_store_dataset(db: Session) -> dict:
+    """(Re)build the vivo_cross_store_v1 dataset from confirmed images across
+    the top-4 stores. Soft-prefers images with an orange-box preview and a
+    real file (>50KB); falls back to all confirmed if that drops below 30.
+    Returns {store_counts, total_images, dataset_id}."""
+    import os
+    from app.training.dataset import split_dataset
+
+    rows = _cross_store_query(db)
+    if not rows:
+        return {"store_counts": {}, "total_images": 0, "dataset_id": None,
+                "reason": "no confirmed images from the top-4 stores "
+                          "(check store names match the DB)"}
+
+    def _quality(ti) -> bool:
+        try:
+            return bool(ti.preview_path and ti.file_path
+                        and os.path.exists(ti.file_path)
+                        and os.path.getsize(ti.file_path) > 50 * 1024)
+        except Exception:
+            return False
+
+    filtered = [r for r in rows if _quality(r[0])]
+    use = filtered if len(filtered) >= CROSS_STORE_MIN_IMAGES else rows
+    log.info("cross_store: %d confirmed images (%d passed quality filter) — "
+             "using %d", len(rows), len(filtered), len(use))
+
+    classes = sorted({ev.detection_type for (_ti, ev, _s) in use if ev.detection_type})
+    ds = _ensure_dataset(db, CROSS_STORE_DATASET, classes,
+                         description="auto: cross-store generalist (top-4 stores)")
+    # Rebuild fresh each run so counts reflect the current confirmed pool.
+    db.query(TrainingImage).filter(TrainingImage.dataset_id == ds.id).delete()
+    db.commit()
+
+    from app.models import Annotation
+    store_counts: dict[str, int] = {}
+    for (ti, ev, sname) in use:
+        # The training image is ALREADY a clean person crop (the alert
+        # thumbnail); the source frame isn't persisted, so sv.crop_image
+        # re-extraction is N/A — reference the existing crop directly.
+        new = TrainingImage(
+            dataset_id=ds.id, camera_id=ti.camera_id,
+            file_path=ti.file_path, labeled=True,
+            source_extra={"source": "cross_store", "origin_store": sname,
+                          "origin_image_id": ti.id,
+                          "detection_type": ev.detection_type},
+        )
+        db.add(new); db.flush()
+        if ev.detection_type:
+            db.add(Annotation(image_id=new.id, class_label=ev.detection_type,
+                              bbox_json=[0.5, 0.5, 1.0, 1.0], verified=True))
+        store_counts[sname] = store_counts.get(sname, 0) + 1
+    db.commit()
+
+    split_dataset(db, ds.id, train=0.8, val=0.2, test=0.0)
+    total = sum(store_counts.values())
+    log.info("cross_store: dataset=%s rebuilt total=%d per-store=%s",
+             ds.id, total, store_counts)
+    return {"store_counts": store_counts, "total_images": total, "dataset_id": ds.id}

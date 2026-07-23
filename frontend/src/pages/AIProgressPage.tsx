@@ -45,6 +45,14 @@ interface Progress {
     avg_map50_improvement: number | null
     projected_uniform_accuracy_weeks: number | null
   }
+  cross_store: {
+    contributing_stores: string[]
+    store_counts: Record<string, number>
+    total_images: number
+    map50: number | null
+    version: string | null
+    deployed: boolean
+  }
 }
 
 function healthColor(n: number): string {
@@ -66,6 +74,8 @@ function relTime(iso: string | null): string {
 export default function AIProgressPage() {
   const [data, setData] = useState<Progress | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [csBusy, setCsBusy] = useState(false)
+  const [csMsg, setCsMsg] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -76,6 +86,15 @@ export default function AIProgressPage() {
     const t = setInterval(load, 60_000)
     return () => { alive = false; clearInterval(t) }
   }, [])
+
+  const trainCrossStore = () => {
+    setCsBusy(true); setCsMsg(null)
+    api<{ store_counts: Record<string, number>; total_images: number; job_id: number }>(
+      '/training/cross-store/start', { method: 'POST' })
+      .then(r => setCsMsg(`Training started — job #${r.job_id} on ${r.total_images} images.`))
+      .catch(e => setCsMsg(`Could not start: ${String(e)}`))
+      .finally(() => setCsBusy(false))
+  }
 
   if (error) return (
     <div className="p-6"><PageHeader title="AI Progress" />
@@ -134,6 +153,54 @@ export default function AIProgressPage() {
               }} />
           </LineChart>
         </ResponsiveContainer>
+      </Card>
+
+      {/* SECTION 1b — cross-store generalist model */}
+      <Card className="p-4 dark:bg-slate-900 dark:border-slate-800">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="font-semibold text-slate-800 dark:text-slate-100">
+              Cross-Store Generalist Model
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              One detector trained on high-quality confirmed data from the top-4 stores.
+            </div>
+          </div>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full text-white shrink-0"
+            style={{ background: data.cross_store.deployed ? GREEN : AXIS }}>
+            {data.cross_store.deployed ? 'Deployed' : 'Staged'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+          <Kpi label="Total training images" value={data.cross_store.total_images} color={BLUE} />
+          <Kpi label="Current map50"
+            value={data.cross_store.map50 != null ? data.cross_store.map50.toFixed(3) : '—'}
+            color={mapColor(data.cross_store.map50)} small />
+          <Kpi label="Version" value={data.cross_store.version ?? 'not trained'} color={AXIS} small />
+          <Kpi label="Contributing stores"
+            value={data.cross_store.contributing_stores.length} color={GREEN} />
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mt-3">
+          {data.cross_store.contributing_stores.map(s => (
+            <div key={s} className="rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-2">
+              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">{s}</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                {data.cross_store.store_counts[s] ?? 0} images
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-3 mt-4">
+          <button onClick={trainCrossStore} disabled={csBusy}
+            className="rounded-lg px-4 py-2 text-sm font-semibold text-white bg-blue-600
+                       hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+            {csBusy ? 'Starting…' : 'Train Now'}
+          </button>
+          {csMsg && <span className="text-xs text-slate-600 dark:text-slate-300">{csMsg}</span>}
+        </div>
       </Card>
 
       {/* SECTION 2 — dataset health */}
