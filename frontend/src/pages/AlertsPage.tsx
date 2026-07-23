@@ -9,20 +9,16 @@ import { alerts as alertsApi, type Alert } from '@/api/alerts'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 
-// Simple quick-filter buttons non-technical staff understand. The
-// 'status' bucket isolates the recurring sales_floor_insight cards
-// ("Status Update — <store>") so they don't pollute the urgent /
-// attention / resolved feeds.
-type Quick = 'store' | 'status' | 'urgent' | 'attention' | 'resolved' | 'all'
+// Simple quick-filter buttons non-technical staff understand.
+type Quick = 'store' | 'urgent' | 'attention' | 'resolved' | 'all'
 
-// store_intelligence has its own tab. sales_floor_insight + system_health are
-// the routine "Status Update" heartbeats. All three are kept OUT of the
-// actionable tabs (urgent / attention / resolved / all).
+// store_intelligence has its own "Store Update" tab and is kept OUT of the
+// actionable tabs (urgent / attention / resolved / all). Everything else —
+// including the routine sales_floor_insight + system_health heartbeats —
+// flows into the actionable tabs by severity/status like any other alert.
 const STORE_INTEL_TYPE = 'store_intelligence'
-const STATUS_TYPES = new Set(['sales_floor_insight', 'system_health'])
-const _isStatus = (a: Alert) => STATUS_TYPES.has(a.detection_type ?? '')
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
-const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isStatus(a)
+const _isActionable = (a: Alert) => !_isStoreIntel(a)
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
@@ -94,17 +90,16 @@ export default function AlertsPage() {
     return () => window.removeEventListener('vg:alert-resolved', onResolved)
   }, [items])
 
-  // Client-side quick-filter + search over the loaded window. Every
-  // non-status filter EXCLUDES sales_floor_insight so the routine
-  // 15-min "Status Update" alerts only show up under their own tab.
+  // Client-side quick-filter + search over the loaded window. The
+  // actionable tabs exclude only store_intelligence (which has its own
+  // "Store Update" tab); sales_floor_insight + system_health flow into
+  // the "All" tab (and the others by severity) like normal alerts.
   const filtered = useMemo(() => {
     let rows = items
     if (quick === 'store') {
       rows = rows.filter(_isStoreIntel)
-    } else if (quick === 'status') {
-      rows = rows.filter(_isStatus)
     } else {
-      // Actionable tabs exclude store_intelligence AND the status heartbeats.
+      // Actionable tabs exclude store_intelligence only.
       rows = rows.filter(_isActionable)
       if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
       else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
@@ -125,14 +120,13 @@ export default function AlertsPage() {
 
   // Per-bucket counts derived from the loaded items, so each filter
   // button's badge equals what the user will actually see when they
-  // click it. Status-update alerts are excluded from every other
-  // bucket; the Status Update tab is the only one that shows them.
+  // click it. Only store_intelligence is excluded from the actionable
+  // buckets; it has its own Store Update tab.
   const counts = useMemo(() => {
     const actionable = items.filter(_isActionable)
     return {
       // Store Update badge = unread (new) store_intelligence updates.
       store:     items.filter(a => _isStoreIntel(a) && a.status === 'new').length,
-      status:    items.filter(_isStatus).length,
       urgent:    actionable.filter(a => a.severity_label === 'URGENT' && a.status === 'new').length,
       attention: actionable.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new').length,
       resolved:  actionable.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
@@ -232,10 +226,6 @@ export default function AlertsPage() {
                   tone="teal">
           🏪 Store Update ({counts.store})
         </QuickBtn>
-        <QuickBtn active={quick === 'status'}    onClick={() => setQuick('status')}
-                  tone="orange">
-          📊 Status Update ({counts.status})
-        </QuickBtn>
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
           🔴 Urgent ({counts.urgent})
         </QuickBtn>
@@ -289,21 +279,15 @@ export default function AlertsPage() {
 
 function QuickBtn({ active, onClick, children, tone = 'default' }: {
   active: boolean; onClick: () => void; children: React.ReactNode
-  tone?: 'default' | 'orange' | 'teal'
+  tone?: 'default' | 'teal'
 }) {
-  // Same padding / sizing across all tones — only the colour swap
-  // differs. font-bold for the orange tone is intentional: the
-  // Status Update button is the routine-heartbeat tab and the brief
-  // asked for a sharp, distinct look so it doesn't blend in with the
-  // urgent / attention buckets.
-  const palette = tone === 'orange'
+  // Same padding / sizing across tones — only the colour swap differs.
+  // The teal tone marks the Store Update tab so it stands apart from the
+  // urgent / attention / resolved buckets.
+  const palette = tone === 'teal'
     ? (active
-        ? 'bg-orange-600 text-white font-bold hover:bg-orange-700'
-        : 'bg-orange-500 text-white font-bold hover:bg-orange-600')
-    : tone === 'teal'
-      ? (active
-          ? 'bg-teal-600 text-white font-bold hover:bg-teal-700'
-          : 'bg-teal-500 text-white font-bold hover:bg-teal-600')
+        ? 'bg-teal-600 text-white font-bold hover:bg-teal-700'
+        : 'bg-teal-500 text-white font-bold hover:bg-teal-600')
     : (active
         ? 'bg-slate-800 text-white font-medium'
         : 'bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')
