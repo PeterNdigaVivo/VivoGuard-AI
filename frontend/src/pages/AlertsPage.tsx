@@ -13,9 +13,16 @@ import { stores as storesApi, type Store } from '@/api/stores'
 // 'status' bucket isolates the recurring sales_floor_insight cards
 // ("Status Update — <store>") so they don't pollute the urgent /
 // attention / resolved feeds.
-type Quick = 'urgent' | 'attention' | 'resolved' | 'all' | 'status'
+type Quick = 'store' | 'status' | 'urgent' | 'attention' | 'resolved' | 'all'
 
-const SFI_TYPE = 'sales_floor_insight'
+// store_intelligence has its own tab. sales_floor_insight + system_health are
+// the routine "Status Update" heartbeats. All three are kept OUT of the
+// actionable tabs (urgent / attention / resolved / all).
+const STORE_INTEL_TYPE = 'store_intelligence'
+const STATUS_TYPES = new Set(['sales_floor_insight', 'system_health'])
+const _isStatus = (a: Alert) => STATUS_TYPES.has(a.detection_type ?? '')
+const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
+const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isStatus(a)
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
@@ -92,10 +99,13 @@ export default function AlertsPage() {
   // 15-min "Status Update" alerts only show up under their own tab.
   const filtered = useMemo(() => {
     let rows = items
-    if (quick === 'status') {
-      rows = rows.filter(a => a.detection_type === SFI_TYPE)
+    if (quick === 'store') {
+      rows = rows.filter(_isStoreIntel)
+    } else if (quick === 'status') {
+      rows = rows.filter(_isStatus)
     } else {
-      rows = rows.filter(a => a.detection_type !== SFI_TYPE)
+      // Actionable tabs exclude store_intelligence AND the status heartbeats.
+      rows = rows.filter(_isActionable)
       if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
       else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
       // 'confirmed' covers alerts the /resolve endpoint flipped (it
@@ -118,13 +128,15 @@ export default function AlertsPage() {
   // click it. Status-update alerts are excluded from every other
   // bucket; the Status Update tab is the only one that shows them.
   const counts = useMemo(() => {
-    const nonSfi = items.filter(a => a.detection_type !== SFI_TYPE)
+    const actionable = items.filter(_isActionable)
     return {
-      urgent:    nonSfi.filter(a => a.severity_label === 'URGENT' && a.status === 'new').length,
-      attention: nonSfi.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new').length,
-      resolved:  nonSfi.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
-      all:       nonSfi.length,
-      status:    items.filter(a => a.detection_type === SFI_TYPE).length,
+      // Store Update badge = unread (new) store_intelligence updates.
+      store:     items.filter(a => _isStoreIntel(a) && a.status === 'new').length,
+      status:    items.filter(_isStatus).length,
+      urgent:    actionable.filter(a => a.severity_label === 'URGENT' && a.status === 'new').length,
+      attention: actionable.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new').length,
+      resolved:  actionable.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
+      all:       actionable.length,
     }
   }, [items])
 
@@ -216,6 +228,10 @@ export default function AlertsPage() {
       {/* Simple filter bar. Each button shows a live count so the
           operator sees at a glance how much is in each bucket. */}
       <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
+        <QuickBtn active={quick === 'store'}     onClick={() => setQuick('store')}
+                  tone="teal">
+          🏪 Store Update ({counts.store})
+        </QuickBtn>
         <QuickBtn active={quick === 'status'}    onClick={() => setQuick('status')}
                   tone="orange">
           📊 Status Update ({counts.status})
@@ -273,7 +289,7 @@ export default function AlertsPage() {
 
 function QuickBtn({ active, onClick, children, tone = 'default' }: {
   active: boolean; onClick: () => void; children: React.ReactNode
-  tone?: 'default' | 'orange'
+  tone?: 'default' | 'orange' | 'teal'
 }) {
   // Same padding / sizing across all tones — only the colour swap
   // differs. font-bold for the orange tone is intentional: the
@@ -284,6 +300,10 @@ function QuickBtn({ active, onClick, children, tone = 'default' }: {
     ? (active
         ? 'bg-orange-600 text-white font-bold hover:bg-orange-700'
         : 'bg-orange-500 text-white font-bold hover:bg-orange-600')
+    : tone === 'teal'
+      ? (active
+          ? 'bg-teal-600 text-white font-bold hover:bg-teal-700'
+          : 'bg-teal-500 text-white font-bold hover:bg-teal-600')
     : (active
         ? 'bg-slate-800 text-white font-medium'
         : 'bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')
