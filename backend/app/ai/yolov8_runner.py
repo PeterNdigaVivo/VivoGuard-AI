@@ -44,6 +44,20 @@ def _hardware() -> HardwareEnv:
     return _env
 
 
+def _get_person_class_ids(model) -> list[int]:
+    """Class ids in this model whose name is a person synonym. Diagnostic:
+    an EMPTY list means the model has NO person class — every person-based
+    detector (which filters cls=='person') will see 0 persons. This is exactly
+    how a custom retail model (e.g. v25) breaks general detection chain-wide."""
+    names = getattr(model, "names", None)
+    person = {"person", "people", "human"}
+    if isinstance(names, dict):
+        return [int(k) for k, v in names.items() if str(v).lower() in person]
+    if isinstance(names, (list, tuple)):
+        return [i for i, v in enumerate(names) if str(v).lower() in person]
+    return [0]
+
+
 def load_model(weights: str):
     """Load (and cache) a YOLO model for `weights`, optimized for the
     detected backend when settings.use_optimized is True."""
@@ -53,10 +67,19 @@ def load_model(weights: str):
             env = _hardware()
             use_opt = bool(getattr(settings, "use_optimized", True))
             model, fmt = env.load_optimized(weights, use_optimized=use_opt)
+            # Diagnostic: which class ids are people? Empty => this model can
+            # NOT drive person-based detectors (the chain-wide persons=0 cause).
+            try:
+                model._person_cls_ids = _get_person_class_ids(model)
+            except Exception:
+                model._person_cls_ids = [0]
             log.info("loaded YOLO model %s as %s (backend=%s device=%s "
-                     "export_ms=%.0f load_ms=%.0f)",
+                     "export_ms=%.0f load_ms=%.0f) | person_class_ids=%s | "
+                     "names=%s",
                      weights, fmt, env.backend, env.device,
-                     env.export_ms, env.load_ms)
+                     env.export_ms, env.load_ms,
+                     getattr(model, "_person_cls_ids", None),
+                     getattr(model, "names", None))
             _models[weights] = model
         return _models[weights]
 

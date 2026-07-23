@@ -29,7 +29,7 @@ from app.ai.detectors import DetectorRegistry
 from app.ai.detectors.base import COCO_PERSON, DetectorContext
 from app.ai.snapshot import SNAPSHOT_TYPES
 from app.ai.tracker import IOUTracker
-from app.ai.yolov8_runner import infer
+from app.ai.yolov8_runner import infer, load_model, resolve_weights
 from app.config import settings
 from app.database import SessionLocal
 from app.models import AIModel, Camera, DetectionConfig, DetectionEvent, Store, Zone, Alert
@@ -355,6 +355,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             reid_encoder = reid_xtracker = None
     last_seen_ts: float = 0.0
     last_evict_ts: float = 0.0
+    model_validated = False
     frame_idx = 0
 
     # Sprint 1.2 latency telemetry. Backend/format from HardwareEnv so
@@ -412,6 +413,21 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 continue
             frame = np.array(img)[:, :, ::-1]   # RGB → BGR for OpenCV/YOLO
             perf.record("frame_read", (time.perf_counter() - _t0) * 1000.0)
+
+            # Startup validation — log the actual model + its person class ids
+            # ONCE per camera so an outage cause (a model with no person class)
+            # is obvious in the worker log immediately.
+            if not model_validated:
+                try:
+                    _m = load_model(resolve_weights(weights))
+                    _pids = getattr(_m, "_person_cls_ids", None)
+                    log.info("Model validation cam=%s: weights=%s person_class_ids=%s%s",
+                             camera_id, weights, _pids,
+                             "  ← NO PERSON CLASS — person detectors will see 0!"
+                             if _pids == [] else "")
+                except Exception as _mv:
+                    log.warning("Model validation failed cam=%s: %s", camera_id, _mv)
+                model_validated = True
 
             _t0 = time.perf_counter()
             try:
