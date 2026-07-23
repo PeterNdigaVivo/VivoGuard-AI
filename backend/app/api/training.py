@@ -1722,6 +1722,7 @@ def cross_store_start(db: Session = Depends(get_db),
     promote. Returns {store_counts, total_images, job_id}."""
     import traceback
     try:
+        from app.config import settings
         from app.training.orchestrator import build_cross_store_dataset, CROSS_STORE_DATASET
         res = build_cross_store_dataset(db)
         if not res.get("dataset_id") or int(res.get("total_images", 0)) == 0:
