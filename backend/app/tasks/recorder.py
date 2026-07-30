@@ -322,12 +322,18 @@ def extract_pending_clips() -> None:
             started = clip.started_at
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
-            # Standardised 30s clip for ALL alert types: 10s of lead-up
-            # before the alert + 20s after, so the operator sees what led
-            # up to the incident and what happened right after.
-            pre_buffer = 10                       # seconds before the alert
-            post_buffer = 20                      # seconds after the alert
-            dur = pre_buffer + post_buffer        # 30 seconds total
+            # Standardised 30s clip for most alert types (10s before + 20s
+            # after). shop_open_close gets the longer 60s "Yaya 9:13" clip —
+            # 45s of the person approaching the door + 15s of the door
+            # opening / entering — so the store-open motion is captured end
+            # to end.
+            if (ev.detection_type or "") == "shop_open_close":
+                pre_buffer = 45                   # approach to the door
+                post_buffer = 15                  # door opening / entering
+            else:
+                pre_buffer = 10                   # seconds before the alert
+                post_buffer = 20                  # seconds after the alert
+            dur = pre_buffer + post_buffer
             seconds_since_recording_start = int((ev_ts - started).total_seconds())
             offset = max(0, seconds_since_recording_start - pre_buffer)
             out = _alert_clips_root() / f"{alert.id}.mp4"

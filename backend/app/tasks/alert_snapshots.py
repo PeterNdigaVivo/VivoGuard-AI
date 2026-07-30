@@ -11,6 +11,10 @@ Alerts page shows what led up to it AND what happened next:
     [+90s]  incident continuing
     [+120s] resolution / aftermath
 
+The timeline is per-type (FILMSTRIP_TIMELINES). shop_open_close overrides it
+with the Yaya 9:13 door-opening sequence — [-30s][-15s][-5s][0s][+5s][+15s] —
+so the strip shows the person approaching, opening the door, and entering.
+
 Snapshot 1 (-10s): extracted from the camera's ACTIVE recording file at
 (alert_time - 10s) when one is running; otherwise the most-recent Redis
 frame (vg:frame:{cam}) is used as the best available "before" image.
@@ -51,8 +55,17 @@ FILMSTRIP_TYPES: set[str] = {
     "counter_unstaffed", "shop_open_close", "shrinkage", "uniform_compliance",
 }
 
-PRE_OFFSET_S   = 10                     # snapshot 1 — before the alert
-POST_OFFSETS_S = (30, 60, 90, 120)      # snapshots 3-6 — after the alert
+# Default timeline: 1 pre-frame (-10s), the t=0 frame, then +30/60/90/120s.
+DEFAULT_PRE_OFFSETS_S  = (10,)                 # snapshot 1 — before the alert
+DEFAULT_POST_OFFSETS_S = (30, 60, 90, 120)     # snapshots 3-6 — after the alert
+
+# Per-type overrides. shop_open_close uses the tight door-opening timeline
+# from the Yaya 9:13 store-open: -30/-15/-5 (approach), t=0 (crossing),
+# +5/+15 (door open + entering). Pre offsets are POSITIVE seconds before the
+# alert; each pair totals <= MAX_SNAPSHOTS frames counting the t=0 frame.
+FILMSTRIP_TIMELINES: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {
+    "shop_open_close": ((30, 15, 5), (5, 15)),
+}
 MAX_SNAPSHOTS  = 6
 
 # 48h retention for the on-disk filmstrips (mirrors prune_alert_clips).
@@ -183,9 +196,12 @@ def capture_filmstrip_frame(alert_id: int, camera_id: int, store_id: int,
 def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
                              detection_type: str, alert_epoch: float) -> None:
     """Kick off the 6-frame filmstrip for a business-hours alert: capture the
-    -10s and t=0 frames now, then schedule the +30/60/90/120s frames. Gated on
-    the alert type and the 09:00–20:00 EAT window (evaluated at the alert's
-    own time). Best-effort — never raises."""
+    pre-frames and t=0 frame now, then schedule the post-frames via countdown.
+    Timeline is per-type (FILMSTRIP_TIMELINES) — the default is -10s/t=0/
+    +30/60/90/120s; shop_open_close uses -30/-15/-5/t=0/+5/+15 to capture the
+    approach-to-door + door-opening motion. Gated on the alert type and the
+    09:00–20:00 EAT window (evaluated at the alert's own time). Best-effort —
+    never raises."""
     if not bool(getattr(settings, "business_hours_snapshot_enabled", True)):
         return
     if detection_type not in FILMSTRIP_TYPES:
@@ -194,16 +210,22 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
     if not _within_business_hours(alert_dt):
         return
 
-    # Snapshot 1 — 10s BEFORE the alert (recording extract, else Redis frame).
-    pre_dt = alert_dt - timedelta(seconds=PRE_OFFSET_S)
-    pre_jpeg = _extract_recording_frame(camera_id, pre_dt) or _redis_frame(camera_id)
-    if pre_jpeg:
-        p = _save_jpeg(pre_jpeg, store_id=store_id, alert_id=alert_id,
-                       epoch_ts=int(pre_dt.timestamp()))
-        if p:
-            _append_path(alert_id, p)
+    pre_offsets, post_offsets = FILMSTRIP_TIMELINES.get(
+        detection_type, (DEFAULT_PRE_OFFSETS_S, DEFAULT_POST_OFFSETS_S))
 
-    # Snapshot 2 — the alert moment (most-recent Redis frame).
+    # Pre-frames — each extracted from the active recording at (alert - Ns),
+    # else the most-recent Redis frame. Oldest-first so the strip reads
+    # left-to-right as the approach to the door.
+    for pre in sorted(pre_offsets, reverse=True):    # e.g. 30,15,5 → -30/-15/-5s
+        pre_dt = alert_dt - timedelta(seconds=pre)
+        pre_jpeg = _extract_recording_frame(camera_id, pre_dt) or _redis_frame(camera_id)
+        if pre_jpeg:
+            p = _save_jpeg(pre_jpeg, store_id=store_id, alert_id=alert_id,
+                           epoch_ts=int(pre_dt.timestamp()))
+            if p:
+                _append_path(alert_id, p)
+
+    # t=0 frame — the alert moment (most-recent Redis frame).
     now_jpeg = _redis_frame(camera_id)
     if now_jpeg:
         p = _save_jpeg(now_jpeg, store_id=store_id, alert_id=alert_id,
@@ -211,9 +233,9 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
         if p:
             _append_path(alert_id, p)
 
-    # Snapshots 3-6 — +30/60/90/120s via Celery countdown.
+    # Post-frames via Celery countdown (grab the live Redis frame at +Ns).
     base = int(alert_dt.timestamp())
-    for off in POST_OFFSETS_S:
+    for off in post_offsets:
         capture_filmstrip_frame.apply_async(
             args=[alert_id, camera_id, store_id, base + off],
             countdown=off,

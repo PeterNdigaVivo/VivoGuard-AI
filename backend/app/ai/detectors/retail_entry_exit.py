@@ -135,6 +135,8 @@ class EntryExitDetector(Detector):
         self._pseudo: dict[tuple[int, int], list[dict]] = {}
         self._last_hb: dict[int, float] = {}
         self._last_near: dict[tuple[int, int], float] = {}
+        # camera_id → first timestamp we saw entry_exit zones but ZERO persons.
+        self._zero_since: dict[int, float] = {}
         # Per-camera flag so the "code path loaded" banner only logs
         # once — confirms the position-based pseudo-track code is
         # what's running, not the retired prev/curr centroid version.
@@ -203,6 +205,12 @@ class EntryExitDetector(Detector):
         thr = float(cfg.get("confidence_threshold", 0.5))
         persons = [d for d in ctx.raw_detections
                    if d.get("cls") in COCO_PERSON and d.get("conf", 0.0) >= thr]
+        # Track how long we've had entry_exit zones but ZERO persons — a
+        # strong signal the camera angle / line position is wrong.
+        if persons:
+            self._zero_since.pop(ctx.camera_id, None)
+        else:
+            self._zero_since.setdefault(ctx.camera_id, now)
         if ctx.camera_id not in self._announced:
             self._announced.add(ctx.camera_id)
             log.info("EntryExit camera=%s pseudo-track impl loaded "
@@ -212,8 +220,15 @@ class EntryExitDetector(Detector):
                      ctx.camera_id, self.MATCH_RADIUS, self.PSEUDO_TRACK_TTL,
                      self.SIDE_DEADBAND, thr)
         if self._hb_due(ctx.camera_id, now):
-            log.info("EntryExit camera=%s zones=%d persons=%d",
-                     ctx.camera_id, len(good_lines), len(persons))
+            zero_for = now - self._zero_since.get(ctx.camera_id, now)
+            if not persons and zero_for >= _HEARTBEAT_SECONDS:
+                log.warning("camera %s has entry_exit zone but no persons "
+                            "detected for %.0fs — check camera angle and line "
+                            "position (line must sit at the door threshold).",
+                            ctx.camera_id, zero_for)
+            else:
+                log.info("EntryExit camera=%s zones=%d persons=%d",
+                         ctx.camera_id, len(good_lines), len(persons))
 
         inward_sign = float(((cfg.get("extra") or {}).get("inward_sign")) or 1.0)
         out: list[DetectionEvent] = []
