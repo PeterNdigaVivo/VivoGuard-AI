@@ -19,10 +19,48 @@ import redis
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Dataset, TrainingJob
+from app.models import AIModel, Dataset, TrainingJob
 from app.training.dataset import dataset_root, split_dataset, write_yolo_dataset_yaml
+from app.training.sanitize import sanitize_dataset
 
 log = logging.getLogger(__name__)
+
+# Aggressive augmentation defaults (Part 2 #3, Q7) — multiplies effective
+# dataset size ~4-8x; critical for lighting variance across 28 stores.
+# A job may override/extend via cfg["augmentation"]; the merged dict is
+# validated against the installed ultralytics' config keys BEFORE training
+# so an invalid key fails fast instead of surfacing mid-run.
+DEFAULT_AUGMENTATION: dict[str, float] = {
+    "degrees": 10.0, "translate": 0.1, "scale": 0.5, "fliplr": 0.5,
+    "mosaic": 0.5, "hsv_h": 0.015, "hsv_s": 0.7, "hsv_v": 0.4,
+}
+
+
+def _ultralytics_cfg_keys() -> set[str]:
+    """Authoritative set of train-config keys for the INSTALLED ultralytics.
+    (`YOLO.train` accepts **kwargs, so signature introspection is useless —
+    the default-config dict is the real schema.)"""
+    from ultralytics.cfg import DEFAULT_CFG_DICT
+    return set(DEFAULT_CFG_DICT.keys())
+
+
+def validate_augmentation_config(aug: dict[str, object], *,
+                                 valid_keys: set[str] | None = None) -> None:
+    """Fail-fast validation of augmentation kwargs. Raises ValueError naming
+    every unknown key / non-numeric value. Replaces the old silent
+    TypeError-retry (which dropped the whole augmentation block mid-run)."""
+    if valid_keys is None:
+        valid_keys = _ultralytics_cfg_keys()
+    unknown = sorted(set(aug) - valid_keys)
+    if unknown:
+        raise ValueError(
+            f"augmentation config contains keys the installed ultralytics "
+            f"does not support: {unknown} — fix the job's cfg['augmentation']")
+    non_numeric = sorted(k for k, v in aug.items()
+                         if not isinstance(v, (int, float)) or isinstance(v, bool))
+    if non_numeric:
+        raise ValueError(
+            f"augmentation config values must be numeric: {non_numeric}")
 
 
 def _deployed_parent_for(detection_type: str | None):
@@ -153,7 +191,6 @@ def run_job(job_id: int) -> None:
         resume_from = cfg.get("resume_from_model_id")
         resume_weights: str | None = None
         if incremental and resume_from is not None:
-            from app.models import AIModel
             parent = db.get(AIModel, int(resume_from))
             if parent is None:
                 job.status, job.error_message = "failed", (
@@ -209,8 +246,8 @@ def run_job(job_id: int) -> None:
         image_count = len(lines)
         if not lines:
             job.status, job.error_message = "failed", (
-                f"train.txt has 0 image paths — dataset has no labelled "
-                f"images for this detection_type")
+                "train.txt has 0 image paths — dataset has no labelled "
+                "images for this detection_type")
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             raise RuntimeError(job.error_message)
@@ -222,6 +259,42 @@ def run_job(job_id: int) -> None:
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             raise RuntimeError(job.error_message)
+
+    # DATA SANITIZATION — corrupt/duplicate/blurred images are excluded
+    # (manifests rewritten; source files untouched) and extreme class
+    # imbalance is surfaced before compute is spent. A sanitize failure
+    # fails the job loudly — never train on an unvetted manifest.
+    try:
+        sanitize_report = sanitize_dataset(
+            str(ds_root),
+            blur_threshold=float(getattr(settings, "sanitize_blur_threshold",
+                                         25.0)))
+    except Exception as e:
+        with SessionLocal() as db:
+            job2 = db.get(TrainingJob, job_id)
+            if job2:
+                job2.status, job2.error_message = "failed", f"dataset sanitize: {e}"
+                job2.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        raise
+    for warning in sanitize_report["imbalance_warnings"]:
+        log.warning("training job %s: %s", job_id, warning)
+    # Re-read the (possibly rewritten) manifest so epoch sizing and the
+    # minimum-image gate operate on what will actually be trained on.
+    image_count = len([ln for ln in (ds_root / "train.txt")
+                       .read_text().splitlines() if ln.strip()])
+    if image_count == 0:
+        with SessionLocal() as db:
+            job2 = db.get(TrainingJob, job_id)
+            if job2:
+                job2.status, job2.error_message = "failed", (
+                    "sanitization excluded every training image "
+                    f"(report: corrupt={len(sanitize_report['excluded_corrupt'])} "
+                    f"dup={len(sanitize_report['excluded_duplicate'])} "
+                    f"blurred={len(sanitize_report['excluded_blurred'])})")
+                job2.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        raise RuntimeError("sanitization excluded every training image")
 
     # Heavy import deferred so the rest of the app boots without torch.
     from ultralytics import YOLO
@@ -280,13 +353,13 @@ def run_job(job_id: int) -> None:
             device=("0" if settings.use_gpu else "cpu"),
             augment=augment,
         )
-        # Aggressive augmentation (Part 2 #3, Q7) — multiplies effective
-        # dataset size ~4-8x; critical for lighting variance across 28 stores.
-        # Passed DIRECTLY as train() kwargs (no separate YAML). If the
-        # installed ultralytics rejects an arg with a TypeError we log it and
-        # retry without the aug block rather than failing the job.
-        _aug = dict(degrees=10.0, translate=0.1, scale=0.5, fliplr=0.5,
-                    mosaic=0.5, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4)
+        # Augmentation kwargs (defaults merged with any per-job override),
+        # validated against the INSTALLED ultralytics' config schema so an
+        # invalid key fails the job fast with a named error — the old
+        # silent TypeError-retry (drop the whole aug block mid-run) is gone.
+        _aug: dict[str, float] = {**DEFAULT_AUGMENTATION,
+                                  **(cfg.get("augmentation") or {})}
+        validate_augmentation_config(_aug)
         train_kwargs.update(_aug)
         if lr and lr != "auto":
             train_kwargs["lr0"] = float(lr)
@@ -295,14 +368,7 @@ def run_job(job_id: int) -> None:
         # Bind the return value — it's the validation Metrics from the
         # final epoch. Previously discarded, leaving AIModel.map50 /
         # precision / recall NULL and starving the promotion gate.
-        try:
-            results = model.train(**train_kwargs)
-        except TypeError as _aug_err:
-            log.warning("training job %s: ultralytics rejected an augmentation "
-                        "arg (%s) — retrying WITHOUT the aug block", job_id, _aug_err)
-            for _k in _aug:
-                train_kwargs.pop(_k, None)
-            results = model.train(**train_kwargs)
+        results = model.train(**train_kwargs)
         # Diagnostic — surface exactly what the results object exposes so a
         # future metrics regression (like the all-zero mAP bug) is visible in
         # the worker log instead of being silently stored as 0/None.

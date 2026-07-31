@@ -1,10 +1,9 @@
-"""Dataset helpers — directory layout, image ingestion, train/val/test split."""
+"""Dataset helpers — directory layout, image staging, train/val/test split."""
 from __future__ import annotations
 import logging
 import os
 import random
 import shutil
-import zipfile
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -35,13 +34,6 @@ def save_uploaded_image(dataset_id: int, filename: str, data: bytes) -> Path:
         n += 1
     target.write_bytes(data)
     return target
-
-
-# stdlib zipfile doesn't take bytes; small helper to keep callers simple.
-def _zipfile_from_bytes(b: bytes) -> zipfile.ZipFile:
-    import io
-    return zipfile.ZipFile(io.BytesIO(b))
-zipfile.ZipFile_BytesIO_compat = _zipfile_from_bytes                     # type: ignore
 
 
 def split_dataset(db: Session, dataset_id: int, *,
