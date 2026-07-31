@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
     # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
     temporal_gate_min_frames: int = 10
+    # ---- Live Activity Sentinel (dark-launched) --------------------------
+    # Consumes the vg:activity:* keys the Live Activity tab reads and
+    # turns occupancy patterns into alerts. Per-camera overrides live in
+    # detection_configs rows with detection_type="live_activity".
+    activity_sentinel_enabled: bool = False
+    activity_surge_people: int = 12
+    activity_surge_sustain_samples: int = 3
+    activity_store_surge_people: int = 30
+    activity_dead_scene_minutes: int = 0          # 0 = dead_scene rule off
+    activity_sentinel_interval_seconds: int = 60
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new

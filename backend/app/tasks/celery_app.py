@@ -40,6 +40,7 @@ celery_app = Celery(
         "app.tasks.agents",
         "app.tasks.recorder",
         "app.tasks.alert_snapshots",
+        "app.tasks.activity_sentinel",
         "app.tasks.uniform_miner",
     ],
 )
@@ -65,6 +66,7 @@ celery_app.conf.update(
         # Operator-facing alerts pool.
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
+        "alerting.live_activity_sentinel":      {"queue": "alerts"},
         "simulation.mine_uniform_crops":        {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
@@ -340,6 +342,15 @@ celery_app.conf.update(
         "store-intelligence-every-15min": {
             "task": "alerting.store_intelligence_update",
             "schedule": timedelta(minutes=15),
+        },
+        # Live Activity Sentinel — reads the same vg:activity:* keys the
+        # Live Activity tab uses and turns occupancy patterns into alerts.
+        # Dark-launched: the task body no-ops unless
+        # ACTIVITY_SENTINEL_ENABLED=true.
+        "live-activity-sentinel": {
+            "task": "alerting.live_activity_sentinel",
+            "schedule": timedelta(seconds=int(getattr(
+                settings, "activity_sentinel_interval_seconds", 60))),
         },
         # Staff-uniform crop miner (Part 6) — mines live frames for training
         # data every 2 hours (30 cameras/run, rotating cursor).
