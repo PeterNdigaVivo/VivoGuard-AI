@@ -151,7 +151,9 @@ def test_score_in_40_60_band_keeps_prior_state():
 def test_thresholds_match_spec():
     assert D.SCORE_ATTENDED          == 60
     assert D.SCORE_UNATTENDED        == 40
-    # Part 4 (counter false-alert fixes): dwell 5->10 min, grace 60->120 s.
+    # Part 4 (counter false-alert fixes): dwell 5->10 min; presence-override
+    # follow-up: grace 120->300 s (staff step away to fetch items / help in
+    # aisles / cover fitting rooms — 5 min empty = genuinely unattended).
     assert D.UNATTENDED_DWELL_SECONDS == 10 * 60
-    assert D.ABSENCE_GRACE_SECONDS    == 120
+    assert D.ABSENCE_GRACE_SECONDS    == 300
     assert D.DEDUP_SECONDS            == 30 * 60

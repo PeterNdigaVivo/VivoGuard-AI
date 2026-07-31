@@ -33,6 +33,24 @@ def bbox_in_zone(bbox_norm: list[float], polygon: list[list[float]]) -> bool:
     return point_in_polygon(cx, cy, polygon)
 
 
+def bbox_overlaps_zone(bbox_norm: list[float],
+                       polygon: list[list[float]]) -> bool:
+    """True if the person bbox OVERLAPS the polygon at all (not just its
+    foot-point). Deliberately generous — used for counter presence so a
+    customer leaning over / standing at the counter still counts as
+    'someone is there'. Checks any bbox corner inside the polygon, any
+    polygon vertex inside the bbox, or the bbox centre inside the polygon."""
+    x1, y1, x2, y2 = bbox_norm
+    if any(point_in_polygon(px, py, polygon)
+           for px, py in ((x1, y1), (x2, y1), (x1, y2), (x2, y2))):
+        return True
+    for px, py in polygon:
+        if x1 <= px <= x2 and y1 <= py <= y2:
+            return True
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    return point_in_polygon(cx, cy, polygon)
+
+
 def iou(a: list[float], b: list[float]) -> float:
     """IOU of two [x1,y1,x2,y2] boxes."""
     ax1, ay1, ax2, ay2 = a

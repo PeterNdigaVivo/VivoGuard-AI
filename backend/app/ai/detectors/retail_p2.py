@@ -18,7 +18,7 @@ from app.ai.detectors.base import (
 )
 from app.ai.detectors import staff_identity
 from app.ai.detectors.uniform_compliance import uniform_features
-from app.ai.zone_logic import bbox_in_zone, zone_contains
+from app.ai.zone_logic import bbox_in_zone, bbox_overlaps_zone, zone_contains
 
 log = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ class StaffPresenceDetector(Detector):
 
     Alert (URGENT) fires only when:
       • score has been < 40 CONTINUOUSLY for UNATTENDED_DWELL_SECONDS
-        (5 min), AND
-      • we are past the ABSENCE_GRACE_SECONDS (60 s) following the
+        (10 min), AND
+      • we are past the ABSENCE_GRACE_SECONDS (5 min) following the
         last attended frame — covers short occlusions / dropped
-        detections / camera blink, AND
+        detections / staff stepping away briefly, AND
       • the store is currently inside business hours, AND
       • we are outside the opening / closing grace bands, AND
       • per-zone Redis dedupe says we haven't fired in the last
@@ -77,10 +77,12 @@ class StaffPresenceDetector(Detector):
 
     # Alert timing.
     UNATTENDED_DWELL_SECONDS = 10 * 60      # must be unattended this long (10 min)
-    ABSENCE_GRACE_SECONDS    = 120          # 2-min grace after last person seen
+    ABSENCE_GRACE_SECONDS    = 300          # 5-min grace after last person seen
                                             # at the counter before the countdown
-                                            # effectively starts (occlusions,
-                                            # dropped detections, brief step-away)
+                                            # effectively starts — staff step away
+                                            # to fetch items, help in aisles, or
+                                            # cover fitting rooms; 5 min empty is
+                                            # what "genuinely unattended" means
     DEDUP_SECONDS            = 30 * 60      # 30 min between URGENT repeats
 
     OPENING_GRACE_SECONDS = 30 * 60
@@ -259,6 +261,22 @@ class StaffPresenceDetector(Detector):
                     staff_identity.observe(ctx.camera_id, tr.track_id,
                                            "staff_zone", now)
 
+        # ANY person (customer OR staff) whose bbox OVERLAPS a counter
+        # polygon → that counter is occupied. Broader than the foot-point
+        # containment above on purpose: a customer being served stands on
+        # the customer side and leans in, so their FEET sit outside the
+        # polygon while their body clearly overlaps it. Foot-point stays
+        # authoritative for service-time/dwell (a person walking past
+        # shouldn't start a service timer); bbox-overlap drives the
+        # unattended suppression only.
+        occupied_counters: set[int] = set()
+        for tr, _det in ctx.tracks:
+            if tr.cls not in COCO_PERSON:
+                continue
+            for z in counter_zones:
+                if bbox_overlaps_zone(tr.bbox_norm, z["polygon_coords_json"]):
+                    occupied_counters.add(z["id"])
+
         # Tracks that LEFT a counter zone — close the timer + emit
         # the service_time metric.
         for key in list(self._counter_entries.keys()):
@@ -321,13 +339,14 @@ class StaffPresenceDetector(Detector):
             state = self._load_state(ctx.camera_id, z["id"])
             prev_attended = bool(state.get("attended"))
             attended = self.apply_hysteresis(score, prev_attended)
-            # Presence override: ANY person physically inside the counter
-            # polygon means the counter is attended — a customer being served
-            # or a non-uniform staffer still means someone is there. This
-            # prevents false "Counter Left Unattended" alerts when the person
-            # simply isn't uniform-classified (low score but clearly present).
-            person_in_counter = any(zid == z["id"]
-                                    for (_tid, zid) in active_track_zones)
+            # Presence override: ANY person whose bbox OVERLAPS the counter
+            # zone means the counter is attended — a customer being served,
+            # a non-uniform staffer, or anyone behind the counter. Presence
+            # alone suppresses the alert; staff classification is NOT
+            # required (the AI can't reliably tell staff from customers
+            # yet, and a served customer at the counter was reading as
+            # "empty" under foot-point containment).
+            person_in_counter = z["id"] in occupied_counters
             if person_in_counter:
                 attended = True
             # P5: consecutive-empty-frame counter — reset when anyone is in
