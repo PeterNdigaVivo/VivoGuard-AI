@@ -3425,7 +3425,7 @@ def store_anomalies(store_id: int, db: Session = Depends(get_db),
         "store_name": store.name,
         "anomalies": anomalies,
         "metric_source": metric,
-        "note": (f"Comparing today vs the last 30 same-weekday slots."
+        "note": ("Comparing today vs the last 30 same-weekday slots."
                  if anomalies else "No anomalies detected today."),
     }
 

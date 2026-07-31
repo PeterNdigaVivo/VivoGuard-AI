@@ -1,0 +1,31 @@
+# VivoGuard-AI backend lint gate.
+#
+# Scope: correctness rules only (syntax errors, undefined names, unused
+# imports/variables, comparison bugs) — the rules this codebase holds at
+# zero. Style-only rule families (import sorting, quote style, modern-
+# syntax upgrades) are deliberately NOT enabled: the realtime pipeline
+# predates them and churning it for style adds risk without safety.
+#
+# The intentional best-effort `except Exception: pass` pattern in the
+# realtime loop (Redis publishes, file cleanup, rollbacks) is documented
+# at each site; S110/BLE001 are therefore not part of the gate.
+#
+# Run:  python -m ruff check app/          (must be zero errors)
+
+line-length = 100
+
+[lint]
+select = [
+    "E4",     # import placement errors
+    "E7",     # statement/comparison errors (incl. E712 — suppressed
+              #   per-site with `# noqa: E712` for SQLAlchemy filters)
+    "E9",     # syntax / io errors
+    "F",      # pyflakes: undefined names, unused imports/vars, f-strings
+]
+ignore = [
+    "E402",   # late module imports — deliberate (circular-import avoidance,
+              #   post-docstring sections like tracker.py's adapter block)
+    "E701",   # compact `if x: y` one-liners — established codebase idiom,
+    "E702",   #   esp. best-effort `try: cleanup()` / `except: pass` pairs;
+    "E741",   #   churning ~170 sites is style-only risk with no safety gain
+]

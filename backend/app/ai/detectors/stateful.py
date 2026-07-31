@@ -456,7 +456,8 @@ class HeatmapDetector(Detector):
 
     def _publish(self, camera_id: int) -> None:
         try:
-            import json, time as _t
+            import json
+            import time as _t
             import redis
             from app.config import settings
             r = redis.from_url(settings.redis_url)

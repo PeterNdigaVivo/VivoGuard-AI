@@ -136,9 +136,9 @@ def run_uniform_mining() -> dict:
                     dual_black = bool(feats.get("dual_black"))
 
                     if dual_black and in_staff:
-                        kind, ds_name, label = "pos", POSITIVE_DATASET, POSITIVE_LABEL
+                        kind, label = "pos", POSITIVE_LABEL
                     elif (not dual_black) and (not in_staff):
-                        kind, ds_name, label = "neg", NEGATIVE_DATASET, NEGATIVE_LABEL
+                        kind, label = "neg", NEGATIVE_LABEL
                     else:
                         summary["skipped"] += 1
                         continue

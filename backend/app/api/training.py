@@ -856,7 +856,7 @@ def shutter_train_start(store_id: int, camera_id: int | None = None,
     if short:
         raise HTTPException(
             400,
-            f"Need ≥50 frames per class. Short: " +
+            "Need ≥50 frames per class. Short: " +
             ", ".join(f"{k}={v}" for k, v in short.items()))
     from app.tasks.shutter_training import train_shutter_model
     train_shutter_model.delay(store_id, camera_id)
