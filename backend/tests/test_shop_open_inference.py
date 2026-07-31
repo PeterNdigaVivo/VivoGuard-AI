@@ -14,7 +14,7 @@ add integration tests on top of these — but don't replace them, the
 pure-function coverage is what guarantees the rule itself is right.
 """
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.tasks.alerting import (

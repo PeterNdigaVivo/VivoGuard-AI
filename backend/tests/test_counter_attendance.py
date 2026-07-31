@@ -151,6 +151,7 @@ def test_score_in_40_60_band_keeps_prior_state():
 def test_thresholds_match_spec():
     assert D.SCORE_ATTENDED          == 60
     assert D.SCORE_UNATTENDED        == 40
-    assert D.UNATTENDED_DWELL_SECONDS == 5 * 60
-    assert D.ABSENCE_GRACE_SECONDS    == 60
+    # Part 4 (counter false-alert fixes): dwell 5->10 min, grace 60->120 s.
+    assert D.UNATTENDED_DWELL_SECONDS == 10 * 60
+    assert D.ABSENCE_GRACE_SECONDS    == 120
     assert D.DEDUP_SECONDS            == 30 * 60

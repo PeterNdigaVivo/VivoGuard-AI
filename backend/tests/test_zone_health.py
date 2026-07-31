@@ -8,7 +8,7 @@ from __future__ import annotations
 from app.utils.zone_health import (
     BADGE_HEALTHY_MIN, BADGE_WARN_MIN, POINTS_PER_REQUIRED,
     PENALTY_DUPLICATE, PENALTY_TYPO, PENALTY_OFFLINE_CAM,
-    score_store, _detect_typo, _canonical_zone_labels,
+    score_store, _detect_typo,
 )
 
 
