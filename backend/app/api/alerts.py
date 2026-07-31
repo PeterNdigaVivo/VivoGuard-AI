@@ -11,7 +11,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, desc
+from fastapi.responses import JSONResponse
+
+from app.utils.cache import cached_store_endpoint
+from sqlalchemy import case, desc, func
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -993,6 +996,7 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
 # ---- Endpoints -----------------------------------------------------
 
 @router.get("/summary")
+@cached_store_endpoint("alerts-summary", ttl=15)
 def alerts_summary(db: Session = Depends(get_db),
                    _u: User = Depends(get_current_user),
                    store_id: Optional[int] = Query(None)):
@@ -1005,53 +1009,75 @@ def alerts_summary(db: Session = Depends(get_db),
     fields directly. Adds avg-time-to-resolve and a vs-yesterday
     trend so the bar can render "Avg Response: 1m 42s · 📈 Alerts
     up 12% vs yesterday" without a follow-up request."""
+    from types import SimpleNamespace
     from app.models import Store as _Store
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     yest_start = today - timedelta(days=1)
 
-    def _fetch(window_start, window_end):
-        qq = (db.query(Alert, DetectionEvent, _Store)
-               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-               .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-               .outerjoin(_Store, Camera.store_id == _Store.id)
-               .filter(DetectionEvent.timestamp >= window_start,
-                       DetectionEvent.timestamp <  window_end))
-        if store_id is not None:
-            qq = qq.filter(Camera.store_id == store_id)
-        return qq.all()
+    # Yesterday is only ever used as a COUNT for the trend line — one
+    # aggregate query instead of materialising every ORM row.
+    yq = (db.query(func.count(Alert.id))
+            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+            .filter(DetectionEvent.timestamp >= yest_start,
+                    DetectionEvent.timestamp < today))
+    if store_id is not None:
+        yq = yq.filter(Camera.store_id == store_id)
+    yest_count = int(yq.scalar() or 0)
 
-    rows = _fetch(today, today + timedelta(days=1))
-    yest_count = len(_fetch(yest_start, today))
+    # Today: the severity classifiers are rule-based Python over
+    # event.extra + zone/store context, so classification stays in
+    # Python — but on a COLUMN PROJECTION (7 columns + the tiny Store
+    # entity) instead of full Alert+DetectionEvent ORM objects.
+    tq = (db.query(Alert.status, Alert.created_at, Alert.resolved_at,
+                   Alert.acknowledged_at,
+                   DetectionEvent.detection_type, DetectionEvent.extra,
+                   DetectionEvent.zone_id, DetectionEvent.timestamp,
+                   _Store)
+            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+            .outerjoin(_Store, Camera.store_id == _Store.id)
+            .filter(DetectionEvent.timestamp >= today,
+                    DetectionEvent.timestamp < today + timedelta(days=1)))
+    if store_id is not None:
+        tq = tq.filter(Camera.store_id == store_id)
+    rows = tq.all()
 
-    zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
+    zone_ids = {r.zone_id for r in rows if r.zone_id is not None}
     zones_by_id = ({z.id: z for z in db.query(Zone).filter(Zone.id.in_(zone_ids)).all()}
                    if zone_ids else {})
 
     urgent = attention = resolved = dismissed = unread_urgent = 0
     critical = high = medium = low = 0
     resolve_durations: list[float] = []
-    for alert, ev, store in rows:
-        zone = zones_by_id.get(ev.zone_id) if ev.zone_id else None
-        label = _severity_label(ev.detection_type, ev, zone, store)
-        s4    = _severity_4_label(ev.detection_type, ev, zone, store)
-        if alert.status in ("resolved", "confirmed"):
+    for r in rows:
+        zone = zones_by_id.get(r.zone_id) if r.zone_id else None
+        # Duck-typed event shim carrying the only fields the severity
+        # classifiers (and their _person_context/_is_after_hours helpers)
+        # read: extra, timestamp, detection_type.
+        ev = SimpleNamespace(extra=r.extra, timestamp=r.timestamp,
+                             detection_type=r.detection_type)
+        store = r[8]
+        label = _severity_label(r.detection_type, ev, zone, store)
+        s4    = _severity_4_label(r.detection_type, ev, zone, store)
+        if r.status in ("resolved", "confirmed"):
             resolved += 1
             # Time-to-resolve = resolved_at − created_at when both
             # present. Falls back to acknowledged_at when an older
             # row never recorded the resolve timestamp explicitly.
-            r_at = alert.resolved_at or alert.acknowledged_at
-            if r_at and alert.created_at:
+            r_at = r.resolved_at or r.acknowledged_at
+            if r_at and r.created_at:
                 if r_at.tzinfo is None: r_at = r_at.replace(tzinfo=timezone.utc)
-                c_at = alert.created_at
+                c_at = r.created_at
                 if c_at.tzinfo is None: c_at = c_at.replace(tzinfo=timezone.utc)
                 resolve_durations.append(max(0.0, (r_at - c_at).total_seconds()))
             continue
-        if alert.status == "dismissed":
+        if r.status == "dismissed":
             dismissed += 1
             continue
         if label == "URGENT":
             urgent += 1
-            if alert.status == "new":
+            if r.status == "new":
                 unread_urgent += 1
         elif label == "ATTENTION":
             attention += 1
@@ -1209,6 +1235,12 @@ def list_alerts(
                     "this alert id (keyset on created_at,id — no OFFSET). "
                     "Designed for order=recent; with severity ordering it "
                     "acts as an older-than filter."),
+    lite: bool                 = Query(
+        False,
+        description="Lightweight rows only (id, created_at, status, "
+                    "detection_type, severity_label, camera_id, store_id) — "
+                    "no titles, snapshots, clip URLs, or extra payloads. "
+                    "The default (false) payload is unchanged."),
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
@@ -1253,6 +1285,26 @@ def list_alerts(
         q = q.order_by(severity_rank.asc(), desc(Alert.created_at)).limit(limit)
 
     rows = q.all()
+
+    # Lite mode — slim rows for pollers/badges that only need counts and
+    # identity. Returned as a raw JSONResponse so the AlertOut
+    # response_model never touches (or pads) it; the default path below
+    # is byte-identical to before this flag existed.
+    if lite:
+        return JSONResponse([
+            {
+                "id":             a.id,
+                "created_at":     (a.created_at.isoformat()
+                                   if a.created_at else None),
+                "status":         a.status,
+                "detection_type": ev.detection_type,
+                "severity_label": _severity_label(ev.detection_type, ev),
+                "camera_id":      ev.camera_id,
+                "store_id":       cam.store_id if cam else None,
+            }
+            for a, ev, cam in rows
+        ])
+
     # Bulk-fetch zones AND stores referenced by these events so
     # _to_alert_out gets the names without N round-trips. Skipped
     # when no event in the page references one.

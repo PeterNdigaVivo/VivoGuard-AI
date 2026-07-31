@@ -3136,6 +3136,7 @@ def report_pdf(since: datetime, until: datetime,
 
 
 @router.get("/dashboard/multi")
+@cached_store_endpoint("chain-multi", ttl=60)
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                 days: int = 7,
                 since: datetime | None = None,
