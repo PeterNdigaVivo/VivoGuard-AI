@@ -28,6 +28,9 @@ Rules (all thresholds chain-configurable, per-camera overridable):
                                   (X=0 disables — the default)
 
 Dark-launch: gated on settings.activity_sentinel_enabled (default False).
+Once the flag is on, coverage is OPT-OUT: every ai-enabled camera is
+evaluated unless a detection_configs row (detection_type="live_activity")
+explicitly sets enabled=false.
 """
 from __future__ import annotations
 
@@ -83,10 +86,12 @@ def evaluate_activity_rules(
     from the arguments, so tests drive it with plain dicts.
 
     See the approved contract in this module's docstring / the design
-    plan: rules a-d, override semantics (enabled=False removes a camera
-    from everything including store sums; per-camera threshold keys
-    override chain defaults for rules a & d; store-level thresholds are
-    chain-config only in v1), and the trigger dict shape.
+    plan: rules a-d and the trigger dict shape. Override semantics are
+    OPT-OUT: a camera with no override row — or a row without an
+    explicit enabled flag — is evaluated; ONLY an explicit
+    enabled=False removes it (from everything, including store sums).
+    Per-camera threshold keys override chain defaults for rules a & d;
+    store-level thresholds are chain-config only in v1.
 
     after_hours_activity and store_surge emit ONE trigger per store;
     their camera_id anchors on the busiest evidencing camera so the
@@ -101,8 +106,11 @@ def evaluate_activity_rules(
     dead_min = int(config.get("dead_scene_minutes", 0))
 
     def _enabled(cid: int) -> bool:
+        # OPT-OUT semantics: cameras are evaluated by default — no
+        # override row, or a row without an explicit enabled flag,
+        # both mean "enabled". ONLY an explicit enabled=False skips.
         ov = overrides.get(cid)
-        return True if ov is None else bool(ov.get("enabled", True))
+        return ov is None or ov.get("enabled") is not False
 
     def _cam_cfg(cid: int, key: str, default: int) -> int:
         ov = overrides.get(cid) or {}
@@ -281,7 +289,13 @@ def live_activity_sentinel() -> None:
         cam_names = {cid: n for cid, _sid, n in cams}
         stores_by_id = {s.id: s for s in store_rows}
         store_open = {s.id: bool(is_store_open(s)) for s in store_rows}
-        overrides = {c.camera_id: {"enabled": bool(c.enabled),
+        # Pass `enabled` through RAW (no bool() coercion) so the
+        # evaluator's opt-out rule — only an explicit False disables —
+        # sees exactly what the row says. NOTE: DetectionConfig.enabled
+        # has column default=False, so a threshold-only row created
+        # without setting enabled WILL read as an explicit disable;
+        # operators adding overrides must set enabled=true.
+        overrides = {c.camera_id: {"enabled": c.enabled,
                                    **(c.extra or {})}
                      for c in override_rows if c.camera_id is not None}
 

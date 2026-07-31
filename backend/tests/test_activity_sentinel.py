@@ -180,6 +180,24 @@ def test_override_thresholds_apply_per_camera() -> None:
     assert [t["camera_id"] for t in hits] == [1]   # cam 2 keeps defaults
 
 
+def test_opt_out_only_explicit_false_disables() -> None:
+    samples = {1: _win(13, 13, 13), 2: _win(13, 13, 13), 3: _win(13, 13, 13)}
+    out = _eval(samples, {1: 10, 2: 10, 3: 10}, store_open={10: True},
+                overrides={
+                    1: {"surge_people": 12},        # threshold-only row
+                    2: {"enabled": None},           # no explicit flag
+                    # camera 3: no row at all
+                })
+    fired = sorted(t["camera_id"] for t in out
+                   if t["rule"] == "occupancy_surge")
+    assert fired == [1, 2, 3]                       # all evaluated
+    out = _eval(samples, {1: 10, 2: 10, 3: 10}, store_open={10: True},
+                overrides={2: {"enabled": False}})  # explicit opt-out
+    fired = sorted(t["camera_id"] for t in out
+                   if t["rule"] == "occupancy_surge")
+    assert fired == [1, 3]
+
+
 def test_malformed_override_values_fall_back_to_defaults() -> None:
     out = _eval({1: _win(13, 13, 13)}, {1: 10}, store_open={10: True},
                 overrides={1: {"enabled": True, "surge_people": "lots"}})
