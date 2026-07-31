@@ -131,7 +131,13 @@ def env(monkeypatch: pytest.MonkeyPatch):
                  ("activity_surge_people", 12),
                  ("activity_surge_sustain_samples", 3),
                  ("activity_store_surge_people", 30),
-                 ("activity_dead_scene_minutes", 0)]:
+                 ("activity_dead_scene_minutes", 0),
+                 # presence off by default in this fixture so the surge
+                 # volume expectations stay exact; the presence test
+                 # flips it on explicitly.
+                 ("activity_presence_enabled", False),
+                 ("activity_presence_threshold", 1),
+                 ("activity_presence_sustain_samples", 2)]:
         monkeypatch.setattr(settings, k, v, raising=False)
 
     return SimpleNamespace(redis=r, db=db, fired=fired,
@@ -205,6 +211,31 @@ def test_dead_scene_off_at_zero_minutes_even_with_flat_zero(env) -> None:
             for i in range(9, -1, -1)]
     _run(1)
     assert all(f["cls"] != "dead_scene" for f in env.fired)
+
+
+def test_activity_presence_end_to_end_info_alert(env) -> None:
+    from app.config import settings
+    env.monkeypatch.setattr(settings, "activity_presence_enabled", True,
+                            raising=False)
+    # Low count (2 people) — below every surge threshold.
+    now = time.time()
+    for cid in (1, 2):
+        env.redis.store[f"vg:activity:{cid}"] = json.dumps(
+            {"camera_id": cid, "people": 2, "score": 2.0, "ts": now})
+    _run(1)
+    assert env.fired == []                    # 1 sample < sustain 2
+    _run(1)
+    presence = [f for f in env.fired if f["cls"] == "activity_presence"]
+    assert sorted(f["camera_id"] for f in presence) == [1, 2]
+    for f in presence:
+        assert f["detection_type"] == "live_activity"
+        assert f["extra"]["severity"] == "INFO"
+        assert "Activity detected at Cam" in f["extra"]["message"]
+        assert "2 people present" in f["extra"]["message"]
+    # Dedupe: still active next tick → no new alerts.
+    n = len(env.fired)
+    _run(1)
+    assert len(env.fired) == n
 
 
 def test_stale_activity_blobs_are_ignored(env) -> None:

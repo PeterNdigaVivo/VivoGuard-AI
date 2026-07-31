@@ -184,7 +184,8 @@ def _severity_4_label(detection_type: str | None,
         return {"after_hours_activity": "HIGH",
                 "occupancy_surge":      "MEDIUM",
                 "store_surge":          "MEDIUM",
-                "dead_scene":           "MEDIUM"}.get(rule, "MEDIUM")
+                "dead_scene":           "MEDIUM",
+                "activity_presence":    "LOW"}.get(rule, "MEDIUM")
     # / late-opening are HIGH/MEDIUM; routine open + close are LOW.
     if dt == "shop_open_close":
         if rule == "shop_not_opened":           return "CRITICAL"
@@ -224,7 +225,9 @@ def _severity_label(detection_type: str | None,
     # (staffing issue, not an emergency).
     if detection_type == "live_activity":
         rule = (event.extra or {}).get("rule", "") if event is not None else ""
-        return "URGENT" if rule == "after_hours_activity" else "ATTENTION"
+        if rule == "after_hours_activity":
+            return "URGENT"
+        return "INFO" if rule == "activity_presence" else "ATTENTION"
     if detection_type == "shop_open_close" and event is not None:
         rule = (event.extra or {}).get("rule", "")
         if rule in ("shop_opened_before_hours", "shop_not_opened"):
@@ -628,6 +631,11 @@ def _title(event: DetectionEvent, camera: Camera | None,
         return f"{icon} Shutter {state or 'state change'} — {cam}"
     if dt == "live_activity":
         rule = extra.get("rule", "")
+        if rule == "activity_presence":
+            n = extra.get("people_count")
+            count = (f" ({int(n)} people)"
+                     if isinstance(n, (int, float)) else "")
+            return f"👁️ Live Activity Presence{count} — {cam}"
         label = {
             "occupancy_surge":      "Occupancy Surge",
             "store_surge":          "Store-Wide Occupancy Surge",

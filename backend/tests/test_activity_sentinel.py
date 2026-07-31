@@ -62,6 +62,45 @@ def test_surge_short_window_never_fires() -> None:
     assert all(t["rule"] != "occupancy_surge" for t in out)
 
 
+# ── rule: activity_presence ───────────────────────────────────────────────
+
+CFG_P = {**CFG, "presence_enabled": True, "presence_threshold": 1,
+         "presence_sustain_samples": 2}
+
+
+def test_activity_presence_fires_on_low_count() -> None:
+    # 1 person for 2 consecutive samples → fires at INFO.
+    out = _eval({1: _win(1, 1)}, {1: 10}, CFG_P, store_open={10: True})
+    t = next(t for t in out if t["rule"] == "activity_presence")
+    assert t["severity"] == "INFO"
+    assert t["camera_id"] == 1
+    assert t["extra"] == {"people_count": 1, "threshold": 1,
+                          "sustain_samples": 2}
+    # 1 person for only 1 sample → does NOT fire.
+    out = _eval({1: _win(1)}, {1: 10}, CFG_P, store_open={10: True})
+    assert all(t["rule"] != "activity_presence" for t in out)
+
+
+def test_activity_presence_skips_closed_stores() -> None:
+    # After-hours presence belongs to after_hours_activity (URGENT),
+    # not the INFO presence rule — no double-fire.
+    out = _eval({1: _win(1, 1)}, {1: 10}, CFG_P, store_open={10: False})
+    assert all(t["rule"] != "activity_presence" for t in out)
+    assert any(t["rule"] == "after_hours_activity" for t in out)
+
+
+def test_activity_presence_off_when_unconfigured() -> None:
+    # Pure-function contract: a config without presence_enabled means
+    # the rule is off (production passes the setting explicitly).
+    out = _eval({1: _win(1, 1)}, {1: 10}, store_open={10: True})
+    assert all(t["rule"] != "activity_presence" for t in out)
+
+
+def test_activity_presence_zero_people_never_fires() -> None:
+    out = _eval({1: _win(0, 0)}, {1: 10}, CFG_P, store_open={10: True})
+    assert all(t["rule"] != "activity_presence" for t in out)
+
+
 # ── rule b: store_surge ────────────────────────────────────────────────────
 
 def test_store_surge_aggregates_and_anchors_busiest() -> None:

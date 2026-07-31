@@ -18,6 +18,8 @@ Every 60 s the beat task:
      ``alerting._create_info_alert`` (detection_type="live_activity").
 
 Rules (all thresholds chain-configurable, per-camera overridable):
+  activity_presence    INFO       ANY activity (people >= 1 by default)
+                                  sustained 2 samples; open stores only
   occupancy_surge      ATTENTION  people >= N for K consecutive samples
   store_surge          ATTENTION  store-wide sum >= M, same sustain
   after_hours_activity URGENT     people while the store is closed
@@ -53,6 +55,7 @@ SAMPLE_FRESH_S     = 300         # matches the writer's TTL
 DEDUPE_TTL_SECONDS = 600         # 10-min per-(rule, camera, store) bucket
 
 SEVERITY_BY_RULE: dict[str, str] = {
+    "activity_presence":    "INFO",
     "occupancy_surge":      "ATTENTION",
     "store_surge":          "ATTENTION",
     "after_hours_activity": "URGENT",
@@ -61,6 +64,7 @@ SEVERITY_BY_RULE: dict[str, str] = {
 # extra["priority"] vocabulary used by the existing alert body/severity
 # helpers in api/alerts.py.
 PRIORITY_BY_RULE: dict[str, str] = {
+    "activity_presence":    "info",
     "occupancy_surge":      "warning",
     "store_surge":          "warning",
     "after_hours_activity": "high",
@@ -104,6 +108,9 @@ def evaluate_activity_rules(
     sustain = max(1, int(config.get("surge_sustain_samples", 3)))
     store_thr = int(config.get("store_surge_people", 30))
     dead_min = int(config.get("dead_scene_minutes", 0))
+    presence_on = bool(config.get("presence_enabled", False))
+    presence_thr = int(config.get("presence_threshold", 1))
+    presence_k = max(1, int(config.get("presence_sustain_samples", 2)))
 
     def _enabled(cid: int) -> bool:
         # OPT-OUT semantics: cameras are evaluated by default — no
@@ -144,6 +151,35 @@ def evaluate_activity_rules(
                     "sustain_samples": k,
                 },
             })
+
+    # ---- rule: activity_presence (per camera, low-threshold INFO) ------
+    # ANY activity (people >= presence_threshold, default 1) sustained
+    # for presence_sustain_samples ticks. Deliberately NOT high-threshold
+    # — small but real activity matters. Skips stores that are explicitly
+    # CLOSED (after_hours_activity owns that case at URGENT). Volume is
+    # bounded by the caller's per-camera dedupe bucket.
+    if presence_on:
+        for cid, window in active.items():
+            sid = store_map.get(cid)
+            if sid is not None and store_open.get(sid) is False:
+                continue
+            thr = _cam_cfg(cid, "presence_threshold", presence_thr)
+            k = max(1, _cam_cfg(cid, "presence_sustain_samples", presence_k))
+            if len(window) < k:
+                continue
+            tail = window[-k:]
+            if all(int(smp.get("people") or 0) >= thr for smp in tail):
+                triggers.append({
+                    "rule": "activity_presence",
+                    "camera_id": cid,
+                    "store_id": sid,
+                    "severity": SEVERITY_BY_RULE["activity_presence"],
+                    "extra": {
+                        "people_count": int(tail[-1].get("people") or 0),
+                        "threshold": thr,
+                        "sustain_samples": k,
+                    },
+                })
 
     # ---- rule b: store_surge (per store, slot-aligned sums) -----------
     by_store: dict[int, list[int]] = {}
@@ -247,11 +283,19 @@ def _chain_config() -> dict:
         "surge_sustain_samples": int(getattr(settings, "activity_surge_sustain_samples", 3)),
         "store_surge_people":    int(getattr(settings, "activity_store_surge_people", 30)),
         "dead_scene_minutes":    int(getattr(settings, "activity_dead_scene_minutes", 0)),
+        "presence_enabled":      bool(getattr(settings, "activity_presence_enabled", True)),
+        "presence_threshold":    int(getattr(settings, "activity_presence_threshold", 1)),
+        "presence_sustain_samples": int(getattr(
+            settings, "activity_presence_sustain_samples", 2)),
     }
 
 
-def _title_for(rule: str, extra: dict, store_name: str | None) -> str:
+def _title_for(rule: str, extra: dict, store_name: str | None,
+               camera_name: str | None = None) -> str:
     where = f" — {store_name}" if store_name else ""
+    if rule == "activity_presence":
+        return (f"Activity detected at {camera_name or 'camera'}: "
+                f"{extra.get('people_count')} people present.")
     if rule == "occupancy_surge":
         return (f"Occupancy surge: {extra.get('people_count')} people "
                 f"(threshold {extra.get('threshold')}){where}")
@@ -392,7 +436,8 @@ def live_activity_sentinel() -> None:
                 "store_id":    sid,
                 "store_name":  store_name,
                 "camera_name": cam_names.get(cid),
-                "message":     _title_for(rule, t["extra"], store_name),
+                "message":     _title_for(rule, t["extra"], store_name,
+                                          cam_names.get(cid)),
                 "source":      "live_activity_sentinel",
                 **t["extra"],
             }
