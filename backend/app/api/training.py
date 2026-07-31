@@ -34,6 +34,7 @@ from app.database import get_db
 from app.deps import require_role
 from app.models import (
     AIModel, Annotation, Camera, Dataset, TrainingImage, TrainingJob,
+    TrainingSample,
 )
 from app.schemas.training import (
     AIModelOut, AnnotationIn, AnnotationOut, CaptureFromCameraIn,
@@ -1141,10 +1142,9 @@ ALLOWED_EXT  = {".jpg", ".jpeg", ".png"}
 def _save_uploaded(detector: str, label: str, camera_id: int | None,
                    store_id: int | None, user_id: int | None,
                    data: bytes, original_name: str,
-                   root_fn) -> "TrainingSample":
+                   root_fn) -> TrainingSample:
     """Common write path for /uniform/upload + /shutter/upload."""
     from datetime import datetime, timezone
-    from app.models import TrainingSample
 
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"file too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
@@ -1528,8 +1528,8 @@ def training_progress(db: Session = Depends(get_db),
     countdowns, simulation status, and learning velocity."""
     from datetime import timedelta
     from sqlalchemy import func
-    from app.models import Alert, DetectionEvent, AgentReport
-    from app.training.orchestrator import _min_images, TRAIN_PRIORITY
+    from app.models import Alert, DetectionEvent
+    from app.training.orchestrator import _min_images
 
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)

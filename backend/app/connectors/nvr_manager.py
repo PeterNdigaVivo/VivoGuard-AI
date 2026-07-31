@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from app.connectors.dahua_http import DahuaHTTP
 from app.connectors.hikvision_isapi import HikvisionISAPI
-from app.connectors.rtsp import probe_rtsp
 from app.utils.network import build_rtsp_url
 
 log = logging.getLogger(__name__)
@@ -61,10 +60,3 @@ async def enumerate_hikvision(host: str, http_port: int, rtsp_port: int,
                                     channel=ch, subtype=1),
         ))
     return out
-
-
-async def quick_probe_first_channel(channels: list[DiscoveredChannel]) -> tuple[bool, str | None]:
-    """Probe the first channel's substream to confirm RTSP path is correct."""
-    if not channels:
-        return False, "no channels enumerated"
-    return await probe_rtsp(channels[0].rtsp_sub, timeout=12)

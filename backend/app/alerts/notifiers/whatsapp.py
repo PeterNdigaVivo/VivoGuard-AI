@@ -10,11 +10,9 @@ TWILIO_AUTH_TOKEN). New env vars:
                          Stops the manager's phone from melting.
 """
 from __future__ import annotations
-import asyncio
 import logging
 
 from app.alerts.notifiers.base import AlertPayload, Notifier
-from app.config import settings
 
 log = logging.getLogger(__name__)
 

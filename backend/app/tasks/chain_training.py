@@ -444,30 +444,6 @@ def _chain_tz():
         return _tz.utc
 
 
-def _has_grown_since_last_train(detector_type: str) -> bool:
-    """True if the approved-sample count for this detector exceeds the
-    sample_count baked into the latest chain model for the same
-    detector. If no chain model exists yet, treat as grown."""
-    from sqlalchemy import or_, func
-    from app.database import SessionLocal
-    from app.models import AIModel, TrainingSample
-
-    with SessionLocal() as db:
-        latest = (db.query(AIModel)
-                    .filter(AIModel.is_chain_model == True,            # noqa: E712
-                            AIModel.detector_type == detector_type)
-                    .order_by(AIModel.id.desc()).first())
-        current = (db.query(func.count(TrainingSample.id))
-                     .filter(TrainingSample.detector_type == detector_type,
-                             or_(TrainingSample.approved.is_(True),
-                                 TrainingSample.approved.is_(None)),
-                             TrainingSample.source.in_(_ALLOWED_SAMPLE_SOURCES))
-                     .scalar() or 0)
-        if latest is None or latest.sample_count is None:
-            return current > 0
-        return int(current) > int(latest.sample_count)
-
-
 @celery_app.task(name="training.chain_retrain_due", ignore_result=True)
 def chain_retrain_due() -> None:
     """5-min beat tick. Auto-fires the chain trainer when:

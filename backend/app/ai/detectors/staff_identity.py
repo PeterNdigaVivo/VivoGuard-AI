@@ -33,13 +33,15 @@ we upsert a row in `staff_tracks` so the analytics endpoints exclude
 the visitor from the customer count (existing LEFT-JOIN behaviour).
 """
 from __future__ import annotations
-from collections import defaultdict
+import logging
 from datetime import date as _date, datetime, timezone
 from typing import Literal
 
 from app.ai.detectors.base import COCO_PERSON, DetectorContext
 from app.ai.detectors.uniform_compliance import uniform_features
 from app.ai.zone_logic import bbox_in_zone, iou
+
+log = logging.getLogger(__name__)
 
 
 # Tags treated as "staff-only" floor area.
@@ -87,15 +89,6 @@ def observe(camera_id: int, track_id: int, zone_tag: str, now: float) -> None:
     book = _zone_first_seen.setdefault(key, {})
     book.setdefault(zone_tag, now)
     _last_seen[key] = now
-
-
-def left_zone(camera_id: int, track_id: int, zone_tag: str) -> None:
-    """The track is no longer in `zone_tag`. Reset that one timer so
-    the duration clock restarts if they come back."""
-    key = (int(camera_id), int(track_id))
-    book = _zone_first_seen.get(key)
-    if book:
-        book.pop(zone_tag, None)
 
 
 def forget_stale(now: float) -> None:

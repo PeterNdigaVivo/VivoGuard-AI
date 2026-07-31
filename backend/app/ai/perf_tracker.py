@@ -25,7 +25,6 @@ import logging
 import statistics
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

@@ -14,7 +14,7 @@ they degrade gracefully (events still fire, no metrics persisted).
 """
 from __future__ import annotations
 import time
-from datetime import date, datetime, timezone
+from datetime import date
 
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
@@ -160,7 +160,6 @@ class QueueDetector(Detector):
         the current frame and stash it under vg:frame_overlay:{cam}
         for the snapshot/Live View endpoints."""
         import cv2
-        import numpy as np
         import redis as _redis
         from app.config import settings
 

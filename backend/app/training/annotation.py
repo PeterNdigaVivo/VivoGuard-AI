@@ -1,6 +1,5 @@
 """Annotation helpers — auto-suggest labels using a base model."""
 from __future__ import annotations
-import io
 import logging
 from pathlib import Path
 

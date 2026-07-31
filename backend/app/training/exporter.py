@@ -1,7 +1,6 @@
 """Export trained models to TorchScript / ONNX / TensorRT."""
 from __future__ import annotations
 import logging
-from pathlib import Path
 
 from app.database import SessionLocal
 from app.models import AIModel

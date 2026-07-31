@@ -102,7 +102,6 @@ def queue_escalation_check() -> None:
     """
     from app.database import SessionLocal
     from app.models import Camera, MetricSnapshot, Store, Zone
-    from sqlalchemy import desc
 
     r = _redis()
     now_ts = datetime.now(timezone.utc).timestamp()
@@ -692,7 +691,6 @@ def _sfi_metric_summary(db, store, cam_ids: list[int], zone_id_to_name: dict[int
     """Aggregate the last-15-min metric_snapshots into a plain payload
     the alert body + classifier consume."""
     from app.models import MetricSnapshot
-    from sqlalchemy import func
 
     # browse_time_seconds → average across zones (recorded with avg aggregator
     # by AisleDwellDetector). dwell_count is per-zone "customers in zone now"
@@ -891,77 +889,6 @@ def _people_count_line(customers: int, people_peak: int) -> str:
                 "(no customers)")
     return (f"👥 {customers} {cust_word} in store · "
             f"{staff_est} {staff_word} detected on sales floor")
-
-
-def _sfi_compose_body(store_name: str, summary: dict, rule: str,
-                       hb: dict) -> str:
-    """Plain-English alert body. Every rule renders the same one-line
-    people-count summary up front; the rest of the body is the
-    rule-specific copy + the AI System Status footer."""
-    avg_text = _fmt_browse_time(summary["avg_browse_s"])
-    customers = summary["total_customers"]
-    people_peak = int(summary.get("people_peak") or 0)
-    coverage_pct = int(round(summary["staff_coverage"] * 100))
-    winner = summary["winner"]
-    cams_active = int(hb.get("cameras_active") or 0)
-    cams_total  = int(hb.get("cameras_total")  or 0)
-    last_inf    = hb.get("last_inference_min")
-    people_line = _people_count_line(customers, people_peak)
-
-    # Detection-offline override: no person/dwell metrics landed for
-    # this store in the window. Could be a quiet store with cameras
-    # that didn't produce a metric write, a streamer warm-up gap, or
-    # an actual camera issue — the worker doesn't know which, so we
-    # keep the copy strictly factual and let the AI System Status
-    # line below carry the numbers.
-    if rule == "detection_offline":
-        last = (f"{last_inf} minutes ago"
-                if last_inf is not None else "not yet")
-        return "\n".join([
-            "No detection data recorded for this store in the last 15 minutes.",
-            "",
-            f"📷 Cameras active: {cams_active}/{cams_total}",
-            f"⚡ Last inference: {last}",
-        ])
-
-    lines: list[str] = ["In the last 15 minutes:",
-                        people_line,
-                        f"👥 {customers} customers browsed your product aisles",
-                        f"⏱️ Average browse time: {avg_text}"]
-    if winner and winner["avg"] > 0:
-        lines.append(
-            f"🏆 Most popular area: {winner['name']} "
-            f"({_fmt_browse_time(winner['avg'])} avg)")
-    lines.append(f"👔 Staff coverage: {coverage_pct}% of the time")
-
-    if rule == "good_engagement":
-        lines += ["",
-                  "What this means: Customers are spending good time "
-                  "browsing your products."]
-        if winner:
-            lines.append(f"{winner['name']} is getting the most attention.")
-    elif rule == "low_engagement":
-        lines += ["",
-                  "What this means: Customers are spending less than 1 min "
-                  "browsing. Consider improving displays or moving popular "
-                  "items to more visible locations."]
-    elif rule == "unattended_floor":
-        lines += ["",
-                  "What this means: Customers are browsing without staff in "
-                  "sight. Please send a staff member to the sales floor."]
-    elif rule == "quiet_period":
-        # Brief one-line summary — the people-count line above already
-        # carries the actual numbers. No multi-tier rewrite needed.
-        lines = [people_line,
-                 "Quiet period — light store activity in the last 15 minutes."]
-
-    last = (f"{last_inf} minutes ago"
-            if last_inf is not None else "not yet")
-    lines += ["",
-              "🤖 AI System Status: Running normally",
-              f"📷 Cameras active: {cams_active}/{cams_total}",
-              f"⚡ Last inference: {last}"]
-    return "\n".join(lines)
 
 
 def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
@@ -1383,7 +1310,6 @@ def sales_floor_daily_summary() -> None:
 
 def _sfi_send_daily_for_store(db, store, local_now) -> None:
     from app.models import Camera, MetricSnapshot, Zone
-    from sqlalchemy import func
     from zoneinfo import ZoneInfo
 
     tz = ZoneInfo(getattr(store, "timezone", None) or "Africa/Nairobi")

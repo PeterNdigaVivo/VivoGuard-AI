@@ -7,8 +7,7 @@ made the chain /alerts page and the per-store feed render
 inconsistently) and just renders what we send.
 """
 from __future__ import annotations
-import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query

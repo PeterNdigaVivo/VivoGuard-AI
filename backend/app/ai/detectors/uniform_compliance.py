@@ -226,20 +226,6 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
         return None
 
 
-def uniform_colour_score(frame_bgr, bbox_norm) -> float | None:
-    """Legacy 0..1 score retained for callers that haven't moved to
-    uniform_features() yet (the StaffPresenceDetector colour fallback,
-    the staff-track marker). Computed from the new features so the
-    two paths agree."""
-    feats = uniform_features(frame_bgr, bbox_norm)
-    if feats is None:
-        return None
-    correct = 1.0 if feats["top_ok"] else 0.0
-    return (0.50 * correct
-            + 0.30 * (1.0 if feats["has_lanyard"] else 0.0)
-            + 0.20 * (1.0 if feats["has_nametag"] else 0.0))
-
-
 
 class UniformComplianceDetector(Detector):
     detection_type = "uniform_compliance"

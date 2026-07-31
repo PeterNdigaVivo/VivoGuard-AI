@@ -60,7 +60,7 @@ def run_uniform_mining() -> dict:
     import numpy as np
     import cv2
     from app.database import SessionLocal
-    from app.models import Camera, Zone, TrainingImage, Annotation
+    from app.models import Zone, TrainingImage, Annotation
     from app.stream.frame_buffer import FrameBuffer
     from app.ai.yolov8_runner import infer
     from app.ai.detectors.base import COCO_PERSON

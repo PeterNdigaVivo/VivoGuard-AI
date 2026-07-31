@@ -45,15 +45,6 @@ _WINDOWS = [(9, 14, "0900", 18000), (14, 19, "1400", 18000), (19, 20, "1900", 36
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 
-# Alert-clip segment durations (seconds) per detection type.
-_CLIP_DURATIONS = {
-    "shop_open_close": 180,
-    "intrusion": 120, "trespass": 120, "shrinkage": 120, "after_hours": 120,
-    "staff_present": 60,
-    # checkout_dwell is computed from dwell_seconds + 60 (see _clip_duration).
-}
-_CLIP_DEFAULT = 90
-
 
 def _redis():
     return redis.from_url(settings.redis_url, decode_responses=True)
@@ -269,10 +260,6 @@ def tick() -> None:
 
 
 # ── Alert clip extraction ─────────────────────────────────────────────────
-def _clip_duration(detection_type: str, extra: dict) -> int:
-    if detection_type == "checkout_dwell":
-        return int((extra or {}).get("dwell_seconds") or 60) + 60
-    return _CLIP_DURATIONS.get(detection_type or "", _CLIP_DEFAULT)
 
 
 @celery_app.task(name="recorder.extract_pending_clips", ignore_result=True)
@@ -284,8 +271,8 @@ def extract_pending_clips() -> None:
     The recording_clips table is the single source of truth — there is NO
     clip_pending flag and no dependency on the Redis window marker: we join
     alerts to any camera recording that is `status='recording'` and started
-    before the alert. Works for ALL detection types (_clip_duration falls
-    back to a default). Idempotent via the alert_clip_path guard."""
+    before the alert. Works for ALL detection types. Idempotent via the
+    alert_clip_path guard."""
     if not bool(getattr(settings, "recording_enabled", True)):
         return
     from datetime import timedelta

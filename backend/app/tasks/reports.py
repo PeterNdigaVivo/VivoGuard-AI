@@ -38,7 +38,7 @@ Delivery:
 from __future__ import annotations
 import logging
 import smtplib
-from datetime import date as date_t, datetime, time as time_t, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Optional
 

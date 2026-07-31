@@ -7,7 +7,6 @@ manager (falling back to the ops dashboard number). Deduped per
 store per day in Redis.
 """
 from __future__ import annotations
-import json
 import logging
 from datetime import datetime, timezone
 

@@ -8,6 +8,7 @@
    `app.api.analytics.heatmap_image`.)
 """
 from __future__ import annotations
+import logging
 import time
 from datetime import datetime, timezone
 from statistics import mean
@@ -18,6 +19,8 @@ from app.ai.detectors.base import (
 from app.ai.detectors import staff_identity
 from app.ai.detectors.uniform_compliance import uniform_features
 from app.ai.zone_logic import bbox_in_zone, zone_contains
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +204,6 @@ class StaffPresenceDetector(Detector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
-        thr_conf = float(cfg.get("confidence_threshold", 0.6))
         # `dwell_time_seconds` retained as a per-store override of the
         # 5-min unattended window — operators tune via detector_config.
         dwell    = int(cfg.get("dwell_time_seconds") or self.UNATTENDED_DWELL_SECONDS)
@@ -218,8 +220,6 @@ class StaffPresenceDetector(Detector):
                        if "staff_zone" in (z.get("detection_types_json") or [])
                        and not z.get("suppressed")]
 
-        people = [d for d in ctx.raw_detections
-                  if d["cls"] in COCO_PERSON and d["conf"] >= thr_conf]
         out: list[DetectionEvent] = []
         now = time.time()
 
@@ -230,7 +230,8 @@ class StaffPresenceDetector(Detector):
                 if not is_open(ctx.business_hours, localised_now(ctx.store_timezone)):
                     return []
             except Exception:
-                pass
+                log.debug("business-hours check failed — treating store "
+                          "as open", exc_info=True)
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
         # P4: PolygonZone (foot-point) containment when a frame is available.
         _wh = None

@@ -25,7 +25,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import String, cast, distinct, func
 from sqlalchemy.orm import Session

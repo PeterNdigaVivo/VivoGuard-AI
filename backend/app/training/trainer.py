@@ -19,7 +19,7 @@ import redis
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AIModel, Dataset, TrainingJob
+from app.models import Dataset, TrainingJob
 from app.training.dataset import dataset_root, split_dataset, write_yolo_dataset_yaml
 
 log = logging.getLogger(__name__)

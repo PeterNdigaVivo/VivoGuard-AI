@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 import time
+from datetime import datetime
 
 from app.ai.detectors.base import COCO_PERSON, COCO_VEHICLE, Detector, DetectorContext, DetectionEvent
 from app.ai.zone_logic import bbox_centre, bbox_in_zone, iou, segments_cross, zone_contains
@@ -413,7 +414,7 @@ class HeatmapDetector(Detector):
         self._sessions: dict[tuple[int, int], dict] = {}
 
     @staticmethod
-    def _period_anchor(window: str, ts: "datetime | None" = None) -> tuple:
+    def _period_anchor(window: str, ts: datetime | None = None) -> tuple:
         """Tuple uniquely identifying the current window-period.
 
         Comparable across calls — if the anchor changed since last
@@ -794,7 +795,6 @@ class LPRDetector(Detector):
             if LPRDetector._reader is None:
                 import easyocr
                 LPRDetector._reader = easyocr.Reader(["en"], gpu=False)
-            import numpy as np
             x1, y1, x2, y2 = [int(v) for v in bbox_px]
             x1, y1 = max(0, x1), max(0, y1)
             crop = frame_bgr[y1:y2, x1:x2]

@@ -26,7 +26,7 @@ from app.alerts.notifiers.webhook import WebhookNotifier
 from app.alerts.notifiers.whatsapp import WhatsAppNotifier
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Alert, Camera, DetectionEvent, Zone
+from app.models import Camera, Zone
 
 log = logging.getLogger(__name__)
 

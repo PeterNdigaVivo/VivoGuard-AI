@@ -28,7 +28,6 @@ from sqlalchemy.orm import Session
 from app.ai.detectors import DetectorRegistry
 from app.ai.detectors.base import COCO_PERSON, DetectorContext
 from app.ai.snapshot import SNAPSHOT_TYPES
-from app.ai.tracker import IOUTracker
 from app.ai.yolov8_runner import infer, load_model, resolve_weights
 from app.config import settings
 from app.database import SessionLocal
@@ -224,8 +223,8 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                 schedule_alert_filmstrip.delay(
                     alert.id, camera_id, store_id, ev.detection_type,
                     datetime.now(timezone.utc).timestamp())
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("filmstrip enqueue failed cam=%s: %s", camera_id, e)
         # VLM scene analysis — fire-and-forget on the alerts queue so
         # the 10s cloud call never blocks this inference loop. Guarded
         # by detection_type + a stored thumbnail; the task itself

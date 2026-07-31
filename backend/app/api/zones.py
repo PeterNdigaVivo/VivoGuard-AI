@@ -21,7 +21,7 @@ from app.database import get_db
 from app.deps import require_role
 from app.models import Camera, DetectionConfig, Zone
 from app.schemas.detection import ZoneIn, ZoneOut
-from app.zone_purposes import ZONE_PURPOSES, types_for_purpose
+from app.zone_purposes import ZONE_PURPOSES
 
 router = APIRouter(prefix="/cameras", tags=["zones"])
 

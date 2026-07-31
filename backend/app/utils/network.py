@@ -1,33 +1,6 @@
-"""Network utilities — DDNS resolution, TCP probes, RTSP URL building."""
+"""Network utilities — RTSP URL building."""
 from __future__ import annotations
-import asyncio
-import socket
 from urllib.parse import quote
-
-
-def resolve_host(host: str) -> str | None:
-    """Resolve `host` to an IPv4 string. Accepts IP or DDNS hostname.
-    Returns None if resolution fails (caller decides whether to alert)."""
-    try:
-        return socket.gethostbyname(host)
-    except OSError:
-        return None
-
-
-async def tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:
-    """Cheap reachability check: open TCP, close immediately."""
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return True
-    except (OSError, asyncio.TimeoutError):
-        return False
 
 
 def build_rtsp_url(

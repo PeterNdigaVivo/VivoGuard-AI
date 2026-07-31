@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 import time
-from datetime import datetime, timezone
 
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
@@ -26,18 +25,6 @@ from app.ai.zone_logic import bbox_in_zone
 # The colour rule-based + model UniformComplianceDetector now lives in
 # its own module. Re-exported here so existing imports keep working.
 from app.ai.detectors.uniform_compliance import UniformComplianceDetector  # noqa: E402,F401
-
-
-def _shift_label_for(ctx: DetectorContext) -> str | None:
-    """Best-effort 'morning' / 'evening' / 'night' label based on time of day.
-    A proper shift query (store.shifts) is run by the analytics rollup;
-    here we just want a coarse dim for the metric series."""
-    h = datetime.now(timezone.utc).hour
-    if h < 12:
-        return "morning"
-    if h < 18:
-        return "afternoon"
-    return "evening"
 
 
 # ---------------------------------------------------------------------------

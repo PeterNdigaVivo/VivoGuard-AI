@@ -4,7 +4,6 @@ These use Redis pub/sub as the fan-out so multiple browser clients can
 listen without coupling to the inference worker.
 """
 from __future__ import annotations
-import asyncio
 import json
 import logging
 

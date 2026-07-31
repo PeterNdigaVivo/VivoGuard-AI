@@ -37,22 +37,6 @@ def save_uploaded_image(dataset_id: int, filename: str, data: bytes) -> Path:
     return target
 
 
-def ingest_zip(dataset_id: int, zip_bytes: bytes) -> int:
-    """Extract image files from a zip into the dataset. Returns count added."""
-    root = dataset_root(dataset_id)
-    added = 0
-    with zipfile.ZipFile_BytesIO_compat(zip_bytes) as zf:                # type: ignore
-        for name in zf.namelist():
-            if name.endswith("/"):
-                continue
-            if not name.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
-                continue
-            data = zf.read(name)
-            save_uploaded_image(dataset_id, Path(name).name, data)
-            added += 1
-    return added
-
-
 # stdlib zipfile doesn't take bytes; small helper to keep callers simple.
 def _zipfile_from_bytes(b: bytes) -> zipfile.ZipFile:
     import io

@@ -24,6 +24,7 @@ based on uniform colour + lanyard + time-in-zone. Alerts:
 Suppression: business hours only, no alerts within 30 min of opening.
 """
 from __future__ import annotations
+import logging
 import time
 from datetime import datetime
 
@@ -32,6 +33,8 @@ from app.ai.detectors.base import (
 )
 from app.ai.detectors import staff_identity
 from app.ai.zone_logic import bbox_in_zone
+
+log = logging.getLogger(__name__)
 
 
 # Sustained-duration thresholds.
@@ -174,5 +177,6 @@ class StaffZoneDetector(Detector):
                 except Exception:
                     continue
         except Exception:
-            pass
+            log.debug("opening-grace check failed — no grace applied",
+                      exc_info=True)
         return False

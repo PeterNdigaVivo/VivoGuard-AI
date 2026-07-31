@@ -136,7 +136,6 @@ def quick_add_nvr(payload: QuickAddNvrIn, db: Session = Depends(get_db),
     than re-encrypting per channel and avoids a Fernet key surface).
     """
     from app.models import Store
-    from app.utils.network import build_rtsp_url
 
     store = db.get(Store, payload.store_id)
     if not store:

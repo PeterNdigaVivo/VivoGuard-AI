@@ -18,6 +18,7 @@
         — cross-store comparison
 """
 from __future__ import annotations
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -33,6 +34,8 @@ from app.models import (
     Alert, Camera, DetectionEvent, MetricSnapshot, Store, VisitorTrack,
 )
 from app.schemas.store import MetricSnapshotOut
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -264,8 +267,6 @@ def store_live_dashboard(store_id: int,
     # We still return zone capabilities so the dashboard knows what
     # KPI tiles WOULD have been shown.
     no_live = cameras_online == 0
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = today_start - timedelta(days=7)
     five_min_ago = now - timedelta(minutes=5)
 
     # Active window (defaults to today's BUSINESS-HOURS session, not
@@ -857,10 +858,8 @@ def store_behaviour(store_id: int, since: datetime | None = None, until: datetim
     now = datetime.now(timezone.utc)
     if since is not None:
         week_start = since
-        week_end   = until or now
     else:
         week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end   = now
     # Staff signatures from the past week — used to filter out staff
     # movement loops from the journey map (the user's complaint:
     # "Dwell time averages include staff movement which skews data").
@@ -1167,10 +1166,8 @@ def store_zone_performance(store_id: int,
     now = datetime.now(timezone.utc)
     if since is not None:
         week_start = since
-        week_end   = until or now
     else:
         week_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end   = now
 
     zones = db.query(Zone).filter(Zone.camera_id.in_(cam_ids)).all()
     if not zones:
@@ -1365,7 +1362,6 @@ def store_queue_intelligence(store_id: int,
     Trend is computed against the immediately preceding window of the
     same length, so Yesterday vs day-before-yesterday, Last 7 vs the
     7 before that, etc."""
-    from sqlalchemy import extract
     from datetime import datetime as _dt, date as date_t, timedelta
 
     store = db.get(Store, store_id)
@@ -2076,7 +2072,7 @@ def store_week_summary(store_id: int, since: datetime | None = None, until: date
     on each day, so closed-store noise doesn't pollute the bars.
     """
     from sqlalchemy import extract
-    from app.utils.business_hours import is_store_open, todays_session
+    from app.utils.business_hours import todays_session
     from app.api.detector_catalog import DETECTOR_CATALOG
     from app.models import Zone
 
@@ -2094,12 +2090,10 @@ def store_week_summary(store_id: int, since: datetime | None = None, until: date
     now = datetime.now(timezone.utc)
     if since is not None:
         week_start = since
-        week_end   = until or now
     else:
         week_start = (now - timedelta(days=7)).replace(
             hour=0, minute=0, second=0, microsecond=0,
         )
-        week_end   = now
     today_session_open, _ = todays_session(store, now)
 
     # --- 7-day footfall: prefer visitor_count_in; fall back to the
@@ -2298,7 +2292,8 @@ def store_heatmaps(store_id: int, window: str | None = None,
                         "norm_y": round(my / max(1, n - 1), 3),
                     }
             except Exception:
-                pass
+                log.warning("heatmap hotspot computation failed camera=%s",
+                            c.id, exc_info=True)
         out.append({
             "camera_id": c.id,
             "camera_name": c.name,
@@ -3910,7 +3905,6 @@ def store_loss_prevention(store_id: int, since: datetime | None = None, until: d
     """Daily LP summary: time-of-day pattern, camera hotspots, staff
     correlation. Pure aggregation over DetectionEvent + Alert rows
     of shrinkage / loitering / weapon types."""
-    from sqlalchemy import extract
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
@@ -3959,7 +3953,6 @@ def store_loss_prevention(store_id: int, since: datetime | None = None, until: d
 
     # Correlation with unstaffed counter: fraction of alerts whose
     # time falls inside a known staff gap. Rough but actionable.
-    from app.models import StaffTrack
     # Pre-compute unstaffed minutes from staff_present_pct as a set
     # of timestamps where value < 0.5. Expensive on long windows, so
     # use today only.
@@ -4008,7 +4001,7 @@ def store_behaviour_trends(store_id: int, since: datetime | None = None, until: 
                             _u=Depends(get_current_user)):
     """Weekly customer-behaviour trends — avg visit duration, top
     zones this week vs last, conversion-funnel (entered → counter)."""
-    from app.models import CustomerJourney, Zone
+    from app.models import CustomerJourney
     store = db.get(Store, store_id)
     if not store:
         raise HTTPException(404, "store not found")
@@ -4178,7 +4171,8 @@ def chain_opening_status(db: Session = Depends(get_db),
     # entry_exit detector_config.extra). Hard-coding them here is
     # acceptable because the chain summary just needs to colour a
     # row — operators tune per-store thresholds in detection_configs.
-    late_threshold = time(9, 3)
+    from datetime import time
+    from app.models import Zone
     not_opened_cutoff = time(9, 30)
 
     stores = (db.query(Store).filter(Store.is_active == True)  # noqa: E712
@@ -4406,8 +4400,6 @@ def roi_report(db: Session = Depends(get_db),
     """
     from sqlalchemy import func as _func
     from app.config import settings as _settings
-    from zoneinfo import ZoneInfo
-    eat = ZoneInfo("Africa/Nairobi")
     now_local = _eat_now()
     month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_start_utc   = month_start_local.astimezone(timezone.utc)

@@ -1,14 +1,11 @@
 """/cameras endpoints — add, list, update, delete, test, discover, snapshot."""
 from __future__ import annotations
-import base64
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.connectors.base import ConnectionTestResult
 from app.connectors.dahua_http import DahuaHTTP
 from app.connectors.discovery import discover_onvif
 from app.connectors.hikvision_isapi import HikvisionISAPI

@@ -101,19 +101,3 @@ ZONE_PURPOSES = {
 def types_for_purpose(purpose_key: str) -> list[str]:
     p = ZONE_PURPOSES.get(purpose_key)
     return list(p["types"]) if p else []
-
-
-def purpose_for_types(types: list[str]) -> str | None:
-    """Reverse: pick the most-specific purpose whose `types` are all
-    present in the given list. Most-specific = longest matching set,
-    so a zone with [entry_exit, glass_door] resolves to
-    `count_entries_glass` (the modifier-tagged variant) rather than
-    the bare `count_entries`."""
-    given = set(types or [])
-    best_key: str | None = None
-    best_len = -1
-    for key, p in ZONE_PURPOSES.items():
-        ptypes = list(p["types"] or [])
-        if ptypes and set(ptypes).issubset(given) and len(ptypes) > best_len:
-            best_key, best_len = key, len(ptypes)
-    return best_key

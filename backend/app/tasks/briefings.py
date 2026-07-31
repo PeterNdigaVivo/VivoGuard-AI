@@ -23,7 +23,7 @@ env vars aren't set — dev environments just don't get briefings.
 """
 from __future__ import annotations
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
@@ -252,7 +252,7 @@ def weekly_fire_due() -> None:
 def _send_weekly_for_chain(db, stores) -> None:
     """Chain-wide weekly summary. Recipients come from the
     WEEKLY_BRIEFING_TO env var (comma-separated whatsapp:+... numbers)."""
-    from app.models import Alert, Camera, DetectionEvent, MetricSnapshot, VisitorTrack
+    from app.models import Alert, DetectionEvent, VisitorTrack
     from sqlalchemy import func
     now = datetime.now(timezone.utc)
     week_start = now - timedelta(days=7)

@@ -29,7 +29,7 @@ import time
 from typing import Any
 
 from app.ai.detectors.base import COCO_PERSON, DetectionEvent, Detector, DetectorContext
-from app.ai.zone_logic import bbox_in_zone, zone_contains
+from app.ai.zone_logic import zone_contains
 
 log = logging.getLogger(__name__)
 

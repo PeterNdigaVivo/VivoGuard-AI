@@ -6,7 +6,7 @@ deps so it works inside the slim API image without bloating it (~6 MB).
 from __future__ import annotations
 import csv
 import io
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from sqlalchemy import func
