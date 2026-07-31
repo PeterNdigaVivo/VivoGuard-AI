@@ -155,6 +155,24 @@ def store_opened_today(store_id: int, day_iso: str) -> dict | None:
         return None
 
 
+def release_store_opened(store_id: int, day_iso: str) -> None:
+    """Delete the opened-today marker. Used when the alert write that
+    FOLLOWED a successful claim failed — Redis and Postgres are not
+    transactional together, so without this a post-claim DB error left
+    the store 'opened' in Redis with no alert row, silencing the Store
+    Opened alert for the whole day (20h TTL). Releasing lets the next
+    crossing / beat tick claim again and retry."""
+    try:
+        _redis().delete(_STORE_OPENED_KEY.format(store_id=int(store_id),
+                                                 day_iso=day_iso))
+        log.warning("shop_state: released opened-today marker store=%s %s "
+                    "(post-claim alert write failed — next signal retries)",
+                    store_id, day_iso)
+    except Exception as e:
+        log.warning("shop_state: could not release opened marker store=%s: %s",
+                    store_id, e)
+
+
 def mark_store_opened(store_id: int, day_iso: str, *,
                      opened_at: datetime, method: str, confidence: str,
                      camera_id: int | None = None) -> bool:

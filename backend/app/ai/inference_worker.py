@@ -189,13 +189,21 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
             frame_bgr, ev.bbox_norm, ev.detection_type, camera_id,
             store_name=store_name, camera_name=camera_name,
             boxes=(ev.extra or {}).get("boxes"))
+    # The detector dataclass carries `cls` (e.g. "shop_opened",
+    # "crossing_in") but detection_events has no cls column — merge it
+    # into extra so the sub-type survives persistence instead of being
+    # silently dropped (the shop_open_close NULL-cls bug, Jul 2026).
+    extra = dict(ev.extra or {})
+    _cls = getattr(ev, "cls", None)
+    if _cls and "cls" not in extra:
+        extra["cls"] = _cls
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=ev.zone_id,
         detection_type=ev.detection_type,
         confidence=ev.confidence,
         bbox_json=ev.bbox_norm,
-        extra=ev.extra or None,
+        extra=extra or None,
         model_id=model_id,
         thumbnail_path=thumb_path,
     )

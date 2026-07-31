@@ -908,6 +908,11 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     thumb_path: str | None = None
     if capture_snapshot and camera_id is not None:
         thumb_path = _save_alert_thumbnail(camera_id, detection_type)
+    # The `cls` parameter was previously accepted and silently discarded
+    # (detection_events has no cls column) — stamp it into extra so the
+    # event sub-type is queryable, matching _persist_event's behaviour.
+    if cls and "cls" not in extra:
+        extra = {**extra, "cls": cls}
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=zone_id,
@@ -2000,8 +2005,15 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     now_eat = _store_eat_now(store)
     day_iso = now_eat.date().isoformat()
 
-    # Already opened (by crossing OR by previous inference run)? Done.
-    if shop_state.store_opened_today(store.id, day_iso) is not None:
+    # Already opened (by crossing OR by previous inference run)?
+    # RECONCILIATION: Redis and Postgres are not transactional together —
+    # a post-claim DB failure historically left the marker set with NO
+    # alert row (the "Redis says opened but no Store Opened alert" bug).
+    # When the marker exists, verify today's opened alert actually exists
+    # and create a recovery alert if it doesn't, then stop.
+    marker = shop_state.store_opened_today(store.id, day_iso)
+    if marker is not None:
+        _ensure_open_alert_exists(db, store, marker, now_eat)
         return
 
     # OPENING-WINDOW GATE. Store-opening inference is only meaningful
@@ -2101,30 +2113,106 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     if not claimed:
         return
 
-    body = (f"{store.name or 'Store ' + str(store.id)} opened — "
-            f"inferred from occupancy. People detected on cameras at "
-            f"{opened_at.strftime('%H:%M')} but no entrance crossing "
-            f"was recorded.")
-    extra = {
-        "priority":          "info",
-        "rule":              "shop_opened_inferred",
-        "store_id":          store.id,
-        "store_name":        store.name,
-        "message":           body,
-        "method":            "occupancy_inference",
-        "confidence":        "medium",
-        "opened_at_eat":     opened_at.strftime("%H:%M"),
-        "opened_at_iso":     opened_at.isoformat(),
-        "signal":            "occupancy_two_in_five_min",
-    }
+    # Claim succeeded — if the alert write below fails, RELEASE the
+    # marker so the next tick can retry instead of the store staying
+    # silently "opened" for the day (Redis/PG are not one transaction).
+    try:
+        body = (f"{store.name or 'Store ' + str(store.id)} opened — "
+                f"inferred from occupancy. People detected on cameras at "
+                f"{opened_at.strftime('%H:%M')} but no entrance crossing "
+                f"was recorded.")
+        extra = {
+            "priority":          "info",
+            "rule":              "shop_opened_inferred",
+            "store_id":          store.id,
+            "store_name":        store.name,
+            "message":           body,
+            "method":            "occupancy_inference",
+            "confidence":        "medium",
+            "opened_at_eat":     opened_at.strftime("%H:%M"),
+            "opened_at_iso":     opened_at.isoformat(),
+            "signal":            "occupancy_two_in_five_min",
+        }
+        _create_info_alert(
+            db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
+            detection_type="shop_open_close", cls="shop_opened_inferred",
+            extra=extra,
+        )
+        db.commit()
+        log.info("shop_open_inference: store=%s opened_at=%s (cam=%s)",
+                 store.id, opened_at.isoformat(), anchor_cam_id)
+    except Exception:
+        shop_state.release_store_opened(store.id, day_iso)
+        raise
+
+
+def _ensure_open_alert_exists(db, store, marker: dict, now_eat) -> None:
+    """Backstop for the claim/alert split-brain: the opened-today marker
+    exists in Redis but no Store Opened alert row landed (a post-claim
+    persistence failure — worker frame rollback or beat-task crash).
+    Creates the missing shop_open_close alert once; subsequent ticks see
+    the event row and no-op."""
+    from app.models import Camera, DetectionEvent
+
+    today_start_utc = (now_eat.replace(hour=0, minute=0, second=0,
+                                       microsecond=0)
+                       .astimezone(timezone.utc))
+    opened_rules = ("shop_opened", "shop_opened_late", "shop_opened_inferred")
+    exists = (db.query(DetectionEvent.id)
+                .join(Camera, Camera.id == DetectionEvent.camera_id)
+                .filter(Camera.store_id == store.id,
+                        DetectionEvent.detection_type == "shop_open_close",
+                        DetectionEvent.timestamp >= today_start_utc,
+                        DetectionEvent.extra.op("->>")("rule")
+                                            .in_(opened_rules))
+                .first())
+    if exists is not None:
+        return
+
+    method = str(marker.get("method") or "unknown")
+    rule = ("shop_opened" if method in ("entry_crossing",
+                                        "glass_door_crossing")
+            else "shop_opened_inferred")
+    opened_iso = marker.get("opened_at")
+    opened_hhmm = None
+    if opened_iso:
+        try:
+            opened_hhmm = datetime.fromisoformat(str(opened_iso)) \
+                                  .strftime("%H:%M")
+        except ValueError:
+            opened_hhmm = None
+    anchor_cam_id = marker.get("camera_id")
+    if anchor_cam_id is None:
+        cams = _entrance_cam_ids_for_store(db, store.id)
+        anchor_cam_id = cams[0] if cams else None
+    if anchor_cam_id is None:
+        log.warning("open-alert recovery: store=%s has marker but no camera "
+                    "to anchor an alert on — skipped", store.id)
+        return
+
+    body = (f"{store.name or 'Store ' + str(store.id)} opened"
+            f"{' at ' + opened_hhmm if opened_hhmm else ''} "
+            f"(recovered — the original alert failed to save).")
     _create_info_alert(
-        db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
-        detection_type="shop_open_close", cls="shop_opened_inferred",
-        extra=extra,
+        db, camera_id=int(anchor_cam_id), zone_id=None, store_id=store.id,
+        detection_type="shop_open_close", cls=rule,
+        extra={
+            "priority":      "info",
+            "rule":          rule,
+            "store_id":      store.id,
+            "store_name":    store.name,
+            "message":       body,
+            "method":        method,
+            "confidence":    marker.get("confidence"),
+            "opened_at_eat": opened_hhmm,
+            "opened_at_iso": opened_iso,
+            "recovered":     True,
+        },
     )
     db.commit()
-    log.info("shop_open_inference: store=%s opened_at=%s (cam=%s)",
-             store.id, opened_at.isoformat(), anchor_cam_id)
+    log.warning("open-alert recovery: store=%s marker existed with no alert "
+                "row — recovery alert created (rule=%s method=%s)",
+                store.id, rule, method)
 
 
 # ── After-hours intrusion snapshot filmstrip ───────────────────────────
