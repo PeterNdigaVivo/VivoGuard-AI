@@ -3152,6 +3152,7 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
       • best_store_today — highest visitor count today
       • totals.alerts_critical — high-priority subset of alerts_total
     """
+    from collections import defaultdict
     from app.utils.business_hours import is_store_open
     from app.stream.frame_buffer import FrameBuffer
 
@@ -3166,37 +3167,174 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
     CRITICAL_TYPES = {"intrusion", "fight", "weapon",
                       "weapon_brandished", "shrinkage", "fire"}
 
-    for s in stores:
-        row = store_dashboard(s.id, days=days, since=since, until=until,
-                              db=db, _u=_u)
+    # ── BATCHED CHAIN AGGREGATION (perf rewrite) ──────────────────────
+    # Previously this endpoint called store_dashboard() PER STORE
+    # (~17 queries each) plus a per-store camera query and a per-camera
+    # Redis GET — ~500 SQL queries + ~100 Redis RTTs per request for 28
+    # stores. Everything below computes the SAME per-store row shape
+    # from ~10 chain-wide GROUP BY queries + one Redis MGET.
+    if since is not None:
+        window_since = since
+        window_until = until or now
+    else:
+        window_since = now - timedelta(days=days)
+        window_until = now
+    is_historical = (now - window_until).total_seconds() > 300
 
-        # Camera liveness — Redis health row within the last 30s.
-        store_cams = db.query(Camera).filter(Camera.store_id == s.id).all()
-        cam_total = len(store_cams)
-        cam_online = 0
-        for cam in store_cams:
-            h = fb.health(cam.id) or {}
-            lfa = h.get("last_frame_at")
-            if lfa and (now.timestamp() - float(lfa)) < 30:
-                cam_online += 1
+    store_ids = [s.id for s in stores]
 
-        open_now = is_store_open(s)
+    # One camera pull for the whole chain (id + store only).
+    all_cams = (db.query(Camera.id, Camera.store_id)
+                  .filter(Camera.store_id.in_(store_ids)).all()
+                if store_ids else [])
+    cams_by_store: dict[int, list[int]] = defaultdict(list)
+    for cid, sid in all_cams:
+        cams_by_store[sid].append(cid)
 
-        # Count alerts in the last hour scoped to this store. We use
-        # the existing alerts_breakdown for the {days}-window total,
-        # but for the RAG light we care about HOT alerts (last 60min,
-        # critical types).
-        cam_ids = [c.id for c in store_cams]
-        recent_critical = 0
-        if cam_ids:
-            recent_critical = (
-                db.query(func.count(Alert.id))
+    # One MGET for camera liveness across the chain.
+    health = fb.health_many([cid for cid, _sid in all_cams])
+    online_by_store: dict[int, int] = defaultdict(int)
+    for cid, sid in all_cams:
+        h = health.get(cid) or {}
+        lfa = h.get("last_frame_at")
+        if lfa and (now.timestamp() - float(lfa)) < 30:
+            online_by_store[sid] += 1
+
+    AVG_METRICS = ("occupancy", "queue_length", "queue_wait_seconds",
+                   "staff_present_pct", "passersby", "stop_rate",
+                   "dwell_seconds")
+    SUM_METRICS = ("visitor_count_in", "visitor_count_out")
+    LAST_METRICS = ("occupancy", "queue_length", "shutter_open")
+
+    avg_map: dict[tuple[int, str], float] = {}
+    if store_ids:
+        for sid, mt, v in (
+                db.query(Camera.store_id, MetricSnapshot.metric_type,
+                         func.avg(MetricSnapshot.value))
+                  .join(Camera, Camera.id == MetricSnapshot.camera_id)
+                  .filter(Camera.store_id.in_(store_ids),
+                          MetricSnapshot.metric_type.in_(AVG_METRICS),
+                          MetricSnapshot.period_start >= window_since,
+                          MetricSnapshot.period_start < window_until)
+                  .group_by(Camera.store_id, MetricSnapshot.metric_type)
+                  .all()):
+            if v is not None:
+                avg_map[(sid, mt)] = float(v)
+
+    sum_map: dict[tuple[int, str], float] = {}
+    if store_ids:
+        for sid, mt, v in (
+                db.query(Camera.store_id, MetricSnapshot.metric_type,
+                         func.sum(MetricSnapshot.value))
+                  .join(Camera, Camera.id == MetricSnapshot.camera_id)
+                  .filter(Camera.store_id.in_(store_ids),
+                          MetricSnapshot.metric_type.in_(SUM_METRICS),
+                          MetricSnapshot.period_start >= window_since,
+                          MetricSnapshot.period_start < window_until)
+                  .group_by(Camera.store_id, MetricSnapshot.metric_type)
+                  .all()):
+            if v is not None:
+                sum_map[(sid, mt)] = float(v)
+
+    # Latest sample per (store, metric): row_number window partitioned on
+    # (store, metric_type), newest first. Window-scoped only for a
+    # historical range — matching store_dashboard._last's semantics
+    # (live view shows the latest sample EVER, not window-bound).
+    last_map: dict[tuple[int, str], float] = {}
+    if store_ids:
+        rn = func.row_number().over(
+            partition_by=(Camera.store_id, MetricSnapshot.metric_type),
+            order_by=MetricSnapshot.period_start.desc())
+        lastq = (db.query(Camera.store_id.label("sid"),
+                          MetricSnapshot.metric_type.label("mt"),
+                          MetricSnapshot.value.label("val"),
+                          rn.label("rn"))
+                   .join(Camera, Camera.id == MetricSnapshot.camera_id)
+                   .filter(Camera.store_id.in_(store_ids),
+                           MetricSnapshot.metric_type.in_(LAST_METRICS)))
+        if is_historical:
+            lastq = lastq.filter(MetricSnapshot.period_start >= window_since,
+                                 MetricSnapshot.period_start < window_until)
+        sub = lastq.subquery()
+        for r in db.query(sub.c.sid, sub.c.mt, sub.c.val).filter(sub.c.rn == 1):
+            last_map[(r.sid, r.mt)] = r.val
+
+    vt_window: dict[int, int] = dict(
+        db.query(VisitorTrack.store_id, func.count(VisitorTrack.id))
+          .filter(VisitorTrack.store_id.in_(store_ids),
+                  VisitorTrack.first_seen >= window_since,
+                  VisitorTrack.first_seen < window_until)
+          .group_by(VisitorTrack.store_id).all()) if store_ids else {}
+    vt_today: dict[int, int] = dict(
+        db.query(VisitorTrack.store_id, func.count(VisitorTrack.id))
+          .filter(VisitorTrack.store_id.in_(store_ids),
+                  VisitorTrack.day == date.today())
+          .group_by(VisitorTrack.store_id).all()) if store_ids else {}
+
+    ab_map: dict[int, dict[str, int]] = defaultdict(dict)
+    if store_ids:
+        for sid, dt, n in (
+                db.query(Camera.store_id, DetectionEvent.detection_type,
+                         func.count(Alert.id))
+                  .select_from(Alert)
                   .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-                  .filter(DetectionEvent.camera_id.in_(cam_ids),
-                          Alert.created_at >= now - timedelta(hours=1),
-                          DetectionEvent.detection_type.in_(CRITICAL_TYPES))
-                  .scalar() or 0
-            )
+                  .join(Camera, Camera.id == DetectionEvent.camera_id)
+                  .filter(Camera.store_id.in_(store_ids),
+                          Alert.created_at >= window_since,
+                          Alert.created_at < window_until)
+                  .group_by(Camera.store_id, DetectionEvent.detection_type)
+                  .all()):
+            ab_map[sid][dt] = int(n)
+
+    rc_map: dict[int, int] = dict(
+        db.query(Camera.store_id, func.count(Alert.id))
+          .select_from(Alert)
+          .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+          .join(Camera, Camera.id == DetectionEvent.camera_id)
+          .filter(Camera.store_id.in_(store_ids),
+                  Alert.created_at >= now - timedelta(hours=1),
+                  DetectionEvent.detection_type.in_(CRITICAL_TYPES))
+          .group_by(Camera.store_id).all()) if store_ids else {}
+
+    for s in stores:
+        sid = s.id
+        vin = sum_map.get((sid, "visitor_count_in"))
+        vout = sum_map.get((sid, "visitor_count_out"))
+        # Row shape identical to store_dashboard()'s return — the
+        # frontend contract is unchanged, only the query plan is.
+        row = {
+            "store_id": s.id,
+            "store_name": s.name,
+            "country": s.country,
+            "as_of": now.isoformat(),
+            "window_days": days,
+            "window_since": window_since.isoformat(),
+            "window_until": window_until.isoformat(),
+            "is_historical": is_historical,
+            "kpis": {
+                "occupancy_now":        last_map.get((sid, "occupancy")),
+                "occupancy_avg":        avg_map.get((sid, "occupancy")),
+                "queue_length_now":     last_map.get((sid, "queue_length")),
+                "queue_length_avg":     avg_map.get((sid, "queue_length")),
+                "queue_wait_avg_sec":   avg_map.get((sid, "queue_wait_seconds")),
+                "staff_present_avg":    avg_map.get((sid, "staff_present_pct")),
+                "unique_visitors_today":     int(vt_today.get(sid, 0)),
+                "unique_visitors_in_window": int(vt_window.get(sid, 0)),
+                "visitors_in_window":   vin,
+                "visitors_out_window":  vout,
+                "visitors_net_window":  (vin or 0) - (vout or 0),
+                "passersby_avg":        avg_map.get((sid, "passersby")),
+                "stop_rate_avg":        avg_map.get((sid, "stop_rate")),
+                "dwell_seconds_avg":    avg_map.get((sid, "dwell_seconds")),
+                "shutter_open_now":     last_map.get((sid, "shutter_open")),
+            },
+            "alerts_breakdown": dict(ab_map.get(sid, {})),
+        }
+
+        cam_total = len(cams_by_store.get(sid, []))
+        cam_online = online_by_store.get(sid, 0)
+        open_now = is_store_open(s)
+        recent_critical = int(rc_map.get(sid, 0))
 
         staff_pct = row["kpis"].get("staff_present_avg")
 
@@ -3712,11 +3850,12 @@ def store_health_score(store_id: int, db: Session = Depends(get_db),
     incident_score = max(0, 100 - week_critical * 20)
 
     # Camera uptime — fraction of attached cameras with a fresh frame
-    # in Redis right now.
+    # in Redis right now. One MGET for all cameras (was one GET each).
     fb = FrameBuffer()
+    health = fb.health_many([c.id for c in cams])
     online = 0
     for cam in cams:
-        h = fb.health(cam.id) or {}
+        h = health.get(cam.id) or {}
         lfa = h.get("last_frame_at")
         if lfa and (now.timestamp() - float(lfa)) < 60:
             online += 1

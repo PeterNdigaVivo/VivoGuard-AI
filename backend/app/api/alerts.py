@@ -1203,10 +1203,22 @@ def list_alerts(
     until: Optional[datetime]  = Query(None),
     limit: int                 = Query(100, le=500),
     order: Optional[str]       = Query(None),
+    before_id: Optional[int]   = Query(
+        None,
+        description="Cursor pagination: return alerts strictly older than "
+                    "this alert id (keyset on created_at,id — no OFFSET). "
+                    "Designed for order=recent; with severity ordering it "
+                    "acts as an older-than filter."),
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id))
+    if before_id is not None:
+        cursor = db.get(Alert, before_id)
+        if cursor is not None:
+            from sqlalchemy import tuple_
+            q = q.filter(tuple_(Alert.created_at, Alert.id)
+                         < tuple_(cursor.created_at, cursor.id))
     if status:
         q = q.filter(Alert.status == status)
     if camera_id:

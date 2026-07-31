@@ -97,6 +97,23 @@ class FrameBuffer:
         raw = self.r.get(f"vg:health:{camera_id}")
         return json.loads(raw) if raw else None
 
+    def health_many(self, camera_ids: list[int]) -> dict[int, dict]:
+        """Batched health() — one MGET instead of N round-trips. Cameras
+        with no health row (or an unparseable one) are simply absent from
+        the returned map."""
+        if not camera_ids:
+            return {}
+        raws = self.r.mget([f"vg:health:{cid}" for cid in camera_ids])
+        out: dict[int, dict] = {}
+        for cid, raw in zip(camera_ids, raws):
+            if not raw:
+                continue
+            try:
+                out[cid] = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+        return out
+
     def subscribe(self, camera_id: int):
         ps = self.r.pubsub()
         ps.subscribe(f"vg:pub:frames:{camera_id}")
