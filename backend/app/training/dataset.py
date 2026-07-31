@@ -63,7 +63,10 @@ def split_dataset(db: Session, dataset_id: int, *,
 
 def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
                             extra_dataset_ids: list[int] | None = None,
-                            max_neg_ratio: float = 3.0) -> Path:
+                            max_neg_ratio: float = 3.0,
+                            mix_dataset_id: int | None = None,
+                            mix_fraction: float = 0.18,
+                            mix_seed: int = 1337) -> Path:
     """Write the YOLO data.yaml file the trainer reads.
 
     Layout:
@@ -84,6 +87,15 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     SECOND dataset (typically `feedback-negative-<type>`) without
     moving rows across the TrainingImage FK — useful for the
     Phase 2 feedback fine-tune pipeline.
+
+    `mix_dataset_id` (anti-catastrophic-forgetting replay): sample
+    `mix_fraction` (default 18%, the 15-20% replay band) of the TRAIN
+    list's size from the parent model's ORIGINAL dataset and append the
+    samples to the train split only — never val, so validation keeps
+    measuring performance on the new data rather than being inflated by
+    easy replayed samples. Only images whose annotations map into this
+    dataset's class set are eligible (anything else would silently
+    become a background sample). Deterministic via `mix_seed`.
     """
     root = dataset_root(dataset_id)
     ds = db.get(Dataset, dataset_id)
@@ -175,6 +187,44 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
                 continue
             (root / "labels" / f"{img.id}.txt").write_text("")   # background
             target.append(staged)
+
+    # Base-dataset replay mix (anti-catastrophic-forgetting) — train only.
+    if mix_dataset_id is not None and mix_dataset_id != dataset_id:
+        pool = (db.query(TrainingImage)
+                  .filter(TrainingImage.dataset_id == mix_dataset_id,
+                          TrainingImage.labeled == True)          # noqa: E712
+                  .all())
+        eligible: list[tuple[TrainingImage, list[Annotation]]] = []
+        for img in pool:
+            anns = (db.query(Annotation)
+                      .filter(Annotation.image_id == img.id).all())
+            if anns and any(a.class_label in cls_map for a in anns):
+                eligible.append((img, anns))
+        n_mix = min(len(eligible), max(1, int(len(train_list) * mix_fraction)))
+        if n_mix and eligible:
+            sampled = random.Random(mix_seed).sample(eligible, n_mix)
+            added = 0
+            for img, anns in sampled:
+                staged = _stage_image(img)
+                if staged is None:
+                    continue
+                label_path = root / "labels" / f"{img.id}.txt"
+                with label_path.open("w") as f:
+                    for a in anns:
+                        if a.class_label not in cls_map:
+                            continue
+                        cx, cy, w, h = a.bbox_json
+                        f.write(f"{cls_map[a.class_label]} "
+                                f"{cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+                train_list.append(staged)
+                added += 1
+            log.info("write_yolo_dataset_yaml ds=%s: replay-mixed %d/%d "
+                     "images from base dataset %s (fraction=%.2f)",
+                     dataset_id, added, len(eligible), mix_dataset_id,
+                     mix_fraction)
+        else:
+            log.info("write_yolo_dataset_yaml ds=%s: base dataset %s has no "
+                     "eligible images to replay-mix", dataset_id, mix_dataset_id)
 
     def _write(name: str, items: list[str]) -> Path:
         p = root / f"{name}.txt"

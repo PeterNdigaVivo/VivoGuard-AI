@@ -214,15 +214,21 @@ def run_job(job_id: int) -> None:
             raise RuntimeError(job.error_message)
 
         try:
+            # Strict 80/20 train/val split (test unused — every labelled
+            # image contributes signal; val stays a true hold-out). A job
+            # cfg may still override explicitly.
             split_dataset(db, ds.id,
-                          train=float(cfg.get("split_train", 0.7)),
+                          train=float(cfg.get("split_train", 0.8)),
                           val=float(cfg.get("split_val", 0.2)),
-                          test=float(cfg.get("split_test", 0.1)))
+                          test=float(cfg.get("split_test", 0.0)))
             extra_neg_ids = cfg.get("extra_negative_dataset_ids") or []
+            _mix_id = cfg.get("base_mix_dataset_id")
             yaml_path = write_yolo_dataset_yaml(
                 db, ds.id,
                 extra_dataset_ids=[int(i) for i in extra_neg_ids] or None,
                 max_neg_ratio=float(cfg.get("max_neg_ratio", 3.0)),
+                mix_dataset_id=int(_mix_id) if _mix_id is not None else None,
+                mix_fraction=float(getattr(settings, "base_mix_fraction", 0.18)),
             )
         except Exception as e:
             job.status, job.error_message = "failed", f"dataset prep: {e}"
@@ -283,18 +289,27 @@ def run_job(job_id: int) -> None:
     # minimum-image gate operate on what will actually be trained on.
     image_count = len([ln for ln in (ds_root / "train.txt")
                        .read_text().splitlines() if ln.strip()])
-    if image_count == 0:
+    # Minimum-viable-dataset gate: the COMBINED post-sanitize set
+    # (train + val: positives + capped negatives + replay mix) must reach
+    # settings.min_training_images (default 50) — below that, validation
+    # metrics are noise and the fine-tune overfits. The orchestrator
+    # projects this before enqueueing; this is the authoritative check.
+    from app.training.errors import InsufficientDataError
+    combined = int(sanitize_report["kept"])
+    min_total = int(getattr(settings, "min_training_images", 50))
+    if combined < min_total:
+        msg = (f"insufficient data: combined dataset has {combined} images "
+               f"after sanitization (< min_training_images={min_total}; "
+               f"excluded: corrupt={len(sanitize_report['excluded_corrupt'])} "
+               f"dup={len(sanitize_report['excluded_duplicate'])} "
+               f"blurred={len(sanitize_report['excluded_blurred'])})")
         with SessionLocal() as db:
             job2 = db.get(TrainingJob, job_id)
             if job2:
-                job2.status, job2.error_message = "failed", (
-                    "sanitization excluded every training image "
-                    f"(report: corrupt={len(sanitize_report['excluded_corrupt'])} "
-                    f"dup={len(sanitize_report['excluded_duplicate'])} "
-                    f"blurred={len(sanitize_report['excluded_blurred'])})")
+                job2.status, job2.error_message = "failed", msg
                 job2.completed_at = datetime.now(timezone.utc)
                 db.commit()
-        raise RuntimeError("sanitization excluded every training image")
+        raise InsufficientDataError(msg)
 
     # Heavy import deferred so the rest of the app boots without torch.
     from ultralytics import YOLO

@@ -90,6 +90,11 @@ x-app-env: &app-env
   ENTRY_EXIT_MIN_FRAMES_PER_SIDE: ${ENTRY_EXIT_MIN_FRAMES_PER_SIDE:-1}
   # Store Intelligence 45-min BI update — paused by default (Jul 2026).
   STORE_INTELLIGENCE_ENABLED: ${STORE_INTELLIGENCE_ENABLED:-false}
+  # Training-pipeline hardening (ML audit): combined-dataset floor,
+  # anti-forgetting replay fraction, blur-exclusion threshold.
+  MIN_TRAINING_IMAGES: ${MIN_TRAINING_IMAGES:-50}
+  BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
+  SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation

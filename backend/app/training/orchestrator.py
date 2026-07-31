@@ -233,6 +233,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     # set would otherwise train on noise and crash on validation.
     pos_dataset_ids = ([pos_ds.id] if pos_ds is not None else []) + \
                       [d.id for d in extra_pos_ds]
+    pos_count = 0
     if pos_dataset_ids:
         pos_count = (db.query(TrainingImage)
                        .filter(TrainingImage.dataset_id.in_(pos_dataset_ids)).count())
@@ -254,11 +255,52 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     if neg_ds is not None:
         extra_ids.append(neg_ds.id)
     extra_ids += [d.id for d in extra_neg_ds]
+
+    # Anti-catastrophic-forgetting replay: sample ~18% of the parent
+    # model's ORIGINAL training dataset into this fine-tune (train split
+    # only — see write_yolo_dataset_yaml). Resolved here because only the
+    # orchestrator knows the parent; the trainer just reads the cfg key.
+    base_mix_dataset_id: int | None = None
+    if parent.training_job_id:
+        parent_job = db.get(TrainingJob, parent.training_job_id)
+        if (parent_job and parent_job.dataset_id
+                and pos_ds is not None
+                and parent_job.dataset_id != pos_ds.id):
+            base_mix_dataset_id = parent_job.dataset_id
+
+    # Combined-size projection — don't enqueue a job the trainer's
+    # InsufficientDataError gate (settings.min_training_images, default 50)
+    # is guaranteed to abort. Projection mirrors the trainer's real
+    # composition: positives + capped negatives + replay mix.
+    from app.config import settings as _settings
+    _min_total = int(getattr(_settings, "min_training_images", 50))
+    neg_ids = ([neg_ds.id] if neg_ds is not None else []) + \
+              [d.id for d in extra_neg_ds]
+    neg_count = (db.query(TrainingImage)
+                   .filter(TrainingImage.dataset_id.in_(neg_ids)).count()
+                 if neg_ids else 0)
+    _mix_frac = float(getattr(_settings, "base_mix_fraction", 0.18))
+    projected = (pos_count + min(neg_count, int(3.0 * pos_count))
+                 + (int(pos_count * _mix_frac) if base_mix_dataset_id else 0))
+    if projected < _min_total:
+        log.warning(
+            "orchestrator: projected combined dataset too small for training "
+            "(%d < %d) — detection_type=%s pos=%d neg=%d mix=%s",
+            projected, _min_total, detection_type, pos_count, neg_count,
+            base_mix_dataset_id)
+        return {"detection_type": detection_type,
+                "status": "skipped",
+                "reason": (f"projected combined dataset {projected} images "
+                           f"< min_training_images {_min_total} "
+                           f"(pos={pos_count} neg={neg_count})"),
+                "positives_total": pos_count, "negatives_total": neg_count}
+
     cfg = {
         "incremental_finetune":       True,
         "detection_type":             detection_type,   # cutoff filter key
         "resume_from_model_id":       parent.id,
         "extra_negative_dataset_ids": extra_ids,
+        "base_mix_dataset_id":        base_mix_dataset_id,
         "max_neg_ratio":              3.0,
         # epochs intentionally omitted — the trainer sizes it to the dataset
         # (Part 2 #2): <50 img -> 20, <200 -> 15, else 10.

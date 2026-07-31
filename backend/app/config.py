@@ -103,6 +103,19 @@ class Settings(BaseSettings):
     cross_store_base_model:   str   = "yolov8n.pt"
     cross_store_promote_map50: float = 0.85
     cross_store_auto_deploy:  bool  = False
+    # ---- training-pipeline hardening (ML audit) --------------------------
+    # Minimum COMBINED dataset size (positives + capped negatives + replay
+    # mix, post-sanitization) a training job may run with. Below this the
+    # trainer aborts with InsufficientDataError; the orchestrator projects
+    # the same number before enqueueing so doomed jobs never queue.
+    min_training_images: int = 50
+    # Anti-catastrophic-forgetting replay: fraction of the parent model's
+    # original dataset sampled into every fine-tune (train split only).
+    # 0.18 sits inside the standard 15-20% replay band.
+    base_mix_fraction: float = 0.18
+    # Variance-of-Laplacian floor for the sanitize pre-check — images
+    # scoring below are excluded as severely blurred.
+    sanitize_blur_threshold: float = 25.0
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new
