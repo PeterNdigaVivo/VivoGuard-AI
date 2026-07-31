@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # deployed baseline. 0.0 = strict no-regression (historical behaviour);
     # 0.05 relaxes to the standard "no worse than 5 points" gate.
     model_gate_max_regression: float = 0.0
+    # Temporal alert gate: minimum consecutive tracked frames before an
+    # alert fires (event rows always persist). Applies only to detectors
+    # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
+    # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
+    temporal_gate_min_frames: int = 10
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new

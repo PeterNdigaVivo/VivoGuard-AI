@@ -96,6 +96,8 @@ x-app-env: &app-env
   BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
   MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
+  # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
+  TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-10}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation

@@ -201,8 +201,12 @@ class EntryExitDetector(Detector):
 
         # Use raw_detections — track IDs are unreliable on cameras
         # with occlusion or low FPS, and the pseudo-track below
-        # handles continuity itself.
-        thr = float(cfg.get("confidence_threshold", 0.5))
+        # handles continuity itself. Threshold goes through the dynamic
+        # calibration layer (per-zone overrides + EAT time-of-day bands
+        # in detection_configs.extra) — glass-door glare at 07:30 needs
+        # a different bar than crisp noon light.
+        from app.ai.calibration import effective_threshold
+        thr = effective_threshold(cfg, default=0.5)
         persons = [d for d in ctx.raw_detections
                    if d.get("cls") in COCO_PERSON and d.get("conf", 0.0) >= thr]
         # Track how long we've had entry_exit zones but ZERO persons — a

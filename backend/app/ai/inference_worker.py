@@ -170,6 +170,18 @@ _SKIP_ALERT_TYPES: set[str] = {
     "checkout_dwell",
 }
 
+# Temporal alert gate (FP-reduction Phase 3): a tracked object must persist
+# for >= settings.temporal_gate_min_frames consecutive frames before its
+# ALERT fires — the DetectionEvent row is ALWAYS written, only the Alert is
+# held back, so metrics and the training loop see every detection. Exempt:
+# the fast-fire store-open path (entry_exit / shop_open_close were tuned to
+# min=1 after real missed-crossing pain) and every detector with its own
+# bespoke P5 frame gate — double-gating them would change tuned behaviour.
+_TEMPORAL_GATE_EXEMPT: set[str] = {
+    "entry_exit", "shop_open_close",
+    "checkout_dwell", "trespass", "uniform_compliance", "staff_present",
+}
+
 
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
@@ -517,6 +529,14 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 frame_bgr=frame,
             )
 
+            # track_id -> consecutive frames seen: ByteTrack's rolling
+            # confidence buffer when available, history length under the
+            # IOUTracker fallback. Drives the temporal alert gate below.
+            frames_seen: dict[int, int] = {
+                tr.track_id: int(tr.extra.get("frames_seen") or len(tr.history))
+                for tr, _d in tracks
+            }
+
             events_emitted: list[dict] = []
             # Per-frame dedupe set: kills back-to-back duplicate
             # detections (NMS misses, near-identical bboxes, concurrent-
@@ -603,6 +623,23 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                     "— persisting event without alert",
                                     camera_id, _sup_exc)
                                 suppress = True
+                        # Temporal gate — suppress the ALERT (never the
+                        # event row) when the underlying track hasn't
+                        # persisted long enough; kills 1-frame blips.
+                        if (not suppress
+                                and ev.detection_type not in _SKIP_ALERT_TYPES
+                                and ev.detection_type not in _TEMPORAL_GATE_EXEMPT
+                                and ev.track_id is not None):
+                            _need = int(getattr(settings,
+                                                "temporal_gate_min_frames", 10))
+                            _fs = frames_seen.get(ev.track_id, 0)
+                            if _need > 1 and _fs < _need:
+                                suppress = True
+                                log.debug(
+                                    "temporal gate: %s cam=%s track=%s "
+                                    "frames_seen=%d < %d — alert suppressed",
+                                    ev.detection_type, camera_id,
+                                    ev.track_id, _fs, _need)
                         eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name, store_id=store_id,
