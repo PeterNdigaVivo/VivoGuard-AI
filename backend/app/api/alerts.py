@@ -59,6 +59,7 @@ _SEVERITY: dict[str, str] = {
     "entry_exit":        "info",
     "dwell":             "info",
     "passersby":         "info",
+    "live_activity":     "warning",
     "shop_open_close":   "info",
     "sales_floor_insight": "info",
     "store_intelligence":  "info",
@@ -122,6 +123,7 @@ _SEVERITY_4: dict[str, str] = {
     "uniform_compliance": "MEDIUM",
     "shutter":            "MEDIUM",
 
+    "live_activity":      "MEDIUM",
     "shop_open_close":    "LOW",
     "sales_floor_insight":"LOW",
     "store_intelligence": "LOW",
@@ -177,6 +179,12 @@ def _severity_4_label(detection_type: str | None,
     if dt == "sales_floor_insight":
         return "MEDIUM" if rule in ("low_engagement", "unattended_floor") else "LOW"
     # Shop open/close: not-opened-by-cutoff is CRITICAL; before-hours
+    # Live Activity Sentinel: severity rides on the rule.
+    if dt == "live_activity":
+        return {"after_hours_activity": "HIGH",
+                "occupancy_surge":      "MEDIUM",
+                "store_surge":          "MEDIUM",
+                "dead_scene":           "MEDIUM"}.get(rule, "MEDIUM")
     # / late-opening are HIGH/MEDIUM; routine open + close are LOW.
     if dt == "shop_open_close":
         if rule == "shop_not_opened":           return "CRITICAL"
@@ -214,6 +222,9 @@ def _severity_label(detection_type: str | None,
     # Shop open / close: routine open + close are INFO; before-hours
     # is URGENT (security implication); late-opening is ATTENTION
     # (staffing issue, not an emergency).
+    if detection_type == "live_activity":
+        rule = (event.extra or {}).get("rule", "") if event is not None else ""
+        return "URGENT" if rule == "after_hours_activity" else "ATTENTION"
     if detection_type == "shop_open_close" and event is not None:
         rule = (event.extra or {}).get("rule", "")
         if rule in ("shop_opened_before_hours", "shop_not_opened"):
@@ -503,6 +514,7 @@ _TITLE_ICONS: dict[str, str] = {
     "crowd":             "⚠️",
     "loitering":         "⚠️",
     "shutter":           "🔒",
+    "live_activity":     "👥",
     "shop_open_close":   "🏬",
     "sales_floor_insight": "📊",
     "store_intelligence":  "📊",
@@ -614,6 +626,18 @@ def _title(event: DetectionEvent, camera: Camera | None,
     if dt == "shutter":
         state = _extract(extra, "state", "shutter_state", default="")
         return f"{icon} Shutter {state or 'state change'} — {cam}"
+    if dt == "live_activity":
+        rule = extra.get("rule", "")
+        label = {
+            "occupancy_surge":      "Occupancy Surge",
+            "store_surge":          "Store-Wide Occupancy Surge",
+            "after_hours_activity": "After-Hours Activity Detected",
+            "dead_scene":           "Camera Activity Stalled",
+        }.get(rule, "Live Activity")
+        n = extra.get("people_count")
+        count = (f" ({int(n)} people)"
+                 if isinstance(n, (int, float)) and rule != "dead_scene" else "")
+        return f"👥 {label}{count} — {cam}"
     if dt == "shop_open_close":
         rule = extra.get("rule", "")
         eat = extra.get("eat_time", "")
