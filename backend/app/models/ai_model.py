@@ -40,4 +40,10 @@ class AIModel(Base):
     # for full retrains from the base yolov8n weights.
     parent_model_id: Mapped[int | None] = mapped_column(ForeignKey("ai_models.id", ondelete="SET NULL"), nullable=True)
 
+    # Experiment tracking (migration 0033): SHA256 fingerprint of the staged
+    # dataset this model trained on, plus the full final-validation metric
+    # dict — the reproducibility record next to the weights.
+    dataset_hash:            Mapped[str | None]  = mapped_column(String(64), nullable=True)
+    validation_metrics_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

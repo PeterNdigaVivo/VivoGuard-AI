@@ -311,6 +311,17 @@ def run_job(job_id: int) -> None:
                 db.commit()
         raise InsufficientDataError(msg)
 
+    # Reproducibility fingerprint of the staged, sanitized dataset —
+    # persisted on the AIModel row and in the JSON run record.
+    from app.training.training_logger import compute_dataset_hash, log_training_run
+    runs_dir = Path(settings.models_dir).parent / "training_runs"
+    dataset_hash: str | None = None
+    try:
+        dataset_hash = compute_dataset_hash(ds_root)
+    except Exception as e:
+        # Non-fatal for the run itself, but never silent.
+        log.error("training job %s: dataset hash failed: %s", job_id, e)
+
     # Heavy import deferred so the rest of the app boots without torch.
     from ultralytics import YOLO
 
@@ -435,9 +446,12 @@ def run_job(job_id: int) -> None:
                 map50_95=final_metrics["map50_95"],
                 precision=final_metrics["precision"],
                 recall=final_metrics["recall"],
+                dataset_hash=dataset_hash,
+                validation_metrics_json=final_metrics,
             )
             db.add(ai_model)
             db.commit()
+            new_model_id = ai_model.id
 
             # Auto-promotion gate (config-driven — used by the cross-store
             # pipeline). When a job sets cfg["auto_promote_map50"] and the
@@ -477,6 +491,21 @@ def run_job(job_id: int) -> None:
                              "promote (staged deployed=false; set "
                              "CROSS_STORE_AUTO_DEPLOY=true or promote manually)",
                              _m50, float(_auto))
+        # Experiment record — the JSON audit trail for this run. A write
+        # failure is logged at ERROR (surfaced, never silent) but does not
+        # fail a training run that already completed.
+        try:
+            log_training_run(
+                runs_dir, job_id=job_id, status="done",
+                dataset_id=job.dataset_id, dataset_hash=dataset_hash,
+                parent_model_id=parent_model_id, model_id=new_model_id,
+                hyperparameters={k: str(v) if isinstance(v, Path) else v
+                                 for k, v in train_kwargs.items()},
+                augmentation_config=_aug,
+                sanitize_report=sanitize_report,
+                final_validation_metrics=final_metrics)
+        except Exception as e:
+            log.error("training job %s: run-record write failed: %s", job_id, e)
         _publish(f"vg:pub:training:{job_id}",
                  {"event": "done", "weights": str(best),
                   "metrics": final_metrics})
@@ -490,5 +519,14 @@ def run_job(job_id: int) -> None:
                 job2.error_message = str(e)
                 job2.completed_at = datetime.now(timezone.utc)
                 db.commit()
+        try:
+            log_training_run(
+                runs_dir, job_id=job_id, status="failed",
+                dataset_id=job.dataset_id, dataset_hash=dataset_hash,
+                parent_model_id=parent_model_id,
+                sanitize_report=sanitize_report, error=str(e))
+        except Exception as e2:
+            log.error("training job %s: failure-record write failed: %s",
+                      job_id, e2)
         _publish(f"vg:pub:training:{job_id}", {"event": "failed", "error": str(e)})
         raise
