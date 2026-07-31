@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # Variance-of-Laplacian floor for the sanitize pre-check — images
     # scoring below are excluded as severely blurred.
     sanitize_blur_threshold: float = 25.0
+    # Max absolute map50 drop an automated promotion tolerates versus the
+    # deployed baseline. 0.0 = strict no-regression (historical behaviour);
+    # 0.05 relaxes to the standard "no worse than 5 points" gate.
+    model_gate_max_regression: float = 0.0
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new

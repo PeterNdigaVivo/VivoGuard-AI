@@ -95,6 +95,7 @@ x-app-env: &app-env
   MIN_TRAINING_IMAGES: ${MIN_TRAINING_IMAGES:-50}
   BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
+  MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation

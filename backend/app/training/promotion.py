@@ -134,19 +134,39 @@ def promote(db: Session, candidate_id: int, *,
                   .all())
 
     # Incremental-regression auto-revert (Part 2 #7, Q2): never deploy a
-    # candidate whose training map50 is BELOW the currently-deployed model.
+    # candidate whose training map50 regresses beyond the configured
+    # tolerance versus the currently-deployed model (default 0.0 = strict
+    # no-regression; MODEL_GATE_MAX_REGRESSION relaxes, e.g. 0.05).
     # `force` (explicit operator override) bypasses this guard.
-    if not force and cand is not None and cand.map50 is not None:
+    if not force and cand is not None:
+        from app.ai.model_gating import (check_metric_regression,
+                                         validate_model_before_deploy)
+        from app.config import settings as _settings
         deployed_best = max((s.map50 for s in siblings if s.map50 is not None),
                             default=None)
-        if deployed_best is not None and cand.map50 < deployed_best:
-            log.warning("incremental regression — keeping current deployed model "
-                        "(candidate=%s map50=%.4f < deployed map50=%.4f)",
-                        candidate_id, cand.map50, deployed_best)
+        ok, reason = check_metric_regression(
+            cand.map50, deployed_best,
+            max_regression=float(getattr(_settings,
+                                         "model_gate_max_regression", 0.0)))
+        if not ok:
+            log.warning("incremental regression — keeping current deployed "
+                        "model (candidate=%s): %s", candidate_id, reason)
             result["verdict"] = "regression"
             result["promoted"] = False
-            result["reason"] = (f"candidate map50 {cand.map50:.4f} < deployed "
-                                f"{deployed_best:.4f} — not promoted")
+            result["reason"] = reason
+            return result
+        # Pre-deployment validation gate: class map must match what the
+        # platform will serve, and the weights must survive a dummy
+        # inference pass. Blocks the automated flip; manual /deploy and
+        # force=True bypass (rollback path must never be gated).
+        if not cand.weights_path or not validate_model_before_deploy(
+                cand.weights_path, list(cand.classes_json or [])):
+            log.error("promotion BLOCKED by model gate — candidate=%s "
+                      "weights=%s", candidate_id, cand.weights_path)
+            result["verdict"] = "gate_failed"
+            result["promoted"] = False
+            result["reason"] = ("pre-deployment validation failed (class map "
+                               "or inference smoke test) — see worker log")
             return result
     for s in siblings:
         s.deployed = False

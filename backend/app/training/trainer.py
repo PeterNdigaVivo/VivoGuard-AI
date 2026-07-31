@@ -449,17 +449,29 @@ def run_job(job_id: int) -> None:
             if _auto is not None and _m50 is not None and _m50 >= float(_auto):
                 from app.config import settings as _s
                 if bool(getattr(_s, "cross_store_auto_deploy", False)):
-                    sibs = (db.query(AIModel)
-                              .filter(AIModel.name == ai_model.name,
-                                      AIModel.deployed == True,            # noqa: E712
-                                      AIModel.id != ai_model.id).all())
-                    for _sib in sibs:
-                        _sib.deployed = False
-                    ai_model.deployed = True
-                    db.commit()
-                    log.info("Cross-store model promoted — now active on all "
-                             "cameras (map50=%.4f >= %.2f, model=%s)",
-                             _m50, float(_auto), ai_model.id)
+                    # Automated deploy → must clear the model gate (class
+                    # map + inference smoke test). A gate failure stages
+                    # the model instead of deploying a broken one.
+                    from app.ai.model_gating import validate_model_before_deploy
+                    if not validate_model_before_deploy(
+                            str(best), list(ai_model.classes_json or [])):
+                        log.error(
+                            "Cross-store auto-deploy BLOCKED by model gate "
+                            "(model=%s weights=%s) — staged deployed=false; "
+                            "see gate log above for the rejection reason",
+                            ai_model.id, best)
+                    else:
+                        sibs = (db.query(AIModel)
+                                  .filter(AIModel.name == ai_model.name,
+                                          AIModel.deployed == True,        # noqa: E712
+                                          AIModel.id != ai_model.id).all())
+                        for _sib in sibs:
+                            _sib.deployed = False
+                        ai_model.deployed = True
+                        db.commit()
+                        log.info("Cross-store model promoted — now active on "
+                                 "all cameras (map50=%.4f >= %.2f, model=%s)",
+                                 _m50, float(_auto), ai_model.id)
                 else:
                     log.info("Cross-store model map50=%.4f >= %.2f — ready to "
                              "promote (staged deployed=false; set "
