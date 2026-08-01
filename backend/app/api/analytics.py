@@ -3182,6 +3182,16 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         window_until = now
     is_historical = (now - window_until).total_seconds() > 300
 
+    import time as _time
+    _perf: dict[str, float] = {}
+    _t0 = _time.perf_counter()
+
+    def _mark(stage: str) -> None:
+        nonlocal _t0
+        _now = _time.perf_counter()
+        _perf[stage] = round((_now - _t0) * 1000.0, 1)
+        _t0 = _now
+
     store_ids = [s.id for s in stores]
 
     # One camera pull for the whole chain (id + store only).
@@ -3200,6 +3210,7 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         lfa = h.get("last_frame_at")
         if lfa and (now.timestamp() - float(lfa)) < 30:
             online_by_store[sid] += 1
+    _mark("meta_redis")
 
     AVG_METRICS = ("occupancy", "queue_length", "queue_wait_seconds",
                    "staff_present_pct", "passersby", "stop_rate",
@@ -3256,9 +3267,19 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         if is_historical:
             lastq = lastq.filter(MetricSnapshot.period_start >= window_since,
                                  MetricSnapshot.period_start < window_until)
+        else:
+            # LIVE path: bound the partition scan to a 48h lookback.
+            # Unbounded, this window function sorted the ENTIRE
+            # metric_snapshots table (no retention pruning existed) and
+            # got slower every day — the endpoint's dominant cost. A
+            # camera silent >48h now shows null for its "now" KPIs,
+            # which is more honest than a week-old stale value.
+            lastq = lastq.filter(MetricSnapshot.period_start
+                                 >= now - timedelta(hours=48))
         sub = lastq.subquery()
         for r in db.query(sub.c.sid, sub.c.mt, sub.c.val).filter(sub.c.rn == 1):
             last_map[(r.sid, r.mt)] = r.val
+    _mark("latest_samples")
 
     vt_window: dict[int, int] = dict(
         db.query(VisitorTrack.store_id, func.count(VisitorTrack.id))
@@ -3296,6 +3317,7 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
                   Alert.created_at >= now - timedelta(hours=1),
                   DetectionEvent.detection_type.in_(CRITICAL_TYPES))
           .group_by(Camera.store_id).all()) if store_ids else {}
+    _mark("grouped_aggregates")
 
     for s in stores:
         sid = s.id
@@ -3405,6 +3427,9 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
         -_store_visitors(r),
     ))
 
+    _mark("assemble")
+    log.info("chain-multi cold path ms: %s (stores=%d, historical=%s)",
+             _perf, len(rows), is_historical)
     totals = {
         "unique_visitors_today": visitors_total,
         "unique_visitors_in_window": visitors_total,
