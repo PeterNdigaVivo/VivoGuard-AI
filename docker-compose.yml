@@ -96,6 +96,7 @@ x-app-env: &app-env
   BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
   MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
+  METRIC_RETENTION_DAYS: ${METRIC_RETENTION_DAYS:-90}
   # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
   TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-10}
   # Live Activity Sentinel — dark-launched; enable per rollout plan.

@@ -146,3 +146,46 @@ def cameras_status_sync() -> None:
 
     log.info("cameras_status_sync: inspected=%d online+=%d offline+=%d orphans=%d",
              inspected, transitions_online, transitions_offline, orphans)
+
+
+@celery_app.task(name="maintenance.prune_metric_snapshots", ignore_result=True,
+                 soft_time_limit=1740, time_limit=1800)
+def prune_metric_snapshots() -> None:
+    """Delete metric_snapshots rows older than METRIC_RETENTION_DAYS
+    (default 90 — comfortably above the dashboards' max 30-day window;
+    0 disables). The table grows ~50-150k rows/day at per-minute writes
+    across ~102 cameras and previously had NO retention at all — every
+    dashboard aggregate slowly decayed as it grew.
+
+    Deletes in 50k-row batches (id IN (SELECT ... LIMIT)) with a commit
+    per batch so the task never holds a long transaction / table bloat
+    lock on the platform's busiest write table. period_start is indexed,
+    so the probe subquery is a range scan."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import text
+
+    from app.config import settings
+    from app.database import SessionLocal
+
+    days = int(getattr(settings, "metric_retention_days", 90))
+    if days <= 0:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    batch = 50_000
+    total = 0
+    with SessionLocal() as db:
+        while True:
+            res = db.execute(
+                text("DELETE FROM metric_snapshots WHERE id IN ("
+                     "SELECT id FROM metric_snapshots "
+                     "WHERE period_start < :cutoff LIMIT :batch)"),
+                {"cutoff": cutoff, "batch": batch})
+            db.commit()
+            n = int(res.rowcount or 0)
+            total += n
+            if n < batch:
+                break
+    if total:
+        log.info("prune_metric_snapshots: removed %d rows older than %dd "
+                 "(cutoff=%s)", total, days, cutoff.date())

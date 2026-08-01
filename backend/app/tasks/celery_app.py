@@ -105,6 +105,7 @@ celery_app.conf.update(
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
+        "maintenance.prune_metric_snapshots": {"queue": "beat"},
         "maintenance.cameras_status_sync":    {"queue": "beat"},
         "queue_report.fire_due":              {"queue": "beat"},
         "staff_classifier.classify_today":    {"queue": "beat"},
@@ -351,6 +352,12 @@ celery_app.conf.update(
             "task": "alerting.live_activity_sentinel",
             "schedule": timedelta(seconds=int(getattr(
                 settings, "activity_sentinel_interval_seconds", 60))),
+        },
+        # metric_snapshots retention — nightly at 03:10 EAT (quiet hours),
+        # batched deletes; see maintenance.prune_metric_snapshots.
+        "prune-metric-snapshots-nightly": {
+            "task": "maintenance.prune_metric_snapshots",
+            "schedule": crontab(minute=10, hour=3),
         },
         # Staff-uniform crop miner (Part 6) — mines live frames for training
         # data every 2 hours (30 cameras/run, rotating cursor).

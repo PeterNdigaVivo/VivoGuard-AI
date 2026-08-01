@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
     # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
     temporal_gate_min_frames: int = 10
+    # Retention for the metric_snapshots time-series table (days). The
+    # dashboards' largest window is 30 days; 90 keeps triple margin.
+    # 0 disables pruning entirely.
+    metric_retention_days: int = 90
     # ---- Live Activity Sentinel (dark-launched) --------------------------
     # Consumes the vg:activity:* keys the Live Activity tab reads and
     # turns occupancy patterns into alerts. Per-camera overrides live in
