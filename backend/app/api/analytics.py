@@ -31,7 +31,7 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.utils.cache import cached_store_endpoint
 from app.models import (
-    Alert, Camera, DetectionEvent, MetricSnapshot, Store, VisitorTrack,
+    Alert, Camera, DetectionEvent, MetricSnapshot, Store,
 )
 from app.schemas.store import MetricSnapshotOut
 
@@ -89,70 +89,37 @@ def store_dashboard(store_id: int, days: int = 7,
     # of-day state, not the empty current minute.
     is_historical = (now - window_until).total_seconds() > 300
 
-    # JOIN through cameras.store_id rather than filtering
-    # MetricSnapshot.store_id directly. Why: a metric row written when
-    # the camera was unattached has store_id=NULL; after the operator
-    # attaches the camera, those rows would otherwise stay invisible to
-    # the dashboard forever. Joining through cameras picks them up
-    # automatically.
+    # Shared aggregation helpers (app.utils.analytics_queries) — the
+    # same SQL the chain dashboard uses, scoped to one store. Replaces
+    # ~17 sequential queries (including computing each visitor sum
+    # TWICE for the net figure) with 4 grouped round-trips and zero ORM
+    # entity instantiation. "Now" KPIs use the 48h live lookback.
+    from app.utils.analytics_queries import (
+        fetch_alert_stats, fetch_latest_samples, fetch_metric_aggregates,
+        fetch_visitor_counts)
+    ids = [store_id]
+    avg_map, sum_map = fetch_metric_aggregates(db, ids, window_since,
+                                               window_until)
+    last_map = fetch_latest_samples(
+        db, ids, now=now,
+        historical_window=((window_since, window_until)
+                           if is_historical else None))
+    vt_window, vt_today = fetch_visitor_counts(db, ids, window_since,
+                                               window_until, date.today())
+    _ab, _ = fetch_alert_stats(db, ids, window_since, window_until, now=now)
+    alert_breakdown = _ab.get(store_id, {})
+    visitors_in_window = vt_window.get(store_id, 0)
+    unique_today = vt_today.get(store_id, 0)
+
     def _last(metric: str) -> float | None:
-        q = (db.query(MetricSnapshot)
-               .join(Camera, Camera.id == MetricSnapshot.camera_id)
-               .filter(Camera.store_id == store_id,
-                       MetricSnapshot.metric_type == metric))
-        if is_historical:
-            q = q.filter(MetricSnapshot.period_start >= window_since,
-                         MetricSnapshot.period_start <  window_until)
-        row = q.order_by(MetricSnapshot.period_start.desc()).first()
-        return row.value if row else None
+        return last_map.get((store_id, metric))
 
     def _avg(metric: str) -> float | None:
-        v = (db.query(func.avg(MetricSnapshot.value))
-               .join(Camera, Camera.id == MetricSnapshot.camera_id)
-               .filter(Camera.store_id == store_id,
-                       MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= window_since,
-                       MetricSnapshot.period_start <  window_until)
-               .scalar())
-        return float(v) if v is not None else None
+        return avg_map.get((store_id, metric))
 
     def _sum(metric: str) -> float | None:
-        v = (db.query(func.sum(MetricSnapshot.value))
-               .join(Camera, Camera.id == MetricSnapshot.camera_id)
-               .filter(Camera.store_id == store_id,
-                       MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= window_since,
-                       MetricSnapshot.period_start <  window_until)
-               .scalar())
-        return float(v) if v is not None else None
+        return sum_map.get((store_id, metric))
 
-    # Unique visitors in the window — counts every day that overlaps,
-    # not just "today" (which made the chain dashboard return 0 on
-    # Yesterday / Last week / Last 30 days even with real history).
-    visitors_in_window = (db.query(func.count(VisitorTrack.id))
-                            .filter(VisitorTrack.store_id == store_id,
-                                    VisitorTrack.first_seen >= window_since,
-                                    VisitorTrack.first_seen <  window_until)
-                            .scalar() or 0)
-    # Today figure preserved separately for tiles that need "today
-    # specifically" rather than "the window".
-    today = date.today()
-    unique_today = (db.query(func.count(VisitorTrack.id))
-                      .filter(VisitorTrack.store_id == store_id,
-                              VisitorTrack.day == today)
-                      .scalar() or 0)
-
-    # Alert volume by type — same window as the KPIs.
-    alert_breakdown = dict(
-        db.query(DetectionEvent.detection_type, func.count(Alert.id))
-          .join(Alert, Alert.event_id == DetectionEvent.id)
-          .join(Camera, Camera.id == DetectionEvent.camera_id)
-          .filter(Camera.store_id == store_id,
-                  Alert.created_at >= window_since,
-                  Alert.created_at <  window_until)
-          .group_by(DetectionEvent.detection_type)
-          .all()
-    )
 
     return {
         "store_id": store.id,
@@ -3212,111 +3179,26 @@ def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
             online_by_store[sid] += 1
     _mark("meta_redis")
 
-    AVG_METRICS = ("occupancy", "queue_length", "queue_wait_seconds",
-                   "staff_present_pct", "passersby", "stop_rate",
-                   "dwell_seconds")
-    SUM_METRICS = ("visitor_count_in", "visitor_count_out")
-    LAST_METRICS = ("occupancy", "queue_length", "shutter_open")
+    from app.utils.analytics_queries import (
+        fetch_alert_stats, fetch_latest_samples, fetch_metric_aggregates,
+        fetch_visitor_counts)
 
-    avg_map: dict[tuple[int, str], float] = {}
-    if store_ids:
-        for sid, mt, v in (
-                db.query(Camera.store_id, MetricSnapshot.metric_type,
-                         func.avg(MetricSnapshot.value))
-                  .join(Camera, Camera.id == MetricSnapshot.camera_id)
-                  .filter(Camera.store_id.in_(store_ids),
-                          MetricSnapshot.metric_type.in_(AVG_METRICS),
-                          MetricSnapshot.period_start >= window_since,
-                          MetricSnapshot.period_start < window_until)
-                  .group_by(Camera.store_id, MetricSnapshot.metric_type)
-                  .all()):
-            if v is not None:
-                avg_map[(sid, mt)] = float(v)
-
-    sum_map: dict[tuple[int, str], float] = {}
-    if store_ids:
-        for sid, mt, v in (
-                db.query(Camera.store_id, MetricSnapshot.metric_type,
-                         func.sum(MetricSnapshot.value))
-                  .join(Camera, Camera.id == MetricSnapshot.camera_id)
-                  .filter(Camera.store_id.in_(store_ids),
-                          MetricSnapshot.metric_type.in_(SUM_METRICS),
-                          MetricSnapshot.period_start >= window_since,
-                          MetricSnapshot.period_start < window_until)
-                  .group_by(Camera.store_id, MetricSnapshot.metric_type)
-                  .all()):
-            if v is not None:
-                sum_map[(sid, mt)] = float(v)
-
-    # Latest sample per (store, metric): row_number window partitioned on
-    # (store, metric_type), newest first. Window-scoped only for a
-    # historical range — matching store_dashboard._last's semantics
-    # (live view shows the latest sample EVER, not window-bound).
-    last_map: dict[tuple[int, str], float] = {}
-    if store_ids:
-        rn = func.row_number().over(
-            partition_by=(Camera.store_id, MetricSnapshot.metric_type),
-            order_by=MetricSnapshot.period_start.desc())
-        lastq = (db.query(Camera.store_id.label("sid"),
-                          MetricSnapshot.metric_type.label("mt"),
-                          MetricSnapshot.value.label("val"),
-                          rn.label("rn"))
-                   .join(Camera, Camera.id == MetricSnapshot.camera_id)
-                   .filter(Camera.store_id.in_(store_ids),
-                           MetricSnapshot.metric_type.in_(LAST_METRICS)))
-        if is_historical:
-            lastq = lastq.filter(MetricSnapshot.period_start >= window_since,
-                                 MetricSnapshot.period_start < window_until)
-        else:
-            # LIVE path: bound the partition scan to a 48h lookback.
-            # Unbounded, this window function sorted the ENTIRE
-            # metric_snapshots table (no retention pruning existed) and
-            # got slower every day — the endpoint's dominant cost. A
-            # camera silent >48h now shows null for its "now" KPIs,
-            # which is more honest than a week-old stale value.
-            lastq = lastq.filter(MetricSnapshot.period_start
-                                 >= now - timedelta(hours=48))
-        sub = lastq.subquery()
-        for r in db.query(sub.c.sid, sub.c.mt, sub.c.val).filter(sub.c.rn == 1):
-            last_map[(r.sid, r.mt)] = r.val
+    # One pass computes avg AND sum per (store, metric); a second,
+    # 48h-bounded (live) window query gets the "now" samples. Shared
+    # with /dashboard/store/{id} via app.utils.analytics_queries.
+    avg_map, sum_map = fetch_metric_aggregates(db, store_ids,
+                                               window_since, window_until)
+    last_map = fetch_latest_samples(
+        db, store_ids, now=now,
+        historical_window=((window_since, window_until)
+                           if is_historical else None))
     _mark("latest_samples")
 
-    vt_window: dict[int, int] = dict(
-        db.query(VisitorTrack.store_id, func.count(VisitorTrack.id))
-          .filter(VisitorTrack.store_id.in_(store_ids),
-                  VisitorTrack.first_seen >= window_since,
-                  VisitorTrack.first_seen < window_until)
-          .group_by(VisitorTrack.store_id).all()) if store_ids else {}
-    vt_today: dict[int, int] = dict(
-        db.query(VisitorTrack.store_id, func.count(VisitorTrack.id))
-          .filter(VisitorTrack.store_id.in_(store_ids),
-                  VisitorTrack.day == date.today())
-          .group_by(VisitorTrack.store_id).all()) if store_ids else {}
-
-    ab_map: dict[int, dict[str, int]] = defaultdict(dict)
-    if store_ids:
-        for sid, dt, n in (
-                db.query(Camera.store_id, DetectionEvent.detection_type,
-                         func.count(Alert.id))
-                  .select_from(Alert)
-                  .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-                  .join(Camera, Camera.id == DetectionEvent.camera_id)
-                  .filter(Camera.store_id.in_(store_ids),
-                          Alert.created_at >= window_since,
-                          Alert.created_at < window_until)
-                  .group_by(Camera.store_id, DetectionEvent.detection_type)
-                  .all()):
-            ab_map[sid][dt] = int(n)
-
-    rc_map: dict[int, int] = dict(
-        db.query(Camera.store_id, func.count(Alert.id))
-          .select_from(Alert)
-          .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-          .join(Camera, Camera.id == DetectionEvent.camera_id)
-          .filter(Camera.store_id.in_(store_ids),
-                  Alert.created_at >= now - timedelta(hours=1),
-                  DetectionEvent.detection_type.in_(CRITICAL_TYPES))
-          .group_by(Camera.store_id).all()) if store_ids else {}
+    vt_window, vt_today = fetch_visitor_counts(db, store_ids, window_since,
+                                                window_until, date.today())
+    ab_map, rc_map = fetch_alert_stats(
+        db, store_ids, window_since, window_until,
+        now=now, critical_types=tuple(CRITICAL_TYPES))
     _mark("grouped_aggregates")
 
     for s in stores:
