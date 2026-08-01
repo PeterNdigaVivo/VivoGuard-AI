@@ -96,6 +96,19 @@ def test_activity_presence_off_when_unconfigured() -> None:
     assert all(t["rule"] != "activity_presence" for t in out)
 
 
+def test_activity_presence_default_threshold_is_5() -> None:
+    # Chain default: 5 people minimum (filters passersby). Checked at
+    # the Settings field level so container env vars can't skew it.
+    from app.config import Settings
+    assert Settings.model_fields["activity_presence_threshold"].default == 5
+    # Evaluator fallback matches when the key is absent but the rule is on.
+    cfg = {**CFG, "presence_enabled": True}
+    out = _eval({1: _win(4, 4)}, {1: 10}, cfg, store_open={10: True})
+    assert all(t["rule"] != "activity_presence" for t in out)
+    out = _eval({1: _win(5, 5)}, {1: 10}, cfg, store_open={10: True})
+    assert any(t["rule"] == "activity_presence" for t in out)
+
+
 def test_activity_presence_zero_people_never_fires() -> None:
     out = _eval({1: _win(0, 0)}, {1: 10}, CFG_P, store_open={10: True})
     assert all(t["rule"] != "activity_presence" for t in out)

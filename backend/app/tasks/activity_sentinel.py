@@ -18,8 +18,9 @@ Every 60 s the beat task:
      ``alerting._create_info_alert`` (detection_type="live_activity").
 
 Rules (all thresholds chain-configurable, per-camera overridable):
-  activity_presence    INFO       ANY activity (people >= 1 by default)
-                                  sustained 2 samples; open stores only
+  activity_presence    INFO       sustained activity (people >= 5 by
+                                  default — filters out passersby),
+                                  2 samples; open stores only
   occupancy_surge      ATTENTION  people >= N for K consecutive samples
   store_surge          ATTENTION  store-wide sum >= M, same sustain
   after_hours_activity URGENT     people while the store is closed
@@ -109,7 +110,7 @@ def evaluate_activity_rules(
     store_thr = int(config.get("store_surge_people", 30))
     dead_min = int(config.get("dead_scene_minutes", 0))
     presence_on = bool(config.get("presence_enabled", False))
-    presence_thr = int(config.get("presence_threshold", 1))
+    presence_thr = int(config.get("presence_threshold", 5))
     presence_k = max(1, int(config.get("presence_sustain_samples", 2)))
 
     def _enabled(cid: int) -> bool:
@@ -153,9 +154,9 @@ def evaluate_activity_rules(
             })
 
     # ---- rule: activity_presence (per camera, low-threshold INFO) ------
-    # ANY activity (people >= presence_threshold, default 1) sustained
-    # for presence_sustain_samples ticks. Deliberately NOT high-threshold
-    # — small but real activity matters. Skips stores that are explicitly
+    # Sustained activity: people >= presence_threshold (default 5 — the
+    # minimum group size worth an alert; filters out passersby) for
+    # presence_sustain_samples ticks. Skips stores that are explicitly
     # CLOSED (after_hours_activity owns that case at URGENT). Volume is
     # bounded by the caller's per-camera dedupe bucket.
     if presence_on:
@@ -284,7 +285,7 @@ def _chain_config() -> dict:
         "store_surge_people":    int(getattr(settings, "activity_store_surge_people", 30)),
         "dead_scene_minutes":    int(getattr(settings, "activity_dead_scene_minutes", 0)),
         "presence_enabled":      bool(getattr(settings, "activity_presence_enabled", True)),
-        "presence_threshold":    int(getattr(settings, "activity_presence_threshold", 1)),
+        "presence_threshold":    int(getattr(settings, "activity_presence_threshold", 5)),
         "presence_sustain_samples": int(getattr(
             settings, "activity_presence_sustain_samples", 2)),
     }

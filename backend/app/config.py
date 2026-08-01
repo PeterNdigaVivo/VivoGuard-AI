@@ -135,11 +135,13 @@ class Settings(BaseSettings):
     activity_store_surge_people: int = 30
     activity_dead_scene_minutes: int = 0          # 0 = dead_scene rule off
     activity_sentinel_interval_seconds: int = 60
-    # activity_presence rule — INFO alert on ANY sustained activity
-    # (people >= threshold for N samples). High-volume by design; the
-    # per-camera 10-min dedupe bucket bounds the rate.
+    # activity_presence rule — INFO alert on sustained activity
+    # (people >= threshold for N samples). Threshold 5 = the minimum
+    # people count required to trigger a presence alert, filtering out
+    # passersby / single browsers; the per-camera 10-min dedupe bucket
+    # bounds the rate.
     activity_presence_enabled: bool = True
-    activity_presence_threshold: int = 1
+    activity_presence_threshold: int = 5
     activity_presence_sustain_samples: int = 2
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
