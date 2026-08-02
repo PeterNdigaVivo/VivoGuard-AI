@@ -793,6 +793,29 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return ("Large gathering detected. Monitor for safety.")
     if dt == "shutter":
         return ("Shutter open/close state has changed. Verify against expected store hours.")
+    if dt == "live_activity":
+        rule = extra.get("rule", "")
+        if rule == "dead_scene":
+            return (extra.get("message")
+                    or "Camera is streaming but produced no detections.")
+        cam_name = extra.get("camera_name") or "camera"
+        people = int(extra.get("people_count") or 0)
+        suffix = {"occupancy_surge":      " (surge)",
+                  "store_surge":          " (store-wide surge)",
+                  "after_hours_activity": " after hours"}.get(rule, "")
+        parts = [f"{people} people detected at {cam_name}{suffix}"]
+        staff = extra.get("staff_count")
+        customers = extra.get("customer_count")
+        if isinstance(staff, int) and isinstance(customers, int) \
+                and (staff > 0 or customers > 0):
+            breakdown = []
+            if staff > 0:
+                breakdown.append(f"{staff} staff")
+            if customers > 0:
+                breakdown.append(
+                    f"{customers} customer{'s' if customers != 1 else ''}")
+            parts.append(f"({', '.join(breakdown)})")
+        return " | ".join(parts)
     if dt == "shop_open_close":
         msg = extra.get("message") or ""
         if msg:

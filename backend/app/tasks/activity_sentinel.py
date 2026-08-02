@@ -418,6 +418,35 @@ def live_activity_sentinel() -> None:
             overrides=overrides, now_ts=now,
         )
 
+        # Staff/customer breakdown context for the fired triggers.
+        # REALITY CHECK vs the spec: detection_events has no per-person
+        # class rows and the general model has no staff/customer classes
+        # — the platform's staff signal is staff_tracks (STORE-scoped,
+        # no camera FK). So the breakdown is "tracks classified staff in
+        # this STORE active in the last 15 min", computed ONCE per tick
+        # for all triggers (tuple query, no ORM rows) and labelled with
+        # its source. Any failure degrades to total-count-only alerts.
+        staff_by_store: dict[int, int] = {}
+        _sids = sorted({t["store_id"] for t in triggers
+                        if t["store_id"] is not None})
+        if _sids:
+            try:
+                from datetime import datetime, timedelta, timezone
+
+                from sqlalchemy import func as _f
+
+                from app.models import StaffTrack
+                _recent = datetime.now(timezone.utc) - timedelta(minutes=15)
+                staff_by_store = dict(
+                    db.query(StaffTrack.store_id, _f.count(StaffTrack.id))
+                      .filter(StaffTrack.store_id.in_(_sids),
+                              StaffTrack.classified_as == "staff",
+                              StaffTrack.last_seen >= _recent)
+                      .group_by(StaffTrack.store_id).all())
+            except Exception as e:
+                log.warning("activity sentinel: staff breakdown query "
+                            "failed (alerts fall back to totals): %s", e)
+
         # 4. Dedupe + emit through the existing synthetic-alert path.
         fired = 0
         for t in triggers:
@@ -442,6 +471,12 @@ def live_activity_sentinel() -> None:
                 "source":      "live_activity_sentinel",
                 **t["extra"],
             }
+            _people = t["extra"].get("people_count")
+            if _people is not None and sid is not None:
+                _staff = min(int(staff_by_store.get(sid, 0)), int(_people))
+                extra["staff_count"] = _staff
+                extra["customer_count"] = int(_people) - _staff
+                extra["breakdown_source"] = "staff_tracks_store_15min"
             try:
                 from app.tasks.alerting import _create_info_alert
                 _create_info_alert(

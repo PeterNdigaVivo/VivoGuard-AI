@@ -72,10 +72,20 @@ class FakeRedis:
         return FakePipeline(self.store)
 
 
+class _Q:
+    """Chainable query stub — filter/group_by are no-ops over canned rows."""
+    def __init__(self, rows): self.rows = rows
+    def filter(self, *a):   return self
+    def group_by(self, *a): return self
+    def all(self):          return self.rows
+    def __iter__(self):     return iter(self.rows)
+
+
 class FakeDB:
-    """Duck-typed Session covering exactly the three queries the task runs."""
-    def __init__(self, cams, stores, overrides):
+    """Duck-typed Session covering exactly the queries the task runs."""
+    def __init__(self, cams, stores, overrides, staff_rows=None):
         self._cams, self._stores, self._overrides = cams, stores, overrides
+        self.staff_rows = staff_rows if staff_rows is not None else []
         self.committed = 0
 
     def __enter__(self): return self
@@ -84,15 +94,18 @@ class FakeDB:
     def rollback(self): pass
 
     def query(self, *args):
+        from app.models import StaffTrack
         if args and args[0] is Camera.id:
             rows = self._cams
         elif args and args[0] is Store:
             rows = self._stores
         elif args and args[0] is DetectionConfig:
             rows = self._overrides
+        elif args and args[0] is StaffTrack.store_id:
+            rows = self.staff_rows
         else:                                       # pragma: no cover
             raise AssertionError(f"unexpected query args: {args}")
-        return SimpleNamespace(filter=lambda *f: SimpleNamespace(all=lambda: rows))
+        return _Q(rows)
 
 
 # ── fixture wiring ─────────────────────────────────────────────────────────
@@ -108,7 +121,7 @@ def env(monkeypatch: pytest.MonkeyPatch):
 
     cams = [(1, 10, "Cam A"), (2, 10, "Cam B")]
     stores = [SimpleNamespace(id=10, name="Vivo Test")]
-    db = FakeDB(cams, stores, overrides=[])
+    db = FakeDB(cams, stores, overrides=[], staff_rows=[(10, 1)])
 
     fired: list[dict] = []
 
@@ -173,6 +186,9 @@ def test_fires_after_sustain_and_maps_rules(env) -> None:
     store_t = next(f for f in env.fired if f["cls"] == "store_surge")
     assert store_t["store_id"] == 10
     assert store_t["extra"]["people_count"] == 30
+    # Breakdown rides on every people_count rule: 1 staff, rest customers.
+    assert store_t["extra"]["staff_count"] == 1
+    assert store_t["extra"]["customer_count"] == 29
     assert env.db.committed >= 1
 
 
@@ -232,6 +248,11 @@ def test_activity_presence_end_to_end_info_alert(env) -> None:
         assert f["extra"]["severity"] == "INFO"
         assert "Activity detected at Cam" in f["extra"]["message"]
         assert "2 people present" in f["extra"]["message"]
+        # Staff/customer breakdown from staff_tracks (fixture: 1 staff
+        # active at store 10) — customers = people - staff.
+        assert f["extra"]["staff_count"] == 1
+        assert f["extra"]["customer_count"] == 1
+        assert f["extra"]["breakdown_source"] == "staff_tracks_store_15min"
     # Dedupe: still active next tick → no new alerts.
     n = len(env.fired)
     _run(1)
