@@ -46,6 +46,12 @@ from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
+# ── TEMPORARY KILL-SWITCH (ops, Aug 2026) ──────────────────────────────────
+# Hard-disables the sentinel regardless of ACTIVITY_SENTINEL_ENABLED — no
+# new live_activity alerts are generated until this is flipped back to
+# False (tests override it via monkeypatch so coverage stays live).
+SENTINEL_TEMPORARILY_DISABLED = True
+
 ACTIVITY_KEY_FMT = "vg:activity:{cid}"
 HIST_KEY_FMT     = "vg:activity:hist:{cid}"
 DEDUPE_KEY_FMT   = "vg:alert:dedupe:live_activity:{rule}:{cid}:{sid}"
@@ -313,6 +319,8 @@ def _title_for(rule: str, extra: dict, store_name: str | None,
 def live_activity_sentinel() -> None:
     """60 s beat tick — see module docstring. Never raises past Celery;
     a failed run logs and the next tick retries naturally."""
+    if SENTINEL_TEMPORARILY_DISABLED:
+        return  # temporarily disabled — see the kill-switch constant above
     if not bool(getattr(settings, "activity_sentinel_enabled", False)):
         return
     from app.database import SessionLocal

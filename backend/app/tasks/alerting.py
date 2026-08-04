@@ -1084,7 +1084,9 @@ def sales_floor_insights_check() -> None:
     Logging policy: every branch logs at INFO level so the worker
     log alone explains why an expected alert didn't fire (no zones,
     closed hours, dedup, exception). Hard failures inside the
-    per-store body are caught and logged with full stack traces."""
+    per-store body are caught and logged with full stack traces.
+    return  # temporarily disabled (ops, Aug 2026) — delete this line to
+    #         restore the SALES_FLOOR_INSIGHT_ENABLED-gated behaviour below."""
     from app.database import SessionLocal
     from app.models import Store
 
@@ -1291,6 +1293,8 @@ def sales_floor_daily_summary() -> None:
     """Per-store 18:00 EAT WhatsApp summary of today's sales-floor
     activity. 5-min beat tick + per-store-per-day Redis dedup matches
     the briefings pattern."""
+    return  # temporarily disabled (ops, Aug 2026) — delete this line to
+    #         resume the daily sales-floor summary.
     from app.database import SessionLocal
     from app.models import Store
 

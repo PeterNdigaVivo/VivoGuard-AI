@@ -134,6 +134,9 @@ def env(monkeypatch: pytest.MonkeyPatch):
     import app.database as app_db
     import app.tasks.alerting as alerting
     import app.utils.business_hours as bh
+    # Disarm the ops kill-switch so the suite keeps exercising the
+    # real task body; a dedicated test re-arms it.
+    monkeypatch.setattr(sentinel, "SENTINEL_TEMPORARILY_DISABLED", False)
     monkeypatch.setattr(sentinel, "_redis", lambda: r)
     monkeypatch.setattr(app_db, "SessionLocal", lambda: db)
     monkeypatch.setattr(alerting, "_create_info_alert", _capture)
@@ -170,6 +173,14 @@ def test_disabled_flag_is_a_total_noop(env) -> None:
     _run(3)
     assert env.fired == []
     # No windows were even built — the gate short-circuits before Redis.
+    assert not any(k.startswith("vg:activity:hist:") for k in env.redis.store)
+
+
+def test_kill_switch_beats_the_enable_flag(env) -> None:
+    # SENTINEL_TEMPORARILY_DISABLED wins even with the env flag on.
+    env.monkeypatch.setattr(sentinel, "SENTINEL_TEMPORARILY_DISABLED", True)
+    _run(3)
+    assert env.fired == []
     assert not any(k.startswith("vg:activity:hist:") for k in env.redis.store)
 
 
