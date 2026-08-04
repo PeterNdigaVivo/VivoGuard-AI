@@ -894,7 +894,8 @@ def _people_count_line(customers: int, people_peak: int) -> str:
 def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
                         store_id: int | None, detection_type: str,
                         cls: str, extra: dict,
-                        capture_snapshot: bool = True):
+                        capture_snapshot: bool = True,
+                        thumbnail_path: str | None = None):
     """Write a DetectionEvent + Alert row directly (no detector frame
     needed). Used by the sales-floor heartbeat.
 
@@ -905,8 +906,10 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     prefers thumbnail_path over the live frame buffer.
     """
     from app.models import Alert, DetectionEvent
-    thumb_path: str | None = None
-    if capture_snapshot and camera_id is not None:
+    # A caller-provided thumbnail (e.g. the Activity Sentinel's
+    # track-annotated frame) wins over the generic live capture.
+    thumb_path: str | None = thumbnail_path
+    if thumb_path is None and capture_snapshot and camera_id is not None:
         thumb_path = _save_alert_thumbnail(camera_id, detection_type)
     # The `cls` parameter was previously accepted and silently discarded
     # (detection_events has no cls column) — stamp it into extra so the

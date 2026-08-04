@@ -46,11 +46,11 @@ from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
-# ── TEMPORARY KILL-SWITCH (ops, Aug 2026) ──────────────────────────────────
-# Hard-disables the sentinel regardless of ACTIVITY_SENTINEL_ENABLED — no
-# new live_activity alerts are generated until this is flipped back to
-# False (tests override it via monkeypatch so coverage stays live).
-SENTINEL_TEMPORARILY_DISABLED = True
+# ── KILL-SWITCH (ops) ──────────────────────────────────────────────────────
+# True hard-disables the sentinel regardless of ACTIVITY_SENTINEL_ENABLED.
+# Re-armed to False (Aug 2026) after the snapshot-quality fixes: best-view
+# camera scoring, track-annotated frames, empty-frame rejection.
+SENTINEL_TEMPORARILY_DISABLED = False
 
 ACTIVITY_KEY_FMT = "vg:activity:{cid}"
 HIST_KEY_FMT     = "vg:activity:hist:{cid}"
@@ -60,6 +60,10 @@ HIST_MAX_SAMPLES   = 10          # ~10 min of context at the 60 s cadence
 HIST_TTL_SECONDS   = 3600
 SAMPLE_FRESH_S     = 300         # matches the writer's TTL
 DEDUPE_TTL_SECONDS = 600         # 10-min per-(rule, camera, store) bucket
+FRAME_FRESH_S      = 30          # matches the streamer's vg:frame TTL
+# Rules whose alerts get the best-view, track-annotated snapshot.
+SNAPSHOT_RULES = {"activity_presence", "occupancy_surge",
+                  "store_surge", "after_hours_activity"}
 
 SEVERITY_BY_RULE: dict[str, str] = {
     "activity_presence":    "INFO",
@@ -297,6 +301,109 @@ def _chain_config() -> dict:
     }
 
 
+def _raw_frame(camera_id: int) -> bytes | None:
+    """Latest RAW (no overlay) JPEG for a camera. Module-level so tests
+    stub it; prefer_overlay=False because we draw our own tracker boxes."""
+    try:
+        from app.stream.frame_buffer import FrameBuffer
+        return FrameBuffer().latest_jpeg(int(camera_id), prefer_overlay=False)
+    except Exception:
+        return None
+
+
+def _annotate_snapshot(jpeg: bytes | None, bboxes_px: list,
+                       tracker_ids: list) -> bytes | None:
+    """Draw "Person #<tracker_id>" boxes on the frame — supervision
+    annotators when available (worker image ships supervision==0.22.0),
+    cv2 primitives otherwise. Returns None when there is NOTHING to draw
+    or decode/encode fails: the caller treats None as "no valid
+    snapshot" and moves to the next candidate camera (FIX 4 — never save
+    an unverified/empty frame as evidence)."""
+    if not jpeg or not bboxes_px:
+        return None
+    try:
+        import cv2
+        import numpy as np
+        frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        tids = list(tracker_ids or [])
+        labels = [f"Person #{tids[i]}" if i < len(tids) else "Person"
+                  for i in range(len(bboxes_px))]
+        try:
+            import supervision as sv
+            det = sv.Detections(
+                xyxy=np.array(bboxes_px, dtype=float),
+                tracker_id=np.array(
+                    [int(tids[i]) if i < len(tids) else -1
+                     for i in range(len(bboxes_px))]))
+            frame = sv.BoxAnnotator(thickness=2).annotate(frame, det)
+            frame = sv.LabelAnnotator().annotate(frame, det, labels=labels)
+        except Exception:
+            for (x1, y1, x2, y2), lab in zip(bboxes_px, labels):
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)),
+                              (0, 200, 255), 2)
+                cv2.putText(frame, lab, (int(x1), max(12, int(y1) - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1,
+                            cv2.LINE_AA)
+        ok, buf = cv2.imencode(".jpg", frame)
+        return buf.tobytes() if ok else None
+    except Exception as e:
+        log.debug("activity sentinel: annotate failed: %s", e)
+        return None
+
+
+def _save_snapshot(jpeg: bytes, camera_id: int) -> str | None:
+    """Persist under the same snapshots/YYYY-MM-DD layout the generic
+    alert thumbnails use."""
+    try:
+        from datetime import datetime as _dt
+        from pathlib import Path
+        root = (Path(settings.recordings_dir) / "snapshots"
+                / _dt.now().strftime("%Y-%m-%d"))
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / (f"live_activity_cam{camera_id}_"
+                       f"{_dt.now().strftime('%H%M%S_%f')}.jpg")
+        path.write_bytes(jpeg)
+        return str(path)
+    except Exception as e:
+        log.warning("activity sentinel: snapshot save failed cam=%s: %s",
+                    camera_id, e)
+        return None
+
+
+def _best_annotated_snapshot(candidates: list[int], latest_blob: dict,
+                             fresh_frame_cams: set[int], now: float,
+                             ) -> tuple[int | None, str | None, list[int]]:
+    """Best-view snapshot (FIX 1+2+4): score every candidate camera
+    (people*2 + active_tracker_count), require a fresh vg:frame AND a
+    fresh (<30s) activity blob, read the CURRENT frame and annotate it
+    with the SAME blob's tracker boxes; first candidate whose annotated
+    frame verifiably shows tracked people wins. Returns
+    (camera_id, saved_path, tracker_ids) or (None, None, [])."""
+    scored: list[tuple[int, int, int, list, list]] = []
+    for cand in candidates:
+        blob = latest_blob.get(cand) or {}
+        if cand not in fresh_frame_cams:
+            continue
+        if now - float(blob.get("ts") or 0) > FRAME_FRESH_S:
+            continue
+        people = int(blob.get("people") or 0)
+        tids = list(blob.get("tracker_ids") or [])
+        boxes = list(blob.get("bboxes_px") or [])
+        if people <= 0 and not tids:
+            continue
+        scored.append((people * 2 + len(tids), people, cand, tids, boxes))
+    for _score, _people, cand, tids, boxes in sorted(scored, reverse=True):
+        annotated = _annotate_snapshot(_raw_frame(cand), boxes, tids)
+        if annotated is None:
+            continue                    # nothing verifiable — next camera
+        path = _save_snapshot(annotated, cand)
+        if path:
+            return cand, path, [int(t) for t in tids]
+    return None, None, []
+
+
 def _title_for(rule: str, extra: dict, store_name: str | None,
                camera_name: str | None = None) -> str:
     where = f" — {store_name}" if store_name else ""
@@ -364,6 +471,7 @@ def live_activity_sentinel() -> None:
         except Exception as e:
             log.warning("activity sentinel: MGET failed: %s", e)
             return
+        latest_blob: dict[int, dict] = {}
         pipe = r.pipeline(transaction=False)
         for cid, blob in zip(cam_ids, blobs):
             if not blob:
@@ -374,6 +482,7 @@ def live_activity_sentinel() -> None:
                 continue
             if now - float(payload.get("ts") or 0) > SAMPLE_FRESH_S:
                 continue
+            latest_blob[cid] = payload
             key = HIST_KEY_FMT.format(cid=cid)
             pipe.rpush(key, json.dumps({
                 "people": int(payload.get("people") or 0),
@@ -459,7 +568,26 @@ def live_activity_sentinel() -> None:
         fired = 0
         for t in triggers:
             rule, cid, sid = t["rule"], t["camera_id"], t["store_id"]
-            dedupe = DEDUPE_KEY_FMT.format(rule=rule, cid=cid or 0, sid=sid or 0)
+            # Best-view, track-annotated snapshot. Store-level rules
+            # consider EVERY camera in the store; per-camera rules
+            # validate their own camera. A winning candidate re-anchors
+            # the alert so the thumbnail matches the camera named.
+            snap_path: str | None = None
+            snap_tids: list[int] = []
+            if rule in SNAPSHOT_RULES:
+                if rule in ("store_surge", "after_hours_activity") and sid is not None:
+                    candidates = [c for c, s2 in store_map.items() if s2 == sid]
+                else:
+                    candidates = [cid] if cid is not None else []
+                s_cam, snap_path, snap_tids = _best_annotated_snapshot(
+                    candidates, latest_blob, fresh_frame_cams, now)
+                if s_cam is not None:
+                    cid = s_cam
+            # Store-scoped rules dedupe on the STORE (cid slot = 0) so a
+            # different anchor camera next tick can't double-fire.
+            _dcid = (0 if rule in ("store_surge", "after_hours_activity")
+                     else (cid or 0))
+            dedupe = DEDUPE_KEY_FMT.format(rule=rule, cid=_dcid, sid=sid or 0)
             try:
                 if not r.set(dedupe, "1", ex=DEDUPE_TTL_SECONDS, nx=True):
                     continue
@@ -485,11 +613,16 @@ def live_activity_sentinel() -> None:
                 extra["staff_count"] = _staff
                 extra["customer_count"] = int(_people) - _staff
                 extra["breakdown_source"] = "staff_tracks_store_15min"
+            if _people is not None:
+                extra["person_count"] = int(_people)
+            extra["tracker_ids"] = snap_tids
+            extra["snapshot_annotated"] = bool(snap_path)
             try:
                 from app.tasks.alerting import _create_info_alert
                 _create_info_alert(
                     db, camera_id=cid, zone_id=None, store_id=sid,
                     detection_type="live_activity", cls=rule, extra=extra,
+                    thumbnail_path=snap_path,
                 )
                 fired += 1
             except Exception as e:

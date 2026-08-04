@@ -110,14 +110,17 @@ class FakeDB:
 
 # ── fixture wiring ─────────────────────────────────────────────────────────
 @pytest.fixture()
-def env(monkeypatch: pytest.MonkeyPatch):
+def env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Two cameras in store 10 (open by default), sentinel enabled,
     surge threshold 12 / sustain 3, fresh activity blobs of 15 people."""
     r = FakeRedis()
     now = time.time()
     for cid in (1, 2):
         r.store[f"vg:activity:{cid}"] = json.dumps(
-            {"camera_id": cid, "people": 15, "score": 15.0, "ts": now})
+            {"camera_id": cid, "people": 15, "score": 15.0, "ts": now,
+             "tracker_ids": [7, 9], "bboxes_px": [[10, 10, 60, 120],
+                                                  [80, 20, 140, 130]]})
+        r.store[f"vg:frame:{cid}"] = b"jpeg"      # fresh-frame marker
 
     cams = [(1, 10, "Cam A"), (2, 10, "Cam B")]
     stores = [SimpleNamespace(id=10, name="Vivo Test")]
@@ -126,10 +129,10 @@ def env(monkeypatch: pytest.MonkeyPatch):
     fired: list[dict] = []
 
     def _capture(dbs, *, camera_id, zone_id, store_id, detection_type,
-                 cls, extra, capture_snapshot=True):
+                 cls, extra, capture_snapshot=True, thumbnail_path=None):
         fired.append({"camera_id": camera_id, "store_id": store_id,
                       "detection_type": detection_type, "cls": cls,
-                      "extra": extra})
+                      "extra": extra, "thumbnail_path": thumbnail_path})
 
     import app.database as app_db
     import app.tasks.alerting as alerting
@@ -141,8 +144,20 @@ def env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(app_db, "SessionLocal", lambda: db)
     monkeypatch.setattr(alerting, "_create_info_alert", _capture)
     monkeypatch.setattr(bh, "is_store_open", lambda s: True)
+    # Real (tiny) JPEG for the snapshot pipeline — cv2 is installed in
+    # this test environment; supervision is not, so the cv2 fallback
+    # annotator path is what gets exercised.
+    import cv2
+    import numpy as np
+    _rng = np.random.default_rng(7)
+    _img = _rng.integers(0, 255, (160, 200, 3), dtype=np.uint8)
+    _ok, _buf = cv2.imencode(".jpg", _img)
+    assert _ok
+    monkeypatch.setattr(sentinel, "_raw_frame", lambda cid: _buf.tobytes())
 
     from app.config import settings
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path),
+                        raising=False)
     for k, v in [("activity_sentinel_enabled", True),
                  ("activity_surge_people", 12),
                  ("activity_surge_sustain_samples", 3),
@@ -200,6 +215,13 @@ def test_fires_after_sustain_and_maps_rules(env) -> None:
     # Breakdown rides on every people_count rule: 1 staff, rest customers.
     assert store_t["extra"]["staff_count"] == 1
     assert store_t["extra"]["customer_count"] == 29
+    # Best-view snapshot: annotated with the blob's tracker boxes and
+    # passed through as the alert thumbnail; extra carries the evidence.
+    for f in env.fired:
+        assert f["extra"]["snapshot_annotated"] is True
+        assert f["extra"]["tracker_ids"] == [7, 9]
+        assert f["extra"]["person_count"] == f["extra"]["people_count"]
+        assert f["thumbnail_path"] and "live_activity_cam" in f["thumbnail_path"]
     assert env.db.committed >= 1
 
 
@@ -277,3 +299,63 @@ def test_stale_activity_blobs_are_ignored(env) -> None:
             {"camera_id": cid, "people": 50, "score": 50.0, "ts": stale})
     _run(3)
     assert env.fired == []                    # nothing fresh → no windows
+
+
+def test_no_track_boxes_falls_back_to_plain_alert(env) -> None:
+    """FIX 4: blobs without tracker boxes → no annotated snapshot is
+    saved (never an unverified frame), but the alert still fires with
+    snapshot_annotated=False and no thumbnail override."""
+    now = time.time()
+    for cid in (1, 2):
+        env.redis.store[f"vg:activity:{cid}"] = json.dumps(
+            {"camera_id": cid, "people": 15, "score": 15.0, "ts": now})
+    _run(3)
+    assert len(env.fired) == 3
+    for f in env.fired:
+        assert f["extra"]["snapshot_annotated"] is False
+        assert f["extra"]["tracker_ids"] == []
+        assert f["thumbnail_path"] is None
+
+
+def test_best_camera_wins_store_anchor(env) -> None:
+    """FIX 1: the store-level anchor re-selects by score
+    (people*2 + tracks): cam 2 gets more tracks → higher score → both
+    the alert camera and the snapshot come from cam 2."""
+    now = time.time()
+    env.redis.store["vg:activity:1"] = json.dumps(
+        {"camera_id": 1, "people": 15, "score": 15.0, "ts": now,
+         "tracker_ids": [1], "bboxes_px": [[5, 5, 50, 100]]})
+    env.redis.store["vg:activity:2"] = json.dumps(
+        {"camera_id": 2, "people": 15, "score": 15.0, "ts": now,
+         "tracker_ids": [2, 3, 4],
+         "bboxes_px": [[5, 5, 50, 100], [60, 5, 110, 100],
+                       [120, 5, 170, 100]]})
+    _run(3)
+    store_t = next(f for f in env.fired if f["cls"] == "store_surge")
+    assert store_t["camera_id"] == 2
+    assert store_t["extra"]["tracker_ids"] == [2, 3, 4]
+
+
+def test_stale_frame_camera_skipped_for_snapshot(env) -> None:
+    """FIX 1: a camera without a fresh vg:frame can trigger but never
+    provides the snapshot."""
+    del env.redis.store["vg:frame:1"]
+    del env.redis.store["vg:frame:2"]
+    _run(3)
+    assert len(env.fired) == 3
+    for f in env.fired:
+        assert f["extra"]["snapshot_annotated"] is False
+        assert f["thumbnail_path"] is None
+
+
+def test_annotate_snapshot_unit() -> None:
+    import cv2
+    import numpy as np
+    img = np.full((100, 100, 3), 60, dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", img)
+    assert ok
+    out = sentinel._annotate_snapshot(buf.tobytes(), [[10, 10, 50, 90]], [42])
+    assert out is not None and out != buf.tobytes()
+    # Nothing to draw -> None (FIX 4 contract).
+    assert sentinel._annotate_snapshot(buf.tobytes(), [], [42]) is None
+    assert sentinel._annotate_snapshot(None, [[1, 1, 2, 2]], [1]) is None

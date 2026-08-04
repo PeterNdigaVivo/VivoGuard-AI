@@ -569,6 +569,15 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             # at its last score.
             try:
                 _people_now = sum(1 for d in raw if d.get("cls") == "person")
+                # ByteTrack context (ADDITIVE — the Live Activity tab's
+                # endpoint reads only people/score/ts and ignores these):
+                # per-person tracker ids + pixel boxes from THIS frame,
+                # so the Activity Sentinel can annotate its alert
+                # snapshot with confirmed tracks. Capped at 20 boxes.
+                _tracked = [d for d in raw
+                            if d.get("cls") == "person"
+                            and d.get("track_id") is not None
+                            and d.get("bbox_px")][:20]
                 pub.set(
                     f"vg:activity:{camera_id}",
                     json.dumps({
@@ -576,6 +585,9 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         "people":    _people_now,
                         "score":     float(_people_now),
                         "ts":        time.time(),
+                        "tracker_ids": [int(d["track_id"]) for d in _tracked],
+                        "bboxes_px": [[int(v) for v in d["bbox_px"]]
+                                      for d in _tracked],
                     }),
                     ex=300,
                 )
