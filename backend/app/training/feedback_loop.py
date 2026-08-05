@@ -180,17 +180,44 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         db.commit()
         return
     cls = ev.detection_type
+    # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
+    # frame (boxes burned in) — feeding it to YOLO would teach the model
+    # to detect boxes, not people. Harvest the RAW sibling the sentinel
+    # saved instead, into feedback-negative-person: the false positive is
+    # the PERSON class (usually a mannequin). NOTE: YOLO negatives are
+    # annotation-free by definition, so "mannequin" is recorded as a
+    # source_extra hint for curators/future classifiers, NOT as an
+    # Annotation class (that would make it a mannequin POSITIVE).
+    import os as _os
+    file_path = ev.thumbnail_path
+    ds_name = f"feedback-negative-{cls}"
+    label_hint: str | None = None
+    if cls == "live_activity":
+        raw = (ev.extra or {}).get("raw_snapshot_path")
+        if not raw or not _os.path.exists(raw):
+            a.feedback_used_for_training = True
+            db.commit()
+            log.info("feedback: dismissed live_activity %s has no raw "
+                     "snapshot — skipped (annotated frame is unusable "
+                     "for training)", alert_id)
+            return
+        file_path = raw
+        ds_name = "feedback-negative-person"
+        label_hint = "mannequin"
     ds  = _ensure_dataset(
-        db, f"feedback-negative-{cls}",
+        db, ds_name,
         [],     # no classes — pure background
         description="auto: dismissed alerts (hard-negative pool)",
     )
+    _src = _build_source_extra(db, ev, a, "false")
+    if label_hint:
+        _src["label_hint"] = label_hint
     neg_img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=ev.thumbnail_path,
+        file_path=file_path,
         labeled=True,           # labelled as background — no Annotation rows
-        source_extra=_build_source_extra(db, ev, a, "false"),
+        source_extra=_src,
         source_alert_id=a.id,           # for revert_verdict
     )
     db.add(neg_img); db.flush()

@@ -222,6 +222,9 @@ def test_fires_after_sustain_and_maps_rules(env) -> None:
         assert f["extra"]["tracker_ids"] == [7, 9]
         assert f["extra"]["person_count"] == f["extra"]["people_count"]
         assert f["thumbnail_path"] and "live_activity_cam" in f["thumbnail_path"]
+        # RAW (no-overlay) sibling saved for the training pipeline.
+        assert f["extra"]["raw_snapshot_path"].endswith(".jpg")
+        assert "raw_" in f["extra"]["raw_snapshot_path"]
     assert env.db.committed >= 1
 
 

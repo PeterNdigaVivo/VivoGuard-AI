@@ -353,16 +353,19 @@ def _annotate_snapshot(jpeg: bytes | None, bboxes_px: list,
         return None
 
 
-def _save_snapshot(jpeg: bytes, camera_id: int) -> str | None:
+def _save_snapshot(jpeg: bytes, camera_id: int, tag: str = "") -> str | None:
     """Persist under the same snapshots/YYYY-MM-DD layout the generic
-    alert thumbnails use."""
+    alert thumbnails use. `tag` distinguishes the RAW (no-overlay)
+    sibling kept for the training pipeline — annotated frames must
+    NEVER be fed to YOLO (burned-in boxes become a learned class)."""
     try:
         from datetime import datetime as _dt
         from pathlib import Path
         root = (Path(settings.recordings_dir) / "snapshots"
                 / _dt.now().strftime("%Y-%m-%d"))
         root.mkdir(parents=True, exist_ok=True)
-        path = root / (f"live_activity_cam{camera_id}_"
+        _t = f"{tag}_" if tag else ""
+        path = root / (f"live_activity_{_t}cam{camera_id}_"
                        f"{_dt.now().strftime('%H%M%S_%f')}.jpg")
         path.write_bytes(jpeg)
         return str(path)
@@ -374,7 +377,8 @@ def _save_snapshot(jpeg: bytes, camera_id: int) -> str | None:
 
 def _best_annotated_snapshot(candidates: list[int], latest_blob: dict,
                              fresh_frame_cams: set[int], now: float,
-                             ) -> tuple[int | None, str | None, list[int]]:
+                             ) -> tuple[int | None, str | None,
+                                        list[int], str | None]:
     """Best-view snapshot (FIX 1+2+4): score every candidate camera
     (people*2 + active_tracker_count), require a fresh vg:frame AND a
     fresh (<30s) activity blob, read the CURRENT frame and annotate it
@@ -395,13 +399,18 @@ def _best_annotated_snapshot(candidates: list[int], latest_blob: dict,
             continue
         scored.append((people * 2 + len(tids), people, cand, tids, boxes))
     for _score, _people, cand, tids, boxes in sorted(scored, reverse=True):
-        annotated = _annotate_snapshot(_raw_frame(cand), boxes, tids)
+        raw = _raw_frame(cand)
+        annotated = _annotate_snapshot(raw, boxes, tids)
         if annotated is None:
             continue                    # nothing verifiable — next camera
         path = _save_snapshot(annotated, cand)
         if path:
-            return cand, path, [int(t) for t in tids]
-    return None, None, []
+            # RAW sibling for the feedback/training path — dismissed
+            # live_activity alerts harvest THIS file (never the
+            # annotated one) as a mannequin hard-negative.
+            raw_path = _save_snapshot(raw, cand, tag="raw")
+            return cand, path, [int(t) for t in tids], raw_path
+    return None, None, [], None
 
 
 def _title_for(rule: str, extra: dict, store_name: str | None,
@@ -573,13 +582,14 @@ def live_activity_sentinel() -> None:
             # validate their own camera. A winning candidate re-anchors
             # the alert so the thumbnail matches the camera named.
             snap_path: str | None = None
+            snap_raw: str | None = None
             snap_tids: list[int] = []
             if rule in SNAPSHOT_RULES:
                 if rule in ("store_surge", "after_hours_activity") and sid is not None:
                     candidates = [c for c, s2 in store_map.items() if s2 == sid]
                 else:
                     candidates = [cid] if cid is not None else []
-                s_cam, snap_path, snap_tids = _best_annotated_snapshot(
+                s_cam, snap_path, snap_tids, snap_raw = _best_annotated_snapshot(
                     candidates, latest_blob, fresh_frame_cams, now)
                 if s_cam is not None:
                     cid = s_cam
@@ -617,6 +627,8 @@ def live_activity_sentinel() -> None:
                 extra["person_count"] = int(_people)
             extra["tracker_ids"] = snap_tids
             extra["snapshot_annotated"] = bool(snap_path)
+            if snap_raw:
+                extra["raw_snapshot_path"] = snap_raw
             try:
                 from app.tasks.alerting import _create_info_alert
                 _create_info_alert(

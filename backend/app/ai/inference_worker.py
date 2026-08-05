@@ -568,15 +568,41 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             # streaming drops off naturally instead of lingering
             # at its last score.
             try:
-                _people_now = sum(1 for d in raw if d.get("cls") == "person")
-                # ByteTrack context (ADDITIVE — the Live Activity tab's
-                # endpoint reads only people/score/ts and ignores these):
-                # per-person tracker ids + pixel boxes from THIS frame,
-                # so the Activity Sentinel can annotate its alert
-                # snapshot with confirmed tracks. Capped at 20 boxes.
-                _tracked = [d for d in raw
-                            if d.get("cls") == "person"
-                            and d.get("track_id") is not None
+                # Static-object (mannequin) filter: a real person's track
+                # moves; a mannequin's bbox sits still frame after frame.
+                # Judged from the tracker's own in-process Track.history
+                # (last N bbox positions — no extra Redis state needed).
+                # Tracks younger than the window count as MOVING, so a
+                # person who just walked in is never suppressed. If
+                # tracking is degraded (no ids at all), fall back to the
+                # raw count rather than reporting zero.
+                from app.ai.tracker import is_static_track
+                _win = int(getattr(settings,
+                                   "activity_static_window_frames", 10))
+                _minpx = float(getattr(settings,
+                                       "activity_static_displacement_px", 5))
+                _fh, _fw = frame.shape[:2]
+                _track_by_id = {tr.track_id: tr for tr, _d in tracks}
+                _persons = [d for d in raw if d.get("cls") == "person"]
+                _moving: list[dict] = []
+                _static_n = 0
+                for d in _persons:
+                    _tid = d.get("track_id")
+                    _tr = _track_by_id.get(_tid) if _tid is not None else None
+                    if _tr is not None and is_static_track(
+                            _tr.history, (_fw, _fh),
+                            min_px=_minpx, window=_win):
+                        _static_n += 1
+                        continue
+                    _moving.append(d)
+                if not _track_by_id and _persons:
+                    _moving, _static_n = _persons, 0
+                _people_now = len(_moving)
+                # ByteTrack context (ADDITIVE for the tab endpoint):
+                # MOVING persons only — the sentinel's snapshots and the
+                # tab's counts both exclude static mannequins/fixtures.
+                _tracked = [d for d in _moving
+                            if d.get("track_id") is not None
                             and d.get("bbox_px")][:20]
                 pub.set(
                     f"vg:activity:{camera_id}",
@@ -588,6 +614,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         "tracker_ids": [int(d["track_id"]) for d in _tracked],
                         "bboxes_px": [[int(v) for v in d["bbox_px"]]
                                       for d in _tracked],
+                        "static_filtered": _static_n,
                     }),
                     ex=300,
                 )

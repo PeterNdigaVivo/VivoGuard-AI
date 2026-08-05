@@ -81,6 +81,31 @@ class IOUTracker:
         return out
 
 
+def is_static_track(history_norm: list[list[float]],
+                    frame_wh: tuple[int, int], *,
+                    min_px: float = 5.0, window: int = 10) -> bool:
+    """True when a track has NOT moved — the mannequin signature.
+
+    Judged on the track's own bbox history (both trackers maintain
+    Track.history): max displacement of the bbox CENTRE across the last
+    `window` positions versus the window's first position, in pixels.
+    Max-vs-first (not end-to-end) so a person pacing back to their
+    starting spot still reads as moving.
+
+    Tracks younger than `window` frames return False — a person who
+    just appeared cannot be judged static yet; mannequins persist and
+    accumulate the full window within seconds, so they are filtered
+    almost immediately while new real people are never suppressed."""
+    if len(history_norm) < window:
+        return False
+    w, h = frame_wh
+    pts = [(((bb[0] + bb[2]) / 2.0) * w, ((bb[1] + bb[3]) / 2.0) * h)
+           for bb in history_norm[-window:]]
+    x0, y0 = pts[0]
+    max_d = max(((x - x0) ** 2 + (y - y0) ** 2) ** 0.5 for x, y in pts[1:])
+    return max_d < float(min_px)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ByteTrack adapter (Roboflow Supervision) — drop-in for IOUTracker.
 #

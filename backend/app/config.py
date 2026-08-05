@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     # people count required to trigger a presence alert, filtering out
     # passersby / single browsers; the per-camera 10-min dedupe bucket
     # bounds the rate.
+    # Static-object (mannequin) filter for the activity feed: a tracked
+    # person whose bbox centre moved less than this many pixels across
+    # the last N frames is treated as a fixture and excluded from the
+    # people count, the sentinel rules, and alert snapshots.
+    activity_static_displacement_px: int = 5
+    activity_static_window_frames: int = 10
     activity_presence_enabled: bool = True
     activity_presence_threshold: int = 5
     activity_presence_sustain_samples: int = 2
