@@ -3,12 +3,13 @@ service (celery worker -Q recorder), so it survives worker/inference
 rebuilds. ffmpeg subprocesses are children of THIS container.
 
 Windows (EAT), business hours only:
-    08:00-14:00  window "<date>_0800"  (21600s)
+    07:00-14:00  window "<date>_0700"  (25200s)
     14:00-19:00  window "<date>_1400"  (18000s)
     19:00-20:00  window "<date>_1900"  ( 3600s)
-Outside 08:00-20:00 EAT: nothing records. The first window starts an
-hour before official trading so early store openings (08:0x crossings
-at Garden City / Runda / Yaya, Aug 2026) have footage for their clips.
+Outside 07:00-20:00 EAT: nothing records. The first window starts two
+hours before official trading: early openers kept beating the recorder
+(08:0x crossings first, then Yaya 07:06 / Garden City 07:12 on the
+08:00 window) — 07:00 covers the whole observed opening spread.
 
 At each transition the PREVIOUS window's directory is deleted. Recording is
 substream, stream-copy (no re-encode), fragmented-mp4 so an in-progress file
@@ -42,7 +43,7 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 # Ordered windows: (start_hour, end_hour, suffix, seconds).
-_WINDOWS = [(8, 14, "0800", 21600), (14, 19, "1400", 18000), (19, 20, "1900", 3600)]
+_WINDOWS = [(7, 14, "0700", 25200), (14, 19, "1400", 18000), (19, 20, "1900", 3600)]
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
@@ -174,9 +175,12 @@ def _entrance_clip_for(db, ev, ev_ts):
     entrance = {cid for cid, types in zs if "entry_exit" in (types or [])}
     if not entrance or ev.camera_id in entrance:
         return None
+    # No status filter: window files are deleted at rollover anyway, so
+    # the Path.exists() check at every call site is the real gate — a
+    # status filter only created a boundary race for alerts processed
+    # right after a window transition.
     return (db.query(RecordingClip)
               .filter(RecordingClip.camera_id.in_(sorted(entrance)),
-                      RecordingClip.status == "recording",
                       RecordingClip.started_at <= ev_ts)
               .order_by(RecordingClip.started_at.desc())
               .first())
@@ -296,6 +300,47 @@ def tick() -> None:
 # ── Alert clip extraction ─────────────────────────────────────────────────
 
 
+def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
+    """Cut + re-encode ONE alert clip from `clip` and stamp
+    extra.alert_clip_path. Shared by the fast-path join pass and the
+    24h shop_open_close backfill pass. Returns True on success.
+
+    Standardised 30s clip (10s before + 20s after) for most types;
+    shop_open_close gets the 60s "Yaya 9:13" clip — 45s of approach +
+    15s of the door opening. RE-ENCODED (libx264+aac+faststart), not
+    stream-copied: the window recordings are fragmented mp4, which
+    HTML5 <video> can't play directly."""
+    started = clip.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if (ev.detection_type or "") == "shop_open_close":
+        pre_buffer, post_buffer = 45, 15      # approach + door opening
+    else:
+        pre_buffer, post_buffer = 10, 20
+    dur = pre_buffer + post_buffer
+    offset = max(0, int((ev_ts - started).total_seconds()) - pre_buffer)
+    out = _alert_clips_root() / f"{alert.id}.mp4"
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+           "-ss", str(offset), "-i", clip.file_path,
+           "-t", str(dur),
+           "-c:v", "libx264", "-preset", "veryfast",
+           "-c:a", "aac",
+           "-movflags", "+faststart", str(out)]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, timeout=180)
+    except Exception as e:
+        log.warning("recorder: clip extract failed alert=%s: %s", alert.id, e)
+        return False
+    if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
+        ev.extra = {**(ev.extra or {}), "alert_clip_path": str(out)}
+        db.commit()
+        log.info("recorder: extracted clip alert=%s cam=%s src_cam=%s dur=%ds",
+                 alert.id, ev.camera_id, clip.camera_id, dur)
+        return True
+    return False
+
+
 @celery_app.task(name="recorder.extract_pending_clips", ignore_result=True)
 def extract_pending_clips() -> None:
     """Every 60s: for recent alerts whose camera has an ACTIVE recording,
@@ -334,9 +379,6 @@ def extract_pending_clips() -> None:
                 continue
             if not clip.file_path or not Path(clip.file_path).exists():
                 continue
-            # Offset from the REAL recording start (row's started_at), not the
-            # EAT window boundary: ffmpeg for a window spawns AFTER the
-            # boundary, so a boundary offset seeks past the event / past EOF.
             ev_ts = ev.timestamp
             if ev_ts.tzinfo is None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
@@ -348,48 +390,48 @@ def extract_pending_clips() -> None:
                 if (alt is not None and alt.file_path
                         and Path(alt.file_path).exists()):
                     clip = alt
-            started = clip.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            # Standardised 30s clip for most alert types (10s before + 20s
-            # after). shop_open_close gets the longer 60s "Yaya 9:13" clip —
-            # 45s of the person approaching the door + 15s of the door
-            # opening / entering — so the store-open motion is captured end
-            # to end.
-            if (ev.detection_type or "") == "shop_open_close":
-                pre_buffer = 45                   # approach to the door
-                post_buffer = 15                  # door opening / entering
-            else:
-                pre_buffer = 10                   # seconds before the alert
-                post_buffer = 20                  # seconds after the alert
-            dur = pre_buffer + post_buffer
-            seconds_since_recording_start = int((ev_ts - started).total_seconds())
-            offset = max(0, seconds_since_recording_start - pre_buffer)
-            out = _alert_clips_root() / f"{alert.id}.mp4"
-            # RE-ENCODE the alert clip (not stream-copy): the window
-            # recordings are fragmented mp4, which HTML5 <video> can't play
-            # directly. libx264 + aac + faststart (moov atom at the front)
-            # produces a plain, immediately-playable, seekable mp4.
-            # veryfast preset keeps CPU cheap for these short clips.
-            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-                   "-ss", str(offset), "-i", clip.file_path,
-                   "-t", str(dur),
-                   "-c:v", "libx264", "-preset", "veryfast",
-                   "-c:a", "aac",
-                   "-movflags", "+faststart", str(out)]
-            try:
-                # Re-encode is slower than copy — allow more time than the
-                # old 30s (a 180s clip on CPU can take a while).
-                res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, timeout=180)
-            except Exception as e:
-                log.warning("recorder: clip extract failed alert=%s: %s", alert.id, e)
+            _extract_one(db, alert, ev, clip, ev_ts)
+
+        # ── PASS 2: shop_open_close backfill (last 24h) ─────────────────
+        # THE FIX (Aug 2026) for beat-created store-open alerts with no
+        # clips: the inner JOIN above requires the alert's OWN camera to
+        # have a recording row, so alerts anchored on non-recorded
+        # cameras (occupancy anchors, ffmpeg spawn failures) never
+        # reached the loop — and the entrance-preference swap inside it
+        # never ran for exactly the alerts that needed it. The 10-min
+        # `since` also aged out anything that missed one cycle. This
+        # pass selects the ALERTS first (24h window, no clip yet, no
+        # camera-join precondition), then resolves the best clip per
+        # alert: entrance camera first, the event's own camera second.
+        # Bounded (limit 200) + idempotent via the alert_clip_path guard.
+        day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+        pending = (db.query(Alert, DetectionEvent)
+                     .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+                     .filter(Alert.created_at >= day_ago,
+                             DetectionEvent.detection_type == "shop_open_close")
+                     .order_by(Alert.created_at.desc())
+                     .limit(200)
+                     .all())
+        for alert, ev in pending:
+            if alert.id in seen or (ev.extra or {}).get("alert_clip_path"):
                 continue
-            if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
-                ev.extra = {**(ev.extra or {}), "alert_clip_path": str(out)}
-                db.commit()
-                log.info("recorder: extracted clip alert=%s cam=%s dur=%ds",
-                         alert.id, ev.camera_id, dur)
+            seen.add(alert.id)
+            ev_ts = ev.timestamp
+            if ev_ts is None:
+                continue
+            if ev_ts.tzinfo is None:
+                ev_ts = ev_ts.replace(tzinfo=timezone.utc)
+            clip = _entrance_clip_for(db, ev, ev_ts)
+            if clip is None and ev.camera_id:
+                clip = (db.query(RecordingClip)
+                          .filter(RecordingClip.camera_id == ev.camera_id,
+                                  RecordingClip.started_at <= ev_ts)
+                          .order_by(RecordingClip.started_at.desc())
+                          .first())
+            if (clip is None or not clip.file_path
+                    or not Path(clip.file_path).exists()):
+                continue
+            _extract_one(db, alert, ev, clip, ev_ts)
 
 
 @celery_app.task(name="recorder.prune_alert_clips", ignore_result=True)
