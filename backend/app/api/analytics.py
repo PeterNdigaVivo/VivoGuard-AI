@@ -161,6 +161,72 @@ def store_dashboard(store_id: int, days: int = 7,
 # Live store dashboard — Rules 1, 2, 3 of the retail overhaul
 # ====================================================================
 
+@router.get("/store/{store_id}/multi-camera")
+@cached_store_endpoint("store-multi-camera", ttl=60)
+def store_multi_camera(store_id: int,
+                       db: Session = Depends(get_db),
+                       _u=Depends(get_current_user)):
+    """Multi-camera store view — aggregated TODAY footfall for the whole
+    store plus per-camera in/out/current-occupancy, preferring
+    entry_exit-tagged cameras (all cameras when none are tagged).
+    Reuses the analytics_queries helpers; cached 60s."""
+    from zoneinfo import ZoneInfo
+
+    from app.models import Zone
+    from app.utils.analytics_queries import (
+        fetch_camera_latest, fetch_camera_metric_sums,
+    )
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    cams = (db.query(Camera).filter(Camera.store_id == store_id)
+              .order_by(Camera.name).all())
+    if not cams:
+        return {"store_id": store_id, "store_name": store.name,
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "totals": {"in": 0, "out": 0, "net": 0, "occupancy": 0},
+                "cameras": []}
+
+    zone_rows = (db.query(Zone.camera_id, Zone.detection_types_json)
+                   .filter(Zone.camera_id.in_([c.id for c in cams])).all())
+    entrance_ids = {cid for cid, types in zone_rows
+                    if "entry_exit" in (types or [])}
+    selected = [c for c in cams if c.id in entrance_ids] or cams
+    ids = [c.id for c in selected]
+
+    now = datetime.now(timezone.utc)
+    eat_midnight = (now.astimezone(ZoneInfo("Africa/Nairobi"))
+                    .replace(hour=0, minute=0, second=0, microsecond=0))
+    since = eat_midnight.astimezone(timezone.utc)
+
+    sums = fetch_camera_metric_sums(db, ids, since, now)
+    occ = fetch_camera_latest(db, ids, ("occupancy",), now=now)
+
+    cameras = []
+    t_in = t_out = t_occ = 0
+    for c in selected:
+        c_in = int(sums.get((c.id, "visitor_count_in")) or 0)
+        c_out = int(sums.get((c.id, "visitor_count_out")) or 0)
+        c_occ = int(occ.get((c.id, "occupancy")) or 0)
+        t_in += c_in
+        t_out += c_out
+        t_occ += c_occ
+        cameras.append({
+            "camera_id": c.id, "name": c.name, "status": c.status,
+            "entrance": c.id in entrance_ids,
+            "in": c_in, "out": c_out, "occupancy": c_occ,
+        })
+    return {
+        "store_id": store_id,
+        "store_name": store.name,
+        "as_of": now.isoformat(),
+        "totals": {"in": t_in, "out": t_out,
+                   "net": t_in - t_out, "occupancy": t_occ},
+        "cameras": cameras,
+    }
+
+
 @router.get("/store/{store_id}/live")
 @cached_store_endpoint("store-live", ttl=15)
 def store_live_dashboard(store_id: int,

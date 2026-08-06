@@ -29,7 +29,7 @@ type Detection = { camera_id: number; bbox_norm: number[]; detection_type: strin
 
 // Live AI detections for the bbox overlay — vg:dets:{cam} via
 // GET /cameras/detections/live. bbox = normalized [x1,y1,x2,y2].
-type LiveDet = {
+export type LiveDet = {
   id: number | null; cls: string; conf: number
   bbox: number[]; is_static: boolean
 }
@@ -38,7 +38,7 @@ const DET_POLL_MS = 1000       // 1 Hz — plenty for human perception
 // Poll live detections for the MOUNTED tiles only. The camera grid is
 // hard-paged (off-page tiles unmount) and Activity has <= 15 slots, so
 // `ids` never contains an off-screen camera — one batch request per tick.
-function useLiveDetections(ids: number[]): Record<number, LiveDet[]> {
+export function useLiveDetections(ids: number[]): Record<number, LiveDet[]> {
   const [dets, setDets] = useState<Record<number, LiveDet[]>>({})
   const key = ids.slice().sort((a, b) => a - b).join(',')
   useEffect(() => {
@@ -59,7 +59,7 @@ function useLiveDetections(ids: number[]): Record<number, LiveDet[]> {
 // Bounding-box overlay: %-sized boxes (resize-proof) positioned via
 // transform (no layout thrash). Person = solid green; static/mannequin
 // = dashed gray. Hover = native title tooltip.
-function DetBoxes({ dets }: { dets: LiveDet[] }) {
+export function DetBoxes({ dets }: { dets: LiveDet[] }) {
   if (!dets.length) return null
   return (
     <div className="absolute inset-0 pointer-events-none overflow-hidden">

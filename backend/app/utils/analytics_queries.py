@@ -160,3 +160,53 @@ def fetch_alert_stats(
         if crit_hour is not None and int(row[3] or 0):
             rc_map[sid] = rc_map.get(sid, 0) + int(row[3])
     return ab_map, rc_map
+
+
+def fetch_camera_metric_sums(
+    db: Session, camera_ids: list[int],
+    window_since: datetime, window_until: datetime,
+    metrics: tuple[str, ...] = SUM_METRICS,
+) -> dict[tuple[int, str], float]:
+    """Per-CAMERA metric sums — the camera-grained sibling of
+    fetch_metric_aggregates (which groups by store). One pass."""
+    out: dict[tuple[int, str], float] = {}
+    if not camera_ids:
+        return out
+    for cid, mt, v in (
+            db.query(MetricSnapshot.camera_id, MetricSnapshot.metric_type,
+                     func.sum(MetricSnapshot.value))
+              .filter(MetricSnapshot.camera_id.in_(camera_ids),
+                      MetricSnapshot.metric_type.in_(metrics),
+                      MetricSnapshot.period_start >= window_since,
+                      MetricSnapshot.period_start < window_until)
+              .group_by(MetricSnapshot.camera_id, MetricSnapshot.metric_type)
+              .all()):
+        if v is not None:
+            out[(cid, mt)] = float(v)
+    return out
+
+
+def fetch_camera_latest(
+    db: Session, camera_ids: list[int],
+    metrics: tuple[str, ...], *, now: datetime,
+) -> dict[tuple[int, str], float]:
+    """Latest sample per (camera, metric) with the same 48h live
+    lookback the store-level fetch_latest_samples uses."""
+    out: dict[tuple[int, str], float] = {}
+    if not camera_ids:
+        return out
+    rn = func.row_number().over(
+        partition_by=(MetricSnapshot.camera_id, MetricSnapshot.metric_type),
+        order_by=MetricSnapshot.period_start.desc())
+    sub = (db.query(MetricSnapshot.camera_id.label("cid"),
+                    MetricSnapshot.metric_type.label("mt"),
+                    MetricSnapshot.value.label("val"),
+                    rn.label("rn"))
+             .filter(MetricSnapshot.camera_id.in_(camera_ids),
+                     MetricSnapshot.metric_type.in_(metrics),
+                     MetricSnapshot.period_start
+                     >= now - timedelta(hours=LIVE_LAST_LOOKBACK_HOURS))
+             .subquery())
+    for r in db.query(sub.c.cid, sub.c.mt, sub.c.val).filter(sub.c.rn == 1):
+        out[(r.cid, r.mt)] = float(r.val)
+    return out

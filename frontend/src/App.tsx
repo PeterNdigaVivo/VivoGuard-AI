@@ -42,6 +42,7 @@ const AgentsPage           = lazy(() => import('@/pages/AgentsPage'))
 const StoresPage           = lazy(() => import('@/pages/StoresPage'))
 const StoreDashboardPage   = lazy(() => import('@/pages/StoreDashboardPage'))
 const StoreDetailPage      = lazy(() => import('@/pages/StoreDetailPage'))
+const StoreMultiCameraView = lazy(() => import('@/pages/StoreMultiCameraView'))
 const MultiStorePage       = lazy(() => import('@/pages/MultiStorePage'))
 const HeatmapPage          = lazy(() => import('@/pages/HeatmapPage'))
 const StockroomLogPage     = lazy(() => import('@/pages/StockroomLogPage'))
@@ -82,6 +83,7 @@ export default function App() {
               <Route path="/stores"                   element={<StoresPage />} />
               <Route path="/stores/:id"               element={<StoreDetailPage />} />
               <Route path="/stores/:id/analytics"     element={<StoreDashboardPage />} />
+              <Route path="/stores/:id/cameras"       element={<StoreMultiCameraView />} />
               <Route path="/stores/:id/add-camera"    element={<AddCameraWizard />} />
               <Route path="/heatmaps/:id"             element={<StoreHeatmapsPage />} />
               <Route path="/detectors"                element={<DetectorsPage />} />
