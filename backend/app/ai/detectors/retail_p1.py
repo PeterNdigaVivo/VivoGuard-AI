@@ -20,7 +20,7 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.zone_logic import bbox_in_zone
-from app.utils.business_hours import is_open, localised_now
+from app.utils.business_hours import is_open_with_default, localised_now
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +389,11 @@ class IntrusionDetector(Detector):
     """Fires a *high-priority* DetectionEvent when a person is seen
     inside a `restricted` zone while the store is closed.
 
-    Closed = `is_open(store.business_hours, local_now) == False`.
+    Closed = `is_open_with_default(store.business_hours, local_now)
+    == False` — unconfigured / malformed hours fall back to the default
+    Vivo window (09:00-21:00) so a store nobody configured is armed
+    OVERNIGHT, not around the clock (Aug-2026 false-urgent fix; an
+    explicitly empty day like `"sun": []` still arms all day).
     Without a store assignment we fall back to a global
     `extra.always_armed` flag (useful for back-alley cameras).
     """
@@ -440,10 +444,15 @@ class IntrusionDetector(Detector):
         if not cfg or not cfg.get("enabled"):
             return []
 
-        # Determine whether the store is closed right now.
-        if ctx.business_hours is not None and ctx.store_timezone:
+        # Determine whether the store is closed right now. Any camera
+        # WITH a store assignment goes through business hours (with the
+        # default-window fallback for unconfigured/malformed hours —
+        # previously {} or a missing weekday key meant "closed", arming
+        # intrusion at 10:55 EAT with the store wide open). always_armed
+        # only applies to store-less cameras, per the class docstring.
+        if ctx.store_id is not None and ctx.store_timezone:
             local_now = localised_now(ctx.store_timezone)
-            closed = not is_open(ctx.business_hours, local_now)
+            closed = not is_open_with_default(ctx.business_hours, local_now)
         else:
             closed = bool((cfg.get("extra") or {}).get("always_armed"))
         if not closed:

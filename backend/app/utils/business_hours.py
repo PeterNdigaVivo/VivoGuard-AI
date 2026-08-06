@@ -23,10 +23,11 @@ _WARNED_BAD_TZ: set[str] = set()
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 # When a store has no business_hours_json at all, fall back to the
-# dominant Vivo schedule (09:00-21:00 every day) for the DASHBOARD
-# helpers below. The DETECTOR helper `is_open()` stays closed-by-
-# default — we don't want to silence intrusion alarms because nobody
-# filled the field in.
+# dominant Vivo schedule (09:00-21:00 every day). `is_open()` stays
+# closed-by-default for callers that want strict semantics; the
+# intrusion gate uses `is_open_with_default()` so unconfigured hours
+# arm the detector overnight (outside the default window) instead of
+# around the clock.
 _DASHBOARD_DEFAULT_WINDOWS = ["09:00-21:00"]
 
 
@@ -51,6 +52,41 @@ def is_open(business_hours: Optional[dict], ts_local: datetime) -> bool:
                 return True
         except Exception:
             continue
+    return False
+
+
+def is_open_with_default(business_hours: Optional[dict],
+                         ts_local: datetime) -> bool:
+    """`is_open()` for the intrusion gate — unconfigured hours mean
+    "assume the default Vivo schedule", not "closed".
+
+    FALSE-URGENT BUG FIX (Aug 2026, follow-up to the tz fix): is_open()
+    is closed-by-default, so business_hours_json of {} / missing
+    today's key / windows that don't parse ("9:00 - 20:00") armed the
+    intrusion detector ALL DAY and fired after_hours alerts at 10:55
+    EAT while stores were open. Semantics here:
+
+      * key present with parseable windows → honour them exactly
+      * key present but EMPTY list        → deliberately closed all
+        day (e.g. "sun": []) → stays closed, detector stays armed
+      * no dict / missing key / zero parseable windows → unconfigured
+        → default 09:00-21:00 window (matches _windows_for_day)
+    """
+    key = WEEKDAY_KEYS[ts_local.weekday()]
+    t = ts_local.time()
+    if isinstance(business_hours, dict) and key in business_hours:
+        windows = list(business_hours.get(key) or [])
+        if not windows:
+            return False                 # explicitly closed today
+        parsed = [p for p in (_parse_window(w) for w in windows) if p]
+        if parsed:
+            return any(a <= t < b for a, b in parsed)
+        # Every configured window is malformed — treat today as
+        # unconfigured rather than arming intrusion around the clock.
+    for w in _DASHBOARD_DEFAULT_WINDOWS:
+        p = _parse_window(w)
+        if p and p[0] <= t < p[1]:
+            return True
     return False
 
 
