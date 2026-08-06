@@ -585,13 +585,16 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 _track_by_id = {tr.track_id: tr for tr, _d in tracks}
                 _persons = [d for d in raw if d.get("cls") == "person"]
                 _moving: list[dict] = []
+                _static_flags: list[bool] = []
                 _static_n = 0
                 for d in _persons:
                     _tid = d.get("track_id")
                     _tr = _track_by_id.get(_tid) if _tid is not None else None
-                    if _tr is not None and is_static_track(
-                            _tr.history, (_fw, _fh),
-                            min_px=_minpx, window=_win):
+                    _is_static = (_tr is not None and is_static_track(
+                        _tr.history, (_fw, _fh),
+                        min_px=_minpx, window=_win))
+                    _static_flags.append(_is_static)
+                    if _is_static:
                         _static_n += 1
                         continue
                     _moving.append(d)
@@ -617,6 +620,24 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         "static_filtered": _static_n,
                     }),
                     ex=300,
+                )
+                # Live overlay feed for the frontend (vg:dets:{cam}, 15s
+                # TTL): EVERY person detection incl. static ones, with the
+                # mannequin flag, so the UI can draw green boxes for people
+                # and dashed-gray for filtered fixtures. Normalized corners
+                # -> trivial %-based rendering at any container size.
+                pub.set(
+                    f"vg:dets:{camera_id}",
+                    json.dumps([
+                        {"id": d.get("track_id"),
+                         "cls": "person",
+                         "conf": round(float(d.get("conf") or 0.0), 3),
+                         "bbox": [round(float(v), 4)
+                                  for v in (d.get("bbox_norm") or [0, 0, 0, 0])],
+                         "is_static": _static_flags[i]}
+                        for i, d in enumerate(_persons[:25])
+                    ]),
+                    ex=15,
                 )
             except Exception:
                 pass

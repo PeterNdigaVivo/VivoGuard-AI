@@ -26,6 +26,64 @@ type LiveViewMode = 'cameras' | 'activity'
 const ACTIVITY_REFRESH_MS = 30_000     // spec: 30 s minimum
 
 type Detection = { camera_id: number; bbox_norm: number[]; detection_type: string; ts: number }
+
+// Live AI detections for the bbox overlay — vg:dets:{cam} via
+// GET /cameras/detections/live. bbox = normalized [x1,y1,x2,y2].
+type LiveDet = {
+  id: number | null; cls: string; conf: number
+  bbox: number[]; is_static: boolean
+}
+const DET_POLL_MS = 1000       // 1 Hz — plenty for human perception
+
+// Poll live detections for the MOUNTED tiles only. The camera grid is
+// hard-paged (off-page tiles unmount) and Activity has <= 15 slots, so
+// `ids` never contains an off-screen camera — one batch request per tick.
+function useLiveDetections(ids: number[]): Record<number, LiveDet[]> {
+  const [dets, setDets] = useState<Record<number, LiveDet[]>>({})
+  const key = ids.slice().sort((a, b) => a - b).join(',')
+  useEffect(() => {
+    if (!key) { setDets({}); return }
+    let alive = true
+    const tick = () =>
+      api<{ detections: Record<number, LiveDet[]> }>(
+        `/cameras/detections/live?ids=${key}`)
+        .then(d => { if (alive) setDets(d.detections ?? {}) })
+        .catch(() => {})
+    tick()
+    const t = setInterval(tick, DET_POLL_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [key])
+  return dets
+}
+
+// Bounding-box overlay: %-sized boxes (resize-proof) positioned via
+// transform (no layout thrash). Person = solid green; static/mannequin
+// = dashed gray. Hover = native title tooltip.
+function DetBoxes({ dets }: { dets: LiveDet[] }) {
+  if (!dets.length) return null
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+      {dets.map((d, i) => {
+        const [x1, y1, x2, y2] = d.bbox
+        const w = Math.max(0.001, x2 - x1)
+        const h = Math.max(0.001, y2 - y1)
+        const label = d.is_static
+          ? 'Static Object (Likely Mannequin)'
+          : `Person (${Math.round(d.conf * 100)}% confidence)`
+        return (
+          <div key={d.id ?? `i${i}`} title={label}
+               className={'absolute top-0 left-0 pointer-events-auto border-2 ' +
+                 (d.is_static ? 'border-dashed border-gray-400'
+                              : 'border-solid border-green-400')}
+               style={{
+                 width: `${w * 100}%`, height: `${h * 100}%`,
+                 transform: `translate(${(x1 / w) * 100}%, ${(y1 / h) * 100}%)`,
+               }} />
+        )
+      })}
+    </div>
+  )
+}
 type GridSize = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 const GRID_OPTIONS: GridSize[] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 const AUTO_CYCLE_MS = 30_000           // 30s — security-guard cadence
@@ -193,6 +251,11 @@ export default function LiveViewPage() {
     ? cams.find(c => c.id === fullscreenId) ?? null
     : null
 
+  // Live bbox overlays for the mounted camera tiles (+ fullscreen).
+  const detIds = viewMode === 'cameras' ? visible.map(c => c.id) : []
+  if (fullscreenId !== null && !detIds.includes(fullscreenId)) detIds.push(fullscreenId)
+  const liveDets = useLiveDetections(detIds)
+
   return (
     <div className="p-6">
       <PageHeader
@@ -300,7 +363,8 @@ export default function LiveViewPage() {
               <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
             </div>
             <div onClick={() => setFullscreenId(cam.id)} className="cursor-zoom-in">
-              <Tile cameraId={cam.id} overlays={overlays[cam.id] ?? []} />
+              <Tile cameraId={cam.id} overlays={overlays[cam.id] ?? []}
+                    dets={liveDets[cam.id] ?? []} />
             </div>
           </Card>
         ))}
@@ -325,7 +389,8 @@ export default function LiveViewPage() {
           <div className="flex-1 flex items-center justify-center p-4"
                onClick={e => e.stopPropagation()}>
             <div className="w-full h-full max-w-[1600px]">
-              <Tile cameraId={fullscreenCam.id} overlays={overlays[fullscreenCam.id] ?? []} />
+              <Tile cameraId={fullscreenCam.id} overlays={overlays[fullscreenCam.id] ?? []}
+                    dets={liveDets[fullscreenCam.id] ?? []} />
             </div>
           </div>
         </div>
@@ -345,7 +410,9 @@ export default function LiveViewPage() {
 //   • After 10s without a frame, polls /system/cameras/{id}/stream-health
 //     and shows the actual streamer error (RTSP timeout / 401 / no
 //     substream / etc.) instead of a silent black tile.
-function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] }) {
+function Tile({ cameraId, overlays, dets }: {
+  cameraId: number; overlays: Detection[]; dets?: LiveDet[]
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [size, setSize] = useState({ w: 640, h: 360 })
   const [state, setState] = useState<'connecting' | 'live' | 'stale'>('connecting')
@@ -527,6 +594,7 @@ function Tile({ cameraId, overlays }: { cameraId: number; overlays: Detection[] 
         </div>
       )}
 
+      <DetBoxes dets={dets ?? []} />
       <div className="absolute inset-0 pointer-events-none">
         {overlays.map((o, i) => {
           const [x1, y1, x2, y2] = o.bbox_norm
@@ -591,6 +659,8 @@ function ActivityGrid({ onPickFullscreen }: {
   // Tick once a second so the per-tile countdown / "Updated Ns ago"
   // pills stay live between fetches without another network call.
   const [, forceTick] = useState(0)
+  // Live bbox overlays for the visible activity slots (max 15).
+  const liveDets = useLiveDetections(slots.map(s => s.camera_id))
 
   // Latest-known cam metadata + score, keyed by camera_id. Slots
   // dereference this to render — so a held slot whose camera dropped
@@ -771,6 +841,7 @@ function ActivityGrid({ onPickFullscreen }: {
               return (
                 <ActivityTile key={slot.camera_id} cam={cam}
                               enteredAt={slot.entered_at}
+                              dets={liveDets[slot.camera_id] ?? []}
                               onClick={() => onPickFullscreen(slot.camera_id)} />
               )
             })}
@@ -791,9 +862,10 @@ function ActivityGrid({ onPickFullscreen }: {
 }
 
 
-function ActivityTile({ cam, enteredAt, onClick }: {
+function ActivityTile({ cam, enteredAt, dets, onClick }: {
   cam: ActivityCamera
   enteredAt: number
+  dets?: LiveDet[]
   onClick: () => void
 }) {
   const [src, setSrc] = useState<string | null>(null)
@@ -861,6 +933,7 @@ function ActivityTile({ cam, enteredAt, onClick }: {
               {busy ? 'Loading…' : 'Snapshot unavailable'}
             </div>
           )}
+        <DetBoxes dets={dets ?? []} />
         <div className="absolute top-1 left-1 px-2 py-0.5 rounded
                         bg-orange-600 text-white text-[11px] font-bold">
           {headline}

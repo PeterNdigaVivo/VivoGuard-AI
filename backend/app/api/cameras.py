@@ -1040,6 +1040,42 @@ def _live_cam_meta(db, needed_ids: set[int]) -> dict[int, dict]:
     return _meta_cache
 
 
+@router.get("/detections/live")
+def detections_live(ids: str = "",
+                    db: Session = Depends(get_db),
+                    _u: User = Depends(get_current_user)):
+    """Latest raw person detections for the requested cameras — one MGET
+    over vg:dets:{id} (written every inference frame, 15s TTL). Powers
+    the live bounding-box overlay; callers poll at ~1Hz for VISIBLE
+    tiles only. `ids` = comma-separated camera ids, max 32."""
+    import json as _json
+    import time as _t
+
+    import redis as _redis
+    from app.config import settings as _settings
+
+    try:
+        cam_ids = [int(x) for x in ids.split(",") if x.strip()][:32]
+    except ValueError:
+        raise HTTPException(400, "ids must be comma-separated integers")
+    if not cam_ids:
+        return {"detections": {}, "as_of": _t.time()}
+    try:
+        r = _redis.from_url(_settings.redis_url, decode_responses=True)
+        raw = r.mget([f"vg:dets:{c}" for c in cam_ids])
+    except Exception:
+        return {"detections": {}, "as_of": _t.time(), "source": "redis-unavailable"}
+    out: dict[int, list] = {}
+    for cid, blob in zip(cam_ids, raw):
+        if not blob:
+            continue
+        try:
+            out[cid] = _json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+    return {"detections": out, "as_of": _t.time()}
+
+
 @router.get("/activity/live")
 def activity_live(limit: int = 15,
                   db: Session = Depends(get_db),
