@@ -577,6 +577,8 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 # tracking is degraded (no ids at all), fall back to the
                 # raw count rather than reporting zero.
                 from app.ai.tracker import is_static_track
+                _filter_on = bool(getattr(settings,
+                                          "mannequin_filter_enabled", True))
                 _win = int(getattr(settings,
                                    "activity_static_window_frames", 10))
                 _minpx = float(getattr(settings,
@@ -590,7 +592,8 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 for d in _persons:
                     _tid = d.get("track_id")
                     _tr = _track_by_id.get(_tid) if _tid is not None else None
-                    _is_static = (_tr is not None and is_static_track(
+                    _is_static = (_filter_on
+                                  and _tr is not None and is_static_track(
                         _tr.history, (_fw, _fh),
                         min_px=_minpx, window=_win))
                     _static_flags.append(_is_static)

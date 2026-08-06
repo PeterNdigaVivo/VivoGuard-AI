@@ -148,6 +148,8 @@ class Settings(BaseSettings):
     # person whose bbox centre moved less than this many pixels across
     # the last N frames is treated as a fixture and excluded from the
     # people count, the sentinel rules, and alert snapshots.
+    # mannequin_filter_enabled is the master switch (MANNEQUIN_FILTER_ENABLED).
+    mannequin_filter_enabled: bool = True
     activity_static_displacement_px: int = 5
     activity_static_window_frames: int = 10
     activity_presence_enabled: bool = True
