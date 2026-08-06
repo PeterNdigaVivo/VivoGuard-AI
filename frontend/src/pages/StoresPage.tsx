@@ -178,6 +178,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
   healthByStoreId: Map<number, ZoneHealthRow>
   onCreate: () => void
 }) {
+  const nav = useNavigate()
   return (
     <>
       {list === null && (
@@ -255,8 +256,19 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
                     {s.manager_phone && <div>📞 {s.manager_phone}</div>}
                     {s.capacity && <div>👥 capacity: {s.capacity}</div>}
                   </div>
-                  <div className="mt-4 text-sky-600 text-sm hover:underline">
-                    Open dashboard →
+                  <div className="mt-4 flex items-center justify-between text-sm">
+                    <span className="text-sky-600 hover:underline">Open dashboard →</span>
+                    {/* Card is one big <Link>; stop the click from bubbling into it. */}
+                    <button
+                      onClick={e => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        nav(`/stores/${s.id}/cameras`)
+                      }}
+                      title="Multi-camera view"
+                      className="text-sky-600 hover:underline">
+                      📹 Multi-cam
+                    </button>
                   </div>
                 </Card>
               </Link>
