@@ -1,6 +1,6 @@
 """Business-hours alert filmstrip — 6 smartly-timed snapshots per alert.
 
-When an operator-visible alert fires DURING business hours (09:00–20:00
+When an operator-visible alert fires DURING business hours (08:00–20:00
 EAT) we capture a 6-frame filmstrip that brackets the incident so the
 Alerts page shows what led up to it AND what happened next:
 
@@ -42,8 +42,10 @@ from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
-# Fixed retail window (spec): 09:00–20:00 EAT. 20:00 exactly is excluded.
-BUSINESS_START_HOUR = int(getattr(settings, "business_hours_start", 9))
+# Filmstrip window: 08:00–20:00 EAT (20:00 exactly excluded). Starts an
+# hour before official trading, matching the recorder — early store
+# openings (08:0x) must get their strips too.
+BUSINESS_START_HOUR = int(getattr(settings, "business_hours_start", 8))
 BUSINESS_END_HOUR   = int(getattr(settings, "business_hours_end", 20))
 
 # Alert types that get the 6-frame business-hours filmstrip. checkout_dwell

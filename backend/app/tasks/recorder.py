@@ -3,10 +3,12 @@ service (celery worker -Q recorder), so it survives worker/inference
 rebuilds. ffmpeg subprocesses are children of THIS container.
 
 Windows (EAT), business hours only:
-    09:00-14:00  window "<date>_0900"  (18000s)
+    08:00-14:00  window "<date>_0800"  (21600s)
     14:00-19:00  window "<date>_1400"  (18000s)
     19:00-20:00  window "<date>_1900"  ( 3600s)
-Outside 09:00-20:00 EAT: nothing records.
+Outside 08:00-20:00 EAT: nothing records. The first window starts an
+hour before official trading so early store openings (08:0x crossings
+at Garden City / Runda / Yaya, Aug 2026) have footage for their clips.
 
 At each transition the PREVIOUS window's directory is deleted. Recording is
 substream, stream-copy (no re-encode), fragmented-mp4 so an in-progress file
@@ -40,7 +42,7 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 # Ordered windows: (start_hour, end_hour, suffix, seconds).
-_WINDOWS = [(9, 14, "0900", 18000), (14, 19, "1400", 18000), (19, 20, "1900", 3600)]
+_WINDOWS = [(8, 14, "0800", 21600), (14, 19, "1400", 18000), (19, 20, "1900", 3600)]
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
@@ -146,6 +148,38 @@ def _start_window(db, r, window_id: str, seconds: int) -> int:
     db.commit()
     log.info("Started recording %d cameras for window %s", started, window_id)
     return started
+
+
+def _entrance_clip_for(db, ev, ev_ts):
+    """Entrance-camera preference for store-open clips (Issue 3, Aug
+    2026): shop_opened_via_occupancy / inferred alerts anchor on
+    counter/aisle cameras, so their clip showed the inside of the store
+    instead of the door opening. Returns an ACTIVE RecordingClip from
+    one of the store's entry_exit-tagged cameras covering the event
+    time, or None (caller keeps the event camera's clip). No-op when
+    the event camera already IS an entrance camera."""
+    from app.models import Camera, RecordingClip, Zone
+    store_id = (ev.extra or {}).get("store_id")
+    if store_id is None and ev.camera_id:
+        cam = db.get(Camera, ev.camera_id)
+        store_id = cam.store_id if cam else None
+    if store_id is None:
+        return None
+    cam_ids = [c for (c,) in db.query(Camera.id)
+                 .filter(Camera.store_id == int(store_id)).all()]
+    if not cam_ids:
+        return None
+    zs = (db.query(Zone.camera_id, Zone.detection_types_json)
+            .filter(Zone.camera_id.in_(cam_ids)).all())
+    entrance = {cid for cid, types in zs if "entry_exit" in (types or [])}
+    if not entrance or ev.camera_id in entrance:
+        return None
+    return (db.query(RecordingClip)
+              .filter(RecordingClip.camera_id.in_(sorted(entrance)),
+                      RecordingClip.status == "recording",
+                      RecordingClip.started_at <= ev_ts)
+              .order_by(RecordingClip.started_at.desc())
+              .first())
 
 
 def _pid_is_ffmpeg(pid: int) -> bool:
@@ -306,6 +340,14 @@ def extract_pending_clips() -> None:
             ev_ts = ev.timestamp
             if ev_ts.tzinfo is None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
+            # Store-open clips must show the DOOR: prefer an entrance
+            # camera's recording over the (possibly occupancy) camera
+            # that anchored the event.
+            if (ev.detection_type or "") == "shop_open_close":
+                alt = _entrance_clip_for(db, ev, ev_ts)
+                if (alt is not None and alt.file_path
+                        and Path(alt.file_path).exists()):
+                    clip = alt
             started = clip.started_at
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)

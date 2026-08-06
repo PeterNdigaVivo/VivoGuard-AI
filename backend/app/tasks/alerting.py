@@ -926,7 +926,27 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
         thumbnail_path=thumb_path,
     )
     db.add(rec); db.flush()
-    db.add(Alert(event_id=rec.id, status="new"))
+    alert = Alert(event_id=rec.id, status="new")
+    db.add(alert); db.flush()
+    # Business-hours filmstrip for BEAT-created alerts too (Issue 2, Aug
+    # 2026): shop_opened_inferred / recovery / shop_not_opened previously
+    # got a single thumbnail but never the 6-frame strip, because only
+    # the worker's _persist_event enqueued schedule_alert_filmstrip.
+    # Same detection_type gate; the anchor camera passed in is already
+    # entrance-first for every shop_open path. Best-effort — a filmstrip
+    # failure must never block alert creation.
+    try:
+        from app.tasks.alert_snapshots import (
+            FILMSTRIP_TYPES, schedule_alert_filmstrip,
+        )
+        if (store_id is not None and camera_id is not None
+                and detection_type in FILMSTRIP_TYPES):
+            schedule_alert_filmstrip.delay(
+                alert.id, int(camera_id), int(store_id), detection_type,
+                datetime.now(timezone.utc).timestamp())
+    except Exception as e:
+        log.warning("filmstrip enqueue failed (info alert cam=%s): %s",
+                    camera_id, e)
     return rec
 
 
