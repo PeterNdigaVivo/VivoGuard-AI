@@ -10,8 +10,15 @@ hours, the Shutter detector (P2) for inverse checks, and the May-2026
 dashboard redesign to gate KPI tiles behind "store currently open".
 """
 from __future__ import annotations
+import logging
 from datetime import datetime, time, timezone
 from typing import Optional
+
+log = logging.getLogger(__name__)
+
+# Timezones we've already warned about — one log line per bad value,
+# not one per frame (these helpers run in the per-frame detector path).
+_WARNED_BAD_TZ: set[str] = set()
 
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -48,12 +55,28 @@ def is_open(business_hours: Optional[dict], ts_local: datetime) -> bool:
 
 
 def localised_now(tz_name: str) -> datetime:
-    """Return current time in the store's timezone (or UTC fallback)."""
+    """Return current time in the store's timezone.
+
+    TIMEZONE BUG FIX (Aug 2026): the old fallback silently returned
+    datetime.utcnow() whenever tz_name wasn't a valid IANA name ("EAT",
+    "Nairobi", "+03:00", stray whitespace...). is_open() then compared
+    07:00 UTC against 09:00-20:00 store windows and declared open
+    stores CLOSED — firing after_hours intrusion alerts at 10:00 EAT.
+    Every Vivo store is UTC+3 (Kenya/Uganda/Rwanda), so the safe
+    fallback is Africa/Nairobi, warned once per bad value; naive UTC is
+    the absolute last resort."""
+    from zoneinfo import ZoneInfo
     try:
-        from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(tz_name))
     except Exception:
-        return datetime.utcnow()
+        if tz_name not in _WARNED_BAD_TZ:
+            _WARNED_BAD_TZ.add(str(tz_name))
+            log.warning("business_hours: invalid store timezone %r — "
+                        "falling back to Africa/Nairobi", tz_name)
+        try:
+            return datetime.now(ZoneInfo("Africa/Nairobi"))
+        except Exception:                            # pragma: no cover
+            return datetime.now(timezone.utc)
 
 
 # ---------- Dashboard helpers (May-2026 redesign) -------------------
@@ -73,11 +96,20 @@ def _store_local_now(store, now_utc: Optional[datetime] = None) -> datetime:
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
     tz_name = getattr(store, "timezone", None) or "Africa/Nairobi"
+    from zoneinfo import ZoneInfo
     try:
-        from zoneinfo import ZoneInfo
         return now_utc.astimezone(ZoneInfo(tz_name))
     except Exception:
-        return now_utc.astimezone(timezone.utc)
+        # Same silent-UTC bug as localised_now — an invalid stored tz
+        # must NOT flip time math to UTC on an all-EAT fleet.
+        if tz_name not in _WARNED_BAD_TZ:
+            _WARNED_BAD_TZ.add(str(tz_name))
+            log.warning("business_hours: invalid store timezone %r — "
+                        "falling back to Africa/Nairobi", tz_name)
+        try:
+            return now_utc.astimezone(ZoneInfo("Africa/Nairobi"))
+        except Exception:                            # pragma: no cover
+            return now_utc.astimezone(timezone.utc)
 
 
 def _windows_for_day(store, weekday_idx: int) -> list[str]:
