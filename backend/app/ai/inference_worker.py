@@ -356,6 +356,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
     buffer   = FrameBuffer()
     pub      = redis.from_url(settings.redis_url)
     started  = time.time()
+    dets_pub_at = 0.0        # vg:dets publish throttle (1s cadence)
 
     # Sprint 2.2 cross-camera Re-ID. Encoder + gallery are lazily/best-
     # effort built; both stay None and the whole feature no-ops when
@@ -629,19 +630,23 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 # mannequin flag, so the UI can draw green boxes for people
                 # and dashed-gray for filtered fixtures. Normalized corners
                 # -> trivial %-based rendering at any container size.
-                pub.set(
-                    f"vg:dets:{camera_id}",
-                    json.dumps([
-                        {"id": d.get("track_id"),
-                         "cls": "person",
-                         "conf": round(float(d.get("conf") or 0.0), 3),
-                         "bbox": [round(float(v), 4)
-                                  for v in (d.get("bbox_norm") or [0, 0, 0, 0])],
-                         "is_static": _static_flags[i]}
-                        for i, d in enumerate(_persons[:25])
-                    ]),
-                    ex=15,
-                )
+                # THROTTLED to 1/s (Feature-2 spec) — the frontend polls at
+                # 1 Hz, so per-frame writes above that were pure Redis load.
+                if time.time() - dets_pub_at >= 1.0:
+                    dets_pub_at = time.time()
+                    pub.set(
+                        f"vg:dets:{camera_id}",
+                        json.dumps([
+                            {"id": d.get("track_id"),
+                             "cls": "person",
+                             "conf": round(float(d.get("conf") or 0.0), 3),
+                             "bbox": [round(float(v), 4)
+                                      for v in (d.get("bbox_norm") or [0, 0, 0, 0])],
+                             "is_static": _static_flags[i]}
+                            for i, d in enumerate(_persons[:25])
+                        ]),
+                        ex=15,
+                    )
             except Exception:
                 pass
 
