@@ -59,7 +59,8 @@ _BOX_COLORS = {
 def capture_alert_snapshot(frame_bgr, bbox_norm, alert_type: str,
                            camera_id: int, *, store_name: str | None = None,
                            camera_name: str | None = None,
-                           boxes: list[dict] | None = None) -> str | None:
+                           boxes: list[dict] | None = None,
+                           title_override: str | None = None) -> str | None:
     """Draw the box(es) + caption on a copy of `frame_bgr` and save it.
     Returns the on-disk path, or None if pixels/cv2 weren't available
     (best-effort — a missing snapshot must never block the alert).
@@ -134,7 +135,8 @@ def capture_alert_snapshot(frame_bgr, bbox_norm, alert_type: str,
             _draw(bbox_norm, (0, 0, 255))
 
         # Caption banner along the top.
-        title = PLAIN_TITLES.get(alert_type, alert_type.replace("_", " ").title())
+        title = title_override or PLAIN_TITLES.get(
+            alert_type, alert_type.replace("_", " ").title())
         when = datetime.now().strftime("%I:%M %p  %a %d %b")
         loc = " | ".join(p for p in (store_name, camera_name) if p)
         caption = f"{title}   {when}"

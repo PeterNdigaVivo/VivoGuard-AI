@@ -2264,10 +2264,18 @@ def _afterhours_key(store_id: int) -> str:
     return f"vg:afterhours:open:{store_id}"
 
 
-def _afterhours_body(store_name: str, n: int, minutes: int) -> str:
-    return (f"Someone is in {store_name} after closing time. "
+def _afterhours_body(store_name: str, n: int, minutes: int,
+                     time_context: str = "after_hours") -> str:
+    when = ("before opening time" if time_context == "before_hours"
+            else "after closing time")
+    return (f"Someone is in {store_name} {when}. "
             f"{n} snapshot{'s' if n != 1 else ''} captured over "
             f"{max(minutes, 0)} minute{'s' if minutes != 1 else ''}.")
+
+
+def _afterhours_title(store_name: str, time_context: str) -> str:
+    when = "Before" if time_context == "before_hours" else "After"
+    return f"Person Detected {when} Hours — {store_name}"
 
 
 def _best_store_camera_jpeg(db, store_id: int):
@@ -2348,16 +2356,21 @@ def after_hours_intrusion_check() -> None:
 
             # ── First detection this night → new alert + snapshot #1 ──
             if sess is None:
+                from app.utils.business_hours import store_time_context
+                t_ctx = store_time_context(store, now)
                 best_cam, jpeg = _best_store_camera_jpeg(db, store.id)
                 anchor_cam = recent.camera_id      # guaranteed non-null
                 extra = {
                     "priority":    "high",
                     "rule":        "after_hours_intrusion",
+                    # after_hours stays True for backward compat;
+                    # time_context carries the before/after wording.
                     "after_hours": True,
+                    "time_context": t_ctx,
                     "store_id":    store.id,
                     "store_name":  store.name,
-                    "title":       f"Person Detected After Hours — {store.name}",
-                    "message":     _afterhours_body(store.name, 1, 0),
+                    "title":       _afterhours_title(store.name, t_ctx),
+                    "message":     _afterhours_body(store.name, 1, 0, t_ctx),
                     "what_to_do": [
                         "Open the live camera for this store",
                         "Verify whether the person is staff or an intruder",
@@ -2411,7 +2424,11 @@ def after_hours_intrusion_check() -> None:
             minutes = int((now_ts - float(sess.get("started_ts") or now_ts)) / 60)
             ev = db.get(DetectionEvent, int(sess["event_id"]))
             if ev is not None:
-                ev.extra = {**(ev.extra or {}), "message": _afterhours_body(store.name, n, minutes)}
+                # Reuse the context stamped at session start so the
+                # wording never flips mid-filmstrip.
+                t_ctx = (ev.extra or {}).get("time_context", "after_hours")
+                ev.extra = {**(ev.extra or {}),
+                            "message": _afterhours_body(store.name, n, minutes, t_ctx)}
             db.commit()
             sess["snap_count"] = n
             sess["last_snap_ts"] = now_ts

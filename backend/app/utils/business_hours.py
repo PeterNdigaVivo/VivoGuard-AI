@@ -72,22 +72,51 @@ def is_open_with_default(business_hours: Optional[dict],
       * no dict / missing key / zero parseable windows → unconfigured
         → default 09:00-21:00 window (matches _windows_for_day)
     """
-    key = WEEKDAY_KEYS[ts_local.weekday()]
     t = ts_local.time()
+    return any(a <= t < b
+               for a, b in _effective_windows(business_hours, ts_local.weekday()))
+
+
+def _effective_windows(business_hours: Optional[dict],
+                       weekday_idx: int) -> list[tuple[time, time]]:
+    """Parsed windows for the weekday under is_open_with_default()
+    semantics: configured+parseable → as configured; explicitly empty
+    day → [] (closed all day); unconfigured / all-malformed → the
+    default Vivo window."""
+    key = WEEKDAY_KEYS[weekday_idx]
     if isinstance(business_hours, dict) and key in business_hours:
         windows = list(business_hours.get(key) or [])
         if not windows:
-            return False                 # explicitly closed today
+            return []                    # explicitly closed today
         parsed = [p for p in (_parse_window(w) for w in windows) if p]
         if parsed:
-            return any(a <= t < b for a, b in parsed)
-        # Every configured window is malformed — treat today as
-        # unconfigured rather than arming intrusion around the clock.
-    for w in _DASHBOARD_DEFAULT_WINDOWS:
-        p = _parse_window(w)
-        if p and p[0] <= t < p[1]:
-            return True
-    return False
+            return parsed
+    return [p for p in (_parse_window(w) for w in _DASHBOARD_DEFAULT_WINDOWS) if p]
+
+
+def intrusion_time_context(business_hours: Optional[dict],
+                           ts_local: datetime) -> str:
+    """'before_hours' when ts_local is earlier than today's first
+    (effective) opening time, else 'after_hours'.
+
+    Drives the intrusion alert wording — a 07:30 person is "Someone in
+    Store BEFORE Hours", a 21:30 person "... AFTER Hours". A day with
+    no opening at all (explicitly closed, e.g. "sun": []) reports
+    'after_hours': there is no opening to be before. Only meaningful
+    while the store is closed — callers gate on that first."""
+    wins = _effective_windows(business_hours, ts_local.weekday())
+    if not wins:
+        return "after_hours"
+    first_open = min(a for a, _ in wins)
+    return "before_hours" if ts_local.time() < first_open else "after_hours"
+
+
+def store_time_context(store, now_utc: Optional[datetime] = None) -> str:
+    """intrusion_time_context() for a Store ORM row — used by the
+    after_hours_intrusion_check beat task."""
+    local = _store_local_now(store, now_utc)
+    return intrusion_time_context(
+        getattr(store, "business_hours_json", None), local)
 
 
 def localised_now(tz_name: str) -> datetime:

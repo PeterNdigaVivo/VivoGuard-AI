@@ -20,7 +20,9 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.zone_logic import bbox_in_zone
-from app.utils.business_hours import is_open_with_default, localised_now
+from app.utils.business_hours import (
+    intrusion_time_context, is_open_with_default, localised_now,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -453,8 +455,13 @@ class IntrusionDetector(Detector):
         if ctx.store_id is not None and ctx.store_timezone:
             local_now = localised_now(ctx.store_timezone)
             closed = not is_open_with_default(ctx.business_hours, local_now)
+            # before_hours (earlier than today's opening) vs after_hours
+            # (past closing) — drives the alert wording so a 07:30
+            # staff arrival reads differently from a 21:30 presence.
+            time_context = intrusion_time_context(ctx.business_hours, local_now)
         else:
             closed = bool((cfg.get("extra") or {}).get("always_armed"))
+            time_context = "after_hours"
         if not closed:
             return []
 
@@ -517,7 +524,11 @@ class IntrusionDetector(Detector):
                         confidence=det["conf"], bbox_norm=det["bbox_norm"],
                         zone_id=z.get("id"),
                         extra={"priority": priority, "store_id": ctx.store_id,
+                               # after_hours stays True for backward
+                               # compat; time_context carries the
+                               # before/after distinction.
                                "after_hours": True,
+                               "time_context": time_context,
                                "staff_level": level,
                                "rule": reason},
                     ))

@@ -197,10 +197,16 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     thumb_path = None
     if ev.detection_type in SNAPSHOT_TYPES and frame_bgr is not None and not suppress_alert:
         from app.ai.snapshot import capture_alert_snapshot
+        # Keep the stamped caption in sync with the card title —
+        # before-hours intrusion reads "Before", not "After".
+        _cap = None
+        if (ev.detection_type == "intrusion"
+                and (ev.extra or {}).get("time_context") == "before_hours"):
+            _cap = "Someone in Store Before Hours"
         thumb_path = capture_alert_snapshot(
             frame_bgr, ev.bbox_norm, ev.detection_type, camera_id,
             store_name=store_name, camera_name=camera_name,
-            boxes=(ev.extra or {}).get("boxes"))
+            boxes=(ev.extra or {}).get("boxes"), title_override=_cap)
     # The detector dataclass carries `cls` (e.g. "shop_opened",
     # "crossing_in") but detection_events has no cls column — merge it
     # into extra so the sub-type survives persistence instead of being

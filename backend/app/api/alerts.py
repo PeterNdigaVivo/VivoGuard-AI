@@ -338,6 +338,13 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         # grows more rules (e.g. abandoned-basket), branch on
         # extra.rule here.
         return "Checkout Taking Too Long"
+    if dt == "intrusion":
+        # time_context (Aug 2026) distinguishes a 07:30 presence from a
+        # 21:30 one; older events without the field keep the after-
+        # hours wording they always had.
+        if extra.get("time_context") == "before_hours":
+            return "Someone in Store Before Hours"
+        return "Someone in Store After Hours"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
 
 
@@ -620,6 +627,8 @@ def _title(event: DetectionEvent, camera: Camera | None,
             return f"{icon} Long Queue — {int(n)} people waiting — {cam}"
         return f"{icon} Long Queue — {cam}"
     if dt == "intrusion":
+        if extra.get("time_context") == "before_hours":
+            return f"{icon} Before-hours Intrusion Detected — {cam}"
         return f"{icon} After-hours Intrusion Detected — {cam}"
     if dt == "crowd":
         n = _extract(extra, "count", "people", default=None)

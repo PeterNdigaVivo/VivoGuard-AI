@@ -12,8 +12,9 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.utils.business_hours import (
-    _store_local_now, is_open, is_open_with_default, is_store_open,
-    localised_now,
+    _store_local_now, intrusion_time_context, is_open,
+    is_open_with_default, is_store_open, localised_now,
+    store_time_context,
 )
 
 EAT = ZoneInfo("Africa/Nairobi")
@@ -91,3 +92,37 @@ def test_default_explicitly_closed_day_stays_armed() -> None:
     # "thu": [] is a deliberate closed-all-day config — intrusion
     # detection must stay armed, unlike the unconfigured cases above.
     assert is_open_with_default({"thu": []}, AT_1055_EAT) is False
+
+
+# ---- intrusion_time_context — before- vs after-hours wording --------
+
+AT_0730_EAT = datetime(2026, 8, 6, 7, 30, tzinfo=EAT)
+AT_2130_EAT = datetime(2026, 8, 6, 21, 30, tzinfo=EAT)
+
+
+def test_time_context_before_vs_after() -> None:
+    assert intrusion_time_context(HOURS, AT_0730_EAT) == "before_hours"
+    assert intrusion_time_context(HOURS, AT_0300_EAT) == "before_hours"
+    assert intrusion_time_context(HOURS, AT_2130_EAT) == "after_hours"
+
+
+def test_time_context_unconfigured_uses_default_window() -> None:
+    # No hours → default 09:00-21:00 boundary decides the wording.
+    assert intrusion_time_context({}, AT_0730_EAT) == "before_hours"
+    assert intrusion_time_context(None, AT_2130_EAT) == "after_hours"
+
+
+def test_time_context_explicitly_closed_day_is_after_hours() -> None:
+    # Closed all day → no opening to be "before" → after_hours label.
+    assert intrusion_time_context({"thu": []}, AT_0730_EAT) == "after_hours"
+
+
+def test_store_time_context_wraps_orm_row() -> None:
+    store = SimpleNamespace(timezone="Africa/Nairobi",
+                            business_hours_json=HOURS)
+    # 04:30 UTC == 07:30 EAT — before the 09:00 open.
+    at_0430_utc = datetime(2026, 8, 6, 4, 30, tzinfo=timezone.utc)
+    assert store_time_context(store, at_0430_utc) == "before_hours"
+    # 18:30 UTC == 21:30 EAT — past the 20:00 close.
+    at_1830_utc = datetime(2026, 8, 6, 18, 30, tzinfo=timezone.utc)
+    assert store_time_context(store, at_1830_utc) == "after_hours"
