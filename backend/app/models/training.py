@@ -136,3 +136,10 @@ class TrainingJob(Base):
     started_at:   Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Stall watchdog (migration 0035): heartbeat bumped by the trainer at
+    # job start and after every epoch; the dispatcher requeues running
+    # jobs whose heartbeat is older than training_stall_timeout_minutes.
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Celery task id captured at dispatch so the watchdog can revoke
+    # (terminate) the actual task before requeueing.
+    celery_task_id:   Mapped[str | None] = mapped_column(String(64), nullable=True)

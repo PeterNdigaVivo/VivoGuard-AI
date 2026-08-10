@@ -109,6 +109,7 @@ def _make_callback(job_id: int):
                 job = db.get(TrainingJob, job_id)
                 if job:
                     job.current_epoch = epoch
+                    job.last_progress_at = datetime.now(timezone.utc)
                     if "metrics/mAP50(B)" in metrics:
                         m = metrics["metrics/mAP50(B)"]
                         if (job.best_map50 or 0) < m:
@@ -179,6 +180,9 @@ def run_job(job_id: int) -> None:
         cfg = job.config_json or {}
         job.status        = "running"
         job.started_at    = datetime.now(timezone.utc)
+        # Stall-watchdog heartbeat — bumped here and per epoch so the
+        # dispatcher can tell "training slowly" from "worker died".
+        job.last_progress_at = job.started_at
         job.total_epochs  = int(cfg.get("epochs", 50))
         job.error_message = None
         db.commit()

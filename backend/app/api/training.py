@@ -212,7 +212,9 @@ def start_job(payload: TrainingJobIn, db: Session = Depends(get_db),
     # Queue the celery task (won't actually run until a worker picks it up).
     try:
         from app.tasks.training import run_training_job
-        run_training_job.delay(job.id)
+        res = run_training_job.delay(job.id)
+        job.celery_task_id = getattr(res, "id", None)
+        db.commit()
     except Exception as e:
         log.warning("celery enqueue failed (job stays 'queued'): %s", e)
     return job
@@ -240,6 +242,43 @@ def job_metrics(job_id: int, db: Session = Depends(get_db),
         "status":        j.status,
         "error":         j.error_message,
     }
+
+
+@router.post("/jobs/{job_id}/dispatch")
+def force_dispatch_job(job_id: int, db: Session = Depends(get_db),
+                       _u=Depends(require_role("admin"))):
+    """Force IMMEDIATE dispatch of one job, bypassing the beat
+    dispatcher's 2-running cap, same-detection_type block and circuit
+    breaker (admin escape hatch — e.g. cross-store job 606 starved
+    behind a crashed run). Works on queued/failed/cancelled jobs; a
+    genuinely running job is refused (revoke it or wait for the stall
+    watchdog first). Returns the Celery task_id."""
+    from datetime import datetime as _dt, timezone as _tz
+    j = db.get(TrainingJob, job_id)
+    if not j:
+        raise HTTPException(404, "job not found")
+    if j.status == "running":
+        raise HTTPException(409, "job is already running — wait for the "
+                                 "stall watchdog or review it manually")
+    j.status = "running"
+    j.started_at = _dt.now(_tz.utc)
+    j.completed_at = None
+    j.error_message = None
+    db.commit()
+    try:
+        from app.tasks.training import run_training_job
+        res = run_training_job.apply_async(args=[j.id], queue="alerts")
+    except Exception as e:
+        # Broker down — roll back so the beat dispatcher retries.
+        j.status = "queued"
+        j.started_at = None
+        db.commit()
+        raise HTTPException(503, f"celery enqueue failed: {e}")
+    j.celery_task_id = getattr(res, "id", None)
+    db.commit()
+    log.info("force-dispatch: job=%s task_id=%s", j.id, j.celery_task_id)
+    return {"job_id": j.id, "status": "running",
+            "task_id": j.celery_task_id}
 
 
 # ---------- models ---------------------------------------------------
@@ -593,7 +632,9 @@ def start_finetune_job(
     # Hand off to the same Celery worker the regular `start` endpoint
     # uses — the trainer reads `incremental_finetune` from cfg.
     from app.tasks.training import run_training_job
-    run_training_job.delay(job.id)
+    res = run_training_job.delay(job.id)
+    job.celery_task_id = getattr(res, "id", None)
+    db.commit()
     return job
 
 
@@ -1743,7 +1784,9 @@ def cross_store_start(db: Session = Depends(get_db),
         db.add(job); db.commit(); db.refresh(job)
         try:
             from app.tasks.training import run_training_job
-            run_training_job.delay(job.id)
+            res = run_training_job.delay(job.id)
+            job.celery_task_id = getattr(res, "id", None)
+            db.commit()
         except Exception as e:
             log.warning("cross-store: celery enqueue failed (job stays queued): %s", e)
         return {"store_counts": res["store_counts"],

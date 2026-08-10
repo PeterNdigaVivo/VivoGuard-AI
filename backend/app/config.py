@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     # deployed baseline. 0.0 = strict no-regression (historical behaviour);
     # 0.05 relaxes to the standard "no worse than 5 points" gate.
     model_gate_max_regression: float = 0.0
+    # Training-job stall watchdog: a `running` job with no epoch
+    # progress (last_progress_at heartbeat) for this many minutes is
+    # revoked and requeued by the dispatcher (max 2 requeues, then
+    # failed). Cross-store trains complete in ~30-60 min; 90 gives
+    # headroom for dataset prep + first epoch. 0 disables the watchdog.
+    training_stall_timeout_minutes: int = 90
     # Temporal alert gate: minimum consecutive tracked frames before an
     # alert fires (event rows always persist). Applies only to detectors
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.

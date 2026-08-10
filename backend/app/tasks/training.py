@@ -89,7 +89,14 @@ def run_training_job(self, job_id: int) -> None:
 # Stale `running` jobs older than this many hours are flipped to
 # `failed` so the dispatcher can keep moving. We DO NOT auto-retry —
 # the spec is explicit that failed training requires human review.
+# (The stall watchdog below usually fires long before this backstop.)
 _STALE_RUNNING_HOURS = 12
+# Stall watchdog: a running job whose progress heartbeat
+# (last_progress_at, bumped per epoch by the trainer) is older than
+# training_stall_timeout_minutes gets its Celery task revoked and the
+# job requeued — at most this many times, then it fails for review.
+# Bounded so a deterministic crash can't requeue-loop forever.
+_MAX_STALL_REQUEUES = 2
 # Cap per-tick dispatches so a 100-job backlog doesn't slam the
 # worker-alerts pool all at once.
 _DISPATCH_MAX_PER_TICK = 3
@@ -122,16 +129,72 @@ def dispatch_queued_jobs() -> None:
     etc.
     """
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import func as _func
+    from app.config import settings
     from app.database import SessionLocal
     from app.models import TrainingJob
 
     with SessionLocal() as db:
-        # 1) Sweep stale running jobs.
+        # 0) Stall watchdog — a running job with no epoch progress for
+        # > training_stall_timeout_minutes (heartbeat = last_progress_at,
+        # falling back to started_at/created_at for jobs dispatched but
+        # never picked up) is revoked and REQUEUED. Bounded at
+        # _MAX_STALL_REQUEUES, then failed for operator review. This is
+        # what frees the 2-running cap when a worker dies mid-train —
+        # job 235 held a cap slot for 12h and starved job 606.
+        stall_min = int(getattr(settings, "training_stall_timeout_minutes", 90))
+        if stall_min > 0:
+            heartbeat = _func.coalesce(TrainingJob.last_progress_at,
+                                       TrainingJob.started_at,
+                                       TrainingJob.created_at)
+            stall_cutoff = _dt.now(_tz.utc) - _td(minutes=stall_min)
+            stalled = (db.query(TrainingJob)
+                         .filter(TrainingJob.status == "running",
+                                 heartbeat < stall_cutoff)
+                         .all())
+            for j in stalled:
+                if j.celery_task_id:
+                    try:   # best-effort kill of the actual task
+                        celery_app.control.revoke(
+                            j.celery_task_id, terminate=True)
+                    except Exception as e:
+                        log.warning("dispatcher: revoke %s for job=%s "
+                                    "failed: %s", j.celery_task_id, j.id, e)
+                cfg = dict(j.config_json or {})
+                n = int(cfg.get("stall_requeues", 0)) + 1
+                if n > _MAX_STALL_REQUEUES:
+                    j.status = "failed"
+                    j.completed_at = _dt.now(_tz.utc)
+                    j.error_message = (
+                        f"auto-failed by stall watchdog: no epoch progress "
+                        f"for > {stall_min} min, and already requeued "
+                        f"{_MAX_STALL_REQUEUES} time(s). Review manually.")
+                    log.error("dispatcher: job %s failed after %d stall "
+                              "requeues", j.id, _MAX_STALL_REQUEUES)
+                else:
+                    cfg["stall_requeues"] = n
+                    j.config_json = cfg
+                    j.status = "queued"
+                    j.started_at = None
+                    j.last_progress_at = None
+                    j.celery_task_id = None
+                    j.error_message = (
+                        f"auto-requeued by stall watchdog (attempt "
+                        f"{n}/{_MAX_STALL_REQUEUES}): no epoch progress "
+                        f"for > {stall_min} min")
+                    log.warning("dispatcher: job %s stalled — requeued "
+                                "(attempt %d/%d)", j.id, n, _MAX_STALL_REQUEUES)
+            if stalled:
+                db.commit()
+
+        # 1) Sweep stale running jobs. coalesce() so a running row with
+        # started_at=NULL (crash between status flip and timestamp
+        # write) can't dodge the sweep and hold a cap slot forever.
         cutoff = _dt.now(_tz.utc) - _td(hours=_STALE_RUNNING_HOURS)
         stale = (db.query(TrainingJob)
                    .filter(TrainingJob.status == "running",
-                           TrainingJob.started_at != None,                  # noqa: E711
-                           TrainingJob.started_at < cutoff)
+                           _func.coalesce(TrainingJob.started_at,
+                                          TrainingJob.created_at) < cutoff)
                    .all())
         for j in stale:
             j.status = "failed"
@@ -225,7 +288,10 @@ def dispatch_queued_jobs() -> None:
             j.started_at = j.started_at or _dt.now(_tz.utc)
             db.commit()
             try:
-                run_training_job.apply_async(args=[j.id], queue="alerts")
+                res = run_training_job.apply_async(args=[j.id], queue="alerts")
+                # Task id lets the stall watchdog revoke a stuck run.
+                j.celery_task_id = getattr(res, "id", None)
+                db.commit()
                 dispatched.append(j.id)
                 running.append(j)               # count toward the cap of 2
                 if dtype:
@@ -235,6 +301,7 @@ def dispatch_queued_jobs() -> None:
                 # back to queued so the next tick retries.
                 j.status = "queued"
                 j.started_at = None
+                j.celery_task_id = None
                 db.commit()
                 log.exception("dispatcher: apply_async failed for job=%s: %s",
                               j.id, e)
