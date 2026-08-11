@@ -279,6 +279,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if ctxt == "restricted":
             return "Unauthorised Person in Staff Area"
         if ctxt == "after_hours":
+            if _time_context(event, store) == "before_hours":
+                return "Person Detected Before Hours"
             return "Person Detected After Hours"
         return "Customer in Store"
     if dt == "shutter":
@@ -340,9 +342,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         return "Checkout Taking Too Long"
     if dt == "intrusion":
         # time_context (Aug 2026) distinguishes a 07:30 presence from a
-        # 21:30 one; older events without the field keep the after-
-        # hours wording they always had.
-        if extra.get("time_context") == "before_hours":
+        # 21:30 one; rows without the stamp are recomputed from the
+        # event timestamp by _time_context.
+        if _time_context(event, store) == "before_hours":
             return "Someone in Store Before Hours"
         return "Someone in Store After Hours"
     return _PLAIN_TITLES.get(dt, dt.replace("_", " ").title())
@@ -599,6 +601,31 @@ def _person_context(event: DetectionEvent, zone: Zone | None, store) -> str:
     return "customer"
 
 
+def _time_context(event: DetectionEvent, store) -> str:
+    """'before_hours' | 'after_hours' for an out-of-hours event.
+
+    Prefers the time_context the detector stamped into extra (Aug
+    2026); rows created before the field existed — and person events,
+    which are classified at read time — fall back to recomputing from
+    the store's hours at the EVENT timestamp, so a 07:49 alert reads
+    "Before Hours" even without the stamp. Only meaningful once the
+    event is already classified out-of-hours."""
+    tc = (event.extra or {}).get("time_context")
+    if tc in ("before_hours", "after_hours"):
+        return tc
+    if store is not None and event.timestamp is not None:
+        try:
+            from datetime import timezone as _tz
+            from app.utils.business_hours import store_time_context
+            ts = event.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+            return store_time_context(store, ts)
+        except Exception:
+            pass
+    return "after_hours"
+
+
 def _title(event: DetectionEvent, camera: Camera | None,
            zone: Zone | None = None, store=None) -> str:
     """Human-readable title for an alert. Embeds the camera name so
@@ -613,6 +640,8 @@ def _title(event: DetectionEvent, camera: Camera | None,
         if ctxt == "restricted":
             return f"🚨 Unauthorised Person in Staff Area — {cam}"
         if ctxt == "after_hours":
+            if _time_context(event, store) == "before_hours":
+                return f"🚨 Person Detected Before Hours — {cam}"
             return f"🚨 Person Detected After Hours — {cam}"
         return f"👤 Customer in Store — {cam}"
 
@@ -627,7 +656,7 @@ def _title(event: DetectionEvent, camera: Camera | None,
             return f"{icon} Long Queue — {int(n)} people waiting — {cam}"
         return f"{icon} Long Queue — {cam}"
     if dt == "intrusion":
-        if extra.get("time_context") == "before_hours":
+        if _time_context(event, store) == "before_hours":
             return f"{icon} Before-hours Intrusion Detected — {cam}"
         return f"{icon} After-hours Intrusion Detected — {cam}"
     if dt == "crowd":
@@ -734,8 +763,11 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
             return (f"Someone was detected in a staff-only area{when}. "
                     f"This area is restricted to staff members only.")
         if ctxt == "after_hours":
+            phase = ("before opening hours"
+                     if _time_context(event, store) == "before_hours"
+                     else "outside opening hours")
             return (f"Someone was seen inside {store_name}{when}, "
-                    f"outside opening hours. Please check immediately.")
+                    f"{phase}. Please check immediately.")
         return (f"A customer was detected in {store_name}{when}. "
                 f"This is normal during business hours.")
 
@@ -792,8 +824,11 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         sentences.append("Consider opening an additional checkout point.")
         return " ".join(sentences)
     if dt == "intrusion":
-        return ("Motion detected inside the store outside business hours. "
-                "Verify whether this is authorised staff or an actual intrusion.")
+        phase = ("before opening hours"
+                 if _time_context(event, store) == "before_hours"
+                 else "outside business hours")
+        return (f"Motion detected inside the store {phase}. "
+                f"Verify whether this is authorised staff or an actual intrusion.")
     if dt == "crowd":
         n = _extract(extra, "count", "people", default=None)
         if n is not None:
