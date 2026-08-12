@@ -1784,8 +1784,10 @@ def cross_store_start(db: Session = Depends(get_db),
         db.add(job); db.commit(); db.refresh(job)
         try:
             from app.tasks.training import run_training_job
-            res = run_training_job.delay(job.id)
-            job.celery_task_id = getattr(res, "id", None)
+            # NB: named task_res, NOT res — `res` is the dataset-build
+            # dict the return statement below subscripts.
+            task_res = run_training_job.delay(job.id)
+            job.celery_task_id = getattr(task_res, "id", None)
             db.commit()
         except Exception as e:
             log.warning("cross-store: celery enqueue failed (job stays queued): %s", e)
