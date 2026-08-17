@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     # (chain-wide outage, Jul 2026). Only enable once the deployed model is
     # confirmed to emit a COCO-"person" class.
     use_deployed_model_for_inference: bool = False
-    # Cross-store generalist model (top-4 stores). Full train from base
+    # Cross-store generalist model (top-3 stores). Full train from base
     # yolov8n by default (a generalist person/retail detector — NOT fine-tuned
     # from the specialist deployed model). Auto-deploy is OFF: a >=0.85 model
     # is staged deployed=false and requires a manual promote, given the recent

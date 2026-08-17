@@ -1752,11 +1752,11 @@ def simulate_uniform(_u=Depends(require_role("admin", "operator"))):
     return run_uniform_mining()
 
 
-# ── Cross-store generalist training (top-4 stores) ─────────────────────────
+# ── Cross-store generalist training (top-3 stores) ─────────────────────────
 @router.post("/cross-store/start")
 def cross_store_start(db: Session = Depends(get_db),
                       _u=Depends(require_role("admin", "operator"))):
-    """Rebuild vivo_cross_store_v1 from the top-4 stores' confirmed images and
+    """Rebuild vivo_cross_store_v1 from the top-3 stores' confirmed images and
     enqueue a high-priority (priority=1) 20-epoch full train from base yolov8n
     with all augmentation. Auto-promotes at map50>=0.85 only when
     CROSS_STORE_AUTO_DEPLOY is set; otherwise the model is staged for a manual

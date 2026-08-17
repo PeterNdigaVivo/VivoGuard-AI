@@ -342,17 +342,19 @@ def run_weekly_for_all(db: Session, *, dry_run: bool = False) -> list[dict]:
     return [enqueue_fine_tune_if_due(db, t, dry_run=dry_run) for t in types]
 
 
-# ── Cross-store generalist dataset (top-4 stores) ──────────────────────────
+# ── Cross-store generalist dataset (top-3 stores) ──────────────────────────
 # Only these stores have proven-accurate operator feedback. Edit if the DB
 # store names differ (the JOIN matches Store.name exactly).
-CROSS_STORE_STORES = ["Vivo Junction", "Vivo Runda", "Vivo Yaya", "Vivo Garden City"]
+# Vivo Garden City removed Aug 2026 — 0 training images contributed.
+CROSS_STORE_STORES = ["Vivo Junction", "Vivo Runda", "Vivo Yaya"]
 CROSS_STORE_DATASET = "vivo_cross_store_v1"
 CROSS_STORE_MIN_IMAGES = 30
 
 
 def _cross_store_query(db: Session):
-    """Confirmed TrainingImages from the top-4 stores, newest first, joined to
-    their DetectionEvent (for the class label) + Store name."""
+    """Confirmed TrainingImages from the CROSS_STORE_STORES list, newest
+    first, joined to their DetectionEvent (for the class label) + Store
+    name."""
     from app.models import Alert, Camera, Store
     from app.models import DetectionEvent  # noqa: F811
     return (db.query(TrainingImage, DetectionEvent, Store.name)
@@ -369,9 +371,9 @@ def _cross_store_query(db: Session):
 
 def build_cross_store_dataset(db: Session) -> dict:
     """(Re)build the vivo_cross_store_v1 dataset from confirmed images across
-    the top-4 stores. Soft-prefers images with an orange-box preview and a
-    real file (>50KB); falls back to all confirmed if that drops below 30.
-    Returns {store_counts, total_images, dataset_id}."""
+    the CROSS_STORE_STORES list. Soft-prefers images with an orange-box
+    preview and a real file (>50KB); falls back to all confirmed if that
+    drops below 30. Returns {store_counts, total_images, dataset_id}."""
     import os
     from app.training.dataset import split_dataset
     from app.training.feedback_loop import _ensure_dataset
@@ -379,7 +381,7 @@ def build_cross_store_dataset(db: Session) -> dict:
     rows = _cross_store_query(db)
     if not rows:
         return {"store_counts": {}, "total_images": 0, "dataset_id": None,
-                "reason": "no confirmed images from the top-4 stores "
+                "reason": "no confirmed images from the top-3 stores "
                           "(check store names match the DB)"}
 
     def _quality(ti) -> bool:
@@ -397,7 +399,7 @@ def build_cross_store_dataset(db: Session) -> dict:
 
     classes = sorted({ev.detection_type for (_ti, ev, _s) in use if ev.detection_type})
     ds = _ensure_dataset(db, CROSS_STORE_DATASET, classes,
-                         description="auto: cross-store generalist (top-4 stores)")
+                         description="auto: cross-store generalist (top-3 stores)")
     # Rebuild fresh each run so counts reflect the current confirmed pool.
     db.query(TrainingImage).filter(TrainingImage.dataset_id == ds.id).delete()
     db.commit()
