@@ -6,8 +6,9 @@ import { useAuth } from '@/auth/AuthContext'
 import { useTheme } from '@/contexts/ThemeContext'
 import AlertNotificationBell from '@/components/AlertNotificationBell'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import { isSystemAdmin } from '@/lib/systemAdmins'
 
-const NAV = [
+const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   { to: '/chain',    label: 'Chain' },
   { to: '/compare',  label: 'Compare' },
   { to: '/stores',   label: 'Stores' },
@@ -23,6 +24,9 @@ const NAV = [
   // { to: '/stockroom', label: 'Stockroom Log' },
   // { to: '/campaigns', label: 'Campaigns' },
   { to: '/training', label: 'AI Training' },
+  // Visible ONLY to the platform operators in lib/systemAdmins.ts —
+  // hidden from everyone else, including regular admins.
+  { to: '/system-health', label: '💓 System Health', systemAdminOnly: true },
   { to: '/ai-progress', label: '📈 AI Progress' },
   { to: '/ai-learning', label: 'AI Learning' },
   { to: '/sprint',      label: 'Sprint' },
@@ -79,7 +83,9 @@ export default function Layout() {
         {/* min-h-0 + overflow-y-auto so a long nav scrolls instead of pushing
             the bottom items (Users / System / Agents) under the footer. */}
         <nav className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
-          {NAV.map(item => (
+          {NAV.filter(item =>
+            !item.systemAdminOnly || isSystemAdmin(user?.email),
+          ).map(item => (
             <NavLink key={item.to} to={item.to}
               className={({ isActive }) =>
                 'flex items-center justify-between rounded px-3 py-2 text-sm ' +

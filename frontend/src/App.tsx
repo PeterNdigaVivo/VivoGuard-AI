@@ -38,6 +38,7 @@ const UniformTrainingPage  = lazy(() => import('@/pages/UniformTrainingPage'))
 const ChainTrainingPage    = lazy(() => import('@/pages/ChainTrainingPage'))
 const ModelsPage           = lazy(() => import('@/pages/ModelsPage'))
 const SystemHealthPage     = lazy(() => import('@/pages/SystemHealthPage'))
+const MissionControlPage   = lazy(() => import('@/pages/MissionControlPage'))
 const AgentsPage           = lazy(() => import('@/pages/AgentsPage'))
 const StoresPage           = lazy(() => import('@/pages/StoresPage'))
 const StoreDashboardPage   = lazy(() => import('@/pages/StoreDashboardPage'))
@@ -112,6 +113,9 @@ export default function App() {
               <Route path="/sprint"                   element={<SprintPage />} />
               <Route path="/models"                   element={<ModelsPage />} />
               <Route path="/system"                   element={<SystemHealthPage />} />
+              {/* Restricted mission-control dashboard — allowlist-gated
+                  in the page itself AND server-side on the API. */}
+              <Route path="/system-health"            element={<MissionControlPage />} />
               <Route path="/agents"                   element={<AgentsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
