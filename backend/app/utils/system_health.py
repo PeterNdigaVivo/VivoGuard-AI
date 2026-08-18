@@ -203,6 +203,13 @@ def collect_system_health(db: Session) -> dict:
         except Exception:
             log.error("system-health: '%s' section failed:\n%s",
                       name, traceback.format_exc())
+            # Clear any aborted transaction so ONE section's SQL error
+            # doesn't poison every later section with "current
+            # transaction is aborted, commands ignored...".
+            try:
+                db.rollback()
+            except Exception:
+                pass
             errors.append(name)
             return default
 
@@ -251,13 +258,16 @@ def collect_system_health(db: Session) -> dict:
         total_today = (db.query(func.count(DetectionEvent.id))
                          .filter(DetectionEvent.timestamp >= today_start)
                          .scalar() or 0)
-        hourly_rows = (db.query(
-                           func.date_trunc("hour", DetectionEvent.timestamp),
-                           func.count(DetectionEvent.id))
+        # Label the bucket and GROUP BY the label: two separate
+        # func.date_trunc('hour', ...) calls bind 'hour' as two
+        # DIFFERENT parameters ($1 vs $2), so Postgres rejected the
+        # SELECT/GROUP BY pair with a GroupingError.
+        hour_bucket = func.date_trunc(
+            "hour", DetectionEvent.timestamp).label("hour_bucket")
+        hourly_rows = (db.query(hour_bucket, func.count(DetectionEvent.id))
                          .filter(DetectionEvent.timestamp
                                  >= now_utc - timedelta(hours=24))
-                         .group_by(func.date_trunc("hour",
-                                                   DetectionEvent.timestamp))
+                         .group_by("hour_bucket")
                          .all())
         # h can be None (NULL-timestamp rows form a NULL group) — the
         # original .replace() on it was an AttributeError → 500.
