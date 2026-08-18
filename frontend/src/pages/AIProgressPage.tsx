@@ -71,17 +71,31 @@ function relTime(iso: string | null): string {
   return `${Math.round(s / 86400)}d ago`
 }
 
+interface FeedbackImpact {
+  clicks_today: number
+  clicks_week: number
+  training_samples_from_your_clicks: number
+  models_trained_from_feedback: number
+  latest_map50_improvement: number | null
+}
+
 export default function AIProgressPage() {
   const [data, setData] = useState<Progress | null>(null)
+  const [impact, setImpact] = useState<FeedbackImpact | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [csBusy, setCsBusy] = useState(false)
   const [csMsg, setCsMsg] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
-    const load = () => api<Progress>('/training/progress')
-      .then(d => { if (alive) { setData(d); setError(null) } })
-      .catch(e => { if (alive) setError(String(e)) })
+    const load = () => {
+      api<Progress>('/training/progress')
+        .then(d => { if (alive) { setData(d); setError(null) } })
+        .catch(e => { if (alive) setError(String(e)) })
+      api<FeedbackImpact>('/training/feedback-impact')
+        .then(d => { if (alive) setImpact(d) })
+        .catch(() => {})
+    }
     load()
     const t = setInterval(load, 60_000)
     return () => { alive = false; clearInterval(t) }
@@ -133,6 +147,33 @@ export default function AIProgressPage() {
         Mission control — how the AI is learning for you. Auto-refreshing every 60s.
       </p>
 
+      {/* SECTION 0 — your feedback impact (per-operator motivation) */}
+      {impact && (
+        <Card className="p-4 dark:bg-slate-900 dark:border-slate-800">
+          <div className="font-semibold text-slate-800 dark:text-slate-100">
+            🙌 Your Feedback Impact
+          </div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+            Every True/False click becomes training data. Here&apos;s what yours have done.
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Kpi label="Clicks today" value={impact.clicks_today} color={BLUE} />
+            <Kpi label="Clicks this week" value={impact.clicks_week} color={BLUE} />
+            <Kpi label="Training samples from your clicks"
+              value={impact.training_samples_from_your_clicks} color={GREEN} />
+            <Kpi label="Models trained from feedback"
+              value={impact.models_trained_from_feedback} color={GREEN} />
+          </div>
+          {impact.latest_map50_improvement != null && (
+            <div className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
+              Latest feedback-trained model improved mAP50 by{' '}
+              {(impact.latest_map50_improvement * 100).toFixed(1)} points vs its parent —
+              your clicks did that.
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* SECTION 1 — model learning curve */}
       <Card className="p-4 dark:bg-slate-900 dark:border-slate-800">
         <div className="font-semibold text-slate-800 dark:text-slate-100">AI Model Learning Curve</div>
@@ -163,7 +204,7 @@ export default function AIProgressPage() {
               Cross-Store Generalist Model
             </div>
             <div className="text-xs text-slate-500 dark:text-slate-400">
-              One detector trained on high-quality confirmed data from the top-4 stores.
+              One detector trained on high-quality confirmed data from the top-3 stores.
             </div>
           </div>
           <span className="text-xs font-bold px-2 py-0.5 rounded-full text-white shrink-0"

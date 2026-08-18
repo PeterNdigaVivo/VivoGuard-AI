@@ -87,27 +87,55 @@ def _ensure_dataset(db: Session, name: str, classes: list[str],
     return ds
 
 
-# Detection types that trigger an IMMEDIATE fine-tune check on feedback
-# (Part 2 #8, Q9). Others still retrain via the periodic beat.
+# Kept for backwards-compat imports; the aggressive schedule (Aug 2026)
+# applies the immediate check to EVERY detection type, so this set no
+# longer gates anything.
 IMMEDIATE_RETRAIN_TYPES = {
     "uniform_compliance", "shop_open_close", "checkout_dwell",
-    "staff_present", "trespass",
+    "staff_present", "trespass", "intrusion", "person",
 }
 
 
 def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
-    """Immediately check whether this feedback pushed the dataset over its
-    training threshold and, if so, queue a fine-tune now instead of waiting
-    for the 5-min chain_retrain_due beat (Part 2 #8). Gated to the high-value
-    types (Q9). Best-effort — the feedback save matters more than the training
+    """Aggressive feedback-driven scheduling (Aug 2026): every click
+    counts new samples since the last COMPLETED job for this type —
+    >= feedback_full_retrain_after (30)  → queue a FULL retrain
+    >= feedback_finetune_after (10)      → queue a fine-tune
+    Skips when a queued/running job for the type already exists, so
+    clicks 11..N while a job is pending don't pile up duplicates.
+    Best-effort — the feedback save matters more than the training
     trigger, so never raise."""
-    if detection_type not in IMMEDIATE_RETRAIN_TYPES:
-        return
     try:
-        from app.training.orchestrator import enqueue_fine_tune_if_due
-        enqueue_fine_tune_if_due(db, detection_type)
+        from app.config import settings
+        from app.training.orchestrator import (
+            _last_fine_tune_completion, _new_samples_since,
+            enqueue_fine_tune_if_due, enqueue_full_retrain, has_open_job,
+        )
+        if has_open_job(db, detection_type):
+            return
+        fine_after = int(getattr(settings, "feedback_finetune_after", 10))
+        full_after = int(getattr(settings, "feedback_full_retrain_after", 30))
+        since = _last_fine_tune_completion(db, detection_type)
+        pos_new, neg_new = _new_samples_since(db, detection_type, since)
+        clicks = pos_new + neg_new
+        if clicks >= full_after:
+            enqueue_full_retrain(db, detection_type)
+        elif clicks >= fine_after:
+            enqueue_fine_tune_if_due(db, detection_type, min_new=fine_after)
     except Exception as e:
         log.warning("training enqueue failed: %s", e)
+
+
+def _enqueue_temporal_harvest(alert_id: int) -> None:
+    """Kick the ±1s temporal-context frame extraction onto the WORKER
+    (the clip lives on the shared volume and opencv only exists there).
+    Best-effort — never raises."""
+    try:
+        from app.tasks.feedback_harvest import harvest_temporal_frames
+        harvest_temporal_frames.delay(alert_id)
+    except Exception as e:
+        log.warning("temporal harvest enqueue failed alert=%s: %s",
+                    alert_id, e)
 
 
 def _enqueue_preview(image_id: int) -> None:
@@ -159,6 +187,12 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(img.id)     # preview runs on the worker (opencv)
+    # Temporal context (Aug 2026): extract the ±1s sibling frames from
+    # the alert clip on the worker. They land labeled=False so the
+    # hourly pseudo-labeler gives them REAL YOLO boxes — the detection-
+    # moment bbox above must never be copied onto frames where the
+    # person has moved.
+    _enqueue_temporal_harvest(alert_id)
     _maybe_enqueue_training(db, cls)   # immediate fine-tune if threshold crossed
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 

@@ -43,6 +43,7 @@ celery_app = Celery(
         "app.tasks.activity_sentinel",
         "app.tasks.uniform_miner",
         "app.tasks.system_health_report",
+        "app.tasks.feedback_harvest",
     ],
 )
 celery_app.conf.update(
@@ -104,6 +105,9 @@ celery_app.conf.update(
         "training.run_job":                   {"queue": "alerts"},
         "training.write_preview_for_image":   {"queue": "alerts"},
         "training.backfill_previews":         {"queue": "alerts"},
+        "training.harvest_temporal_frames":   {"queue": "alerts"},
+        "training.run_shop_opening_specialist": {"queue": "alerts"},
+        "training.run_store_specialist":      {"queue": "alerts"},
         "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},

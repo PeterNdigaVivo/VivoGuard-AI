@@ -126,6 +126,18 @@ class Settings(BaseSettings):
     # failed). Cross-store trains complete in ~30-60 min; 90 gives
     # headroom for dataset prep + first epoch. 0 disables the watchdog.
     training_stall_timeout_minutes: int = 90
+    # ---- aggressive feedback-driven retraining (Aug 2026) ----------------
+    # After this many new True/False clicks on a detection type since its
+    # last completed job → queue an incremental fine-tune immediately.
+    feedback_finetune_after: int = 10
+    # After this many → queue a FULL retrain instead.
+    feedback_full_retrain_after: int = 30
+    # Feedback fine-tunes auto-deploy (registry-level) when the new map50
+    # beats the parent's by at least this margin AND the model gate passes.
+    # NOTE: with use_deployed_model_for_inference=False this changes the
+    # registry/promotion chain, not live inference — cameras follow their
+    # explicit ai_model_id assignment.
+    feedback_auto_promote_margin: float = 0.02
     # Temporal alert gate: minimum consecutive tracked frames before an
     # alert fires (event rows always persist). Applies only to detectors
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.

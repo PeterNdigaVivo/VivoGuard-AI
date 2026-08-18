@@ -72,10 +72,12 @@ def _min_images(detection_type: str) -> int:
 
 
 # Training-dispatch priority per detection type (lower = sooner). Part 2 #6.
+# Aug-2026 feedback mission: uniform > shop_open_close > intrusion > others.
 TRAIN_PRIORITY = {
     "uniform_compliance": 1,
     "shop_open_close":    2,
-    "checkout_dwell":     3,
+    "intrusion":          3,
+    "checkout_dwell":     4,
     "staff_present":      4,
 }
 
@@ -329,6 +331,68 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
             "job_id": job.id,
             "parent_model_id": parent.id,
             "positives_new": pos_new, "negatives_new": neg_new}
+
+
+def has_open_job(db: Session, detection_type: str) -> bool:
+    """True when a queued/running TrainingJob already exists for this
+    detection type — the aggressive click-triggered path must not pile
+    duplicate jobs onto the queue between clicks 10..N."""
+    open_jobs = (db.query(TrainingJob)
+                   .filter(TrainingJob.status.in_(("queued", "running")))
+                   .all())
+    return any((j.config_json or {}).get("detection_type") == detection_type
+               for j in open_jobs)
+
+
+def enqueue_full_retrain(db: Session, detection_type: str) -> dict:
+    """FULL retrain (from base weights, not incremental) for one
+    detection type — the 30-click escalation of the aggressive
+    feedback schedule. Reuses enqueue_fine_tune_if_due's dataset
+    plumbing by building the same job shape with
+    incremental_finetune=False; the trainer then starts from
+    base_model instead of the parent weights."""
+    if not _feedback_pools_exist(db, detection_type):
+        return {"detection_type": detection_type, "status": "skipped",
+                "reason": "no feedback dataset yet"}
+    pos_ds = db.query(Dataset).filter(
+        Dataset.name == f"feedback-{detection_type}").first()
+    neg_ds = db.query(Dataset).filter(
+        Dataset.name == f"feedback-negative-{detection_type}").first()
+    if pos_ds is None:
+        return {"detection_type": detection_type, "status": "skipped",
+                "reason": "no positive pool"}
+    pos_count = (db.query(TrainingImage)
+                   .filter(TrainingImage.dataset_id == pos_ds.id).count())
+    if pos_count < _min_images(detection_type):
+        return {"detection_type": detection_type, "status": "skipped",
+                "reason": f"only {pos_count} positives "
+                          f"(need {_min_images(detection_type)}+)"}
+    parent = _pick_parent_model(db, detection_type)
+    cfg = {
+        "incremental_finetune":       False,
+        "detection_type":             detection_type,
+        "extra_negative_dataset_ids": ([neg_ds.id] if neg_ds else []),
+        "max_neg_ratio":              3.0,
+        "batch":                      16,
+        "imgsz":                      640,
+        "augment":                    True,
+        "origin":                     "feedback_full_retrain",
+    }
+    job = TrainingJob(
+        model_name=(parent.name if parent else f"vivo_{detection_type}"),
+        dataset_id=pos_ds.id,
+        config_json=cfg,
+        status="queued",
+        priority=_priority_for(detection_type),
+    )
+    db.add(job); db.commit(); db.refresh(job)
+    from app.tasks.training import run_training_job
+    run_training_job.delay(job.id)
+    log.info("orchestrator: queued FULL retrain job=%s detection_type=%s "
+             "positives=%d", job.id, detection_type, pos_count)
+    return {"detection_type": detection_type, "status": "queued",
+            "job_id": job.id, "mode": "full_retrain",
+            "positives_total": pos_count}
 
 
 def run_weekly_for_all(db: Session, *, dry_run: bool = False) -> list[dict]:

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from app.connectors.rtsp import grab_thumbnail
 from app.database import get_db
-from app.deps import require_role
+from app.deps import get_current_user, require_role
 from app.models import (
     AIModel, Annotation, Camera, Dataset, TrainingImage, TrainingJob,
     TrainingSample,
@@ -1750,6 +1750,88 @@ def simulate_uniform(_u=Depends(require_role("admin", "operator"))):
     also runs automatically every 2 hours via beat."""
     from app.tasks.uniform_miner import run_uniform_mining
     return run_uniform_mining()
+
+
+# ── Feedback-driven specialists (Aug 2026 mission) ─────────────────────────
+@router.post("/specialists/shop-opening/start")
+def shop_opening_specialist_start(
+        _u=Depends(require_role("admin", "operator"))):
+    """Queue the store-opening motion pipeline on the worker: build
+    vivo_store_opening_motion_v1 from confirmed shop_open_close clips
+    (10 frames each, -30s..+5s) and fine-tune a 30-epoch specialist
+    with lighting-heavy augmentation. Runs async — frames need opencv
+    + the recordings volume, which only the worker has."""
+    from app.tasks.feedback_harvest import run_shop_opening_specialist
+    res = run_shop_opening_specialist.delay()
+    return {"queued": True, "task_id": getattr(res, "id", None)}
+
+
+@router.post("/specialists/store/start")
+def store_specialist_start(store_name: str = "Vivo Yaya",
+                           _u=Depends(require_role("admin", "operator"))):
+    """Queue the per-store person/intrusion specialist for `store_name`
+    (default Vivo Yaya): dataset from the store's own feedback frames,
+    15-epoch fine-tune, and — once the model gate passes — the store's
+    cameras are pointed at the new model via cameras.ai_model_id."""
+    from app.tasks.feedback_harvest import run_store_specialist
+    res = run_store_specialist.delay(store_name)
+    return {"queued": True, "store": store_name,
+            "task_id": getattr(res, "id", None)}
+
+
+@router.get("/feedback-impact")
+def feedback_impact(db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    """'Your Feedback Impact' tile: the operator's own click counts,
+    how many of their clicks became training samples, and the chain-
+    level model progress their feedback feeds."""
+    from datetime import datetime, timedelta, timezone as _tz
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import func as _f
+    from app.models import AIModel, Alert
+    now = datetime.now(_tz.utc)
+    today_start = (now.astimezone(ZoneInfo("Africa/Nairobi"))
+                   .replace(hour=0, minute=0, second=0, microsecond=0)
+                   .astimezone(_tz.utc))
+    mine = (Alert.assigned_to == user.id,
+            Alert.status.in_(("confirmed", "dismissed")))
+    clicks_today = (db.query(_f.count(Alert.id))
+                      .filter(*mine, Alert.acknowledged_at >= today_start)
+                      .scalar() or 0)
+    clicks_week = (db.query(_f.count(Alert.id))
+                     .filter(*mine,
+                             Alert.acknowledged_at >= now - timedelta(days=7))
+                     .scalar() or 0)
+    samples = (db.query(_f.count(TrainingImage.id))
+                 .join(Alert, Alert.id == TrainingImage.source_alert_id)
+                 .filter(Alert.assigned_to == user.id).scalar() or 0)
+    # Chain-level: models produced by feedback-driven runs, and the
+    # map50 delta of the newest one vs its parent.
+    fb_jobs = (db.query(TrainingJob)
+                 .filter(TrainingJob.status == "done").all())
+    fb_job_ids = [j.id for j in fb_jobs
+                  if (j.config_json or {}).get("origin") in (
+                      "weekly_orchestrator", "feedback_full_retrain",
+                      "shop_opening_specialist", "store_specialist")]
+    models = (db.query(AIModel)
+                .filter(AIModel.training_job_id.in_(fb_job_ids))
+                .order_by(AIModel.created_at.desc()).all()
+              if fb_job_ids else [])
+    improvement = None
+    for m in models:
+        if m.map50 is None or not m.parent_model_id:
+            continue
+        parent = db.get(AIModel, m.parent_model_id)
+        if parent is not None and parent.map50 is not None:
+            improvement = round(float(m.map50) - float(parent.map50), 4)
+            break
+    return {
+        "clicks_today": int(clicks_today),
+        "clicks_week": int(clicks_week),
+        "training_samples_from_your_clicks": int(samples),
+        "models_trained_from_feedback": len(models),
+        "latest_map50_improvement": improvement,
+    }
 
 
 # ── Cross-store generalist training (top-3 stores) ─────────────────────────

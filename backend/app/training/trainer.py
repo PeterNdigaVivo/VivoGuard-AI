@@ -495,6 +495,76 @@ def run_job(job_id: int) -> None:
                              "promote (staged deployed=false; set "
                              "CROSS_STORE_AUTO_DEPLOY=true or promote manually)",
                              _m50, float(_auto))
+
+            # Aggressive-feedback auto-deploy (Aug 2026): a feedback-driven
+            # run that beats its baseline map50 by >= the configured margin
+            # deploys at the REGISTRY level once the model gate passes.
+            # (Live inference still follows use_deployed_model_for_inference
+            # and per-camera ai_model_id — see config.py.)
+            _origin = cfg.get("origin")
+            if (_origin in ("weekly_orchestrator", "feedback_full_retrain",
+                            "shop_opening_specialist")
+                    and final_metrics.get("map50") is not None):
+                from app.config import settings as _s2
+                _margin = float(getattr(_s2, "feedback_auto_promote_margin",
+                                        0.02))
+                baseline = None
+                parent_row = (db.get(AIModel, parent_model_id)
+                              if parent_model_id else None)
+                if parent_row is not None and parent_row.map50 is not None:
+                    baseline = float(parent_row.map50)
+                else:
+                    sib = (db.query(AIModel)
+                             .filter(AIModel.name == ai_model.name,
+                                     AIModel.deployed == True,          # noqa: E712
+                                     AIModel.id != ai_model.id,
+                                     AIModel.map50 != None)             # noqa: E711
+                             .order_by(AIModel.created_at.desc()).first())
+                    baseline = float(sib.map50) if sib else None
+                _new50 = float(final_metrics["map50"])
+                if baseline is not None and _new50 >= baseline + _margin:
+                    from app.ai.model_gating import validate_model_before_deploy
+                    if validate_model_before_deploy(
+                            str(best), list(ai_model.classes_json or [])):
+                        for _sib in (db.query(AIModel)
+                                       .filter(AIModel.name == ai_model.name,
+                                               AIModel.deployed == True,   # noqa: E712
+                                               AIModel.id != ai_model.id)):
+                            _sib.deployed = False
+                        ai_model.deployed = True
+                        db.commit()
+                        log.info("feedback auto-deploy: %s %s map50=%.4f "
+                                 ">= baseline %.4f + %.2f",
+                                 ai_model.name, ai_model.version,
+                                 _new50, baseline, _margin)
+                    else:
+                        log.error("feedback auto-deploy BLOCKED by model "
+                                  "gate — model=%s staged deployed=false",
+                                  ai_model.id)
+
+            # Store-specialist camera assignment (Aug 2026): a job carrying
+            # cfg.assign_store_id points that store's cameras at the new
+            # model — the only path that changes LIVE inference. Gate-
+            # checked so a broken model can never take over a store.
+            _assign_sid = cfg.get("assign_store_id")
+            if _assign_sid:
+                from app.ai.model_gating import validate_model_before_deploy
+                if validate_model_before_deploy(
+                        str(best), list(ai_model.classes_json or [])):
+                    from app.models import Camera as _Cam
+                    n_cams = (db.query(_Cam)
+                                .filter(_Cam.store_id == int(_assign_sid))
+                                .update({_Cam.ai_model_id: ai_model.id},
+                                        synchronize_session=False))
+                    db.commit()
+                    log.info("store specialist: model %s (%s %s) assigned "
+                             "to %d cameras of store %s",
+                             ai_model.id, ai_model.name, ai_model.version,
+                             n_cams, _assign_sid)
+                else:
+                    log.error("store specialist: model gate REJECTED model "
+                              "%s — store %s cameras left unchanged",
+                              ai_model.id, _assign_sid)
         # Experiment record — the JSON audit trail for this run. A write
         # failure is logged at ERROR (surfaced, never silent) but does not
         # fail a training run that already completed.
