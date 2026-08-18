@@ -5,11 +5,16 @@ endpoint and the 08:00 EAT daily email task — same numbers in the
 dashboard and the inbox, no drift.
 
 Everything here is best-effort: a broken subsystem must show up AS
-DATA (healthy: false / None), never crash the collector. The API
-container has no docker socket, so "containers" are derived from
-service heartbeats (DB ping, Redis ping, Celery worker ping, streamer
-frame freshness) rather than `docker ps`; docker_images_gb is None for
-the same reason.
+DATA (healthy: false / None / a name in collection_errors), never
+crash the collector — a health page that 500s when something is
+unhealthy is self-defeating. Every section runs behind _guard(),
+which logs the full traceback and substitutes the section's default.
+
+The API container has no docker socket, so "containers" are derived
+from service heartbeats (DB ping, Redis ping, Celery worker ping,
+streamer frame freshness) rather than `docker ps`; docker_images_gb
+is None for the same reason. No psutil either — disk numbers come
+from stdlib shutil.disk_usage + `du`.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import os
 import shutil
 import subprocess
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -153,9 +159,33 @@ def _containers(r) -> list[dict]:
     return out
 
 
+# Section defaults — what a failed section reports instead of 500ing.
+_DEFAULTS: dict[str, dict] = {
+    "containers": {},   # list handled specially below
+    "cameras": {"total": 0, "streaming": 0, "offline": 0,
+                "offline_names": [], "ai_enabled_active": 0},
+    "detection": {"events_last_30min_by_type": {}, "total_events_today": 0,
+                  "events_by_hour_24h": []},
+    "model": {"version": None, "map50": None, "precision": None,
+              "recall": None, "deployed_since": None},
+    "training": {"jobs_queued": 0, "jobs_running": 0,
+                 "jobs_completed_today": 0, "latest_map50": None},
+    "storage": {"total_gb": None, "used_gb": None, "free_gb": None,
+                "percent_used": None, "docker_images_gb": None,
+                "recordings_gb": None, "alert_clips_gb": None},
+    "database": {"total_alerts": 0, "alerts_today": 0,
+                 "detection_events_count": 0},
+    "alerts": {"urgent_today": 0, "resolved_today": 0, "pending_today": 0},
+    "integrations": {"bytetrack_active": False, "supervision_active": False,
+                     "mannequin_filter_active": False},
+}
+
+
 def collect_system_health(db: Session) -> dict:
     """The full snapshot served by GET /system-health and rendered into
-    the daily email. Pure read — no state changes anywhere."""
+    the daily email. Pure read — no state changes anywhere. Sections
+    that fail land in `collection_errors` with their default values and
+    a full traceback in the api logs."""
     from app.models import AIModel, Alert, Camera, DetectionEvent, TrainingJob
     from app.stream.frame_buffer import FrameBuffer
 
@@ -164,6 +194,17 @@ def collect_system_health(db: Session) -> dict:
     today_start = (now_utc.astimezone(EAT)
                    .replace(hour=0, minute=0, second=0, microsecond=0)
                    .astimezone(timezone.utc))
+
+    errors: list[str] = []
+
+    def guard(name: str, fn, default):
+        try:
+            return fn()
+        except Exception:
+            log.error("system-health: '%s' section failed:\n%s",
+                      name, traceback.format_exc())
+            errors.append(name)
+            return default
 
     r = None
     try:
@@ -174,179 +215,189 @@ def collect_system_health(db: Session) -> dict:
         pass
 
     # ---- cameras -----------------------------------------------------
-    cams = db.query(Camera).all()
-    cam_ids = [c.id for c in cams]
-    fb = FrameBuffer()
-    health = fb.health_many(cam_ids) if cam_ids else {}
-    hb_map: dict[int, float] = {}
-    if r is not None and cam_ids:
-        try:
-            raws = r.mget([f"vg:inference-hb:{cid}" for cid in cam_ids])
-            hb_map = {cid: float(v) for cid, v in zip(cam_ids, raws) if v}
-        except Exception:
-            pass
-
-    streaming_ids, offline = set(), []
-    for c in cams:
-        h = health.get(c.id) or {}
-        lf = h.get("last_frame_at")
-        if lf and (now - float(lf)) < 10 and (h.get("fps") or 0) > 0:
-            streaming_ids.add(c.id)
-        else:
-            offline.append(c.name or f"camera {c.id}")
-    ai_active = sum(1 for c in cams
-                    if c.ai_enabled and (now - hb_map.get(c.id, 0)) < 60)
-
-    cameras = {
-        "total": len(cams),
-        "streaming": len(streaming_ids),
-        "offline": len(cams) - len(streaming_ids),
-        "offline_names": offline[:25],
-        "ai_enabled_active": ai_active,
-    }
+    def _cameras() -> dict:
+        cams = db.query(Camera).all()
+        cam_ids = [c.id for c in cams]
+        fb = FrameBuffer()
+        health = fb.health_many(cam_ids) if cam_ids else {}
+        hb_map: dict[int, float] = {}
+        if r is not None and cam_ids:
+            try:
+                raws = r.mget([f"vg:inference-hb:{cid}" for cid in cam_ids])
+                hb_map = {cid: float(v) for cid, v in zip(cam_ids, raws) if v}
+            except Exception:
+                pass
+        streaming, offline = 0, []
+        for c in cams:
+            h = health.get(c.id) or {}
+            lf = h.get("last_frame_at")
+            if lf and (now - float(lf)) < 10 and (h.get("fps") or 0) > 0:
+                streaming += 1
+            else:
+                offline.append(c.name or f"camera {c.id}")
+        ai_active = sum(1 for c in cams
+                        if c.ai_enabled and (now - hb_map.get(c.id, 0)) < 60)
+        return {"total": len(cams), "streaming": streaming,
+                "offline": len(cams) - streaming,
+                "offline_names": offline[:25],
+                "ai_enabled_active": ai_active}
 
     # ---- detection ----------------------------------------------------
-    by_type = dict(
-        db.query(DetectionEvent.detection_type, func.count(DetectionEvent.id))
-          .filter(DetectionEvent.timestamp >= now_utc - timedelta(minutes=30))
-          .group_by(DetectionEvent.detection_type).all())
-    total_today = (db.query(func.count(DetectionEvent.id))
-                     .filter(DetectionEvent.timestamp >= today_start)
-                     .scalar() or 0)
-    # 24 hourly buckets for the dashboard chart, EAT hour labels.
-    hourly_rows = (db.query(
-                       func.date_trunc("hour", DetectionEvent.timestamp),
-                       func.count(DetectionEvent.id))
-                     .filter(DetectionEvent.timestamp >= now_utc - timedelta(hours=24))
-                     .group_by(func.date_trunc("hour", DetectionEvent.timestamp))
-                     .all())
-    hour_counts = {h.replace(tzinfo=h.tzinfo or timezone.utc): int(n)
-                   for h, n in hourly_rows}
-    events_by_hour = []
-    anchor = now_utc.replace(minute=0, second=0, microsecond=0)
-    for i in range(23, -1, -1):
-        slot = anchor - timedelta(hours=i)
-        events_by_hour.append({
-            "hour": slot.astimezone(EAT).strftime("%H:00"),
-            "count": int(hour_counts.get(slot, 0)),
-        })
-
-    detection = {
-        "events_last_30min_by_type": {k: int(v) for k, v in by_type.items() if k},
-        "total_events_today": int(total_today),
-        "events_by_hour_24h": events_by_hour,
-    }
+    def _detection() -> dict:
+        by_type = dict(
+            db.query(DetectionEvent.detection_type, func.count(DetectionEvent.id))
+              .filter(DetectionEvent.timestamp >= now_utc - timedelta(minutes=30))
+              .group_by(DetectionEvent.detection_type).all())
+        total_today = (db.query(func.count(DetectionEvent.id))
+                         .filter(DetectionEvent.timestamp >= today_start)
+                         .scalar() or 0)
+        hourly_rows = (db.query(
+                           func.date_trunc("hour", DetectionEvent.timestamp),
+                           func.count(DetectionEvent.id))
+                         .filter(DetectionEvent.timestamp
+                                 >= now_utc - timedelta(hours=24))
+                         .group_by(func.date_trunc("hour",
+                                                   DetectionEvent.timestamp))
+                         .all())
+        # h can be None (NULL-timestamp rows form a NULL group) — the
+        # original .replace() on it was an AttributeError → 500.
+        hour_counts: dict[datetime, int] = {}
+        for h, n in hourly_rows:
+            if h is None:
+                continue
+            if h.tzinfo is None:
+                h = h.replace(tzinfo=timezone.utc)
+            hour_counts[h] = int(n)
+        events_by_hour = []
+        anchor = now_utc.replace(minute=0, second=0, microsecond=0)
+        for i in range(23, -1, -1):
+            slot = anchor - timedelta(hours=i)
+            events_by_hour.append({
+                "hour": slot.astimezone(EAT).strftime("%H:00"),
+                "count": int(hour_counts.get(slot, 0)),
+            })
+        return {"events_last_30min_by_type":
+                    {k: int(v) for k, v in by_type.items() if k},
+                "total_events_today": int(total_today),
+                "events_by_hour_24h": events_by_hour}
 
     # ---- model ---------------------------------------------------------
-    dep = (db.query(AIModel).filter(AIModel.deployed.is_(True))
-             .order_by(AIModel.created_at.desc()).first())
-    model = {
-        "version": f"{dep.name} {dep.version}" if dep else None,
-        "map50": dep.map50 if dep else None,
-        "precision": dep.precision if dep else None,
-        "recall": dep.recall if dep else None,
-        # No deployed_at column exists — created_at of the deployed row
-        # is the closest honest proxy.
-        "deployed_since": dep.created_at.isoformat() if dep and dep.created_at else None,
-    }
+    def _model() -> dict:
+        dep = (db.query(AIModel).filter(AIModel.deployed.is_(True))
+                 .order_by(AIModel.created_at.desc()).first())
+        return {
+            "version": f"{dep.name} {dep.version}" if dep else None,
+            "map50": dep.map50 if dep else None,
+            "precision": dep.precision if dep else None,
+            "recall": dep.recall if dep else None,
+            # No deployed_at column exists — created_at of the deployed
+            # row is the closest honest proxy.
+            "deployed_since": (dep.created_at.isoformat()
+                               if dep and dep.created_at else None),
+        }
 
     # ---- training -------------------------------------------------------
-    status_counts = dict(
-        db.query(TrainingJob.status, func.count(TrainingJob.id))
-          .filter(TrainingJob.status.in_(("queued", "running")))
-          .group_by(TrainingJob.status).all())
-    done_today = (db.query(func.count(TrainingJob.id))
-                    .filter(TrainingJob.status == "done",
-                            TrainingJob.completed_at >= today_start)
-                    .scalar() or 0)
-    latest_done = (db.query(TrainingJob)
-                     .filter(TrainingJob.status == "done")
-                     .order_by(TrainingJob.completed_at.desc()).first())
-    training = {
-        "jobs_queued": int(status_counts.get("queued", 0)),
-        "jobs_running": int(status_counts.get("running", 0)),
-        "jobs_completed_today": int(done_today),
-        "latest_map50": latest_done.best_map50 if latest_done else None,
-    }
+    def _training() -> dict:
+        status_counts = dict(
+            db.query(TrainingJob.status, func.count(TrainingJob.id))
+              .filter(TrainingJob.status.in_(("queued", "running")))
+              .group_by(TrainingJob.status).all())
+        done_today = (db.query(func.count(TrainingJob.id))
+                        .filter(TrainingJob.status == "done",
+                                TrainingJob.completed_at >= today_start)
+                        .scalar() or 0)
+        latest_done = (db.query(TrainingJob)
+                         .filter(TrainingJob.status == "done")
+                         .order_by(TrainingJob.completed_at.desc()).first())
+        return {"jobs_queued": int(status_counts.get("queued", 0)),
+                "jobs_running": int(status_counts.get("running", 0)),
+                "jobs_completed_today": int(done_today),
+                "latest_map50": latest_done.best_map50 if latest_done else None}
 
     # ---- storage --------------------------------------------------------
-    rec_dir = settings.recordings_dir
-    try:
-        du = shutil.disk_usage(rec_dir)
-        total_gb = round(du.total / (1024 ** 3), 1)
-        used_gb = round(du.used / (1024 ** 3), 1)
-        free_gb = round(du.free / (1024 ** 3), 1)
-        pct = round(du.used / du.total * 100, 1) if du.total else None
-    except Exception:
-        total_gb = used_gb = free_gb = pct = None
-    storage = {
-        "total_gb": total_gb, "used_gb": used_gb, "free_gb": free_gb,
-        "percent_used": pct,
-        # No docker socket in this container — honest null, not a guess.
-        "docker_images_gb": None,
-        "recordings_gb": _du_gb(rec_dir),
-        "alert_clips_gb": _du_gb(os.path.join(rec_dir, "clips")),
-    }
+    def _storage() -> dict:
+        rec_dir = settings.recordings_dir
+        try:
+            du = shutil.disk_usage(rec_dir)
+            total_gb = round(du.total / (1024 ** 3), 1)
+            used_gb = round(du.used / (1024 ** 3), 1)
+            free_gb = round(du.free / (1024 ** 3), 1)
+            pct = round(du.used / du.total * 100, 1) if du.total else None
+        except Exception:
+            total_gb = used_gb = free_gb = pct = None
+        return {"total_gb": total_gb, "used_gb": used_gb, "free_gb": free_gb,
+                "percent_used": pct,
+                # No docker socket in this container — honest null.
+                "docker_images_gb": None,
+                "recordings_gb": _du_gb(rec_dir),
+                "alert_clips_gb": _du_gb(os.path.join(rec_dir, "clips"))}
 
     # ---- database ---------------------------------------------------------
-    total_alerts = db.query(func.count(Alert.id)).scalar() or 0
-    alerts_today = (db.query(func.count(Alert.id))
-                      .filter(Alert.created_at >= today_start).scalar() or 0)
-    events_count = db.query(func.count(DetectionEvent.id)).scalar() or 0
-    database = {
-        "total_alerts": int(total_alerts),
-        "alerts_today": int(alerts_today),
-        "detection_events_count": int(events_count),
-    }
+    def _database() -> dict:
+        return {
+            "total_alerts": int(db.query(func.count(Alert.id)).scalar() or 0),
+            "alerts_today": int(db.query(func.count(Alert.id))
+                                  .filter(Alert.created_at >= today_start)
+                                  .scalar() or 0),
+            "detection_events_count":
+                int(db.query(func.count(DetectionEvent.id)).scalar() or 0),
+        }
 
     # ---- alerts ------------------------------------------------------------
-    urgent_set = _urgent_types()
-    urgent_today = 0
-    if urgent_set:
-        urgent_today = (db.query(func.count(Alert.id))
-                          .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-                          .filter(Alert.created_at >= today_start,
-                                  DetectionEvent.detection_type.in_(urgent_set))
-                          .scalar() or 0)
-    resolved_today = (db.query(func.count(Alert.id))
-                        .filter(Alert.created_at >= today_start,
-                                Alert.status == "resolved").scalar() or 0)
-    pending_today = (db.query(func.count(Alert.id))
-                       .filter(Alert.created_at >= today_start,
-                               Alert.status.in_(("new", "acknowledged")))
-                       .scalar() or 0)
-    alerts = {
-        "urgent_today": int(urgent_today),
-        "resolved_today": int(resolved_today),
-        "pending_today": int(pending_today),
-    }
+    def _alerts() -> dict:
+        urgent_set = _urgent_types()
+        urgent_today = 0
+        if urgent_set:
+            urgent_today = (db.query(func.count(Alert.id))
+                              .join(DetectionEvent,
+                                    Alert.event_id == DetectionEvent.id)
+                              .filter(Alert.created_at >= today_start,
+                                      DetectionEvent.detection_type.in_(urgent_set))
+                              .scalar() or 0)
+        resolved_today = (db.query(func.count(Alert.id))
+                            .filter(Alert.created_at >= today_start,
+                                    Alert.status == "resolved").scalar() or 0)
+        pending_today = (db.query(func.count(Alert.id))
+                           .filter(Alert.created_at >= today_start,
+                                   Alert.status.in_(("new", "acknowledged")))
+                           .scalar() or 0)
+        return {"urgent_today": int(urgent_today),
+                "resolved_today": int(resolved_today),
+                "pending_today": int(pending_today)}
 
     # ---- integrations ---------------------------------------------------------
-    def _importable(mod: str) -> bool:
-        import importlib.util
-        try:
-            return importlib.util.find_spec(mod) is not None
-        except Exception:
-            return False
-    integrations = {
-        "bytetrack_active": _importable("supervision"),   # ByteTrack ships in supervision
-        "supervision_active": _importable("supervision"),
-        "mannequin_filter_active": bool(
-            getattr(settings, "mannequin_filter_enabled", True)),
-    }
+    def _integrations() -> dict:
+        def _importable(mod: str) -> bool:
+            import importlib.util
+            try:
+                return importlib.util.find_spec(mod) is not None
+            except Exception:
+                return False
+        return {
+            # ByteTrack ships inside supervision.
+            "bytetrack_active": _importable("supervision"),
+            "supervision_active": _importable("supervision"),
+            "mannequin_filter_active": bool(
+                getattr(settings, "mannequin_filter_enabled", True)),
+        }
 
-    return {
+    snap = {
         "generated_at": now_utc.isoformat(),
-        "containers": _containers(r),
-        "cameras": cameras,
-        "detection": detection,
-        "model": model,
-        "training": training,
-        "storage": storage,
-        "database": database,
-        "alerts": alerts,
-        "integrations": integrations,
+        "containers": guard("containers", lambda: _containers(r),
+                            [{"name": "api", "status": "running",
+                              "uptime": None, "healthy": True}]),
+        "cameras": guard("cameras", _cameras, _DEFAULTS["cameras"]),
+        "detection": guard("detection", _detection, _DEFAULTS["detection"]),
+        "model": guard("model", _model, _DEFAULTS["model"]),
+        "training": guard("training", _training, _DEFAULTS["training"]),
+        "storage": guard("storage", _storage, _DEFAULTS["storage"]),
+        "database": guard("database", _database, _DEFAULTS["database"]),
+        "alerts": guard("alerts", _alerts, _DEFAULTS["alerts"]),
+        "integrations": guard("integrations", _integrations,
+                              _DEFAULTS["integrations"]),
+        "collection_errors": errors,
     }
+    return snap
 
 
 def overall_status(snap: dict) -> tuple[str, str]:
@@ -355,7 +406,8 @@ def overall_status(snap: dict) -> tuple[str, str]:
     🔴 Critical: storage > 90%, zero cameras streaming, or a core
        service (postgres / redis) down.
     🟡 Warning: storage > 80%, any camera offline, no celery worker,
-       or a training backlog (> 5 queued).
+       a training backlog (> 5 queued), or any collector section
+       failing.
     🟢 Healthy: everything else.
     """
     storage = snap.get("storage") or {}
@@ -372,6 +424,7 @@ def overall_status(snap: dict) -> tuple[str, str]:
                       if c.get("name") == "celery-workers")
     if (pct is not None and pct > 80) or cams.get("offline", 0) > 0 \
             or worker_down \
-            or (snap.get("training") or {}).get("jobs_queued", 0) > 5:
+            or (snap.get("training") or {}).get("jobs_queued", 0) > 5 \
+            or snap.get("collection_errors"):
         return "🟡", "Warning"
     return "🟢", "Healthy"

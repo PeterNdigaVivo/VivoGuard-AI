@@ -43,6 +43,7 @@ interface Snapshot {
     bytetrack_active: boolean; supervision_active: boolean
     mannequin_filter_active: boolean
   }
+  collection_errors?: string[]
 }
 
 const num = (v: number | null | undefined, digits = 0) =>
@@ -114,6 +115,12 @@ export default function MissionControlPage() {
 
       {error && (
         <Card className="p-4 text-red-600">Failed to load: {error}</Card>
+      )}
+      {data && (data.collection_errors?.length ?? 0) > 0 && (
+        <Card className="p-3 text-sm text-amber-700 dark:text-amber-400">
+          ⚠ Some sections could not be collected (showing defaults):{' '}
+          {data.collection_errors!.join(', ')} — see api logs for tracebacks.
+        </Card>
       )}
       {!data && !error && <Card className="p-10 text-center">Loading…</Card>}
 

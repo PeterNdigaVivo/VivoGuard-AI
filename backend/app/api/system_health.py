@@ -36,7 +36,16 @@ def require_system_admin(user: User = Depends(get_current_user)) -> User:
 @router.get("")
 def system_health(db: Session = Depends(get_db),
                   _u: User = Depends(require_system_admin)):
-    snap = collect_system_health(db)
-    emoji, label = overall_status(snap)
-    snap["overall"] = {"emoji": emoji, "label": label}
-    return snap
+    import traceback
+    try:
+        snap = collect_system_health(db)
+        emoji, label = overall_status(snap)
+        snap["overall"] = {"emoji": emoji, "label": label}
+        return snap
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Full traceback in the api logs + the message in `detail` so a
+        # 500 is never silent (same pattern as the cross-store fix).
+        log.error("system_health failed: %s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
