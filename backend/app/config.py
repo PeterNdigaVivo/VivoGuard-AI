@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     # failed). Cross-store trains complete in ~30-60 min; 90 gives
     # headroom for dataset prep + first epoch. 0 disables the watchdog.
     training_stall_timeout_minutes: int = 90
+    # A `running` job whose heartbeat was NEVER stamped (the trainer's
+    # first act) is a task the worker never picked up — requeue after
+    # this many seconds instead of waiting the full stall timeout.
+    # 0 disables the fast tier.
+    training_start_timeout_seconds: int = 60
     # ---- aggressive feedback-driven retraining (Aug 2026) ----------------
     # After this many new True/False clicks on a detection type since its
     # last completed job → queue an incremental fine-tune immediately.

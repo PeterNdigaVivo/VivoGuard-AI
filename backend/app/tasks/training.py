@@ -77,8 +77,20 @@ def backfill_previews(limit: int = 500) -> None:
 
 @celery_app.task(name="training.run_job", bind=True, ignore_result=True)
 def run_training_job(self, job_id: int) -> None:
+    """Celery entry point for one training job.
+
+    Synchronous debug trigger (runs inline in the current process,
+    bypassing the broker entirely):
+
+        docker compose exec -T worker-alerts python3 -c "
+        from app.tasks.training import run_training_job
+        run_training_job.apply(args=[734])
+        "
+    """
     from app.training.trainer import run_job
-    log.info("run_training_job id=%s", job_id)
+    log.info("job %s: celery task received (task_id=%s) — handing to "
+             "trainer", job_id, getattr(getattr(self, "request", None),
+                                        "id", None))
     try:
         run_job(job_id)
     except Exception as e:
@@ -108,6 +120,88 @@ _MAX_FAILURES_PER_DATASET = 3
 _SUSPENDED_MARKER = "[suspended]"
 
 
+def _requeue_or_fail(db, j, reason: str) -> None:
+    """Shared recovery move for a wedged `running` job: revoke its
+    Celery task (also blocks acks_late redelivery from double-running
+    it), then requeue — bounded by _MAX_STALL_REQUEUES via the
+    config_json.stall_requeues counter, after which the job fails for
+    operator review. Caller commits. Every transition is logged with
+    the job id + epoch position."""
+    from datetime import datetime as _dt, timezone as _tz
+    if j.celery_task_id:
+        try:
+            celery_app.control.revoke(j.celery_task_id, terminate=True)
+        except Exception as e:
+            log.warning("job %s: revoke of task %s failed: %s",
+                        j.id, j.celery_task_id, e)
+    cfg = dict(j.config_json or {})
+    n = int(cfg.get("stall_requeues", 0)) + 1
+    old = j.status
+    if n > _MAX_STALL_REQUEUES:
+        j.status = "failed"
+        j.completed_at = _dt.now(_tz.utc)
+        j.error_message = (
+            f"auto-failed: {reason}; already requeued "
+            f"{_MAX_STALL_REQUEUES} time(s). Review manually.")
+        log.error("job %s: state %s -> failed (%s) at epoch %s/%s",
+                  j.id, old, reason, j.current_epoch, j.total_epochs)
+    else:
+        cfg["stall_requeues"] = n
+        j.config_json = cfg
+        j.status = "queued"
+        j.started_at = None
+        j.last_progress_at = None
+        j.celery_task_id = None
+        j.error_message = (
+            f"auto-requeued ({n}/{_MAX_STALL_REQUEUES}): {reason}")
+        log.warning("job %s: state %s -> queued (%s) attempt %d/%d "
+                    "at epoch %s/%s", j.id, old, reason, n,
+                    _MAX_STALL_REQUEUES, j.current_epoch, j.total_epochs)
+
+
+def reset_zombie_running_jobs() -> int:
+    """Worker-restart recovery: training runs ONLY on the alerts-queue
+    worker, so when that worker (re)starts, every TrainingJob still
+    marked `running` is a zombie whose process died with the previous
+    worker. Requeue them all (same bounded counter — an OOM-crash loop
+    can't retrain forever). Returns how many were reset."""
+    from app.database import SessionLocal
+    from app.models import TrainingJob
+    with SessionLocal() as db:
+        zombies = (db.query(TrainingJob)
+                     .filter(TrainingJob.status == "running").all())
+        for j in zombies:
+            _requeue_or_fail(db, j, "worker restarted while job was running")
+        if zombies:
+            db.commit()
+            log.warning("worker start: reset %d zombie running job(s): %s",
+                        len(zombies), [j.id for j in zombies])
+        return len(zombies)
+
+
+try:
+    from celery.signals import worker_ready
+
+    @worker_ready.connect
+    def _on_worker_ready(sender=None, **_kw) -> None:
+        """Run the zombie reset only on the worker that actually
+        consumes the `alerts` queue (where training runs). If queue
+        introspection fails we skip — the dispatcher watchdog still
+        recovers within one tick, this is just the fast path."""
+        try:
+            qnames = {q.name for q in sender.task_consumer.queues}
+        except Exception:
+            qnames = set()
+        if "alerts" not in qnames:
+            return
+        try:
+            reset_zombie_running_jobs()
+        except Exception:
+            log.exception("zombie-job reset failed at worker start")
+except Exception:                                   # pragma: no cover
+    log.exception("could not register worker_ready zombie reset")
+
+
 @celery_app.task(name="training.dispatch_queued_jobs", ignore_result=True)
 def dispatch_queued_jobs() -> None:
     """The missing link between "TrainingJob created" and "trainer
@@ -135,57 +229,41 @@ def dispatch_queued_jobs() -> None:
     from app.models import TrainingJob
 
     with SessionLocal() as db:
-        # 0) Stall watchdog — a running job with no epoch progress for
-        # > training_stall_timeout_minutes (heartbeat = last_progress_at,
-        # falling back to started_at/created_at for jobs dispatched but
-        # never picked up) is revoked and REQUEUED. Bounded at
-        # _MAX_STALL_REQUEUES, then failed for operator review. This is
-        # what frees the 2-running cap when a worker dies mid-train —
-        # job 235 held a cap slot for 12h and starved job 606.
+        # 0) Two-tier watchdog over `running` jobs.
+        #    Tier A (fast, "never started"): last_progress_at is NULL —
+        #      stamping it is the trainer's FIRST act, so NULL means the
+        #      worker never picked the task up (the job-734 pattern:
+        #      running for 10+ min, no heartbeat, no epochs). Requeued
+        #      after training_start_timeout_seconds (default 60s).
+        #    Tier B (slow, "stalled mid-train"): heartbeat exists but is
+        #      older than training_stall_timeout_minutes (default 90).
+        #    Both revoke the Celery task first (also blocks an acks_late
+        #    redelivery from double-running) and are bounded by the
+        #    stall_requeues counter → failed for review after 2 requeues.
+        start_s   = int(getattr(settings, "training_start_timeout_seconds", 60))
         stall_min = int(getattr(settings, "training_stall_timeout_minutes", 90))
-        if stall_min > 0:
-            heartbeat = _func.coalesce(TrainingJob.last_progress_at,
-                                       TrainingJob.started_at,
-                                       TrainingJob.created_at)
-            stall_cutoff = _dt.now(_tz.utc) - _td(minutes=stall_min)
-            stalled = (db.query(TrainingJob)
-                         .filter(TrainingJob.status == "running",
-                                 heartbeat < stall_cutoff)
-                         .all())
-            for j in stalled:
-                if j.celery_task_id:
-                    try:   # best-effort kill of the actual task
-                        celery_app.control.revoke(
-                            j.celery_task_id, terminate=True)
-                    except Exception as e:
-                        log.warning("dispatcher: revoke %s for job=%s "
-                                    "failed: %s", j.celery_task_id, j.id, e)
-                cfg = dict(j.config_json or {})
-                n = int(cfg.get("stall_requeues", 0)) + 1
-                if n > _MAX_STALL_REQUEUES:
-                    j.status = "failed"
-                    j.completed_at = _dt.now(_tz.utc)
-                    j.error_message = (
-                        f"auto-failed by stall watchdog: no epoch progress "
-                        f"for > {stall_min} min, and already requeued "
-                        f"{_MAX_STALL_REQUEUES} time(s). Review manually.")
-                    log.error("dispatcher: job %s failed after %d stall "
-                              "requeues", j.id, _MAX_STALL_REQUEUES)
-                else:
-                    cfg["stall_requeues"] = n
-                    j.config_json = cfg
-                    j.status = "queued"
-                    j.started_at = None
-                    j.last_progress_at = None
-                    j.celery_task_id = None
-                    j.error_message = (
-                        f"auto-requeued by stall watchdog (attempt "
-                        f"{n}/{_MAX_STALL_REQUEUES}): no epoch progress "
-                        f"for > {stall_min} min")
-                    log.warning("dispatcher: job %s stalled — requeued "
-                                "(attempt %d/%d)", j.id, n, _MAX_STALL_REQUEUES)
-            if stalled:
-                db.commit()
+        now_utc = _dt.now(_tz.utc)
+        swept = 0
+        for j in (db.query(TrainingJob)
+                    .filter(TrainingJob.status == "running").all()):
+            hb = j.last_progress_at or j.started_at or j.created_at
+            if hb is not None and hb.tzinfo is None:
+                hb = hb.replace(tzinfo=_tz.utc)
+            age_s = ((now_utc - hb).total_seconds()
+                     if hb is not None else float("inf"))
+            if j.last_progress_at is None:
+                if start_s <= 0 or age_s < start_s:
+                    continue
+                reason = (f"trainer never started within {start_s}s "
+                          f"(task not picked up by the worker)")
+            else:
+                if stall_min <= 0 or age_s < stall_min * 60:
+                    continue
+                reason = f"no epoch progress for > {stall_min} min"
+            _requeue_or_fail(db, j, reason)
+            swept += 1
+        if swept:
+            db.commit()
 
         # 1) Sweep stale running jobs. coalesce() so a running row with
         # started_at=NULL (crash between status flip and timestamp
@@ -287,6 +365,8 @@ def dispatch_queued_jobs() -> None:
             j.status     = "running"
             j.started_at = j.started_at or _dt.now(_tz.utc)
             db.commit()
+            log.info("job %s: state queued -> running (dispatcher) "
+                     "at epoch %s/%s", j.id, j.current_epoch, j.total_epochs)
             try:
                 res = run_training_job.apply_async(args=[j.id], queue="alerts")
                 # Task id lets the stall watchdog revoke a stuck run.

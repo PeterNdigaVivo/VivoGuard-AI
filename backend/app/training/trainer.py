@@ -178,6 +178,7 @@ def run_job(job_id: int) -> None:
             raise RuntimeError("dataset missing")
 
         cfg = job.config_json or {}
+        _old_status = job.status
         job.status        = "running"
         job.started_at    = datetime.now(timezone.utc)
         # Stall-watchdog heartbeat — bumped here and per epoch so the
@@ -186,6 +187,8 @@ def run_job(job_id: int) -> None:
         job.total_epochs  = int(cfg.get("epochs", 50))
         job.error_message = None
         db.commit()
+        log.info("job %d: state %s -> running (trainer start) at epoch %s/%s",
+                 job_id, _old_status, job.current_epoch, job.total_epochs)
 
         # Incremental fine-tune branch — load the deployed (or named)
         # model's `weights_path` as the base and lower LR/epoch
@@ -415,6 +418,9 @@ def run_job(job_id: int) -> None:
         with SessionLocal() as db:
             job2 = db.get(TrainingJob, job_id)
             if job2:
+                log.info("job %d: state running -> done at epoch %s/%s "
+                         "(map50=%s)", job_id, job2.current_epoch,
+                         epochs, final_metrics.get("map50"))
                 job2.status       = "done"
                 job2.completed_at = datetime.now(timezone.utc)
                 job2.total_epochs = epochs      # reflect the dataset-sized value
@@ -589,6 +595,8 @@ def run_job(job_id: int) -> None:
         with SessionLocal() as db:
             job2 = db.get(TrainingJob, job_id)
             if job2:
+                log.error("job %d: state running -> failed at epoch %s/%s: %s",
+                          job_id, job2.current_epoch, job2.total_epochs, e)
                 job2.status = "failed"
                 job2.error_message = str(e)
                 job2.completed_at = datetime.now(timezone.utc)
