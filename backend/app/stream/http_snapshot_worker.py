@@ -76,7 +76,10 @@ class HttpSnapshotWorker(threading.Thread):
         and the previously-negotiated auth. Falls back from Digest to
         Basic on 401 once and sticks with whichever worked."""
         if self._client is None:
-            self._client = httpx.Client(timeout=10.0, verify=False)
+            # follow_redirects: HTTPS-redirecting NVR firmwares 302 the
+            # snapshot URL; the JPEG-magic check below stays the gate.
+            self._client = httpx.Client(timeout=10.0, verify=False,
+                                        follow_redirects=True)
         r = self._client.get(self.snapshot_url, auth=self._auth)
         if r.status_code == 401 and self.username and isinstance(self._auth, httpx.DigestAuth):
             # Some old firmware uses Basic; retry once and remember.

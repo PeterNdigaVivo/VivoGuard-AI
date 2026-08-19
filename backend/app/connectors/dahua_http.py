@@ -19,21 +19,46 @@ log = logging.getLogger(__name__)
 
 class DahuaHTTP:
     def __init__(self, host: str, http_port: int, username: str, password: str, *, ssl: bool = False):
-        scheme = "https" if ssl else "http"
+        # Port 443 is HTTPS by definition — building http://host:443
+        # would just handshake garbage against the TLS socket.
+        scheme = "https" if (ssl or int(http_port) == 443) else "http"
         self.base = f"{scheme}://{host}:{http_port}"
         self.username = username
         self.password = password
 
-    async def _get(self, path: str, *, timeout: float = 8.0) -> httpx.Response:
-        url = self.base + path
-        # Try Digest first.
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as c:
+    async def _fetch(self, url: str, *, timeout: float) -> httpx.Response:
+        # follow_redirects: some Dahua firmwares 302 every HTTP request
+        # to HTTPS; verify=False because NVR certs are self-signed.
+        async with httpx.AsyncClient(timeout=timeout, verify=False,
+                                     follow_redirects=True) as c:
+            # Try Digest first, fall back to Basic (older firmwares).
             r = await c.get(url, auth=httpx.DigestAuth(self.username, self.password))
             if r.status_code != 401:
                 return r
-            # Fall back to Basic.
-            r = await c.get(url, auth=(self.username, self.password))
-            return r
+            return await c.get(url, auth=(self.username, self.password))
+
+    async def _get(self, path: str, *, timeout: float = 8.0) -> httpx.Response:
+        r = await self._fetch(self.base + path, timeout=timeout)
+        # HTTPS-redirect firmwares send `Location: https://host:443/` —
+        # the CGI path is DROPPED, so even with follow_redirects we land
+        # on the login page instead of the CGI output. Detect the hop to
+        # https, re-issue the ORIGINAL path against the https origin,
+        # and pin self.base there so later calls skip the dance.
+        final = r.url
+        if (r.history and final.scheme == "https"
+                and not self.base.startswith("https://")):
+            https_base = f"https://{final.host}:{final.port or 443}"
+            wanted_path = path.split("?", 1)[0]
+            if final.path != wanted_path or r.status_code >= 400:
+                r2 = await self._fetch(https_base + path, timeout=timeout)
+                if r2.status_code < 400:
+                    log.info("Dahua %s redirected to HTTPS — retried on %s",
+                             self.base, https_base)
+                    self.base = https_base
+                    return r2
+            else:
+                self.base = https_base   # redirect kept the path; pin https
+        return r
 
     async def device_info(self) -> dict:
         r = await self._get("/cgi-bin/magicBox.cgi?action=getSystemInfo")

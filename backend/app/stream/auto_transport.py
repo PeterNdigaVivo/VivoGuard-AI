@@ -120,7 +120,10 @@ def _try_snapshot(url: str, username: str | None, password: str | None,
     """
     try:
         digest = httpx.DigestAuth(username, password or "") if username else None
-        with httpx.Client(timeout=timeout, verify=False) as c:
+        # follow_redirects: HTTPS-redirecting NVRs 302 the snapshot URL;
+        # the JPEG-magic check below still gates what counts as success.
+        with httpx.Client(timeout=timeout, verify=False,
+                          follow_redirects=True) as c:
             r = c.get(url, auth=digest)
             if r.status_code == 401 and username:
                 r = c.get(url, auth=(username, password or ""))
