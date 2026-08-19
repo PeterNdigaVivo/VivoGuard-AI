@@ -28,8 +28,10 @@ const TYPES: Array<{ value: string; label: string; isNvr?: boolean; brand: strin
 ]
 
 // Common HTTP admin ports on the Vivo fleet. The wizard's HTTP-port
-// dropdown lets operators pick from these without typing.
-const HTTP_PORT_OPTIONS = [80, 800, 8000, 8080, 7000]
+// dropdown lets operators pick from these without typing. 443 covers
+// Dahua NVRs that redirect HTTP to HTTPS, which breaks the Connect
+// NVR auto-enumerate on plain-HTTP ports.
+const HTTP_PORT_OPTIONS = [80, 443, 800, 8000, 8080, 7000]
 
 // Per-brand RTSP default ports. Dahua-on-7000 is the dominant pattern
 // across the 26 Vivo stores; the rest sit on 554 with HTTP-tunnel
