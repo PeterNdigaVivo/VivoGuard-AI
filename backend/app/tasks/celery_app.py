@@ -96,7 +96,10 @@ celery_app.conf.update(
         "training.weekly_retrain_all":        {"queue": "beat"},
         "training.evaluate_pending_promotions": {"queue": "beat"},
         "training.dispatch_queued_jobs":      {"queue": "beat"},
-        "system.health_daily_report":         {"queue": "beat"},
+        # Status report rides the `alerts` queue — same guaranteed
+        # consumer as training.run_job (worker-alerts, -Q alerts,beat).
+        "system.daily_status_report":         {"queue": "alerts"},
+        "system.health_daily_report":         {"queue": "alerts"},   # legacy alias
         # `training.run_job` is the actual heavy fine-tune. Route it
         # to the alerts pool — NOT the inference pool — so a running
         # fine-tune can never starve live detection workers. The
@@ -329,13 +332,12 @@ celery_app.conf.update(
             "task": "training.dispatch_queued_jobs",
             "schedule": timedelta(minutes=5),
         },
-        # Daily system-health email to the platform operators. 5-min
-        # tick + wall-clock gate (fires once inside 08:00-08:15 EAT,
-        # Redis SET-NX day marker dedupes) — same pattern as the
-        # report dispatcher; crontab schedules have been unreliable
-        # on this worker.
-        "system-health-report-every-5min": {
-            "task": "system.health_daily_report",
+        # VivoGuard Status Report — the ONE daily email (09:00 EAT).
+        # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
+        # successful send, 15-min SMTP retries. Routed to `alerts` so
+        # it can never sit on an unconsumed queue.
+        "vivoguard-status-report-every-5min": {
+            "task": "system.daily_status_report",
             "schedule": timedelta(minutes=5),
         },
         # Sales Floor Intelligence — 15-min timedelta tick (the

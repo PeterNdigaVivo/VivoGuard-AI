@@ -15,7 +15,12 @@ class SMTPNotifier(Notifier):
     name = "smtp"
 
     def is_enabled(self) -> bool:
-        return bool(settings.smtp_host and settings.smtp_from)
+        # DISABLED (ops decision, Aug 2026): per-alert emails are off —
+        # the daily VivoGuard Status Report (tasks/system_health_report)
+        # is the only scheduled email. In-app alerts, WhatsApp, SMS and
+        # webhooks are unaffected. Re-enable by restoring:
+        #   return bool(settings.smtp_host and settings.smtp_from)
+        return False
 
     async def send(self, alert: AlertPayload) -> None:
         if not self.is_enabled():

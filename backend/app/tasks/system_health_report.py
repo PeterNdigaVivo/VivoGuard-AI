@@ -1,16 +1,31 @@
-"""Daily system-health email — 08:00 EAT to the platform operators.
+"""VivoGuard Status Report — the ONE daily email, 09:00 EAT.
 
-House pattern (same as reports.dispatch_due / the recorder): a 5-min
-beat tick that checks the EAT wall clock, with a Redis SET-NX day
-marker so restarts inside the window can't double-send. Recipients
-come from app.utils.system_admins.SYSTEM_ADMIN_EMAILS — the same
-single constant the /system-health endpoint guards with.
+Replaces the old "system health report" email entirely. Sections:
+  1. Total Visitors (yesterday, per store, sorted)
+  2. Alerts summary (yesterday, three plain severity buckets)
+  3. Busiest hour chain-wide (yesterday)
+  4. AI training feedback (yesterday's True/False clicks)
+  5. System health (live at send time, ✅/⚠️/🔴 plain language)
+
+Design rule: readable by a non-technical manager. No IDs, no JSON,
+no tracebacks — a data section that fails to collect degrades to one
+friendly line ("⚠️ Some stats unavailable this morning.").
+
+Delivery: 5-min beat tick on the `alerts` queue (guaranteed consumer —
+same queue as training.run_job), fires once inside 09:00-09:15 EAT,
+Redis SET-NX day marker AFTER a successful send; an SMTP failure
+retries every 15 min up to 4 times (retries bypass the clock gate but
+not the sent marker). Send and skip are both logged at INFO.
+
+Manual test send:  daily_status_report.delay(force=True)
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 import smtplib
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -21,58 +36,364 @@ from app.utils.system_admins import SYSTEM_ADMIN_EMAILS
 log = logging.getLogger(__name__)
 
 EAT = ZoneInfo("Africa/Nairobi")
-_FIRE_HOUR = 8            # 08:00 EAT
-_FIRE_WINDOW_MIN = 15     # fire anywhere in 08:00-08:15 (beat tick is 5 min)
-_DEDUPE_TTL_S = 20 * 60 * 60
+_FIRE_HOUR = 9              # 09:00 EAT
+_FIRE_WINDOW_MIN = 15       # fire anywhere in 09:00-09:15 (5-min tick)
+_RETRY_COUNTDOWN_S = 15 * 60
+_MAX_RETRIES = 4
+_SENT_TTL_S = 20 * 60 * 60
 
 
-def _dedupe_key(day_iso: str) -> str:
-    return f"vg:syshealth:report:{day_iso}"
+def _sent_key(day_iso: str) -> str:
+    return f"vg:statusreport:sent:{day_iso}"
 
 
-@celery_app.task(name="system.health_daily_report", ignore_result=True)
-def system_health_daily_report(force: bool = False) -> None:
-    """Every 5 min; sends once per day inside the 08:00-08:15 EAT
-    window. `force=True` (manual .delay(force=True)) skips the clock
-    gate but NOT the dedupe."""
+def _lock_key(day_iso: str) -> str:
+    return f"vg:statusreport:lock:{day_iso}"
+
+
+# ── data collection (yesterday, EAT) ─────────────────────────────────
+
+
+def _yesterday_window():
+    """(label, since_utc, until_utc) for yesterday's FULL EAT day."""
+    today_eat = datetime.now(EAT).replace(hour=0, minute=0, second=0,
+                                          microsecond=0)
+    y_start = today_eat - timedelta(days=1)
+    label = y_start.strftime("%A, %d %B %Y")
+    return (label,
+            y_start.astimezone(timezone.utc),
+            today_eat.astimezone(timezone.utc))
+
+
+def _collect_yesterday(db) -> dict:
+    """All yesterday-scoped stats. Each block degrades independently —
+    a missing block sets its key to None and flips `degraded`."""
+    from sqlalchemy import func
+    from app.models import Alert, DetectionEvent, MetricSnapshot, Store
+
+    label, since, until = _yesterday_window()
+    out: dict = {"label": label, "degraded": False,
+                 "visitors": None, "alerts": None,
+                 "peak": None, "feedback": None}
+
+    try:   # 1) visitors per store (entry crossings)
+        from app.utils.analytics_queries import fetch_metric_aggregates
+        stores = db.query(Store).all()
+        _avg, sums = fetch_metric_aggregates(
+            db, [s.id for s in stores], since, until)
+        rows = sorted(
+            ((s.name, int(sums.get((s.id, "visitor_count_in"), 0)))
+             for s in stores),
+            key=lambda kv: -kv[1])
+        out["visitors"] = {"total": sum(n for _, n in rows), "rows": rows}
+    except Exception:
+        log.error("status report: visitors block failed:\n%s",
+                  traceback.format_exc())
+        out["degraded"] = True
+
+    try:   # 2) alerts by plain severity bucket
+        from app.api.alerts import _SEVERITY_LABEL
+        buckets = {"URGENT": 0, "ATTENTION": 0, "INFO": 0}
+        for dt, n in (db.query(DetectionEvent.detection_type,
+                               func.count(Alert.id))
+                        .join(DetectionEvent,
+                              Alert.event_id == DetectionEvent.id)
+                        .filter(Alert.created_at >= since,
+                                Alert.created_at < until)
+                        .group_by(DetectionEvent.detection_type).all()):
+            buckets[_SEVERITY_LABEL.get(dt or "", "INFO")] += int(n)
+        out["alerts"] = buckets
+    except Exception:
+        log.error("status report: alerts block failed:\n%s",
+                  traceback.format_exc())
+        out["degraded"] = True
+
+    try:   # 3) busiest hour chain-wide (entry crossings per hour)
+        hour_bucket = func.date_trunc(
+            "hour", MetricSnapshot.period_start).label("hour_bucket")
+        rows = (db.query(hour_bucket, func.sum(MetricSnapshot.value))
+                  .filter(MetricSnapshot.metric_type == "visitor_count_in",
+                          MetricSnapshot.period_start >= since,
+                          MetricSnapshot.period_start < until)
+                  .group_by("hour_bucket").all())
+        best = max(((h, float(v or 0)) for h, v in rows if h is not None),
+                   key=lambda kv: kv[1], default=None)
+        if best and best[1] > 0:
+            h = best[0]
+            if h.tzinfo is None:
+                h = h.replace(tzinfo=timezone.utc)
+            start = h.astimezone(EAT)
+            end = start + timedelta(hours=1)
+            fmt = lambda d: d.strftime("%I:00 %p").lstrip("0")  # noqa: E731
+            out["peak"] = {"window": f"{fmt(start)} – {fmt(end)}",
+                           "visitors": int(best[1])}
+    except Exception:
+        log.error("status report: peak block failed:\n%s",
+                  traceback.format_exc())
+        out["degraded"] = True
+
+    try:   # 4) operator feedback clicks
+        confirmed = (db.query(func.count(Alert.id))
+                       .filter(Alert.status == "confirmed",
+                               Alert.acknowledged_at >= since,
+                               Alert.acknowledged_at < until).scalar() or 0)
+        dismissed = (db.query(func.count(Alert.id))
+                       .filter(Alert.status == "dismissed",
+                               Alert.acknowledged_at >= since,
+                               Alert.acknowledged_at < until).scalar() or 0)
+        out["feedback"] = {"confirmed": int(confirmed),
+                           "dismissed": int(dismissed)}
+    except Exception:
+        log.error("status report: feedback block failed:\n%s",
+                  traceback.format_exc())
+        out["degraded"] = True
+    return out
+
+
+# ── section 5: live health in plain language ─────────────────────────
+
+
+def _friendly_health(snap: dict) -> tuple[str, list[tuple[str, str]]]:
+    """(headline, [(marker, sentence), ...]) — no jargon, no raw keys."""
+    from app.utils.system_health import overall_status
+    emoji, label = overall_status(snap)
+    headline = {"Healthy": "All Systems Healthy ✅",
+                "Warning": "Minor Warnings ⚠️",
+                "Critical": "Attention Needed 🔴"}[label]
+
+    lines: list[tuple[str, str]] = []
+    conts = snap.get("containers") or []
+    bad = [c["name"] for c in conts if not c.get("healthy")]
+    if conts and not bad:
+        lines.append(("✅", f"All {len(conts)} services running"))
+    elif bad:
+        lines.append(("🔴" if {"postgres", "redis"} & set(bad) else "⚠️",
+                      f"{len(bad)} service(s) not responding: "
+                      f"{', '.join(bad)} — IT should check the server"))
+
+    cams = snap.get("cameras") or {}
+    if cams.get("total"):
+        if cams.get("offline", 0) == 0:
+            lines.append(("✅", f"{cams['streaming']} cameras streaming"))
+        else:
+            lines.append(("⚠️",
+                          f"{cams['streaming']} of {cams['total']} cameras "
+                          f"streaming — {cams['offline']} offline"
+                          + (f" ({', '.join(cams['offline_names'][:6])}"
+                             + ("…" if len(cams['offline_names']) > 6 else "")
+                             + ")" if cams.get("offline_names") else "")))
+
+    sto = snap.get("storage") or {}
+    if sto.get("percent_used") is not None:
+        pct = sto["percent_used"]
+        mark = "🔴" if pct > 90 else ("⚠️" if pct > 80 else "✅")
+        lines.append((mark,
+                      f"Storage: {pct:.0f}% used ({sto['used_gb']:.0f}GB / "
+                      f"{sto['total_gb']:.0f}GB) — {sto['free_gb']:.0f}GB free"
+                      + (" — please free up space soon" if pct > 80 else "")))
+
+    mo = snap.get("model") or {}
+    if mo.get("version"):
+        m50 = f" (map50={mo['map50']:.3f})" if mo.get("map50") is not None else ""
+        lines.append(("✅", f"Model {mo['version']} deployed{m50}"))
+    else:
+        lines.append(("⚠️", "No AI model marked as deployed"))
+
+    det = (snap.get("detection") or {}).get("events_last_30min_by_type") or {}
+    if det:
+        top = ", ".join(f"{k} {v}" for k, v in
+                        sorted(det.items(), key=lambda kv: -kv[1])[:3])
+        lines.append(("✅", f"Detection pipeline active ({top})"))
+    else:
+        lines.append(("⚠️", "No detections in the last 30 minutes — "
+                            "normal before opening, worth a look otherwise"))
+
+    tr = snap.get("training") or {}
+    if tr.get("jobs_queued", 0) > 5:
+        lines.append(("⚠️", f"{tr['jobs_queued']} training jobs waiting — "
+                            f"will resume automatically"))
+
+    if snap.get("collection_errors"):
+        lines.append(("⚠️", "Some stats unavailable this morning."))
+    return headline, lines
+
+
+# ── rendering ─────────────────────────────────────────────────────────
+
+_TBL = ("border-collapse:collapse;font-size:14px;margin:6px 0 14px 0")
+_TH = ("text-align:left;padding:6px 14px;border:1px solid #cbd5e1;"
+       "background:#f1f5f9")
+_TD = "padding:6px 14px;border:1px solid #cbd5e1"
+_TDR = _TD + ";text-align:right"
+
+
+def _esc(v) -> str:
+    return _html.escape(str(v))
+
+
+def _render_html(y: dict, headline: str,
+                 health_lines: list[tuple[str, str]], date_str: str) -> str:
+    parts = [f"""<html><body style="font-family:Arial,Helvetica,sans-serif;
+color:#0f172a;max-width:640px">
+<h2 style="margin-bottom:2px">VivoGuard Status Report</h2>
+<p style="color:#64748b;margin-top:0">{_esc(date_str)}</p>"""]
+
+    unavailable = ("<p>⚠️ Some stats unavailable this morning.</p>")
+
+    # 1 — visitors
+    parts.append(f"<h3>Total Visitors (Yesterday — {_esc(y['label'])})</h3>")
+    if y["visitors"] is not None:
+        parts.append(f"<div style='font-size:34px;font-weight:bold'>"
+                     f"{y['visitors']['total']:,}</div>"
+                     f"<table style='{_TBL}'>"
+                     f"<tr><th style='{_TH}'>Store</th>"
+                     f"<th style='{_TH}'>Visitors</th></tr>")
+        for name, n in y["visitors"]["rows"]:
+            parts.append(f"<tr><td style='{_TD}'>{_esc(name)}</td>"
+                         f"<td style='{_TDR}'>{n:,}</td></tr>")
+        parts.append("</table>")
+    else:
+        parts.append(unavailable)
+
+    # 2 — alerts
+    parts.append("<h3>Alerts Summary (Yesterday)</h3>")
+    if y["alerts"] is not None:
+        a = y["alerts"]
+        parts.append(
+            f"<table style='{_TBL}'>"
+            f"<tr><th style='{_TH}'>Severity</th>"
+            f"<th style='{_TH}'>Count</th></tr>"
+            f"<tr><td style='{_TD}'>Critical / Urgent</td>"
+            f"<td style='{_TDR}'>{a['URGENT']}</td></tr>"
+            f"<tr><td style='{_TD}'>High / Needs Attention</td>"
+            f"<td style='{_TDR}'>{a['ATTENTION']}</td></tr>"
+            f"<tr><td style='{_TD}'>Medium / Info</td>"
+            f"<td style='{_TDR}'>{a['INFO']}</td></tr></table>")
+    else:
+        parts.append(unavailable)
+
+    # 3 — peak time
+    parts.append("<h3>Peak Time (Yesterday)</h3>")
+    if y["peak"]:
+        parts.append(f"<p>Busiest hour chain-wide: "
+                     f"<b>{_esc(y['peak']['window'])}</b> "
+                     f"({y['peak']['visitors']:,} visitors)</p>")
+    elif y["visitors"] is not None:
+        parts.append("<p>No clear peak — very low traffic recorded.</p>")
+    else:
+        parts.append(unavailable)
+
+    # 4 — AI training feedback
+    parts.append("<h3>AI Training Feedback (Yesterday)</h3>")
+    if y["feedback"] is not None:
+        f = y["feedback"]
+        parts.append(
+            f"<p>True alerts confirmed: <b>{f['confirmed']}</b> — used as "
+            f"positive training samples<br>"
+            f"False alerts dismissed: <b>{f['dismissed']}</b> — used as "
+            f"negative training samples</p>")
+    else:
+        parts.append(unavailable)
+
+    # 5 — live system health
+    parts.append(f"<h3>System Health — {_esc(headline)}</h3>")
+    for mark, sentence in health_lines:
+        parts.append(f"<p style='margin:3px 0'>{mark} {_esc(sentence)}</p>")
+
+    parts.append("<p style='color:#94a3b8;font-size:12px;margin-top:18px'>"
+                 "Automated daily report — VivoGuard AI</p></body></html>")
+    return "".join(parts)
+
+
+def _render_text(y: dict, headline: str,
+                 health_lines: list[tuple[str, str]], date_str: str) -> str:
+    L = [f"VivoGuard Status Report — {date_str}", ""]
+    L.append(f"Total Visitors (Yesterday — {y['label']})")
+    if y["visitors"] is not None:
+        L.append(f"  {y['visitors']['total']:,} visitors")
+        for name, n in y["visitors"]["rows"]:
+            L.append(f"    {name}: {n:,}")
+    else:
+        L.append("  Some stats unavailable this morning.")
+    L.append("")
+    if y["alerts"] is not None:
+        a = y["alerts"]
+        L += ["Alerts (Yesterday):",
+              f"  Critical/Urgent: {a['URGENT']}  "
+              f"High/Needs Attention: {a['ATTENTION']}  "
+              f"Medium/Info: {a['INFO']}"]
+    if y["peak"]:
+        L.append(f"Busiest hour (Yesterday): {y['peak']['window']} "
+                 f"({y['peak']['visitors']:,} visitors)")
+    if y["feedback"] is not None:
+        L.append(f"Training feedback (Yesterday): "
+                 f"{y['feedback']['confirmed']} confirmed / "
+                 f"{y['feedback']['dismissed']} dismissed")
+    L += ["", f"System Health — {headline}"]
+    L += [f"  {m} {s}" for m, s in health_lines]
+    return "\n".join(L)
+
+
+# ── the task ──────────────────────────────────────────────────────────
+
+
+@celery_app.task(name="system.daily_status_report", bind=True,
+                 ignore_result=True, max_retries=_MAX_RETRIES)
+def daily_status_report(self, force: bool = False) -> None:
+    """5-min tick; sends once per day at/after 09:00 EAT. SMTP failure
+    retries every 15 min (up to 4), bypassing the clock gate but never
+    the sent marker. force=True (manual .delay(force=True)) skips the
+    clock gate only."""
     now_eat = datetime.now(EAT)
-    if not force:
+    day_iso = now_eat.date().isoformat()
+    is_retry = int(getattr(self.request, "retries", 0) or 0) > 0
+    if not (force or is_retry):
         if not (now_eat.hour == _FIRE_HOUR
                 and now_eat.minute < _FIRE_WINDOW_MIN):
             return
     if not settings.smtp_host:
-        log.warning("system-health report: SMTP not configured — skipping")
+        log.warning("status report: SMTP not configured — skipping")
         return
 
+    r = None
     try:
         import redis as _redis
-        r = _redis.from_url(settings.redis_url, decode_responses=True)
-        if not r.set(_dedupe_key(now_eat.date().isoformat()), "1",
-                     nx=True, ex=_DEDUPE_TTL_S):
-            return   # already sent today
+        r = _redis.from_url(settings.redis_url, decode_responses=True,
+                            socket_timeout=3)
     except Exception as e:
-        # Redis down: still send (worst case a duplicate) — a silent
-        # missing report is worse than a doubled one.
-        log.warning("system-health report: dedupe unavailable: %s", e)
+        log.warning("status report: redis unavailable (%s) — sending "
+                    "without dedupe", e)
+    if r is not None:
+        try:
+            if r.get(_sent_key(day_iso)):
+                log.info("status report: already sent today (%s) — skipping",
+                         day_iso)
+                return
+            if not (force or is_retry) and not r.set(
+                    _lock_key(day_iso), "1", nx=True, ex=1200):
+                return   # another tick is already building/sending
+        except Exception:
+            pass
 
-    from app.database import SessionLocal
-    from app.utils.system_health import collect_system_health, overall_status
-    with SessionLocal() as db:
-        snap = collect_system_health(db)
-    emoji, label = overall_status(snap)
-
-    date_str = now_eat.strftime("%A %d %B %Y")
-    subject = f"VivoGuard System Health Report — {now_eat.date().isoformat()}"
-    html = _render_html(snap, emoji, label, date_str)
-    text = _render_text(snap, emoji, label, date_str)
-
-    msg = EmailMessage()
-    msg["From"] = settings.smtp_from
-    msg["To"] = ", ".join(sorted(SYSTEM_ADMIN_EMAILS))
-    msg["Subject"] = subject
-    msg.set_content(text)
-    msg.add_alternative(html, subtype="html")
     try:
+        from app.database import SessionLocal
+        from app.utils.system_health import collect_system_health
+        with SessionLocal() as db:
+            y = _collect_yesterday(db)
+            snap = collect_system_health(db)
+        headline, health_lines = _friendly_health(snap)
+        if y["degraded"]:
+            health_lines.append(("⚠️", "Some stats unavailable this morning."))
+        date_str = now_eat.strftime("%A, %d %B %Y")
+        subject = f"VivoGuard Status Report — {day_iso}"
+
+        msg = EmailMessage()
+        msg["From"] = settings.smtp_from
+        msg["To"] = ", ".join(sorted(SYSTEM_ADMIN_EMAILS))
+        msg["Subject"] = subject
+        msg.set_content(_render_text(y, headline, health_lines, date_str))
+        msg.add_alternative(_render_html(y, headline, health_lines, date_str),
+                            subtype="html")
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port,
                           timeout=30) as s:
             if settings.smtp_use_tls:
@@ -80,117 +401,23 @@ def system_health_daily_report(force: bool = False) -> None:
             if settings.smtp_user:
                 s.login(settings.smtp_user, settings.smtp_password)
             s.send_message(msg)
-        log.info("system-health report sent to %d recipients (%s)",
-                 len(SYSTEM_ADMIN_EMAILS), label)
-    except Exception:
-        log.exception("system-health report: SMTP send failed")
+    except Exception as e:
+        attempt = int(getattr(self.request, "retries", 0) or 0) + 1
+        log.error("status report: send failed (attempt %d/%d): %s",
+                  attempt, _MAX_RETRIES + 1, e)
+        raise self.retry(exc=e, countdown=_RETRY_COUNTDOWN_S)
+
+    if r is not None:
+        try:
+            r.set(_sent_key(day_iso), "1", ex=_SENT_TTL_S)
+        except Exception:
+            pass
+    log.info("status report sent to %d recipients (%s)",
+             len(SYSTEM_ADMIN_EMAILS), day_iso)
 
 
-# ── rendering ────────────────────────────────────────────────────────
-
-
-def _render_text(snap: dict, emoji: str, label: str, date_str: str) -> str:
-    cams, sto = snap["cameras"], snap["storage"]
-    tr, al, mo = snap["training"], snap["alerts"], snap["model"]
-    lines = [
-        f"VivoGuard System Health — {date_str}",
-        f"Overall: {emoji} {label}",
-        "",
-        f"Storage: {sto['used_gb']}/{sto['total_gb']} GB "
-        f"({sto['percent_used']}% used)"
-        + ("  ⚠ OVER 80%" if (sto.get("percent_used") or 0) > 80 else ""),
-        f"Cameras: {cams['streaming']}/{cams['total']} streaming, "
-        f"{cams['offline']} offline",
-    ]
-    if cams["offline_names"]:
-        lines.append("Offline: " + ", ".join(cams["offline_names"]))
-    lines += [
-        f"Model: {mo['version'] or 'none deployed'} "
-        f"(mAP50 {mo['map50']}, P {mo['precision']}, R {mo['recall']})",
-        f"Training: {tr['jobs_queued']} queued, {tr['jobs_running']} running, "
-        f"{tr['jobs_completed_today']} completed today "
-        f"(latest mAP50 {tr['latest_map50']})",
-        f"Alerts today: {al['urgent_today']} urgent, "
-        f"{al['pending_today']} pending, {al['resolved_today']} resolved",
-        f"Detection events today: {snap['detection']['total_events_today']}",
-    ]
-    unhealthy = [c["name"] for c in snap["containers"] if not c["healthy"]]
-    if unhealthy:
-        lines.append("Unhealthy services: " + ", ".join(unhealthy))
-    return "\n".join(lines)
-
-
-def _render_html(snap: dict, emoji: str, label: str, date_str: str) -> str:
-    cams, sto = snap["cameras"], snap["storage"]
-    tr, al, mo, de = (snap["training"], snap["alerts"], snap["model"],
-                      snap["detection"])
-    pct = sto.get("percent_used") or 0
-    bar_color = "#dc2626" if pct > 90 else ("#d97706" if pct > 80 else "#16a34a")
-    storage_warn = ("<p style='color:#dc2626;font-weight:bold'>⚠ Storage above "
-                    "80% — prune recordings or expand the volume.</p>"
-                    if pct > 80 else "")
-
-    def row(k: str, v) -> str:
-        return (f"<tr><td style='padding:4px 12px 4px 0;color:#64748b'>{k}</td>"
-                f"<td style='padding:4px 0'><b>{v}</b></td></tr>")
-
-    containers_rows = "".join(
-        f"<tr><td style='padding:3px 12px 3px 0'>{c['name']}</td>"
-        f"<td style='padding:3px 12px 3px 0'>{'🟢' if c['healthy'] else '🔴'} "
-        f"{c['status']}</td>"
-        f"<td style='padding:3px 0;color:#64748b'>{c['uptime'] or ''}</td></tr>"
-        for c in snap["containers"])
-    offline_html = (
-        "<p><b>Offline cameras:</b> " + ", ".join(cams["offline_names"]) + "</p>"
-        if cams["offline_names"] else "")
-    by_type = de["events_last_30min_by_type"]
-    by_type_html = (", ".join(f"{k}: {v}" for k, v in
-                              sorted(by_type.items(), key=lambda kv: -kv[1]))
-                    or "none")
-
-    return f"""\
-<html><body style="font-family:Arial,Helvetica,sans-serif;color:#0f172a;max-width:680px">
-  <h2 style="margin-bottom:0">{emoji} VivoGuard System Health — {label}</h2>
-  <p style="color:#64748b;margin-top:4px">{date_str} · generated {snap['generated_at']}</p>
-
-  <h3>Storage</h3>
-  <div style="background:#e2e8f0;border-radius:6px;height:18px;width:100%">
-    <div style="background:{bar_color};height:18px;border-radius:6px;width:{min(pct, 100)}%"></div>
-  </div>
-  <p>{sto['used_gb']} / {sto['total_gb']} GB used ({pct}%) — {sto['free_gb']} GB free.
-     Recordings: {sto['recordings_gb'] if sto['recordings_gb'] is not None else '?'} GB,
-     alert clips: {sto['alert_clips_gb'] if sto['alert_clips_gb'] is not None else '?'} GB.</p>
-  {storage_warn}
-
-  <h3>Cameras</h3>
-  <p>{cams['streaming']} / {cams['total']} streaming · {cams['offline']} offline ·
-     {cams['ai_enabled_active']} AI-active</p>
-  {offline_html}
-
-  <h3>Services</h3>
-  <table style="border-collapse:collapse;font-size:14px">{containers_rows}</table>
-
-  <h3>Model</h3>
-  <table style="border-collapse:collapse;font-size:14px">
-    {row('Deployed', mo['version'] or 'none')}
-    {row('mAP50', mo['map50'] if mo['map50'] is not None else '—')}
-    {row('Precision', mo['precision'] if mo['precision'] is not None else '—')}
-    {row('Recall', mo['recall'] if mo['recall'] is not None else '—')}
-    {row('Since', (mo['deployed_since'] or '—')[:10])}
-  </table>
-
-  <h3>Training pipeline</h3>
-  <p>{tr['jobs_queued']} queued · {tr['jobs_running']} running ·
-     {tr['jobs_completed_today']} completed today ·
-     latest mAP50 {tr['latest_map50'] if tr['latest_map50'] is not None else '—'}</p>
-
-  <h3>Alerts (today)</h3>
-  <p>🔴 {al['urgent_today']} urgent · ⏳ {al['pending_today']} pending ·
-     ✅ {al['resolved_today']} resolved</p>
-
-  <h3>Detection</h3>
-  <p>{de['total_events_today']} events today · last 30 min: {by_type_html}</p>
-
-  <p style="color:#94a3b8;font-size:12px">Automated report — VivoGuard AI ·
-     full dashboard: /system-health (system admins only)</p>
-</body></html>"""
+# Back-compat alias: beat entries or operators calling the old task name
+# keep working until every container restarts on the new schedule.
+@celery_app.task(name="system.health_daily_report", ignore_result=True)
+def system_health_daily_report(force: bool = False) -> None:
+    daily_status_report.apply(kwargs={"force": force})
