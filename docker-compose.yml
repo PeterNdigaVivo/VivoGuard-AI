@@ -183,11 +183,15 @@ services:
     # and you've rebuilt with `GPU_BACKEND=cuda`.
     # <<: *gpu-reservation
 
-  # --- Alerts / bookkeeping worker. 4 slots dedicated to the short
-  # tasks the operations team depends on (sales-floor insight,
-  # shop-not-opened, queue escalation, camera health, uniform
-  # violation, daily summaries). Lives on `alerts` + `beat` queues so
-  # it never competes with the inference pool for runtime.
+  # --- Alerts / bookkeeping worker. TWO processes (Aug 2026 split):
+  #   beat-runner    -Q beat, 1 slot — scheduled/lightweight tasks
+  #                  (status report, dispatchers, watchdogs, sentinel).
+  #   alerts-worker  -Q alerts, 4 slots — the heavy work (training
+  #                  jobs, harvests, previews, VLM).
+  # Split because simultaneous training jobs filled every shared slot
+  # and beat-queue tasks (incl. the daily status report) waited
+  # 30-60+ min behind them. `exec` keeps the main worker as PID
+  # owner so compose restart semantics stay intact.
   # No `-B` flag — Beat is owned by the inference worker.
   worker-alerts:
     build:
@@ -200,7 +204,7 @@ services:
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -Q alerts,beat --loglevel=info --concurrency=${WORKER_ALERTS_CONCURRENCY:-4} -n alerts-worker@%h"
+      - "celery -A app.tasks.celery_app worker -Q beat --loglevel=info --concurrency=1 -n beat-runner@%h & exec celery -A app.tasks.celery_app worker -Q alerts --loglevel=info --concurrency=${WORKER_ALERTS_CONCURRENCY:-4} -n alerts-worker@%h"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings

@@ -91,6 +91,37 @@ def run_training_job(self, job_id: int) -> None:
     log.info("job %s: celery task received (task_id=%s) — handing to "
              "trainer", job_id, getattr(getattr(self, "request", None),
                                         "id", None))
+    # Concurrency cap at EXECUTION time. The dispatcher already caps
+    # its own dispatches at 2, but every creation-time .delay() path
+    # (cross-store button, specialists, orchestrator triggers) lands
+    # here directly — that's how jobs 608/609/611 trained
+    # simultaneously and filled the whole alerts pool. If 2 jobs are
+    # actively training (heartbeat stamped), bounce this one back to
+    # queued; the dispatcher redispatches when a slot frees.
+    try:
+        from app.database import SessionLocal
+        from app.models import TrainingJob
+        with SessionLocal() as db:
+            active = (db.query(TrainingJob)
+                        .filter(TrainingJob.status == "running",
+                                TrainingJob.id != job_id,
+                                TrainingJob.last_progress_at.isnot(None))
+                        .count())
+            if active >= 2:
+                j = db.get(TrainingJob, job_id)
+                if j is not None and j.status in ("queued", "running"):
+                    old = j.status
+                    j.status = "queued"
+                    j.started_at = None
+                    j.celery_task_id = None
+                    db.commit()
+                    log.info("job %s: state %s -> queued (concurrency "
+                             "cap: %d jobs already training)",
+                             job_id, old, active)
+                return
+    except Exception:
+        log.exception("job %s: concurrency-cap check failed — "
+                      "proceeding anyway", job_id)
     try:
         run_job(job_id)
     except Exception as e:

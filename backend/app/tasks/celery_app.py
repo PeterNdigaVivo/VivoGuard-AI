@@ -96,10 +96,12 @@ celery_app.conf.update(
         "training.weekly_retrain_all":        {"queue": "beat"},
         "training.evaluate_pending_promotions": {"queue": "beat"},
         "training.dispatch_queued_jobs":      {"queue": "beat"},
-        # Status report rides the `alerts` queue — same guaranteed
-        # consumer as training.run_job (worker-alerts, -Q alerts,beat).
-        "system.daily_status_report":         {"queue": "alerts"},
-        "system.health_daily_report":         {"queue": "alerts"},   # legacy alias
+        # Status report rides `beat`, which now has a DEDICATED 1-slot
+        # runner process (compose: beat-runner inside worker-alerts) —
+        # training jobs filling the alerts pool starved it twice when
+        # beat shared their slots.
+        "system.daily_status_report":         {"queue": "beat"},
+        "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         # `training.run_job` is the actual heavy fine-tune. Route it
         # to the alerts pool — NOT the inference pool — so a running
         # fine-tune can never starve live detection workers. The
@@ -332,10 +334,11 @@ celery_app.conf.update(
             "task": "training.dispatch_queued_jobs",
             "schedule": timedelta(minutes=5),
         },
-        # VivoGuard Status Report — the ONE daily email (09:00 EAT).
+        # VivoGuard Status Report — the ONE daily email (11:30 EAT).
         # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
-        # successful send, 15-min SMTP retries. Routed to `alerts` so
-        # it can never sit on an unconsumed queue.
+        # successful send, 15-min SMTP retries. Rides `beat`, which
+        # has a dedicated 1-slot runner so heavy `alerts` work can
+        # never delay it.
         "vivoguard-status-report-every-5min": {
             "task": "system.daily_status_report",
             "schedule": timedelta(minutes=5),

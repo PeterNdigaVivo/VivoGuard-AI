@@ -1,4 +1,4 @@
-"""VivoGuard Status Report — the ONE daily email, 09:00 EAT.
+"""VivoGuard Status Report — the ONE daily email, 11:30 EAT.
 
 Replaces the old "system health report" email entirely. Sections:
   1. Total Visitors (yesterday, per store, sorted)
@@ -11,8 +11,10 @@ Design rule: readable by a non-technical manager. No IDs, no JSON,
 no tracebacks — a data section that fails to collect degrades to one
 friendly line ("⚠️ Some stats unavailable this morning.").
 
-Delivery: 5-min beat tick on the `alerts` queue (guaranteed consumer —
-same queue as training.run_job), fires once inside 09:00-09:15 EAT,
+Delivery: 5-min tick on the `beat` queue, which has its OWN dedicated
+1-slot worker process (compose: beat-runner inside worker-alerts) so
+long training jobs on `alerts` can never starve it again. Fires once
+inside 11:30-11:45 EAT,
 Redis SET-NX day marker AFTER a successful send; an SMTP failure
 retries every 15 min up to 4 times (retries bypass the clock gate but
 not the sent marker). Send and skip are both logged at INFO.
@@ -36,8 +38,9 @@ from app.utils.system_admins import SYSTEM_ADMIN_EMAILS
 log = logging.getLogger(__name__)
 
 EAT = ZoneInfo("Africa/Nairobi")
-_FIRE_HOUR = 9              # 09:00 EAT
-_FIRE_WINDOW_MIN = 15       # fire anywhere in 09:00-09:15 (5-min tick)
+_FIRE_HOUR = 11             # 11:30 EAT
+_FIRE_MINUTE = 30
+_FIRE_WINDOW_MIN = 15       # fire anywhere in 11:30-11:45 (5-min tick)
 _RETRY_COUNTDOWN_S = 15 * 60
 _MAX_RETRIES = 4
 _SENT_TTL_S = 20 * 60 * 60
@@ -340,7 +343,7 @@ def _render_text(y: dict, headline: str,
 @celery_app.task(name="system.daily_status_report", bind=True,
                  ignore_result=True, max_retries=_MAX_RETRIES)
 def daily_status_report(self, force: bool = False) -> None:
-    """5-min tick; sends once per day at/after 09:00 EAT. SMTP failure
+    """5-min tick; sends once per day at/after 11:30 EAT. SMTP failure
     retries every 15 min (up to 4), bypassing the clock gate but never
     the sent marker. force=True (manual .delay(force=True)) skips the
     clock gate only."""
@@ -349,7 +352,8 @@ def daily_status_report(self, force: bool = False) -> None:
     is_retry = int(getattr(self.request, "retries", 0) or 0) > 0
     if not (force or is_retry):
         if not (now_eat.hour == _FIRE_HOUR
-                and now_eat.minute < _FIRE_WINDOW_MIN):
+                and _FIRE_MINUTE <= now_eat.minute
+                < _FIRE_MINUTE + _FIRE_WINDOW_MIN):
             return
     if not settings.smtp_host:
         log.warning("status report: SMTP not configured — skipping")
