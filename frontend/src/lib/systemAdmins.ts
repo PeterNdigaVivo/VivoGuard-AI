@@ -5,7 +5,6 @@
 
 export const SYSTEM_ADMIN_EMAILS = [
   'itsupport@vivofashiongroup.com',
-  'peterndiga1@gmail.com',
   'peter@vivofashiongroup.com',
 ] as const
 
