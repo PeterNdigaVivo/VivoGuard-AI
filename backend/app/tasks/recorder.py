@@ -341,6 +341,17 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
         return False
     if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
         ev.extra = {**(ev.extra or {}), "alert_clip_path": str(out)}
+        if bool(getattr(settings, "incident_foundations_enabled", False)):
+            try:
+                from app.services.incident_foundations import (
+                    sync_evidence_manifest,
+                )
+                sync_evidence_manifest(db, alert, ev)
+            except Exception as e:
+                log.warning(
+                    "recorder: evidence-manifest sync failed alert=%s: %s",
+                    alert.id, e,
+                )
         db.commit()
         log.info("recorder: extracted clip alert=%s cam=%s src_cam=%s dur=%ds",
                  alert.id, ev.camera_id, clip.camera_id, dur)

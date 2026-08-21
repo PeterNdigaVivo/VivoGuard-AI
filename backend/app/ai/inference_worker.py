@@ -249,6 +249,26 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         # published. This is policy plumbing, not detector logic.
         from app.services.alert_quality import apply_quality_control
         apply_quality_control(db, alert, rec)
+        # Shadow incident/evidence/outbox projection. A savepoint makes this
+        # fail-open in the precise transactional sense: any projection error
+        # rolls back only additive rows and leaves the baseline event+alert
+        # intact. Both feature switches default off.
+        if bool(getattr(settings, "incident_foundations_enabled", False)):
+            try:
+                with db.begin_nested():
+                    from app.services.incident_foundations import (
+                        record_alert_foundations,
+                    )
+                    record_alert_foundations(
+                        db, alert, rec, store_id=store_id,
+                        queue_delivery=bool(getattr(
+                            settings, "delivery_outbox_enabled", False)),
+                    )
+            except Exception as e:
+                log.warning(
+                    "incident foundations failed alert=%s event=%s: %s; "
+                    "baseline alert preserved", alert.id, rec.id, e,
+                )
         alert_id = alert.id
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
@@ -271,7 +291,6 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         # by detection_type + a stored thumbnail; the task itself
         # re-checks vlm_enabled. .delay() is microseconds here.
         try:
-            from app.config import settings
             if (getattr(settings, "vlm_enabled", False)
                     and thumb_path
                     and ev.detection_type in set(getattr(settings, "vlm_alert_types", []) or [])):

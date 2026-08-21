@@ -23,6 +23,10 @@ from app.models.operations import (
     AssuranceCase, CriticalZoneRequirement, GovernanceAuditLog,
     OperationalEvent, RiskReview,
 )
+from app.models.incident import (
+    DeliveryOutbox, EvidenceManifest, Incident, IncidentMember,
+    IncidentTransition, INCIDENT_STATES,
+)
 
 __all__ = [
     "User",
@@ -43,4 +47,6 @@ __all__ = [
     "RecordingClip", "RECORDING_CLIP_STATUSES",
     "AssuranceCase", "CriticalZoneRequirement", "GovernanceAuditLog",
     "OperationalEvent", "RiskReview",
+    "Incident", "IncidentMember", "IncidentTransition", "INCIDENT_STATES",
+    "EvidenceManifest", "DeliveryOutbox",
 ]

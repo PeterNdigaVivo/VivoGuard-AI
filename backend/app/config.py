@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     # dashboards' largest window is 30 days; 90 keeps triple margin.
     # 0 disables pruning entirely.
     metric_retention_days: int = 90
+    # Additive incident lifecycle/evidence projection. Both switches are off
+    # by default so deploying migration 0040 cannot change alert behaviour.
+    incident_foundations_enabled: bool = False
+    delivery_outbox_enabled: bool = False
     # ---- Live Activity Sentinel (dark-launched) --------------------------
     # Consumes the vg:activity:* keys the Live Activity tab reads and
     # turns occupancy patterns into alerts. Per-camera overrides live in
