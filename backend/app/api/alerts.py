@@ -950,11 +950,12 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
 
 
 def _snapshot_url(alert_id: int, event: DetectionEvent) -> str:
-    """Browser-fetchable URL for an alert's snapshot. Always returns
-    a URL — the endpoint itself falls back to the camera's latest
-    cached frame when the event has no archived thumbnail. Frontend
-    can <img src> this directly; on 404 it renders the camera-icon
-    placeholder."""
+    """Browser-fetchable URL for archived incident evidence.
+
+    The endpoint never substitutes a current live frame: doing so makes a
+    later image look like evidence from the alert timestamp. On missing
+    evidence it returns 404 and the frontend renders a clear placeholder.
+    """
     return f"/api/alerts/{alert_id}/snapshot"
 
 
@@ -1592,16 +1593,11 @@ def alert_snapshot(alert_id: int, db: Session = Depends(get_db),
                    _u: User = Depends(get_current_user)):
     """Return a JPEG snapshot for the alert.
 
-    Strategy:
-      1. If the event has a stored thumbnail_path on disk, serve that
-         (the moment-of-detection frame).
-      2. Otherwise fall back to the camera's most recent cached frame
-         from the streamer (vg:frame:{camera_id} in Redis). Stale by
-         a few seconds but always available for active cameras.
-      3. Otherwise 404 — frontend renders the placeholder.
+    Only a stored moment-of-detection thumbnail is valid here. A live frame
+    captured minutes or hours later is operational context, not incident
+    evidence, and must never be presented under this endpoint.
     """
-    from fastapi.responses import Response, FileResponse
-    from app.stream.frame_buffer import FrameBuffer
+    from fastapi.responses import FileResponse
     import os
 
     a = db.get(Alert, alert_id)
@@ -1611,17 +1607,11 @@ def alert_snapshot(alert_id: int, db: Session = Depends(get_db),
     if not ev:
         raise HTTPException(404, "event not found")
 
-    # Tier 1: archived thumbnail (if the inference worker stored one).
+    # Archived moment-of-detection thumbnail only.
     if ev.thumbnail_path and os.path.exists(ev.thumbnail_path):
         return FileResponse(ev.thumbnail_path, media_type="image/jpeg")
 
-    # Tier 2: camera's latest cached frame from the streamer.
-    if ev.camera_id:
-        cached = FrameBuffer().latest_jpeg(ev.camera_id)
-        if cached:
-            return Response(content=cached, media_type="image/jpeg")
-
-    raise HTTPException(404, "no snapshot available")
+    raise HTTPException(404, "incident snapshot unavailable")
 
 
 @router.get("/{alert_id}/snapshot/{idx}")

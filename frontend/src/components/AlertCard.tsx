@@ -497,6 +497,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               </span>
             )}
             <span className="text-xs text-slate-500">{formatTime(alert.created_at)}</span>
+            <span className="text-[11px] text-slate-500 font-mono select-all"
+                  title="Alert reference for WhatsApp and investigation notes">
+              Alert #{alert.id}
+            </span>
             {(alert.delivery_delay_seconds ?? 0) >= 120 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold"
                     title="Time between detection and creation of this alert">
@@ -684,8 +688,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           ) : (
             <div className="w-full sm:w-40 aspect-video flex flex-col items-center justify-center bg-slate-100 rounded text-slate-400">
               <div className="text-2xl">📷</div>
-              <div className="text-[10px] mt-1">
-                {alert.camera_name ?? 'Snapshot'}
+              <div className="text-[10px] mt-1 text-center px-2">
+                Incident snapshot unavailable
               </div>
             </div>
           )}

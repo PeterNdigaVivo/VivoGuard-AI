@@ -225,7 +225,8 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
               {alert.plain_title ?? alert.title ?? 'Alert'}
             </div>
             <div className="text-sm text-slate-500 dark:text-slate-300">
-              {alert.detection_type ?? '—'}
+              <span className="font-mono select-all">Alert #{alert.id}</span>
+              {' · '}{alert.detection_type ?? '—'}
               {alert.confidence != null && ` · ${(alert.confidence * 100).toFixed(0)}%`}
               {' · Dwell '}{dwell}
             </div>
