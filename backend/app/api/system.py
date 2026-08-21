@@ -1,6 +1,7 @@
 """System health endpoints — used by the System Health page (step 14)."""
 from __future__ import annotations
 import shutil
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +15,40 @@ from app.models import Alert, Camera
 from app.stream.frame_buffer import FrameBuffer
 
 router = APIRouter(prefix="/system", tags=["system"])
+
+STREAM_FRESH_SECONDS = 10.0
+
+
+def _runtime_camera_status(configured_status: str, health: dict,
+                           *, now: float) -> tuple[str, float | None]:
+    """Return stream health independently from operator workflow state.
+
+    ``Camera.status`` also carries onboarding/maintenance intent (notably
+    ``pending`` and ``degraded``), so presenting it as runtime health makes a
+    camera with fresh frames look unavailable.  Redis frame telemetry is the
+    source of truth for the System Health page; the configured state is still
+    returned separately for operators who need it.
+    """
+    try:
+        last_frame_at = float(health["last_frame_at"])
+    except (KeyError, TypeError, ValueError):
+        last_frame_at = None
+
+    age = max(0.0, now - last_frame_at) if last_frame_at is not None else None
+    try:
+        fps = float(health.get("fps") or 0)
+    except (TypeError, ValueError):
+        fps = 0.0
+
+    if age is not None and age < STREAM_FRESH_SECONDS and fps > 0:
+        return "online", age
+    if age is not None:
+        return "stale", age
+    if health.get("error"):
+        return "offline", None
+    if configured_status in {"offline", "pending", "degraded"}:
+        return configured_status, None
+    return "offline", None
 
 
 @router.get("/cameras/{camera_id}/stream-health")
@@ -109,16 +144,23 @@ def schema_check(db: Session = Depends(get_db), _u=Depends(get_current_user)):
 def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     fb = FrameBuffer()
     cameras = db.query(Camera).all()
+    health_by_camera = fb.health_many([c.id for c in cameras])
+    now = time.time()
     cam_health = []
     for c in cameras:
-        h = fb.health(c.id) or {}
+        h = health_by_camera.get(c.id, {})
+        runtime_status, frame_age = _runtime_camera_status(
+            c.status, h, now=now,
+        )
         cam_health.append({
             "camera_id": c.id,
             "name":      c.name,
-            "status":    c.status,
+            "status":    runtime_status,
+            "configured_status": c.status,
             "fps":       h.get("fps"),
             "last_frame_at": h.get("last_frame_at"),
-            "error":     h.get("error") or c.last_error,
+            "seconds_since_last_frame": frame_age,
+            "error":     None if runtime_status == "online" else (h.get("error") or c.last_error),
             "network_type": c.network_type,
         })
 
