@@ -316,7 +316,7 @@ def checkout_long_session_check() -> None:
     from app.database import SessionLocal
     from app.models import Camera, Store, Zone
 
-    threshold_minutes = int(getattr(settings, "checkout_alert_minutes", 8))
+    threshold_minutes = int(getattr(settings, "checkout_alert_minutes", 3))
     threshold_seconds = max(60, threshold_minutes * 60)
     r = _redis()
     if r is None:
@@ -341,7 +341,7 @@ def checkout_long_session_check() -> None:
             # Per-session floor stamped by CheckoutDwellDetector for
             # medium-confidence-staff sessions — they get more grace
             # than the global threshold so a staff member serving a
-            # tricky customer doesn't trip the 8-min default.
+            # tricky customer doesn't trip the three-minute customer default.
             session_floor = int(payload.get("min_alert_seconds") or 0)
             effective_threshold = max(threshold_seconds, session_floor)
             if age < effective_threshold:

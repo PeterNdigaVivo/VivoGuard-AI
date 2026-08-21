@@ -345,7 +345,8 @@ class CheckoutDwellDetector(Detector):
 
                 # MEDIUM-staff sessions get a 5-min floor on the
                 # alert threshold so a staff member serving a tricky
-                # customer doesn't trigger the 8-min default.
+                # customer gets a longer grace period than the three-minute
+                # customer default.
                 min_alert = 5 * 60 if level == "medium" else 0
 
                 sess = self._sessions.get(key)

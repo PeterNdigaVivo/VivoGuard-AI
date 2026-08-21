@@ -406,7 +406,7 @@ class Settings(BaseSettings):
     #      CHECKOUT_ALERT_MINUTES.
     checkout_min_dwell_seconds: int = 30
     checkout_max_dwell_seconds: int = 900
-    checkout_alert_minutes:     int = 8
+    checkout_alert_minutes:     int = 3
 
     # --- After-hours intrusion snapshot filmstrip ---
     # One intrusion alert per closed store with a person present; up to
