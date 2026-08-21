@@ -88,8 +88,10 @@ x-app-env: &app-env
   TRESPASS_MIN_FRAMES: ${TRESPASS_MIN_FRAMES:-5}
   COUNTER_MIN_EMPTY_FRAMES: ${COUNTER_MIN_EMPTY_FRAMES:-10}
   ENTRY_EXIT_MIN_FRAMES_PER_SIDE: ${ENTRY_EXIT_MIN_FRAMES_PER_SIDE:-1}
-  # Store Intelligence 45-min BI update — paused by default (Jul 2026).
-  STORE_INTELLIGENCE_ENABLED: ${STORE_INTELLIGENCE_ENABLED:-false}
+  # Store Intelligence 45-min BI update — re-enabled Aug 2026 (the
+  # Jul pause emptied the Store Update tab for a month). NB: this
+  # compose fallback overrides the Python default — keep both in sync.
+  STORE_INTELLIGENCE_ENABLED: ${STORE_INTELLIGENCE_ENABLED:-true}
   # Training-pipeline hardening (ML audit): combined-dataset floor,
   # anti-forgetting replay fraction, blur-exclusion threshold.
   MIN_TRAINING_IMAGES: ${MIN_TRAINING_IMAGES:-50}

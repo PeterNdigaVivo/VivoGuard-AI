@@ -330,8 +330,11 @@ class Settings(BaseSettings):
                                                 # track_id side transition.
     # Part 5: the legacy sales-floor heartbeat is OFF by default — replaced by
     # the store_intelligence 45-min BI update. Flip via env to re-enable.
-    sales_floor_insight_enabled: bool = False
-    store_intelligence_enabled:  bool = False   # paused (Jul 2026)
+    sales_floor_insight_enabled: bool = False   # intentionally OFF (Aug 2026)
+    # Re-enabled Aug 2026 — the Jul-2026 pause default silently emptied
+    # the Store Update tab for a month (last event Jul 23). The task
+    # now logs every generation so a silent disable can't recur.
+    store_intelligence_enabled:  bool = True
     store_intel_llm_model: str = "claude-haiku-4-5"
 
     # --- ROI / Value Report tuning ---

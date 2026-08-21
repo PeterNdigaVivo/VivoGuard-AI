@@ -2568,14 +2568,22 @@ def store_intelligence_update() -> None:
         return
     now_utc = datetime.now(timezone.utc)
     window_start = now_utc - timedelta(minutes=45)
+    updated = 0
     with SessionLocal() as db:
         for store in db.query(Store).filter(Store.is_active == True).all():   # noqa: E712
             try:
-                _emit_store_intel(db, r, store, now_utc, window_start, _shop_state)
+                if _emit_store_intel(db, r, store, now_utc, window_start,
+                                     _shop_state):
+                    updated += 1
             except Exception as e:
                 log.exception("store_intel: store=%s failed: %s", store.id, e)
                 try: db.rollback()
                 except Exception: pass
+    if updated:
+        # Visible heartbeat — a silent disable emptied the Store Update
+        # tab for a month (Jul-Aug 2026); this line makes generation
+        # (or its absence) greppable in the worker log.
+        log.info("store intelligence: %d stores updated", updated)
 
 
 def _emit_store_intel(db, r, store, now_utc, window_start, _shop_state) -> None:
@@ -2656,3 +2664,4 @@ def _emit_store_intel(db, r, store, now_utc, window_start, _shop_state) -> None:
     r.set(sent_key, "1", ex=2700)
     log.info("store_intel: store=%s (%s) fired period=%s people=%d entries=%d",
              store.id, store.name, period, people, int(entry_count))
+    return True
