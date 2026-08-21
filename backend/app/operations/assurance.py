@@ -157,11 +157,16 @@ def assess_coverage(db: Session, now: datetime | None = None, *, persist: bool =
 
 def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
     now = ensure_aware(now or utc_now())
+    review_cutoff = now - timedelta(days=7)
     count = 0
     rows = (db.query(Alert, DetectionEvent, Camera)
             .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
             .join(Camera, Camera.id == DetectionEvent.camera_id)
-            .filter(Alert.status.in_(("new", "escalated")), Alert.resolved_at.is_(None)).limit(500).all())
+            .filter(Alert.status.in_(("new", "escalated")),
+                    Alert.resolved_at.is_(None),
+                    Alert.created_at >= review_cutoff,
+                    DetectionEvent.detection_type != "store_intelligence")
+            .order_by(Alert.created_at.desc()).limit(500).all())
     critical_types = {"weapon", "brandished_weapon", "fight", "fire", "smoke", "intrusion"}
     active_case_keys: set[str] = set()
     for alert, event, camera in rows:
@@ -184,6 +189,25 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
                         camera_id=camera.id, alert_id=alert.id, event_id=event.id,
                         evidence={"issues": issues, "age_seconds": age, "delivery_latency_seconds": latency, "sla_seconds": sla})
             count += 1
+    historical_count = (db.query(Alert).join(
+        DetectionEvent, DetectionEvent.id == Alert.event_id).filter(
+            Alert.status.in_(("new", "escalated")),
+            Alert.resolved_at.is_(None),
+            Alert.created_at < review_cutoff,
+            DetectionEvent.detection_type != "store_intelligence",
+        ).count())
+    historical_key = "alert-quality:historical-backlog"
+    if historical_count:
+        active_case_keys.add(historical_key)
+        upsert_case(
+            db, dedup_key=historical_key, case_type="alert_quality",
+            severity="high", title="Historical alert-review backlog",
+            description=("Review and disposition old alerts in controlled batches; "
+                         "do not bulk-label them as true or false without evidence."),
+            evidence={"unresolved_actionable_alerts": historical_count,
+                      "older_than": review_cutoff.isoformat()},
+        )
+        count += 1
     # Close cases tied to alerts that operators already handled, including
     # alerts outside the bounded 500-row assessment batch.
     for case in db.query(AssuranceCase).filter(
@@ -192,11 +216,17 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
         alert = db.get(Alert, case.alert_id) if case.alert_id else None
         alert_open = bool(alert and alert.status in ("new", "escalated") and
                           alert.resolved_at is None)
-        if case.dedup_key in active_case_keys or alert_open:
+        in_active_horizon = bool(
+            alert_open and alert and ensure_aware(alert.created_at) >= review_cutoff)
+        if case.dedup_key in active_case_keys or in_active_horizon:
             continue
         case.status = "resolved"
         case.resolved_at = utc_now()
-        case.resolution = "Alert is no longer open; the operational exception has cleared."
+        case.resolution = (
+            "Moved to the governed historical-backlog case."
+            if alert_open else
+            "Alert is no longer open; the operational exception has cleared."
+        )
     return count
 
 
