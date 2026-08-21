@@ -20,7 +20,45 @@ from app.ai.zone_logic import bbox_centre, bbox_in_zone, iou, segments_cross, zo
 
 
 class CrowdDetector(Detector):
+    """Detect a sustained congregation, not a transient head-count spike.
+
+    A crowd incident is promoted only when enough tracked people have remained
+    locally stationary for the configured dwell.  Once promoted, the incident
+    stays latched until the area has been below threshold for the re-arm
+    period.  This prevents the same ByteTrack identities producing an alert on
+    every inference frame.
+
+    ``DetectionConfig.dwell_time_seconds`` is the operator-facing dwell knob.
+    Advanced values live in ``extra``:
+
+    * ``max_motion_norm`` (default 0.04) — maximum recent centre displacement;
+    * ``incident_rearm_seconds`` (default 60) — continuous clear time required.
+    """
+
     detection_type = "crowd"
+    needs_tracking = True
+
+    DEFAULT_DWELL_SECONDS = 30.0
+    DEFAULT_MAX_MOTION_NORM = 0.04
+    DEFAULT_REARM_SECONDS = 60.0
+    MOTION_WINDOW = 8
+
+    def __init__(self):
+        self._stationary_since: dict[tuple[int, int], float] = {}
+        self._active_tracks: dict[int, set[int]] = {}
+        self._clear_since: dict[int, float] = {}
+
+    @classmethod
+    def _locally_stationary(cls, track, max_motion: float) -> bool:
+        history = list(track.history or [])[-cls.MOTION_WINDOW:]
+        if len(history) < 3:
+            return False
+        centres = [bbox_centre(bb) for bb in history]
+        x0, y0 = centres[0]
+        return max(
+            ((x - x0) ** 2 + (y - y0) ** 2) ** 0.5
+            for x, y in centres[1:]
+        ) <= max_motion
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
@@ -28,11 +66,70 @@ class CrowdDetector(Detector):
             return []
         threshold = int(cfg.get("crowd_threshold") or 5)
         thr_conf  = float(cfg.get("confidence_threshold", 0.5))
-        people = [d for d in ctx.raw_detections
-                  if d["cls"] in COCO_PERSON and d["conf"] >= thr_conf]
-        if len(people) < threshold:
+        extra = cfg.get("extra") or {}
+        dwell = max(0.0, float(
+            cfg.get("dwell_time_seconds")
+            if cfg.get("dwell_time_seconds") is not None
+            else self.DEFAULT_DWELL_SECONDS
+        ))
+        max_motion = max(0.0, float(
+            extra.get("max_motion_norm", self.DEFAULT_MAX_MOTION_NORM)))
+        rearm = max(0.0, float(
+            extra.get("incident_rearm_seconds", self.DEFAULT_REARM_SECONDS)))
+        now = float(ctx.timestamp)
+
+        tracked_people = [
+            (tr, det) for tr, det in ctx.tracks
+            if tr.cls in COCO_PERSON and float(det.get("conf", 0.0)) >= thr_conf
+        ]
+        visible_ids = {int(tr.track_id) for tr, _ in tracked_people}
+        for key in [key for key in self._stationary_since
+                    if key[0] == ctx.camera_id and key[1] not in visible_ids]:
+            self._stationary_since.pop(key, None)
+
+        qualified: list[tuple] = []
+        for tr, det in tracked_people:
+            key = (ctx.camera_id, int(tr.track_id))
+            if not self._locally_stationary(tr, max_motion):
+                self._stationary_since.pop(key, None)
+                continue
+            since = self._stationary_since.setdefault(key, now)
+            if now - since >= dwell:
+                qualified.append((tr, det))
+
+        if len(qualified) < threshold:
+            if ctx.camera_id in self._active_tracks:
+                clear_since = self._clear_since.setdefault(ctx.camera_id, now)
+                if now - clear_since >= rearm:
+                    self._active_tracks.pop(ctx.camera_id, None)
+                    self._clear_since.pop(ctx.camera_id, None)
             return []
-        # Use the spatial centroid of all people for the alert thumbnail.
+
+        self._clear_since.pop(ctx.camera_id, None)
+
+        # A staff-only/restricted-area rule is more specific and consequential
+        # than a generic crowd rule.  Let StaffZoneDetector/IntrusionDetector
+        # own this scene rather than giving operators two conflicting labels.
+        priority_zones = [
+            z for z in ctx.zones
+            if not z.get("suppressed")
+            and ({"staff_zone", "staff_area", "restricted"}
+                 & set(z.get("detection_types_json") or []))
+        ]
+        if any(
+            bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"])
+            for _tr, det in qualified for z in priority_zones
+        ):
+            return []
+
+        track_ids = {int(tr.track_id) for tr, _ in qualified}
+        if ctx.camera_id in self._active_tracks:
+            self._active_tracks[ctx.camera_id].update(track_ids)
+            return []
+        self._active_tracks[ctx.camera_id] = set(track_ids)
+
+        # Use the spatial centroid of qualified people for the thumbnail.
+        people = [det for _tr, det in qualified]
         xs = [bbox_centre(p["bbox_norm"])[0] for p in people]
         ys = [bbox_centre(p["bbox_norm"])[1] for p in people]
         cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
@@ -42,7 +139,12 @@ class CrowdDetector(Detector):
             confidence=min(1.0, len(people) / max(threshold, 1)),
             bbox_norm=[max(0.0, cx - 0.1), max(0.0, cy - 0.1),
                        min(1.0, cx + 0.1), min(1.0, cy + 0.1)],
-            extra={"count": len(people), "threshold": threshold},
+            track_id=min(track_ids),
+            extra={"count": len(people), "threshold": threshold,
+                   "dwell_seconds": dwell,
+                   "track_ids": sorted(track_ids),
+                   "incident_rearm_seconds": rearm,
+                   "rule": "sustained_congregation"},
         )]
 
 

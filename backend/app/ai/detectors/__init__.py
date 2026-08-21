@@ -53,7 +53,6 @@ STATELESS: dict[str, Detector] = {
     "smoke":              SmokeDetector(),
     "shelf":              ShelfDetector(),
     "custom":             CustomDetector(),
-    "crowd":              CrowdDetector(),
     "occupancy":          OccupancyDetector(),
     "trespass":           TrespassDetector(),
     "fall":               FallDetector(),
@@ -61,6 +60,7 @@ STATELESS: dict[str, Detector] = {
 
 # Stateful — instantiated per camera in DetectorRegistry.
 STATEFUL_TYPES: dict[str, Type[Detector]] = {
+    "crowd":              CrowdDetector,
     "loitering":          LoiteringDetector,
     "abandoned_object":   AbandonedObjectDetector,
     "tripwire":           TripwireDetector,

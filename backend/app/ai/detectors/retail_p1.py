@@ -403,7 +403,12 @@ class IntrusionDetector(Detector):
     detection_type = "intrusion"
 
     def __init__(self):
-        self._fired: dict[int, float] = {}    # zone_id → last alert ts
+        # One incident per (camera, track, zone).  The previous zone-only
+        # 30-second timer repeatedly alerted on the same person standing in
+        # one place.  A fired identity now re-arms only after it has been
+        # continuously absent from the protected zone for the configured gap.
+        self._fired: set[tuple[int, int, int]] = set()
+        self._last_seen: dict[tuple[int, int, int], float] = {}
 
     def _within_after_hours_grace(self, ctx: DetectorContext) -> bool:
         """True when the current store-local time is inside the
@@ -474,12 +479,16 @@ class IntrusionDetector(Detector):
 
         out: list[DetectionEvent] = []
         now = time.time()
+        extra = cfg.get("extra") or {}
+        rearm_seconds = max(0.0, float(
+            extra.get("incident_rearm_seconds", 300.0)))
         # Grace window — minutes before opening / after closing during
         # which a person identified as staff (medium/high) is treated
         # as opening / closing the store rather than an intruder. Same
         # default (60 min) on both sides via existing settings.
         in_grace = self._within_after_hours_grace(ctx)
         from app.ai.detectors import staff_identity
+        active_keys: set[tuple[int, int, int]] = set()
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON or det["conf"] < thr:
                 continue
@@ -505,9 +514,12 @@ class IntrusionDetector(Detector):
                         break
 
                     zid = z.get("id") or -1
-                    if now - self._fired.get(zid, 0) < 30:
+                    incident_key = (ctx.camera_id, int(tid), int(zid))
+                    active_keys.add(incident_key)
+                    self._last_seen[incident_key] = now
+                    if incident_key in self._fired:
                         continue
-                    self._fired[zid] = now
+                    self._fired.add(incident_key)
                     if level in ("high", "medium"):
                         # Staff outside the grace window — downgrade so
                         # the manager sees it without being WhatsApped
@@ -530,7 +542,17 @@ class IntrusionDetector(Detector):
                                "after_hours": True,
                                "time_context": time_context,
                                "staff_level": level,
-                               "rule": reason},
+                               "rule": reason,
+                               "incident_rearm_seconds": rearm_seconds},
                     ))
                     break
+
+        # Re-arm only after a genuine absence.  A short tracker miss or
+        # occlusion must not recreate the same incident.
+        for key, last_seen in list(self._last_seen.items()):
+            if key in active_keys:
+                continue
+            if now - last_seen >= rearm_seconds:
+                self._last_seen.pop(key, None)
+                self._fired.discard(key)
         return out
