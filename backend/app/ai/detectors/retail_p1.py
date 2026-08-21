@@ -13,6 +13,8 @@ All four use `ctx.db` for metric writes; without a DB session attached
 they degrade gracefully (events still fire, no metrics persisted).
 """
 from __future__ import annotations
+import hashlib
+import logging
 import time
 from datetime import date
 
@@ -23,6 +25,8 @@ from app.ai.zone_logic import bbox_in_zone
 from app.utils.business_hours import (
     intrusion_time_context, is_open_with_default, localised_now,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +414,58 @@ class IntrusionDetector(Detector):
         self._fired: set[tuple[int, int, int]] = set()
         self._last_seen: dict[tuple[int, int, int], float] = {}
 
+    @staticmethod
+    def _scene_fingerprint(bbox_norm: list[float], bucket: float = 0.02) -> str:
+        """Stable, non-identifying position fingerprint across task restarts.
+
+        Tracker IDs restart with each inference task.  Quantising the bounding
+        box absorbs normal detector jitter while retaining enough spatial
+        separation not to collapse unrelated parts of a camera view.
+        """
+        safe_bucket = max(0.005, float(bucket))
+        quantised = ":".join(
+            str(int(round(float(value) / safe_bucket)))
+            for value in bbox_norm
+        )
+        return hashlib.sha256(quantised.encode()).hexdigest()[:16]
+
+    @classmethod
+    def _persistent_incident_allowed(
+        cls, ctx: DetectorContext, zone_id: int, bbox_norm: list[float],
+        rearm_seconds: float, fingerprint_bucket: float,
+    ) -> bool:
+        """Atomically open an incident, or refresh an existing one's TTL.
+
+        The key contains camera, zone and a one-way coarse position digest --
+        never an image or biometric identifier.  A continuously visible fixed
+        object therefore keeps the incident closed across short-lived worker
+        tasks.  After genuine absence, Redis expires the key and the same area
+        can alert again.  Redis failure falls back to the detector's in-memory
+        gate, limiting the failure to one alert per running task.
+        """
+        try:
+            import redis
+            from app.config import settings
+
+            fingerprint = cls._scene_fingerprint(
+                bbox_norm, bucket=fingerprint_bucket)
+            key = (f"vg:intrusion:incident:{ctx.camera_id}:"
+                   f"{zone_id}:{fingerprint}")
+            ttl = max(1, int(rearm_seconds))
+            client = redis.from_url(settings.redis_url)
+            if client.set(key, "1", ex=ttl, nx=True):
+                return True
+            # Refresh while the same scene remains visible.  The marker only
+            # expires after a full re-arm interval with no matching detection.
+            client.expire(key, ttl)
+            return False
+        except Exception as exc:
+            log.warning(
+                "intrusion persistent dedupe unavailable cam=%s zone=%s: %s; "
+                "using in-process fallback", ctx.camera_id, zone_id, exc,
+            )
+            return True
+
     def _within_after_hours_grace(self, ctx: DetectorContext) -> bool:
         """True when the current store-local time is inside the
         configurable opening / closing grace window around today's
@@ -482,6 +538,8 @@ class IntrusionDetector(Detector):
         extra = cfg.get("extra") or {}
         rearm_seconds = max(0.0, float(
             extra.get("incident_rearm_seconds", 300.0)))
+        fingerprint_bucket = max(0.005, float(
+            extra.get("incident_fingerprint_bucket", 0.02)))
         # Grace window — minutes before opening / after closing during
         # which a person identified as staff (medium/high) is treated
         # as opening / closing the store rather than an intruder. Same
@@ -517,9 +575,15 @@ class IntrusionDetector(Detector):
                     incident_key = (ctx.camera_id, int(tid), int(zid))
                     active_keys.add(incident_key)
                     self._last_seen[incident_key] = now
+                    persistent_allowed = self._persistent_incident_allowed(
+                        ctx, int(zid), det["bbox_norm"], rearm_seconds,
+                        fingerprint_bucket,
+                    )
                     if incident_key in self._fired:
                         continue
                     self._fired.add(incident_key)
+                    if not persistent_allowed:
+                        continue
                     if level in ("high", "medium"):
                         # Staff outside the grace window — downgrade so
                         # the manager sees it without being WhatsApped
@@ -534,7 +598,7 @@ class IntrusionDetector(Detector):
                     out.append(DetectionEvent(
                         detection_type=self.detection_type, cls="person",
                         confidence=det["conf"], bbox_norm=det["bbox_norm"],
-                        zone_id=z.get("id"),
+                        track_id=int(tid), zone_id=z.get("id"),
                         extra={"priority": priority, "store_id": ctx.store_id,
                                # after_hours stays True for backward
                                # compat; time_context carries the
