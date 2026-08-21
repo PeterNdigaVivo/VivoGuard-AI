@@ -1,8 +1,8 @@
 // Labelling Sprint — fast-review queue for unlabelled alerts.
 // Keyboard: C = confirm, D = dismiss, ← = undo. Batch of 20.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primitives'
 import { labels as labelsApi, type SprintAlert } from '@/api/labels'
 
@@ -16,16 +16,28 @@ export default function SprintPage() {
   const [undoIds, setUndoIds] = useState<number[]>([])   // FIFO, head = most recent
   const [reviewed, setReviewed] = useState(0)            // session counter
   const [err, setErr] = useState<string | null>(null)
-  const detectionTypeRef = useRef<string | undefined>(undefined)
+  const location = useLocation()
+  const filters = useMemo(() => {
+    const q = new URLSearchParams(location.search)
+    const numeric = (key: string) => {
+      const value = Number(q.get(key))
+      return Number.isInteger(value) && value > 0 ? value : undefined
+    }
+    return {
+      detection_type: q.get('detection_type') || undefined,
+      store_id: numeric('store_id'),
+      camera_id: numeric('camera_id'),
+    }
+  }, [location.search])
 
-  const loadBatch = useCallback(async (detection_type?: string) => {
+  const loadBatch = useCallback(async () => {
     setBusy(true); setErr(null)
     try {
-      const items = await labelsApi.queue({ detection_type, limit: BATCH })
+      const items = await labelsApi.queue({ ...filters, limit: BATCH })
       setQueue(items); setIdx(0)
     } catch (e) { setErr(String(e)) }
     finally { setBusy(false) }
-  }, [])
+  }, [filters])
 
   useEffect(() => { loadBatch() }, [loadBatch])
 
@@ -43,7 +55,7 @@ export default function SprintPage() {
       setReviewed(r => r + 1)
       // Advance — if we reach the end, transparently load the next batch.
       if (idx + 1 >= (queue?.length ?? 0)) {
-        await loadBatch(detectionTypeRef.current)
+        await loadBatch()
       } else {
         setIdx(i => i + 1)
       }
@@ -60,7 +72,7 @@ export default function SprintPage() {
       setUndoIds(prev => prev.slice(1))
       setReviewed(r => Math.max(0, r - 1))
       // Refetch so the undone alert reappears at the top.
-      await loadBatch(detectionTypeRef.current)
+      await loadBatch()
     } catch (e) { setErr(String(e)) }
     finally { setBusy(false) }
   }
@@ -87,6 +99,15 @@ export default function SprintPage() {
           ← Back to AI Learning
         </Link>
       } />
+
+      {(filters.camera_id || filters.detection_type) && (
+        <Card className="p-3 mb-3 border-sky-200 bg-sky-50 text-sky-900">
+          Validation campaign
+          {filters.camera_id && <> · camera #{filters.camera_id}</>}
+          {filters.detection_type && <> · {filters.detection_type}</>}
+          {' · '}fixed batch of {BATCH}
+        </Card>
+      )}
 
       {/* Progress + shortcuts */}
       <div className="mb-3 flex items-center gap-4 text-sm text-slate-600 dark:text-slate-300">

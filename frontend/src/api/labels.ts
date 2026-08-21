@@ -19,10 +19,11 @@ export interface TodayCounts {
 }
 
 export const labels = {
-  queue: (params: { detection_type?: string; store_id?: number; limit?: number } = {}) => {
+  queue: (params: { detection_type?: string; store_id?: number; camera_id?: number; limit?: number } = {}) => {
     const q = new URLSearchParams()
     if (params.detection_type) q.set('detection_type', params.detection_type)
     if (params.store_id != null) q.set('store_id', String(params.store_id))
+    if (params.camera_id != null) q.set('camera_id', String(params.camera_id))
     q.set('limit', String(params.limit ?? 20))
     return api<SprintAlert[]>(`/labels/queue?${q}`)
   },

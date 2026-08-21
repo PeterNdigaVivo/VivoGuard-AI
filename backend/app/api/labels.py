@@ -92,6 +92,8 @@ def queue(
         description="Filter to one detector (e.g. 'checkout_dwell')"),
     store_id:       Optional[int] = Query(None,
         description="Filter via Camera.store_id (Alert has no store column)"),
+    camera_id:      Optional[int] = Query(None,
+        description="Pin a validation batch to one exact camera"),
 ):
     """Next batch of unlabelled alerts, newest-first.
 
@@ -110,6 +112,8 @@ def queue(
         q = q.filter(DetectionEvent.detection_type == detection_type)
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
+    if camera_id is not None:
+        q = q.filter(DetectionEvent.camera_id == camera_id)
     priority_rank = case(
         (DetectionEvent.detection_type.in_(CRITICAL_REVIEW_TYPES), 0),
         (DetectionEvent.detection_type.in_(HIGH_REVIEW_TYPES), 1),
@@ -148,7 +152,8 @@ def queue(
         rank, reason = _review_priority(ev.detection_type)
         d["review_priority"] = rank
         d["review_reason"] = reason
-        d["clip_available"] = bool(ev.clip_path)
+        d["clip_available"] = bool(
+            ev.clip_path or (ev.extra or {}).get("alert_clip_path"))
         out.append(d)
     return out
 
