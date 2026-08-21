@@ -1,9 +1,14 @@
 from datetime import datetime, timezone
+import hashlib
+import hmac
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.api.operations import _verify_odoo_signature
 from app.database import Base
 from app.integrations.odoo_pos import normalise_odoo_event
 from app.models import AssuranceCase
@@ -36,6 +41,27 @@ def test_odoo_normaliser_minimises_payload():
     assert result["event_type"] == "refund"
     assert result["source_event_id"] == "42"
     assert "customer_name" not in result["payload"]
+
+
+def test_odoo_webhook_signature_and_replay_window():
+    raw = b'{"event":"pos.refund","id":42}'
+    timestamp = "1787306400"
+    secret = "test-service-secret"
+    signature = "sha256=" + hmac.new(
+        secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
+    now = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+
+    _verify_odoo_signature(raw, timestamp, signature, secret=secret,
+                           max_age_seconds=300, now=now)
+
+    with pytest.raises(HTTPException, match="invalid Odoo webhook signature"):
+        _verify_odoo_signature(raw, timestamp, "sha256=wrong", secret=secret,
+                               max_age_seconds=300, now=now)
+    with pytest.raises(HTTPException, match="expired Odoo webhook timestamp"):
+        _verify_odoo_signature(
+            raw, timestamp, signature, secret=secret, max_age_seconds=300,
+            now=datetime.fromtimestamp(int(timestamp) + 301, tz=timezone.utc),
+        )
 
 
 def test_assurance_agents_resolve_cases_when_conditions_clear():

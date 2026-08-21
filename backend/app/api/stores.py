@@ -114,7 +114,7 @@ def create_store(payload: StoreIn, db: Session = Depends(get_db),
     return s
 
 
-@router.get("/{store_id}", response_model=StoreOut)
+@router.get("/{store_id:int}", response_model=StoreOut)
 def get_store(store_id: int, db: Session = Depends(get_db),
               _u=Depends(get_current_user)):
     s = db.get(Store, store_id)
@@ -123,7 +123,7 @@ def get_store(store_id: int, db: Session = Depends(get_db),
     return s
 
 
-@router.patch("/{store_id}", response_model=StoreOut)
+@router.patch("/{store_id:int}", response_model=StoreOut)
 def update_store(store_id: int, patch: StoreIn,
                  db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
@@ -144,7 +144,7 @@ def update_store(store_id: int, patch: StoreIn,
     return s
 
 
-@router.delete("/{store_id}")
+@router.delete("/{store_id:int}")
 def delete_store(store_id: int, db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
     s = db.get(Store, store_id)
@@ -159,7 +159,7 @@ def delete_store(store_id: int, db: Session = Depends(get_db),
 from app.schemas.camera import CameraOut
 
 
-@router.get("/{store_id}/cameras", response_model=list[CameraOut])
+@router.get("/{store_id:int}/cameras", response_model=list[CameraOut])
 def list_store_cameras(store_id: int, db: Session = Depends(get_db),
                        _u=Depends(get_current_user)):
     if not db.get(Store, store_id):
@@ -171,7 +171,7 @@ def list_store_cameras(store_id: int, db: Session = Depends(get_db),
 
 # ---------- attach / detach cameras ----------
 
-@router.post("/{store_id}/cameras/{camera_id}/attach")
+@router.post("/{store_id:int}/cameras/{camera_id}/attach")
 def attach_camera(store_id: int, camera_id: int,
                   db: Session = Depends(get_db),
                   _u=Depends(require_role("admin", "operator"))):
@@ -184,7 +184,7 @@ def attach_camera(store_id: int, camera_id: int,
     return {"camera_id": cam.id, "store_id": store_id}
 
 
-@router.post("/{store_id}/cameras/{camera_id}/detach")
+@router.post("/{store_id:int}/cameras/{camera_id}/detach")
 def detach_camera(store_id: int, camera_id: int,
                   db: Session = Depends(get_db),
                   _u=Depends(require_role("admin", "operator"))):
@@ -205,7 +205,7 @@ class BulkAttach(BaseModel):
     camera_ids: list[int]
 
 
-@router.post("/{store_id}/cameras/bulk-attach", response_model=list[int])
+@router.post("/{store_id:int}/cameras/bulk-attach", response_model=list[int])
 def bulk_attach(store_id: int, payload: BulkAttach,
                 db: Session = Depends(get_db),
                 _u=Depends(require_role("admin", "operator"))):
@@ -223,13 +223,13 @@ def bulk_attach(store_id: int, payload: BulkAttach,
 
 # ---------- shifts ----------
 
-@router.get("/{store_id}/shifts", response_model=list[ShiftOut])
+@router.get("/{store_id:int}/shifts", response_model=list[ShiftOut])
 def list_shifts(store_id: int, db: Session = Depends(get_db),
                 _u=Depends(get_current_user)):
     return db.query(Shift).filter(Shift.store_id == store_id).order_by(Shift.day_of_week).all()
 
 
-@router.post("/{store_id}/shifts", response_model=ShiftOut)
+@router.post("/{store_id:int}/shifts", response_model=ShiftOut)
 def create_shift(store_id: int, payload: ShiftIn,
                  db: Session = Depends(get_db),
                  _u=Depends(require_role("admin", "operator"))):
@@ -242,7 +242,7 @@ def create_shift(store_id: int, payload: ShiftIn,
     return s
 
 
-@router.delete("/{store_id}/shifts/{shift_id}")
+@router.delete("/{store_id:int}/shifts/{shift_id}")
 def delete_shift(store_id: int, shift_id: int,
                  db: Session = Depends(get_db),
                  _u=Depends(require_role("admin", "operator"))):

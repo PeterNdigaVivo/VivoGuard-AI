@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
+import json
+from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import (
@@ -94,7 +98,8 @@ class FeedbackClarificationIn(BaseModel):
 
 
 def _audit(db: Session, user, action: str, entity_type: str, entity_id, details: dict | None = None):
-    db.add(GovernanceAuditLog(actor_user_id=user.id, actor_email=user.email,
+    db.add(GovernanceAuditLog(actor_user_id=getattr(user, "id", None),
+                              actor_email=getattr(user, "email", None),
                               action=action, entity_type=entity_type,
                               entity_id=str(entity_id), details=details))
 
@@ -110,6 +115,29 @@ def _safe_payload(payload: dict | None) -> dict | None:
         return payload
     blocked = {"employee_name", "customer_name", "email", "phone", "biometric", "face_embedding"}
     return {key: value for key, value in payload.items() if key.lower() not in blocked}
+
+
+def _verify_odoo_signature(raw_body: bytes, timestamp: str, signature: str, *,
+                           secret: str | None = None,
+                           max_age_seconds: int | None = None,
+                           now: datetime | None = None) -> None:
+    """Authenticate an Odoo webhook and reject stale/replayed requests."""
+    key = secret if secret is not None else settings.odoo_webhook_secret
+    if not key:
+        raise HTTPException(503, "Odoo webhook credential is not configured")
+    try:
+        sent_at = int(timestamp)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(401, "invalid Odoo webhook timestamp") from exc
+    current = int((now or datetime.now(timezone.utc)).timestamp())
+    max_age = (max_age_seconds if max_age_seconds is not None
+               else settings.odoo_webhook_max_age_seconds)
+    if abs(current - sent_at) > max_age:
+        raise HTTPException(401, "expired Odoo webhook timestamp")
+    signed = timestamp.encode() + b"." + raw_body
+    expected = "sha256=" + hmac.new(key.encode(), signed, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature or ""):
+        raise HTTPException(401, "invalid Odoo webhook signature")
 
 
 def _clarification_question(missing: list[str]) -> str:
@@ -356,12 +384,22 @@ def ingest_event(body: OperationalEventIn, db: Session = Depends(get_db),
 
 
 @router.post("/events/odoo")
-def ingest_odoo_event(payload: dict, db: Session = Depends(get_db),
-                      user=Depends(require_role("admin", "operator"))):
+async def ingest_odoo_event(
+    request: Request,
+    db: Session = Depends(get_db),
+    timestamp: str = Header(alias="X-VivoGuard-Timestamp"),
+    signature: str = Header(alias="X-VivoGuard-Signature"),
+):
+    raw_body = await request.body()
+    _verify_odoo_signature(raw_body, timestamp, signature)
     try:
+        payload = json.loads(raw_body)
+        if not isinstance(payload, dict):
+            raise TypeError("Odoo webhook body must be a JSON object")
         body = OperationalEventIn(**normalise_odoo_event(payload))
-    except (ValueError, TypeError) as exc:
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
+    user = SimpleNamespace(id=None, email="service:odoo-webhook")
     return _ingest_event(body, db, user)
 
 

@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_ttl_minutes: int = 60
     jwt_refresh_ttl_days: int = 30
+    # Odoo signs ``<unix timestamp>.<raw body>`` with HMAC-SHA256.
+    # An empty secret keeps the service endpoint unavailable, never unsigned.
+    odoo_webhook_secret: str = ""
+    odoo_webhook_max_age_seconds: int = 300
     bootstrap_admin_email: str = "admin@example.com"
     bootstrap_admin_password: str = "change-me-now"
 
