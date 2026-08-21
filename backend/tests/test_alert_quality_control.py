@@ -123,6 +123,17 @@ def test_scorecard_is_honest_about_precision_recall_and_agreement(db):
     assert card["reviewer_agreement"] is None
 
 
+def test_scorecard_counts_legacy_extra_clip_path(db):
+    cam = _camera(db)
+    _alert_row, event = _alert(db, cam, "confirmed")
+    event.extra = {"alert_clip_path": "/legacy/incident.mp4"}
+    db.commit()
+
+    card = quality_scorecards(db)[0]
+    assert card["incident_clips_available"] == 1
+    assert card["clip_availability_rate"] == 1.0
+
+
 def test_threshold_crossing_verdict_is_not_sent_to_training(db, monkeypatch):
     cam = _camera(db)
     for index in range(19):

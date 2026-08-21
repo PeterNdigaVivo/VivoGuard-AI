@@ -179,7 +179,12 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
         dismissed = sum(a.status == "dismissed" for a, _ in samples)
         unreviewed = len(samples) - confirmed - dismissed
         reviewed = confirmed + dismissed
-        clips = sum(bool(e.clip_path) for _, e in samples)
+        # Legacy recorder paths were persisted in event.extra before the
+        # canonical clip_path column was wired for every detector.  Counting
+        # only the column understates evidence availability and can block a
+        # release gate even when a playable incident clip exists.
+        clips = sum(bool(e.clip_path or (e.extra or {}).get("alert_clip_path"))
+                    for _, e in samples)
         multi_review = []
         for alert, _event in samples:
             verdicts = [verdict for (alert_id, _reviewer), verdict
