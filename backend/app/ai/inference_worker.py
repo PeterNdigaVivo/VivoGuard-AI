@@ -244,6 +244,11 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         alert = Alert(event_id=rec.id, status="new")
         db.add(alert)
         db.flush()
+        # Quality quarantine keeps the operator-facing record, snapshot and
+        # clip, while marking it review-only before any live notification is
+        # published. This is policy plumbing, not detector logic.
+        from app.services.alert_quality import apply_quality_control
+        apply_quality_control(db, alert, rec)
         alert_id = alert.id
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
@@ -806,6 +811,11 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             # on actionable incidents.
             for ev in events_emitted:
                 if ev.get("detection_type") in _SKIP_ALERT_TYPES:
+                    continue
+                # Review-only/quarantined alerts remain on the Alerts page but
+                # must not trigger the audible/browser real-time channel.
+                from app.services.alert_quality import alert_is_suppressed
+                if alert_is_suppressed(db, int(ev["alert_id"])):
                     continue
                 try:
                     pub.publish("vg:pub:alerts", json.dumps(ev))

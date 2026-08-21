@@ -53,6 +53,20 @@ def record_verdict(
     a.status          = "confirmed" if verdict == "confirm" else "dismissed"
     a.assigned_to     = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
+    db.flush()
+
+    # Recalculate the pair circuit breaker using this verdict before any
+    # learning side effect. If the threshold is crossed, this alert and all
+    # subsequent alerts stay evidence-only until a governed release.
+    ev_for_quality = event or db.get(DetectionEvent, a.event_id)
+    if ev_for_quality is not None:
+        from app.services.alert_quality import refresh_pair_control
+        state = refresh_pair_control(
+            db, ev_for_quality.camera_id, ev_for_quality.detection_type)
+        if state is not None and state.mode in {"review_only", "quarantined"}:
+            a.review_only = True
+            a.notification_suppressed = True
+            a.training_eligible = False
 
     # Feedback-loop side effect — the actual reason rule #2 exists.
     # Best-effort: never block the operator's verdict on a feedback-
@@ -60,7 +74,10 @@ def record_verdict(
     # swallowed silently — switched to log.exception per the dry-run
     # decision).
     try:
-        if verdict == "confirm":
+        if not a.training_eligible:
+            log.info("alert_feedback: training skipped for quality-controlled "
+                     "alert=%s", alert_id)
+        elif verdict == "confirm":
             from app.training.feedback_loop import absorb_confirmed
             absorb_confirmed(db, a.id)
         else:

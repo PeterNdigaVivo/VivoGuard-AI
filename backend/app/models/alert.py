@@ -22,6 +22,15 @@ class Alert(Base):
     assigned_to:      Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     acknowledged_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feedback_used_for_training: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Quality-control quarantine never discards the alert or its evidence.
+    # It only prevents live/external escalation and automatic learning until
+    # an operator has reviewed the unreliable camera/detector pair.
+    review_only:      Mapped[bool] = mapped_column(Boolean, default=False,
+                                                    server_default="false", index=True)
+    training_eligible: Mapped[bool] = mapped_column(Boolean, default=True,
+                                                     server_default="true", index=True)
+    notification_suppressed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", index=True)
     # Free-text investigation notes the operator adds via "📋 Add Note".
     # Accumulates over time — the UI appends rather than overwrites.
     notes:            Mapped[str | None]    = mapped_column(Text, nullable=True)

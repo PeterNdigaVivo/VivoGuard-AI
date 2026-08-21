@@ -116,6 +116,7 @@ _OPTIONAL_ROUTERS = [
     ("app.api.agents",             ["router"]),
     ("app.api.operations",         ["router"]),
     ("app.api.simulations",        ["router"]),
+    ("app.api.quality",            ["router"]),
 ]
 for _module_name, _attrs in _OPTIONAL_ROUTERS:
     try:

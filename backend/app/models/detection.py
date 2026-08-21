@@ -1,6 +1,6 @@
 """Per-camera detection configuration (one row per detection type)."""
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -54,3 +54,38 @@ class DetectionConfig(Base):
     updated_at:       Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     camera = relationship("Camera", back_populates="detection_configs")
+
+
+class AlertQualityControl(Base):
+    """Escalation policy for one camera/detector pair.
+
+    ``review_only`` and ``quarantined`` both retain alerts and evidence while
+    suppressing notifications.  Quarantine is the automatic circuit-breaker;
+    review-only may also be selected manually during calibration.
+    """
+
+    __tablename__ = "alert_quality_controls"
+    __table_args__ = (UniqueConstraint("camera_id", "detection_type",
+                                       name="uq_alert_quality_pair"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_id: Mapped[int] = mapped_column(
+        ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    detection_type: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(24), default="active",
+                                      server_default="active", index=True)
+    source: Mapped[str] = mapped_column(String(16), default="automatic",
+                                        server_default="automatic")
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    changed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    reviewed_count_at_quarantine: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0")
+    last_sample_size: Mapped[int] = mapped_column(Integer, default=0,
+                                                   server_default="0")
+    last_false_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    camera = relationship("Camera")

@@ -930,6 +930,8 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     db.add(rec); db.flush()
     alert = Alert(event_id=rec.id, status="new")
     db.add(alert); db.flush()
+    from app.services.alert_quality import apply_quality_control
+    apply_quality_control(db, alert, rec)
     # Business-hours filmstrip for BEAT-created alerts too (Issue 2, Aug
     # 2026): shop_opened_inferred / recovery / shop_not_opened previously
     # got a single thumbnail but never the 6-frame strip, because only
