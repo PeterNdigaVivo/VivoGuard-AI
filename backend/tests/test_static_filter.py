@@ -6,7 +6,7 @@ window's first position).
 """
 from __future__ import annotations
 
-from app.ai.tracker import is_static_track
+from app.ai.tracker import Track, is_static_track, partition_static_person_tracks
 
 FRAME = (640, 360)          # (w, h)
 
@@ -62,3 +62,42 @@ def test_only_last_window_considered() -> None:
     hist = ([_bb(0.2 + i * 0.05, 0.5) for i in range(6)]
             + [_bb(0.5, 0.5)] * 10)
     assert is_static_track(hist, FRAME, window=10) is True
+
+
+def _track(track_id: int, history: list[list[float]], cls: str = "person") -> Track:
+    return Track(track_id, cls, history[-1], 0.0, 1.0, history=history)
+
+
+def test_static_person_is_removed_from_actionable_detector_inputs() -> None:
+    det = {"cls": "person", "track_id": 7, "bbox_norm": _bb(0.5, 0.5)}
+    track = _track(7, [_bb(0.5, 0.5)] * 10)
+    raw, tracks, static_ids = partition_static_person_tracks(
+        [det], [(track, det)], FRAME,
+    )
+    assert raw == []
+    assert tracks == []
+    assert static_ids == {7}
+
+
+def test_untracked_person_fails_open() -> None:
+    det = {"cls": "person", "bbox_norm": _bb(0.5, 0.5)}
+    raw, tracks, static_ids = partition_static_person_tracks([det], [], FRAME)
+    assert raw == [det]
+    assert tracks == []
+    assert static_ids == set()
+
+
+def test_person_who_moved_is_never_filtered_after_pausing() -> None:
+    moving = [_bb(0.3 + i * 0.01, 0.5) for i in range(10)]
+    det = {"cls": "person", "track_id": 4, "bbox_norm": moving[-1]}
+    track = _track(4, moving)
+    partition_static_person_tracks([det], [(track, det)], FRAME)
+    assert track.extra["observed_motion"] is True
+
+    track.history = [_bb(0.5, 0.5)] * 10
+    raw, tracks, static_ids = partition_static_person_tracks(
+        [det], [(track, det)], FRAME,
+    )
+    assert raw == [det]
+    assert tracks == [(track, det)]
+    assert static_ids == set()

@@ -7,6 +7,9 @@ export interface Alert {
   resolved_at: string | null
   notes: string | null
   created_at: string
+  event_timestamp: string | null
+  delivery_delay_seconds: number | null
+  scope: 'camera' | 'fleet' | string
   camera_id: number | null; camera_name: string | null
   detection_type: string | null; confidence: number | null
   bbox_norm: number[] | null

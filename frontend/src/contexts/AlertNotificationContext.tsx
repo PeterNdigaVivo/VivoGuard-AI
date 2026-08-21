@@ -149,7 +149,14 @@ export function AlertNotificationProvider({ children }: { children: ReactNode })
       return
     }
 
-    const fresh = scoped.filter(a => !notifiedRef.current.has(a.id))
+    // Never turn a backfilled/stale database row into a "live" alarm. The
+    // card remains in the feed (with its delivery-delay badge), but audible
+    // and browser notifications are reserved for alerts created recently.
+    const now = Date.now()
+    const fresh = scoped.filter(a =>
+      !notifiedRef.current.has(a.id)
+      && now - new Date(a.created_at).getTime() <= 2 * 60 * 1000
+    )
     if (fresh.length > 0) {
       if (s.sound && !mutedRef.current) playSound()            // one horn per batch
       if (s.browserNotif) fresh.slice(0, 3).forEach(showBrowserNotif)  // cap the burst

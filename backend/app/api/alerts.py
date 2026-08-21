@@ -1034,8 +1034,20 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
                   camera: Camera | None, zone: Zone | None,
                   store=None) -> AlertOut:
     item = AlertOut.model_validate(alert)
-    item.camera_id      = event.camera_id
-    item.camera_name    = camera.name if camera else None
+    extra = event.extra or {}
+    item.scope          = str(extra.get("scope") or "camera")
+    scoped_camera       = None if item.scope == "fleet" else camera
+    item.camera_id      = None if item.scope == "fleet" else event.camera_id
+    item.camera_name    = scoped_camera.name if scoped_camera else None
+    item.event_timestamp = event.timestamp
+    if event.timestamp and alert.created_at:
+        event_ts = event.timestamp
+        alert_ts = alert.created_at
+        if event_ts.tzinfo is None:
+            event_ts = event_ts.replace(tzinfo=timezone.utc)
+        if alert_ts.tzinfo is None:
+            alert_ts = alert_ts.replace(tzinfo=timezone.utc)
+        item.delivery_delay_seconds = max(0, int((alert_ts - event_ts).total_seconds()))
     item.detection_type = event.detection_type
     item.confidence     = event.confidence
     item.bbox_norm      = event.bbox_json
@@ -1051,7 +1063,7 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.severity_4       = s4
     item.severity_4_color = _severity_4_color(s4)
     item.severity_4_emoji = _SEVERITY_4_EMOJI.get(s4, "•")
-    item.title          = _title(event, camera, zone, store)
+    item.title          = _title(event, scoped_camera, zone, store)
     item.plain_title    = _plain_title(event, zone, store)
     item.body           = _body(event, zone, store)
     item.what_to_do     = _what_to_do(event, store, zone)

@@ -186,7 +186,7 @@ _TEMPORAL_GATE_EXEMPT: set[str] = {
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None, store_id: int | None = None,
-                   suppress_alert: bool = False) -> int:
+                   suppress_alert: bool = False) -> tuple[int, int | None]:
     """Always writes a DetectionEvent row. `suppress_alert` ONLY
     controls whether the companion Alert row is created — it must
     NEVER gate the underlying detection_event persistence (Vivo
@@ -231,10 +231,12 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # metric set, and not explicitly suppressed by the caller. The
     # DetectionEvent itself is still persisted so the detector activity
     # table and ML-feedback paths see every event.
+    alert_id: int | None = None
     if ev.detection_type not in _SKIP_ALERT_TYPES and not suppress_alert:
         alert = Alert(event_id=rec.id, status="new")
         db.add(alert)
         db.flush()
+        alert_id = alert.id
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
         # Business-hours filmstrip — 6 smartly-timed snapshots bracketing
@@ -264,7 +266,7 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                 analyse_alert_scene.delay(alert.id)
         except Exception:
             pass
-    return rec.id
+    return rec.id, alert_id
 
 
 # Zone tags that make a bare "person" detection alert-worthy even
@@ -528,9 +530,24 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 except Exception as _reid_exc:           # noqa: BLE001
                     log.debug("reid loop skipped cam=%s: %s", camera_id, _reid_exc)
 
+            # Keep fixed false-positive boxes (chairs, mannequins and
+            # merchandise mislabelled as people) out of actionable detector
+            # input.  Previously we calculated this only for the live-count
+            # widget, so those same static boxes still generated alerts.
+            from app.ai.tracker import partition_static_person_tracks
+            _filter_on = bool(getattr(settings, "mannequin_filter_enabled", True))
+            _win = int(getattr(settings, "activity_static_window_frames", 10))
+            _minpx = float(getattr(settings, "activity_static_displacement_px", 5))
+            _fh, _fw = frame.shape[:2]
+            detector_raw, detector_tracks, _static_ids = partition_static_person_tracks(
+                raw, tracks, (_fw, _fh), enabled=_filter_on,
+                min_px=_minpx, window=_win,
+            )
+
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
-                raw_detections=raw, tracks=tracks, zones=zones, config=cfg,
+                raw_detections=detector_raw, tracks=detector_tracks,
+                zones=zones, config=cfg,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
@@ -583,33 +600,10 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 # person who just walked in is never suppressed. If
                 # tracking is degraded (no ids at all), fall back to the
                 # raw count rather than reporting zero.
-                from app.ai.tracker import is_static_track
-                _filter_on = bool(getattr(settings,
-                                          "mannequin_filter_enabled", True))
-                _win = int(getattr(settings,
-                                   "activity_static_window_frames", 10))
-                _minpx = float(getattr(settings,
-                                       "activity_static_displacement_px", 5))
-                _fh, _fw = frame.shape[:2]
-                _track_by_id = {tr.track_id: tr for tr, _d in tracks}
                 _persons = [d for d in raw if d.get("cls") == "person"]
-                _moving: list[dict] = []
-                _static_flags: list[bool] = []
-                _static_n = 0
-                for d in _persons:
-                    _tid = d.get("track_id")
-                    _tr = _track_by_id.get(_tid) if _tid is not None else None
-                    _is_static = (_filter_on
-                                  and _tr is not None and is_static_track(
-                        _tr.history, (_fw, _fh),
-                        min_px=_minpx, window=_win))
-                    _static_flags.append(_is_static)
-                    if _is_static:
-                        _static_n += 1
-                        continue
-                    _moving.append(d)
-                if not _track_by_id and _persons:
-                    _moving, _static_n = _persons, 0
+                _static_flags = [d.get("track_id") in _static_ids for d in _persons]
+                _moving = [d for d in _persons if d.get("track_id") not in _static_ids]
+                _static_n = len(_persons) - len(_moving)
                 _people_now = len(_moving)
                 # ByteTrack context (ADDITIVE for the tab endpoint):
                 # MOVING persons only — the sentinel's snapshots and the
@@ -714,14 +708,17 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                     "frames_seen=%d < %d — alert suppressed",
                                     ev.detection_type, camera_id,
                                     ev.track_id, _fs, _need)
-                        eid = _persist_event(db, camera_id, ev, cam.ai_model_id,
+                        eid, alert_id = _persist_event(
+                                             db, camera_id, ev, cam.ai_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name, store_id=store_id,
                                              suppress_alert=suppress)
-                        if suppress:
+                        if suppress or alert_id is None:
                             continue  # not an operator-facing event
                         events_emitted.append({
-                            "id": eid,
+                            "id": alert_id,
+                            "alert_id": alert_id,
+                            "event_id": eid,
                             "camera_id": camera_id,
                             "detection_type": ev.detection_type,
                             "confidence": ev.confidence,

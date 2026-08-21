@@ -487,6 +487,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               </span>
             )}
             <span className="text-xs text-slate-500">{formatTime(alert.created_at)}</span>
+            {(alert.delivery_delay_seconds ?? 0) >= 120 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold"
+                    title="Time between detection and creation of this alert">
+                Reported {Math.round((alert.delivery_delay_seconds ?? 0) / 60)} min late
+              </span>
+            )}
             {alert.camera_name && (
               <span className="text-xs text-slate-500">· {alert.camera_name}</span>
             )}
@@ -600,12 +606,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
                 ✓ Marked {isDismissed ? 'False' : 'True'}
               </span>
             )}
-            {/* View Clip — primary blue, same size/weight as the True/False
-                feedback buttons, sitting right after them. Only rendered
-                when a recorded clip actually exists for this alert. */}
-            {alert.clip_url && (
+            {/* Incident review is always visible for camera alerts. When a
+                recording is unavailable the modal explains why and offers
+                live view, instead of silently hiding the expected action. */}
+            {alert.camera_id && (
               <FeedbackBtn onClick={() => setClipModal(true)} tone="blue" disabled={busy}>
-                🎬 View Clip
+                🎬 Incident Clip
               </FeedbackBtn>
             )}
             {alert.status === 'new' && !alert.acknowledged_at && (
