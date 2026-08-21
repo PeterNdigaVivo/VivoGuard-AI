@@ -1,0 +1,25 @@
+# VivoGuard WhatsApp feedback ledger
+
+This ledger records issue fingerprints from the `VivoGuard AI TRAINING` group
+so the feedback lane does not reprocess an already handled report. It records
+code readiness only; a pushed commit is **not** evidence of deployment.
+
+| Reported (Africa/Nairobi) | Issue fingerprint | Repository resolution | Verification | Group acknowledgement | Deployment implication |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-21 11:33–12:39 | Delayed/stale alert delivery; static chair/mannequin/merchandise false-person alerts; recurring and ambiguous system-health alert; missing incident-clip action; continuous recording request | `fc4d6e9` | 158 backend tests, changed-code Python lint, frontend production build (recorded in the 13:18 group resolution) | Posted 2026-08-21 13:18 | Code ready for deployment; not deployed by this lane |
+| 2026-08-21 12:52 | Uniform non-compliance observed at Capital Store at 12:46 but no alert | `b1aa6fd` makes the violation timer run concurrently with the staff-dwell gate | Included in 162 passing backend tests; changed-code Python lint passed | Not yet posted; awaiting verified remote push | Requires deployment and camera-level validation; not deployed by this lane |
+| 2026-08-21 12:58 | Live Activity showed two people while five were visible | `b1aa6fd` adds a bounded five-second tracked-person hold; `65dff93` preserves static-object filtering in that smoothed count | Included in 162 passing backend tests; changed-code Python lint passed | Not yet posted; awaiting verified remote push | Requires deployment and camera-level validation; not deployed by this lane |
+
+## Verification notes
+
+- Full backend test run on 2026-08-21: `162 passed, 1 skipped`.
+- Ruff passed for every file changed by `b1aa6fd` and `65dff93`.
+- Repository-wide Ruff still reports a pre-existing `E401` in
+  `backend/alembic/env.py:12`; it is outside these fixes.
+
+## Operational follow-ups
+
+| Sent (Africa/Nairobi) | Owner | Exact ask | Deadline | Response state |
+| --- | --- | --- | --- | --- |
+| 2026-08-21 13:43 | Chris | Confirm whether the person behind the Junction Channel 5 counter is authorised staff before either alert is marked true or false | 13:58 (15-minute urgent safety/security window) | Resolved at 13:54: Chris confirmed authorised staff and identified an orange neck tag. No alert state was changed by this lane. |
+| 2026-08-21 13:51 | Peter | Confirm whether the Capital Centre camera-record cleanup was intentional and who actioned it; if unauthorised, pause further camera changes and preserve audit logs | 14:06 (15-minute active production-change window) | Acknowledged at 13:52: “Checking On capital”. No repeat follow-up is due while acknowledged. |
