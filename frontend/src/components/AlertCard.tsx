@@ -852,9 +852,13 @@ function formatTime(iso: string): string {
 export function groupAlerts(rows: Alert[]): {
   head: Alert; count: number; last: string; siblings: Alert[]
 }[] {
+  const eatDay = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit',
+  })
   const groups = new Map<string, Alert[]>()
   for (const a of rows) {
-    const day = (a.created_at || '').slice(0, 10)
+    const parsed = new Date(a.created_at || '')
+    const day = Number.isNaN(parsed.getTime()) ? (a.created_at || '').slice(0, 10) : eatDay.format(parsed)
     const key = `${day}|${a.detection_type ?? ''}|${a.camera_id ?? 'na'}`
     const arr = groups.get(key) ?? []
     arr.push(a)

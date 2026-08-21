@@ -1106,6 +1106,24 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
 
 # ---- Endpoints -----------------------------------------------------
 
+def _eat_day_bounds(now: datetime | None = None) -> tuple[datetime, datetime, datetime]:
+    """Return yesterday/today/tomorrow EAT midnights as UTC instants.
+
+    Alert timestamps are stored in UTC, but operators and stores work in
+    Africa/Nairobi.  Using UTC midnight made the summary disagree with the
+    EAT-aligned date picker for the first three hours of every day.
+    """
+    from zoneinfo import ZoneInfo
+
+    eat = ZoneInfo("Africa/Nairobi")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local = current.astimezone(eat)
+    today_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = today_local.astimezone(timezone.utc)
+    return today - timedelta(days=1), today, today + timedelta(days=1)
+
 @router.get("/summary")
 @cached_store_endpoint("alerts-summary", ttl=15)
 def alerts_summary(db: Session = Depends(get_db),
@@ -1122,8 +1140,7 @@ def alerts_summary(db: Session = Depends(get_db),
     up 12% vs yesterday" without a follow-up request."""
     from types import SimpleNamespace
     from app.models import Store as _Store
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    yest_start = today - timedelta(days=1)
+    yest_start, today, tomorrow = _eat_day_bounds()
 
     # Yesterday is only ever used as a COUNT for the trend line — one
     # aggregate query instead of materialising every ORM row.
@@ -1149,7 +1166,7 @@ def alerts_summary(db: Session = Depends(get_db),
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .outerjoin(_Store, Camera.store_id == _Store.id)
             .filter(DetectionEvent.timestamp >= today,
-                    DetectionEvent.timestamp < today + timedelta(days=1)))
+                    DetectionEvent.timestamp < tomorrow))
     if store_id is not None:
         tq = tq.filter(Camera.store_id == store_id)
     rows = tq.all()
@@ -1288,7 +1305,7 @@ def export_alerts_xlsx(
     if since:
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:
-        q = q.filter(DetectionEvent.timestamp <= until)
+        q = q.filter(DetectionEvent.timestamp < until)
     rows = q.order_by(desc(Alert.created_at)).limit(5000).all()
 
     wb = Workbook()
@@ -1375,7 +1392,7 @@ def list_alerts(
     if since:
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:
-        q = q.filter(DetectionEvent.timestamp <= until)
+        q = q.filter(DetectionEvent.timestamp < until)
     if order == "recent":
         # Pure recency — used by the real-time notification poller. Severity-
         # first ordering (below) would bury a NEW low-severity alert past
@@ -1510,7 +1527,7 @@ def resolve_all(db: Session = Depends(get_db),
     if since:
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:
-        q = q.filter(DetectionEvent.timestamp <= until)
+        q = q.filter(DetectionEvent.timestamp < until)
     now = datetime.now(timezone.utc)
     n = 0
     for a in q.all():

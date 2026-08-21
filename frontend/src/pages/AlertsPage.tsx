@@ -2,7 +2,7 @@
 // May-2026 redesign: same card component as the per-store dashboard
 // feed so titles, severity colours, and action buttons match exactly.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Card, PageHeader } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
@@ -19,6 +19,7 @@ type Quick = 'store' | 'urgent' | 'attention' | 'resolved' | 'all'
 const STORE_INTEL_TYPE = 'store_intelligence'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
 const _isActionable = (a: Alert) => !_isStoreIntel(a)
+const PAGE_SIZE = 100
 
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
@@ -27,6 +28,12 @@ export default function AlertsPage() {
   const [storeId, setStoreId] = useState<string>('')
   const [search, setSearch] = useState('')
   const [stores, setStores] = useState<Store[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const requestSequence = useRef(0)
   const [summary, setSummary] = useState({
     urgent: 0, attention: 0,
     resolved_today: 0, dismissed_today: 0,
@@ -49,19 +56,52 @@ export default function AlertsPage() {
 
   useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
 
-  const reload = () => {
-    alertsApi.list({
-      store_id: storeId || undefined,
-      since: range.since,
-      until: range.until,
-      limit: 500,
-    }).then(setItems).catch(() => {})
-    alertsApi.summary(storeId ? Number(storeId) : undefined).then(setSummary).catch(() => {})
-  }
-  useEffect(() => { reload() }, [storeId, range.since, range.until])  // eslint-disable-line react-hooks/exhaustive-deps
+  const loadPage = useCallback(async (append = false, beforeId?: number) => {
+    const sequence = ++requestSequence.current
+    if (append) setLoadingMore(true)
+    else {
+      setLoading(true)
+      setItems([])
+    }
+    setLoadError(null)
+    try {
+      const page = await alertsApi.list({
+        store_id: storeId || undefined,
+        since: range.since,
+        until: range.until,
+        limit: PAGE_SIZE,
+        order: 'recent',
+        before_id: beforeId,
+      })
+      if (sequence !== requestSequence.current) return
+      setItems(previous => append
+        ? [...previous, ...page.filter(row => !previous.some(existing => existing.id === row.id))]
+        : page)
+      setHasMore(page.length === PAGE_SIZE)
+    } catch (error) {
+      if (sequence !== requestSequence.current) return
+      setLoadError(error instanceof Error ? error.message : String(error))
+      if (!append) setHasMore(false)
+    } finally {
+      if (sequence === requestSequence.current) {
+        setLoading(false)
+        setLoadingMore(false)
+      }
+    }
+  }, [storeId, range.since, range.until])
+
+  const reload = useCallback(() => { void loadPage(false) }, [loadPage])
+
+  useEffect(() => {
+    reload()
+    setSummaryError(null)
+    alertsApi.summary(storeId ? Number(storeId) : undefined)
+      .then(setSummary)
+      .catch(error => setSummaryError(error instanceof Error ? error.message : String(error)))
+  }, [reload, storeId])
 
   // Real-time: when /ws/alerts pushes a new event, refetch.
-  useEffect(() => alertsApi.subscribe(() => reload()), [])  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => alertsApi.subscribe(reload), [reload])
 
   // Instant-feedback: any time a card fires the resolve/dismiss
   // event, locally decrement the urgent/attention count so the header
@@ -135,6 +175,7 @@ export default function AlertsPage() {
   }, [items])
 
   const groups = groupAlerts(filtered)
+  const rawTotal = range.key === 'today' ? summary.today_count : null
 
   // Excel export — fetch with the bearer header (an <a href> can't
   // carry it) and trigger a download of the returned .xlsx blob.
@@ -208,6 +249,11 @@ export default function AlertsPage() {
           counts + resolved tally + avg-time-to-resolve + vs-yesterday
           trend in one glanceable strip. */}
       <ExecutiveSummaryBar summary={summary} />
+      {summaryError && (
+        <div className="mb-3 text-xs text-red-700" role="alert">
+          Today’s summary could not be refreshed: {summaryError}
+        </div>
+      )}
 
       {/* Legacy compact tally — kept beneath the bar for the operators
           who still scan for it. Drops once everyone's adopted the new
@@ -250,12 +296,27 @@ export default function AlertsPage() {
                className="border rounded px-2 py-1 text-sm flex-1 min-w-[160px]" />
 
         <span className="text-xs text-slate-500 dark:text-slate-300">
-          {range.label} · {filtered.length} shown
+          {range.label}
+          {' · '}{rawTotal == null ? `${items.length}${hasMore ? '+' : ''} raw alerts loaded` : `${rawTotal} raw alerts · ${items.length}${hasMore ? '+' : ''} loaded`}
+          {' · '}{groups.length} grouped incidents shown
         </span>
       </Card>
 
       <div className="space-y-2">
-        {groups.length === 0 ? (
+        {loading ? (
+          <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
+            <div role="status">Loading alerts…</div>
+          </Card>
+        ) : loadError && items.length === 0 ? (
+          <Card className="p-8 text-center text-red-700 bg-red-50 border-red-200">
+            <div className="font-medium">Alerts could not be loaded.</div>
+            <div className="text-xs mt-1 break-words">{loadError}</div>
+            <button type="button" onClick={reload}
+                    className="mt-3 px-3 py-1.5 rounded bg-red-700 text-white text-sm">
+              Try again
+            </button>
+          </Card>
+        ) : groups.length === 0 ? (
           <Card className="p-8 text-center text-slate-500 dark:text-slate-300">No alerts to show.</Card>
         ) : (
           groups.map(g => (
@@ -265,6 +326,23 @@ export default function AlertsPage() {
           ))
         )}
       </div>
+
+      {!loading && loadError && items.length > 0 && (
+        <Card className="p-3 mt-3 text-sm text-red-700 bg-red-50 border-red-200">
+          More alerts could not be loaded: {loadError}
+        </Card>
+      )}
+
+      {!loading && hasMore && (
+        <div className="mt-4 text-center">
+          <button type="button" disabled={loadingMore}
+                  onClick={() => void loadPage(true, items[items.length - 1]?.id)}
+                  className="px-4 py-2 rounded bg-slate-700 text-white text-sm
+                             hover:bg-slate-600 disabled:opacity-50">
+            {loadingMore ? 'Loading more…' : `Load next ${PAGE_SIZE} alerts`}
+          </button>
+        </div>
+      )}
 
       {/* Toast — bottom-right, auto-dismiss after 4s. */}
       {toast && (
