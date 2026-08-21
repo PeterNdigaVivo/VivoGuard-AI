@@ -44,6 +44,12 @@ RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridabl
 # Redis-side TTL is the only remaining safety net (e.g. supervisor itself
 # down).
 LOCK_TTL       = RUN_SECONDS + 30                  # 150s
+# A reservation is created before publishing a task.  With ~100 cameras and
+# 14 CPU worker slots, a legitimately queued task can wait around 15 minutes
+# before it starts.  Giving pending reservations an hour prevents Beat from
+# publishing the same camera every LOCK_TTL while still bounding recovery if
+# the broker loses a task entirely.
+PENDING_LOCK_TTL = max(3600, RUN_SECONDS * 32)
 # Heartbeat TTL must comfortably exceed LOCK_TTL so a missing-hb on a
 # still-live lock is unambiguously "task is dead", never a race.
 HB_TTL         = LOCK_TTL + 30                     # 180s
@@ -51,6 +57,26 @@ LOCK_KEY_FMT   = "vg:inference-lock:{camera_id}"
 HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # set once at task start
 HEALTH_KEY     = "vg:inference:health"             # supervisor breadcrumb
 LOCK_KEY_PREFIX = "vg:inference-lock:"
+
+_CLAIM_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  redis.call('expire', KEYS[1], tonumber(ARGV[2]))
+  redis.call('set', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[3]))
+  return 1
+end
+return 0
+"""
+
+_RELEASE_LUA = """
+local released = 0
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  released = released + redis.call('del', KEYS[1])
+end
+if redis.call('get', KEYS[2]) == ARGV[1] then
+  released = released + redis.call('del', KEYS[2])
+end
+return released
+"""
 
 # Sweep safety — we only clear a lock when hb is missing AND the lock
 # has ≤ this many seconds of TTL left. The lock-TTL grace prevents
@@ -60,6 +86,22 @@ SWEEP_TTL_THRESHOLD_S = 30
 
 def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url)
+
+
+def _claim_reserved_task(
+    r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
+) -> bool:
+    """Atomically convert this task's pending reservation to an active lock."""
+    return bool(r.eval(
+        _CLAIM_LUA, 2, lock, heartbeat, task_id, LOCK_TTL, HB_TTL,
+    ))
+
+
+def _release_owned_task(
+    r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
+) -> int:
+    """Release only keys owned by this task, never a newer task's lease."""
+    return int(r.eval(_RELEASE_LUA, 2, lock, heartbeat, task_id))
 
 
 def _sweep_stale_locks(r: redis.Redis) -> int:
@@ -152,15 +194,17 @@ def supervise_all() -> None:
         # SET NX with TTL — atomic acquire. Value is a placeholder until
         # we know the real task_id; stamped below.
         placeholder = f"pending:{int(time.time())}"
-        if r.set(lock, placeholder, ex=LOCK_TTL, nx=True):
+        if r.set(lock, placeholder, ex=PENDING_LOCK_TTL, nx=True):
             try:
                 ar = run_camera_inference.apply_async(
                     args=[cam.id],
                     kwargs={"max_seconds": RUN_SECONDS},
                     queue="inference",
                 )
-                # Stamp the lock with the real task_id (refresh TTL).
-                r.set(lock, ar.id, ex=LOCK_TTL)
+                # Stamp the reservation with the real task_id.  It remains a
+                # long pending lease until that exact task atomically claims
+                # it at worker start.
+                r.set(lock, ar.id, ex=PENDING_LOCK_TTL)
                 enqueued.append(cam.id)
             except Exception as e:
                 # apply_async failed (broker hiccup). Release the lock
@@ -196,13 +240,24 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
     r = _redis()
     lock = LOCK_KEY_FMT.format(camera_id=camera_id)
     hb   = HB_KEY_FMT.format(camera_id=camera_id)
+    task_id = str(self.request.id)
     log.info("inference.run_camera camera=%s max_seconds=%s start", camera_id, max_seconds)
     started = time.time()
+    claimed = False
     try:
-        # Heartbeat — set BEFORE any heavy work so the sweep can use
-        # its presence as proof the task is alive. HB_TTL > LOCK_TTL
-        # so a missing hb on a live lock is unambiguous.
-        r.set(hb, int(started), ex=HB_TTL)
+        # Old/duplicate broker messages must never run.  Only the exact task
+        # id recorded by the supervisor may convert the pending reservation
+        # into an active lock and heartbeat.
+        claimed = _claim_reserved_task(
+            r, lock=lock, heartbeat=hb, task_id=task_id,
+        )
+        if not claimed:
+            log.warning(
+                "inference.run_camera camera=%s task=%s skipped: "
+                "reservation missing or owned by another task",
+                camera_id, task_id,
+            )
+            return
         run_for_camera(camera_id, max_seconds=max_seconds)
     except Exception as e:
         log.exception("inference.run_camera camera=%s failed: %s", camera_id, e)
@@ -210,13 +265,13 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
         # on the next 30-second tick once the lock is released below
         # (or, on SIGKILL, cleared by the sweep).
     finally:
-        # Release the lock so the supervisor can re-enqueue immediately
-        # rather than waiting for TTL to elapse. Also clear the hb —
-        # avoids a freshly-acquired lock by a subsequent task seeing
-        # the dead task's hb and being misclassified as live.
-        try: r.delete(lock)
-        except Exception: pass
-        try: r.delete(hb)
-        except Exception: pass
+        # A stale task must not delete a newer task's reservation/heartbeat.
+        if claimed:
+            try:
+                _release_owned_task(
+                    r, lock=lock, heartbeat=hb, task_id=task_id,
+                )
+            except Exception:
+                pass
         log.info("inference.run_camera camera=%s exited after %.1fs",
                  camera_id, time.time() - started)
