@@ -67,7 +67,9 @@ celery_app.conf.update(
     task_routes={
         # Inference pool.
         "inference.run_camera":               {"queue": "inference"},
-        "inference.supervise_all":            {"queue": "inference"},
+        # Long-lived camera tasks deliberately fill the inference pool, so
+        # supervisor heartbeats must run on the dedicated short-task runner.
+        "inference.supervise_all":            {"queue": "beat"},
         # Operator-facing alerts pool.
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
@@ -82,7 +84,7 @@ celery_app.conf.update(
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
         "vlm.analyse_alert_scene":              {"queue": "alerts"},
-        "alerting.inference_pipeline_health_check": {"queue": "alerts"},
+        "alerting.inference_pipeline_health_check": {"queue": "beat"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         "alerting.after_hours_intrusion_check": {"queue": "alerts"},
         "alerting.after_hours_prune":           {"queue": "alerts"},

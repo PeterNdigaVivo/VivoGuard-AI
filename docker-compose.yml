@@ -215,6 +215,9 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Read-only shared access lets the frontend assurance agent inspect
+      # actual proxy responses instead of reporting an observability gap.
+      - nginx_logs:/var/log/nginx:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -389,6 +392,7 @@ services:
       - ./deploy/nginx/templates:/etc/nginx/vg-templates:ro
       - ./deploy/nginx/docker-entrypoint.d/10-tls-guard.sh:/docker-entrypoint.d/10-tls-guard.sh:ro
       - ./deploy/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
       # Let's Encrypt certs from the host (read-only) — the HTTPS profile points at
       # /etc/letsencrypt/live/vivoops.vivofashiongroup.net/{fullchain,privkey}.pem
       - /etc/letsencrypt:/etc/letsencrypt:ro
@@ -406,3 +410,4 @@ volumes:
   pg_data:
   redis_data:
   minio_data:
+  nginx_logs:
