@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.tasks.celery_app import celery_app
+from app.training.circuit_breaker import enforce_dataset_circuit
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def run_training_job(self, job_id: int) -> None:
     Synchronous debug trigger (runs inline in the current process,
     bypassing the broker entirely):
 
-        docker compose exec -T worker-alerts python3 -c "
+        docker compose exec -T worker-training python3 -c "
         from app.tasks.training import run_training_job
         run_training_job.apply(args=[734])
         "
@@ -91,6 +92,38 @@ def run_training_job(self, job_id: int) -> None:
     log.info("job %s: celery task received (task_id=%s) — handing to "
              "trainer", job_id, getattr(getattr(self, "request", None),
                                         "id", None))
+    # Execution-time idempotency + circuit guard. Several creation paths call
+    # .delay() directly, so a dispatcher-only breaker lets suspended datasets
+    # train anyway. It also lets an acks_late duplicate rerun a completed job.
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        from app.database import SessionLocal
+        from app.models import TrainingJob
+        with SessionLocal() as db:
+            guarded = db.get(TrainingJob, job_id)
+            if guarded is None:
+                log.error("job %s: task ignored because the row is missing", job_id)
+                return
+            if guarded.status not in ("queued", "running"):
+                log.info("job %s: duplicate task ignored (status=%s)",
+                         job_id, guarded.status)
+                return
+            refusal = enforce_dataset_circuit(db, guarded)
+            if refusal:
+                guarded.status = "cancelled"
+                guarded.error_message = refusal
+                guarded.completed_at = _dt.now(_tz.utc)
+                guarded.celery_task_id = None
+                db.commit()
+                log.error("job %s: blocked before trainer start: %s",
+                          job_id, refusal)
+                return
+    except Exception:
+        # Fail closed. A broken safety check must not become permission to
+        # spend compute or mutate a suspended training lineage.
+        log.exception("job %s: circuit check failed — refusing to train", job_id)
+        return
+
     # Concurrency cap at EXECUTION time. The dispatcher already caps
     # its own dispatches at 2, but every creation-time .delay() path
     # (cross-store button, specialists, orchestrator triggers) lands
@@ -107,7 +140,7 @@ def run_training_job(self, job_id: int) -> None:
                                 TrainingJob.id != job_id,
                                 TrainingJob.last_progress_at.isnot(None))
                         .count())
-            if active >= 2:
+            if active >= _MAX_CONCURRENT_JOBS:
                 j = db.get(TrainingJob, job_id)
                 if j is not None and j.status in ("queued", "running"):
                     old = j.status
@@ -140,17 +173,11 @@ _STALE_RUNNING_HOURS = 12
 # job requeued — at most this many times, then it fails for review.
 # Bounded so a deterministic crash can't requeue-loop forever.
 _MAX_STALL_REQUEUES = 2
-# Cap per-tick dispatches so a 100-job backlog doesn't slam the
-# worker-alerts pool all at once.
-_DISPATCH_MAX_PER_TICK = 3
-# Circuit breaker — when a dataset has accumulated this many failed
-# TrainingJobs (all-time, not consecutive), the next dispatch is
-# short-circuited to `failed` and the Dataset.description is stamped
-# with a `[suspended]` marker. Operators clear the marker to re-enable.
-_MAX_FAILURES_PER_DATASET = 3
-_SUSPENDED_MARKER = "[suspended]"
-
-
+# One CPU fitting process at a time. Marking more rows `running` than the
+# dedicated worker can consume makes queued tasks look like "never started"
+# stalls and causes false revokes/requeues.
+_MAX_CONCURRENT_JOBS = 1
+_DISPATCH_MAX_PER_TICK = 1
 def _requeue_or_fail(db, j, reason: str) -> None:
     """Shared recovery move for a wedged `running` job: revoke its
     Celery task (also blocks acks_late redelivery from double-running
@@ -223,7 +250,7 @@ try:
             qnames = {q.name for q in sender.task_consumer.queues}
         except Exception:
             qnames = set()
-        if "alerts" not in qnames:
+        if "training" not in qnames:
             return
         try:
             reset_zombie_running_jobs()
@@ -244,8 +271,7 @@ def dispatch_queued_jobs() -> None:
          per spec — operators must inspect.
       2. Pick up to _DISPATCH_MAX_PER_TICK oldest `queued` jobs,
          atomically mark them `running`, and enqueue
-         `training.run_job` on the `alerts` queue (NOT the inference
-         queue — live detection must never be interrupted by training).
+         `training.run_job` on the dedicated `training` queue.
 
     The original `.delay()` at job-creation time still fires
     immediately on the happy path; this task is the recovery net for
@@ -316,15 +342,15 @@ def dispatch_queued_jobs() -> None:
         if stale:
             db.commit()
 
-        # Parallel-job lock (Part 2 #5, Q3): at most 2 running jobs at once,
-        # and never 2 on the same detection_type. Simple DB status count —
-        # no locks, no deadlock risk. worker-alerts has 4 slots so 2 training
-        # jobs still leave room for alert tasks.
+        # Parallel-job lock: match the dedicated worker's default concurrency
+        # so a broker-waiting task is never mistaken for a started-but-stalled
+        # job. No locks and no inference/alert capacity is consumed.
         running = (db.query(TrainingJob)
                      .filter(TrainingJob.status == "running").all())
-        if len(running) >= 2:
-            log.info("dispatcher: %d job(s) already running (cap 2) — "
-                     "skipping this tick", len(running))
+        if len(running) >= _MAX_CONCURRENT_JOBS:
+            log.info("dispatcher: %d job(s) already running (cap %d) — "
+                     "skipping this tick", len(running),
+                     _MAX_CONCURRENT_JOBS)
             return
         running_types = {(j.config_json or {}).get("detection_type")
                          for j in running}
@@ -340,7 +366,7 @@ def dispatch_queued_jobs() -> None:
         dispatched: list[int] = []
         suspended: list[int] = []
         for j in picks:
-            if len(running) >= 2:
+            if len(running) >= _MAX_CONCURRENT_JOBS:
                 break
             dtype = (j.config_json or {}).get("detection_type")
             if dtype and dtype in running_types:
@@ -353,40 +379,19 @@ def dispatch_queued_jobs() -> None:
             if j.status != "queued":
                 continue
 
-            # Circuit breaker — count all-time failures on this
-            # dataset. Once we hit the threshold, this job and any
-            # future queued job for the same dataset short-circuit
-            # to `failed` until an operator clears the `[suspended]`
-            # marker from Dataset.description.
-            from app.models import Dataset as _Dataset
-            ds = db.get(_Dataset, j.dataset_id) if j.dataset_id else None
-            already_suspended = bool(
-                ds and (ds.description or "").startswith(_SUSPENDED_MARKER)
-            )
-            failures = (db.query(TrainingJob)
-                          .filter(TrainingJob.dataset_id == j.dataset_id,
-                                  TrainingJob.status == "failed")
-                          .count())
-            if already_suspended or failures >= _MAX_FAILURES_PER_DATASET:
-                if ds is not None and not already_suspended:
-                    prior = ds.description or "(none)"
-                    ds.description = (
-                        f"{_SUSPENDED_MARKER} {failures} training failures — "
-                        f"operator review required. Prior description: {prior}"
-                    )
-                j.status = "failed"
-                j.error_message = (
-                    f"Dataset has {failures} prior failures "
-                    f"(>= {_MAX_FAILURES_PER_DATASET}) — auto-suspended. "
-                    f"Clear the {_SUSPENDED_MARKER} prefix from the dataset "
-                    f"description to re-enable training."
-                )
+            # Central circuit policy counts only data-caused failures on the
+            # current revision. Worker restarts/stalls and prior breaker
+            # refusals are operational consequences, not dataset defects.
+            refusal = enforce_dataset_circuit(db, j)
+            if refusal:
+                j.status = "cancelled"
+                j.error_message = refusal
                 j.completed_at = _dt.now(_tz.utc)
+                j.celery_task_id = None
                 db.commit()
                 suspended.append(j.id)
-                log.error("dispatcher: dataset=%s suspended after %d failures; "
-                          "job=%s short-circuited to failed",
-                          j.dataset_id, failures, j.id)
+                log.error("dispatcher: dataset=%s blocked; job=%s cancelled: %s",
+                          j.dataset_id, j.id, refusal)
                 continue
 
             # Flip status BEFORE .apply_async so a re-entrant tick
@@ -399,7 +404,7 @@ def dispatch_queued_jobs() -> None:
             log.info("job %s: state queued -> running (dispatcher) "
                      "at epoch %s/%s", j.id, j.current_epoch, j.total_epochs)
             try:
-                res = run_training_job.apply_async(args=[j.id], queue="alerts")
+                res = run_training_job.apply_async(args=[j.id], queue="training")
                 # Task id lets the stall watchdog revoke a stuck run.
                 j.celery_task_id = getattr(res, "id", None)
                 db.commit()

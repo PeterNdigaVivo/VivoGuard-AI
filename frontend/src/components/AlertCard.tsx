@@ -358,11 +358,13 @@ export interface AlertCardProps {
   // sibling list so the user can expand to see them.
   groupCount?: number
   groupLast?: string
+  groupUnresolvedCount?: number
   groupSiblings?: Alert[]
   onChanged?: () => void
 }
 
-export function AlertCard({ alert: incoming, groupCount, groupLast, groupSiblings, onChanged }: AlertCardProps) {
+export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresolvedCount,
+  groupSiblings, onChanged }: AlertCardProps) {
   // Local copy of the alert so we can reflect a resolve / dismiss
   // immediately without waiting for the parent's reload — feels
   // instantaneous and never flashes back to "new".
@@ -500,6 +502,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupSibling
               <button onClick={() => setGroupExpanded(g => !g)}
                       className="text-[11px] text-sky-700 hover:underline">
                 ×{groupCount} today (last: {formatTime(groupLast ?? alert.created_at)}) {groupExpanded ? '▴' : '▾'}
+                {(groupUnresolvedCount ?? 0) > 0 && (
+                  <span className="ml-1 font-semibold text-red-700">
+                    · {groupUnresolvedCount} unresolved
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -850,7 +857,7 @@ function formatTime(iso: string): string {
 // accordion.
 
 export function groupAlerts(rows: Alert[]): {
-  head: Alert; count: number; last: string; siblings: Alert[]
+  head: Alert; count: number; last: string; unresolvedCount: number; siblings: Alert[]
 }[] {
   const eatDay = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -864,14 +871,23 @@ export function groupAlerts(rows: Alert[]): {
     arr.push(a)
     groups.set(key, arr)
   }
-  const out: { head: Alert; count: number; last: string; siblings: Alert[] }[] = []
+  const closed = (alert: Alert) => ['resolved', 'confirmed', 'dismissed'].includes(alert.status)
+  const out: {
+    head: Alert; count: number; last: string; unresolvedCount: number; siblings: Alert[]
+  }[] = []
   for (const arr of groups.values()) {
     arr.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    const last = arr[0].created_at
+    const unresolved = arr.filter(alert => !closed(alert))
+    // An unresolved occurrence must own the card even when a newer sibling
+    // was resolved; otherwise grouping hides work from the operator.
+    const head = unresolved[0] ?? arr[0]
     out.push({
-      head: arr[0],
+      head,
       count: arr.length,
-      last: arr[0].created_at,
-      siblings: arr.slice(1),
+      last,
+      unresolvedCount: unresolved.length,
+      siblings: arr.filter(alert => alert.id !== head.id),
     })
   }
   out.sort((a, b) => (b.last || '').localeCompare(a.last || ''))

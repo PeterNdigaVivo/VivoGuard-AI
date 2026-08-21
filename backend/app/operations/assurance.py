@@ -72,9 +72,26 @@ def upsert_case(db: Session, *, dedup_key: str, case_type: str, severity: str,
     return row
 
 
+def _resolve_inactive_cases(db: Session, *, case_type: str,
+                            active_keys: set[str], resolution: str) -> None:
+    """Close previously-open exceptions that the latest assessment cleared."""
+    now = utc_now()
+    rows = db.query(AssuranceCase).filter(
+        AssuranceCase.case_type == case_type,
+        AssuranceCase.status.in_(OPEN_STATUSES),
+    ).all()
+    for row in rows:
+        if row.dedup_key in active_keys:
+            continue
+        row.status = "resolved"
+        row.resolved_at = now
+        row.resolution = resolution
+
+
 def assess_coverage(db: Session, now: datetime | None = None, *, persist: bool = False) -> list[dict]:
     now = ensure_aware(now or utc_now())
     results: list[dict] = []
+    active_case_keys: set[str] = set()
     requirements = db.query(CriticalZoneRequirement).filter(
         CriticalZoneRequirement.is_active.is_(True)).all()
     configured_store_ids = {r.store_id for r in requirements}
@@ -88,7 +105,9 @@ def assess_coverage(db: Session, now: datetime | None = None, *, persist: bool =
                 "assessed_at": now.isoformat()}
         results.append(item)
         if persist:
-            upsert_case(db, dedup_key=f"coverage-config:{store.id}", case_type="coverage_gap",
+            key = f"coverage-config:{store.id}"
+            active_case_keys.add(key)
+            upsert_case(db, dedup_key=key, case_type="coverage_gap",
                         severity="critical", title=f"Critical-zone map missing: {store.name}",
                         store_id=store.id, evidence=item,
                         description="Map entrance, POS/cash, sales floor and stockroom/back-door zones to cameras.")
@@ -121,11 +140,18 @@ def assess_coverage(db: Session, now: datetime | None = None, *, persist: bool =
                 "clip_retrievable": clip_ok, "assessed_at": now.isoformat()}
         results.append(item)
         if persist and issues:
-            upsert_case(db, dedup_key=f"coverage:{req.id}:{','.join(sorted(issues))}",
+            key = f"coverage:{req.id}:{','.join(sorted(issues))}"
+            active_case_keys.add(key)
+            upsert_case(db, dedup_key=key,
                         case_type="coverage_gap", severity=status,
                         title=f"Coverage assurance failed: {req.name}", store_id=req.store_id,
                         zone_id=req.zone_id, evidence=item,
                         description="Restore coverage or correct the mapped camera/zone; verify a retrievable clip.")
+    if persist:
+        _resolve_inactive_cases(
+            db, case_type="coverage_gap", active_keys=active_case_keys,
+            resolution="Latest coverage assessment confirms that this exception has cleared.",
+        )
     return results
 
 
@@ -137,6 +163,7 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
             .join(Camera, Camera.id == DetectionEvent.camera_id)
             .filter(Alert.status.in_(("new", "escalated")), Alert.resolved_at.is_(None)).limit(500).all())
     critical_types = {"weapon", "brandished_weapon", "fight", "fire", "smoke", "intrusion"}
+    active_case_keys: set[str] = set()
     for alert, event, camera in rows:
         age = (now - ensure_aware(alert.created_at)).total_seconds()
         sla = 300 if event.detection_type in critical_types else 1800
@@ -149,12 +176,27 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
         if not event.clip_path and not alert.snapshot_paths:
             issues.append("evidence_missing")
         if issues:
-            upsert_case(db, dedup_key=f"alert-quality:{alert.id}:{','.join(sorted(issues))}",
+            key = f"alert-quality:{alert.id}:{','.join(sorted(issues))}"
+            active_case_keys.add(key)
+            upsert_case(db, dedup_key=key,
                         case_type="alert_quality", severity="critical" if event.detection_type in critical_types else "high",
                         title=f"Alert {alert.id} requires operational follow-up", store_id=camera.store_id,
                         camera_id=camera.id, alert_id=alert.id, event_id=event.id,
                         evidence={"issues": issues, "age_seconds": age, "delivery_latency_seconds": latency, "sla_seconds": sla})
             count += 1
+    # Close cases tied to alerts that operators already handled, including
+    # alerts outside the bounded 500-row assessment batch.
+    for case in db.query(AssuranceCase).filter(
+            AssuranceCase.case_type == "alert_quality",
+            AssuranceCase.status.in_(OPEN_STATUSES)).all():
+        alert = db.get(Alert, case.alert_id) if case.alert_id else None
+        alert_open = bool(alert and alert.status in ("new", "escalated") and
+                          alert.resolved_at is None)
+        if case.dedup_key in active_case_keys or alert_open:
+            continue
+        case.status = "resolved"
+        case.resolved_at = utc_now()
+        case.resolution = "Alert is no longer open; the operational exception has cleared."
     return count
 
 
@@ -162,6 +204,7 @@ def create_lone_worker_cases(db: Session, now: datetime | None = None) -> int:
     now = ensure_aware(now or utc_now())
     since = now - timedelta(minutes=15)
     count = 0
+    active_case_keys: set[str] = set()
     for store in db.query(Store).filter(Store.is_active.is_(True)).all():
         if store_is_open(store, now):
             continue
@@ -174,12 +217,18 @@ def create_lone_worker_cases(db: Session, now: datetime | None = None) -> int:
         if estimated_people == 1:
             evidence = {"event_ids": [e.id for e in events[:10]], "window_minutes": 15,
                         "estimated_people": estimated_people, "basis": "single tracked person after business hours"}
-            upsert_case(db, dedup_key=f"lone-worker:{store.id}:{now.date().isoformat()}",
+            key = f"lone-worker:{store.id}:{now.date().isoformat()}"
+            active_case_keys.add(key)
+            upsert_case(db, dedup_key=key,
                         case_type="lone_worker", severity="high",
                         title=f"Possible lone worker or late departure: {store.name}", store_id=store.id,
                         camera_id=events[0].camera_id, event_id=events[0].id, evidence=evidence,
                         description="Confirm staff authorisation and welfare. Do not infer misconduct from presence alone.")
             count += 1
+    _resolve_inactive_cases(
+        db, case_type="lone_worker", active_keys=active_case_keys,
+        resolution="Latest after-hours assessment no longer shows a single tracked person.",
+    )
     return count
 
 

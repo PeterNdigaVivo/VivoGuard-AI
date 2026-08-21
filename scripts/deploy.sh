@@ -35,12 +35,13 @@ if [ ! -f .env ]; then
   exit 0
 fi
 
-# 3. Build images. The streamer image FROMs the api image, so build api first.
-echo "→ building api image (this is the slow one — torch + ultralytics)"
+# 3. Build images. Build every named application service explicitly so a new
+# queue/worker cannot be omitted from a release by an obsolete service alias.
+echo "→ building api image"
 docker compose build api
 
 echo "→ building remaining images"
-docker compose build streamer worker frontend
+docker compose build streamer worker-inference worker-alerts worker-training recorder frontend
 
 # 4. Start only stateful dependencies.  Keep the currently running API and
 # workers on the old image while the new schema is applied; migrations in a

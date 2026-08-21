@@ -188,6 +188,16 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         return {"detection_type": detection_type,
                 "status": "skipped",
                 "reason": "no feedback dataset yet"}
+    pos_ds = db.query(Dataset).filter(
+        Dataset.name == f"feedback-{detection_type}").first()
+    from app.training.circuit_breaker import dataset_circuit_state
+    circuit = dataset_circuit_state(db, pos_ds)
+    if circuit["suspended"]:
+        return {"detection_type": detection_type,
+                "status": "suspended",
+                "reason": circuit["reason"],
+                "dataset_id": pos_ds.id if pos_ds else None,
+                "dataset_failures": circuit["failures"]}
     parent = _pick_parent_model(db, detection_type)
     if parent is None:
         return {"detection_type": detection_type,
@@ -221,8 +231,6 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
                 "positives_new": pos_new, "negatives_new": neg_new,
                 "days_since_last": days_elapsed}
 
-    pos_ds = db.query(Dataset).filter(
-        Dataset.name == f"feedback-{detection_type}").first()
     neg_ds = db.query(Dataset).filter(
         Dataset.name == f"feedback-negative-{detection_type}").first()
 
@@ -369,6 +377,12 @@ def enqueue_full_retrain(db: Session, detection_type: str) -> dict:
     if pos_ds is None:
         return {"detection_type": detection_type, "status": "skipped",
                 "reason": "no positive pool"}
+    from app.training.circuit_breaker import dataset_circuit_state
+    circuit = dataset_circuit_state(db, pos_ds)
+    if circuit["suspended"]:
+        return {"detection_type": detection_type, "status": "suspended",
+                "reason": circuit["reason"], "dataset_id": pos_ds.id,
+                "dataset_failures": circuit["failures"]}
     pos_count = (db.query(TrainingImage)
                    .filter(TrainingImage.dataset_id == pos_ds.id,
                            TrainingImage.eligible_for_training.is_(True),

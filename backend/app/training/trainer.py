@@ -177,6 +177,26 @@ def run_job(job_id: int) -> None:
         if not ds:
             raise RuntimeError("dataset missing")
 
+        # Business-logic guard behind the Celery task's outer guard. This
+        # also protects synchronous maintenance/debug callers that invoke
+        # run_job() directly and prevents duplicate delivery from rerunning a
+        # terminal job.
+        if job.status not in ("queued", "running"):
+            log.info("job %s: trainer ignored terminal status=%s",
+                     job_id, job.status)
+            return
+        from app.training.circuit_breaker import enforce_dataset_circuit
+        refusal = enforce_dataset_circuit(db, job)
+        if refusal:
+            job.status = "cancelled"
+            job.error_message = refusal
+            job.completed_at = datetime.now(timezone.utc)
+            job.celery_task_id = None
+            db.commit()
+            log.error("job %s: trainer blocked before dataset preparation: %s",
+                      job_id, refusal)
+            return
+
         cfg = job.config_json or {}
         _old_status = job.status
         job.status        = "running"
@@ -433,6 +453,15 @@ def run_job(job_id: int) -> None:
                     if (job2.best_map50 or 0) < final_m:
                         job2.best_map50 = final_m
             ds2 = db.get(Dataset, job2.dataset_id) if job2 else None
+            # A force-dispatch is an explicit, attributable one-run breaker
+            # override. Only successful completion proves the reviewed retry
+            # was safe and clears the suspension; failed overrides leave it
+            # intact for further investigation.
+            if (ds2 is not None
+                    and cfg.get("circuit_breaker_override")
+                    and (ds2.description or "").startswith("[suspended]")):
+                from app.training.circuit_breaker import restore_description
+                ds2.description = restore_description(ds2.description)
             # Auto-version: next vN for this model name. v1 if first.
             model_name = job2.model_name if job2 else f"model-{job_id}"
             existing = (db.query(AIModel)

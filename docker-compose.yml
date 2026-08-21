@@ -188,8 +188,8 @@ services:
   # --- Alerts / bookkeeping worker. TWO processes (Aug 2026 split):
   #   beat-runner    -Q beat, 1 slot — scheduled/lightweight tasks
   #                  (status report, dispatchers, watchdogs, sentinel).
-  #   alerts-worker  -Q alerts, 4 slots — the heavy work (training
-  #                  jobs, harvests, previews, VLM).
+  #   alerts-worker  -Q alerts, 4 slots — notifications, harvests,
+  #                  previews and VLM (never model fitting).
   # Split because simultaneous training jobs filled every shared slot
   # and beat-queue tasks (incl. the daily status report) waited
   # 30-60+ min behind them. `exec` keeps the main worker as PID
@@ -210,6 +210,31 @@ services:
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings
+      - ./data/models:/data/models
+      - ./data/datasets:/data/datasets
+      - ./data/thumbnails:/data/thumbnails
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [vivoguard]
+
+  # --- Training worker. One fitting process at a time on CPU. Keeping this
+  # queue separate prevents training from consuming alert-delivery slots and
+  # prevents an alerts-worker restart from killing an active training job.
+  worker-training:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args:
+        GPU_BACKEND: ${GPU_BACKEND:-cpu}
+    image: vivoguard/worker:latest
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - "celery -A app.tasks.celery_app worker -Q training --loglevel=info --concurrency=${WORKER_TRAINING_CONCURRENCY:-1} -n training-worker@%h"
+    environment: *app-env
+    volumes:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails

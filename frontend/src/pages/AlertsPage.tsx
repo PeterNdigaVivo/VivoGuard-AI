@@ -19,6 +19,7 @@ type Quick = 'store' | 'urgent' | 'attention' | 'resolved' | 'all'
 const STORE_INTEL_TYPE = 'store_intelligence'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
 const _isActionable = (a: Alert) => !_isStoreIntel(a)
+const _isOpen = (a: Alert) => !['resolved', 'confirmed', 'dismissed'].includes(a.status)
 const PAGE_SIZE = 100
 
 export default function AlertsPage() {
@@ -141,8 +142,8 @@ export default function AlertsPage() {
     } else {
       // Actionable tabs exclude store_intelligence only.
       rows = rows.filter(_isActionable)
-      if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && a.status === 'new')
-      else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new')
+      if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && _isOpen(a))
+      else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a))
       // 'confirmed' covers alerts the /resolve endpoint flipped (it
       // re-uses that bucket as a "handled" state). 'dismissed' covers
       // "Not a problem".
@@ -166,9 +167,9 @@ export default function AlertsPage() {
     const actionable = items.filter(_isActionable)
     return {
       // Store Update badge = unread (new) store_intelligence updates.
-      store:     items.filter(a => _isStoreIntel(a) && a.status === 'new').length,
-      urgent:    actionable.filter(a => a.severity_label === 'URGENT' && a.status === 'new').length,
-      attention: actionable.filter(a => a.severity_label === 'ATTENTION' && a.status === 'new').length,
+      store:     items.filter(a => _isStoreIntel(a) && _isOpen(a)).length,
+      urgent:    actionable.filter(a => a.severity_label === 'URGENT' && _isOpen(a)).length,
+      attention: actionable.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a)).length,
       resolved:  actionable.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
       all:       actionable.length,
     }
@@ -322,6 +323,7 @@ export default function AlertsPage() {
           groups.map(g => (
             <AlertCard key={g.head.id} alert={g.head}
                        groupCount={g.count} groupLast={g.last}
+                       groupUnresolvedCount={g.unresolvedCount}
                        groupSiblings={g.siblings} onChanged={reload} />
           ))
         )}

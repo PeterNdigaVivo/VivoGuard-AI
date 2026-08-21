@@ -105,12 +105,10 @@ celery_app.conf.update(
         # beat shared their slots.
         "system.daily_status_report":         {"queue": "beat"},
         "system.health_daily_report":         {"queue": "beat"},   # legacy alias
-        # `training.run_job` is the actual heavy fine-tune. Route it
-        # to the alerts pool — NOT the inference pool — so a running
-        # fine-tune can never starve live detection workers. The
-        # alerts worker is started with `-Q alerts,beat` so this is
-        # picked up there.
-        "training.run_job":                   {"queue": "alerts"},
+        # Heavy model fitting has its own worker. It must not consume alert
+        # delivery capacity, and an alerts-worker restart must not kill a
+        # multi-hour training process and blame the dataset.
+        "training.run_job":                   {"queue": "training"},
         "training.write_preview_for_image":   {"queue": "alerts"},
         "training.backfill_previews":         {"queue": "alerts"},
         "training.harvest_temporal_frames":   {"queue": "alerts"},
