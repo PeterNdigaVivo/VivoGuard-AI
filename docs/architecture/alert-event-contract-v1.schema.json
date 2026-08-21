@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vivoops.vivofashiongroup.net/schemas/alert-event-contract-v1.json",
+  "title": "VivoGuard source event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "event_uuid", "idempotency_key", "camera_id",
+    "stream_epoch", "source_seq", "occurred_at", "detection_type",
+    "severity", "evidence", "training_eligible", "review_state"
+  ],
+  "properties": {
+    "contract_version": {"const": "1.0"},
+    "event_uuid": {"type": "string", "format": "uuid"},
+    "idempotency_key": {"type": "string", "minLength": 16, "maxLength": 200},
+    "camera_id": {"type": "integer", "minimum": 1},
+    "store_id": {"type": ["integer", "null"], "minimum": 1},
+    "zone_id": {"type": ["integer", "null"], "minimum": 1},
+    "stream_epoch": {"type": "string", "format": "uuid"},
+    "source_seq": {"type": "integer", "minimum": 0},
+    "track_id": {"type": ["integer", "null"], "minimum": 0},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "detection_type": {"type": "string", "minLength": 1, "maxLength": 64},
+    "severity": {"enum": ["positive", "info", "low", "medium", "high", "critical"]},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clip_eligible"],
+      "properties": {
+        "clip_eligible": {"type": "boolean"},
+        "ineligible_reason": {"type": ["string", "null"]},
+        "snapshot_uri": {"type": ["string", "null"]},
+        "snapshot_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "clip_uri": {"type": ["string", "null"]},
+        "clip_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "training_eligible": {"type": "boolean"},
+    "review_state": {"enum": ["unreviewed", "quarantined", "adjudicated"]},
+    "payload": {"type": "object"}
+  }
+}
