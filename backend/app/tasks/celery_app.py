@@ -44,6 +44,7 @@ celery_app = Celery(
         "app.tasks.uniform_miner",
         "app.tasks.system_health_report",
         "app.tasks.feedback_harvest",
+        "app.tasks.operations_assurance",
     ],
 )
 celery_app.conf.update(
@@ -135,6 +136,11 @@ celery_app.conf.update(
         "agents.retail_standards": {"queue": "alerts"},
         "agents.inspection":       {"queue": "alerts"},
         "agents.agent_watchdog":   {"queue": "alerts"},
+        "operations.coverage_assurance": {"queue": "alerts"},
+        "operations.alert_quality":      {"queue": "alerts"},
+        "operations.lone_worker":        {"queue": "alerts"},
+        "operations.event_fusion":       {"queue": "alerts"},
+        "operations.retention":          {"queue": "beat"},
         # Rolling recorder — runs in the dedicated `recorder` compose service
         # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
         "recorder.tick":                  {"queue": "recorder"},
@@ -468,6 +474,21 @@ celery_app.conf.update(
         "agents-watchdog-10min": {
             "task": "agents.agent_watchdog",
             "schedule": timedelta(minutes=10),
+        },
+        "operations-coverage-every-5min": {
+            "task": "operations.coverage_assurance", "schedule": timedelta(minutes=5),
+        },
+        "operations-alert-quality-every-5min": {
+            "task": "operations.alert_quality", "schedule": timedelta(minutes=5),
+        },
+        "operations-lone-worker-every-5min": {
+            "task": "operations.lone_worker", "schedule": timedelta(minutes=5),
+        },
+        "operations-event-fusion-every-5min": {
+            "task": "operations.event_fusion", "schedule": timedelta(minutes=5),
+        },
+        "operations-retention-daily": {
+            "task": "operations.retention", "schedule": crontab(minute=40, hour=3),
         },
 
         # ── Rolling recorder ──────────────────────────────────────────

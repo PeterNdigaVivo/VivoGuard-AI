@@ -9,7 +9,8 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # --- Make the app importable when alembic runs from /app ---
-import sys, os
+import os
+import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config   import settings           # noqa: E402

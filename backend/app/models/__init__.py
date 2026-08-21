@@ -19,6 +19,10 @@ from app.models.scheduled import ScheduledReport, CustomerJourney
 from app.models.staff     import StaffTrack
 from app.models.agent_report import AgentReport
 from app.models.recording import RecordingClip, RECORDING_CLIP_STATUSES
+from app.models.operations import (
+    AssuranceCase, CriticalZoneRequirement, GovernanceAuditLog,
+    OperationalEvent, RiskReview,
+)
 
 __all__ = [
     "User",
@@ -37,4 +41,6 @@ __all__ = [
     "StaffTrack",
     "AgentReport",
     "RecordingClip", "RECORDING_CLIP_STATUSES",
+    "AssuranceCase", "CriticalZoneRequirement", "GovernanceAuditLog",
+    "OperationalEvent", "RiskReview",
 ]
