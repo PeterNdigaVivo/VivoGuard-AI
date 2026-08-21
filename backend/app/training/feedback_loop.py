@@ -28,6 +28,26 @@ from app.models import (
 log = logging.getLogger(__name__)
 
 
+def _training_provenance(verdict: str) -> dict:
+    """Return the fail-closed provenance state for operator feedback.
+
+    A single dismissal is useful evidence, but it is not independently
+    verified ground truth.  Keep it available to curators without allowing a
+    noisy camera or one mistaken click to trigger model training.
+    """
+    if verdict == "false":
+        return {
+            "source_kind": "operator_dismissed",
+            "eligible_for_training": False,
+            "review_state": "pending",
+        }
+    return {
+        "source_kind": "operator_verified",
+        "eligible_for_training": True,
+        "review_state": "approved",
+    }
+
+
 def _build_source_extra(db: Session, ev: DetectionEvent,
                          alert: Alert, verdict: str) -> dict:
     """Snapshot every piece of evidence the spec asks us to persist
@@ -174,6 +194,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         labeled=True,
         source_extra=_build_source_extra(db, ev, a, "correct"),
         source_alert_id=a.id,           # for revert_verdict
+        **_training_provenance("correct"),
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
@@ -244,6 +265,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         description="auto: dismissed alerts (hard-negative pool)",
     )
     _src = _build_source_extra(db, ev, a, "false")
+    _src["training_quarantined_reason"] = "single_reviewer_dismissal"
     if label_hint:
         _src["label_hint"] = label_hint
     neg_img = TrainingImage(
@@ -253,12 +275,14 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         labeled=True,           # labelled as background — no Annotation rows
         source_extra=_src,
         source_alert_id=a.id,           # for revert_verdict
+        **_training_provenance("false"),
     )
     db.add(neg_img); db.flush()
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    _maybe_enqueue_training(db, cls)   # immediate fine-tune if threshold crossed
+    # Deliberately do not enqueue training.  A second, independent review must
+    # explicitly approve this hard negative before dataset export can see it.
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

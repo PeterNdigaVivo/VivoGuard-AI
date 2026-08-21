@@ -33,12 +33,17 @@ class CrowdDetector(Detector):
 
     * ``max_motion_norm`` (default 0.04) — maximum recent centre displacement;
     * ``incident_rearm_seconds`` (default 60) — continuous clear time required.
+
+    Vivo retail operations defines a crowd as at least six people remaining
+    stationary for five minutes.  Per-camera configuration may override both
+    values, but the safe fleet default must reflect that reviewed rule.
     """
 
     detection_type = "crowd"
     needs_tracking = True
 
-    DEFAULT_DWELL_SECONDS = 30.0
+    DEFAULT_THRESHOLD = 6
+    DEFAULT_DWELL_SECONDS = 5 * 60.0
     DEFAULT_MAX_MOTION_NORM = 0.04
     DEFAULT_REARM_SECONDS = 60.0
     MOTION_WINDOW = 8
@@ -64,7 +69,7 @@ class CrowdDetector(Detector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
-        threshold = int(cfg.get("crowd_threshold") or 5)
+        threshold = int(cfg.get("crowd_threshold") or self.DEFAULT_THRESHOLD)
         thr_conf  = float(cfg.get("confidence_threshold", 0.5))
         extra = cfg.get("extra") or {}
         dwell = max(0.0, float(

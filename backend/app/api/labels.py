@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc, func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -34,6 +34,22 @@ router = APIRouter(prefix="/labels", tags=["labels"])
 # Per Part 5 spec: 20 alerts per session.
 DEFAULT_BATCH = 20
 MAX_BATCH     = 50
+
+CRITICAL_REVIEW_TYPES = {
+    "weapon", "weapon_brandished", "fight", "fire", "smoke", "fall",
+}
+HIGH_REVIEW_TYPES = {
+    "intrusion", "trespass", "staff_zone", "tailgating", "shrinkage",
+    "stockroom_access", "shop_open_close",
+}
+
+
+def _review_priority(detection_type: str) -> tuple[int, str]:
+    if detection_type in CRITICAL_REVIEW_TYPES:
+        return 0, "critical life-safety review"
+    if detection_type in HIGH_REVIEW_TYPES:
+        return 1, "high-risk operational review"
+    return 2, "routine alert-quality review"
 
 
 class VerdictIn(BaseModel):
@@ -93,7 +109,14 @@ def queue(
         q = q.filter(DetectionEvent.detection_type == detection_type)
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
-    q = q.order_by(desc(Alert.created_at)).limit(limit)
+    priority_rank = case(
+        (DetectionEvent.detection_type.in_(CRITICAL_REVIEW_TYPES), 0),
+        (DetectionEvent.detection_type.in_(HIGH_REVIEW_TYPES), 1),
+        else_=2,
+    )
+    # Consequential alerts first; within a tier review the oldest outstanding
+    # evidence first so a stream of new routine alerts cannot starve the SLA.
+    q = q.order_by(priority_rank.asc(), Alert.created_at.asc()).limit(limit)
     rows = q.all()
 
     # Bulk-fetch zones + stores referenced by the page (same trick as
@@ -121,6 +144,10 @@ def queue(
         )
         d = item.model_dump()
         d["dwell_seconds"] = _dwell_from_event(ev)   # spliced in
+        rank, reason = _review_priority(ev.detection_type)
+        d["review_priority"] = rank
+        d["review_reason"] = reason
+        d["clip_available"] = bool(ev.clip_path)
         out.append(d)
     return out
 

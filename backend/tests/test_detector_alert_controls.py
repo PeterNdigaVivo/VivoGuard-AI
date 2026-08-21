@@ -58,6 +58,11 @@ def test_moving_passersby_never_become_a_crowd() -> None:
     assert detector.evaluate(_crowd_context(200, moving, dwell=0)) == []
 
 
+def test_crowd_defaults_match_reviewed_retail_rule() -> None:
+    assert CrowdDetector.DEFAULT_THRESHOLD == 6
+    assert CrowdDetector.DEFAULT_DWELL_SECONDS == 300
+
+
 def test_crowd_is_latched_until_continuous_clear_rearm() -> None:
     detector = CrowdDetector()
     stationary = [_person(i, [_box(0.2 * i)] * 8) for i in (1, 2, 3)]
@@ -113,4 +118,3 @@ def test_intrusion_dedupes_per_track_and_rearms_after_absence(
     now[0] += 1
     assert detector.evaluate(context([])) == []
     assert len(detector.evaluate(context([person]))) == 1
-
