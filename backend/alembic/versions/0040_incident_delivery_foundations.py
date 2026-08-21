@@ -21,13 +21,15 @@ def upgrade() -> None:
         sa.Column("store_id", sa.Integer(), sa.ForeignKey("stores.id", ondelete="SET NULL"), nullable=True),
         sa.Column("detection_type", sa.String(64), nullable=False),
         sa.Column("severity", sa.String(16), nullable=False, server_default="info"),
-        sa.Column("current_state", sa.String(24), nullable=False, server_default="provisional"),
+        sa.Column("evaluation_state", sa.String(24), nullable=False, server_default="provisional"),
+        sa.Column("acknowledged_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("opened_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("incident_key", name="uq_incidents_incident_key"),
     )
-    for name in ("incident_key", "camera_id", "store_id", "detection_type", "current_state", "opened_at"):
+    for name in ("incident_key", "camera_id", "store_id", "detection_type", "evaluation_state", "acknowledged_at", "resolved_at", "opened_at"):
         op.create_index(f"ix_incidents_{name}", "incidents", [name])
 
     op.create_table(

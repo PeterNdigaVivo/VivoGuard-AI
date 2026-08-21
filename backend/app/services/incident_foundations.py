@@ -1,6 +1,7 @@
 """Feature-off incident/evidence/outbox shadow projection."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -10,6 +11,16 @@ from app.models.incident import (
     DeliveryOutbox, EvidenceManifest, Incident, IncidentMember,
     IncidentTransition,
 )
+
+
+VALID_EVALUATION_TRANSITIONS = {
+    "provisional": {"verified", "downgraded", "retracted", "expired"},
+    "downgraded": {"verified", "retracted", "expired"},
+    # Late evidence can correct a closed incident, but history is never erased.
+    "verified": {"downgraded", "retracted"},
+    "retracted": {"verified", "downgraded"},
+    "expired": {"verified", "downgraded", "retracted"},
+}
 
 
 def event_idempotency_key(event_id: int) -> str:
@@ -52,7 +63,7 @@ def record_alert_foundations(
         store_id=store_id,
         detection_type=event.detection_type,
         severity=_severity(event),
-        current_state="provisional",
+        evaluation_state="provisional",
     )
     db.add(incident)
     db.flush()
@@ -102,6 +113,80 @@ def record_alert_foundations(
         ))
     db.flush()
     return incident
+
+
+def transition_incident(
+    db: Session,
+    incident: Incident,
+    *,
+    to_state: str,
+    actor_type: str,
+    reason_code: str,
+    actor_id: str | None = None,
+    evidence: dict | None = None,
+) -> IncidentTransition:
+    """Apply a validated evaluation transition with append-only history."""
+    allowed = VALID_EVALUATION_TRANSITIONS.get(incident.evaluation_state, set())
+    if to_state not in allowed:
+        raise ValueError(
+            f"invalid incident transition {incident.evaluation_state!r} -> {to_state!r}")
+    previous = incident.evaluation_state
+    incident.evaluation_state = to_state
+    incident.version += 1
+    row = IncidentTransition(
+        incident_id=incident.id,
+        from_state=previous,
+        to_state=to_state,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        reason_code=reason_code,
+        evidence_json=evidence,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def acknowledge_incident(
+    db: Session, incident: Incident, *, actor_id: str, reason_code: str,
+) -> IncidentTransition:
+    """Acknowledge without overwriting the evaluation verdict."""
+    if incident.acknowledged_at is not None:
+        raise ValueError("incident is already acknowledged")
+    incident.acknowledged_at = datetime.now(timezone.utc)
+    incident.version += 1
+    row = IncidentTransition(
+        incident_id=incident.id,
+        from_state=incident.evaluation_state,
+        to_state="acknowledged",
+        actor_type="operator",
+        actor_id=actor_id,
+        reason_code=reason_code,
+    )
+    db.add(row); db.flush()
+    return row
+
+
+def resolve_incident(
+    db: Session, incident: Incident, *, actor_id: str, reason_code: str,
+) -> IncidentTransition:
+    """Resolve operationally while retaining the evaluation state."""
+    if incident.resolved_at is not None:
+        raise ValueError("incident is already resolved")
+    if incident.acknowledged_at is None:
+        raise ValueError("incident must be acknowledged before resolution")
+    incident.resolved_at = datetime.now(timezone.utc)
+    incident.version += 1
+    row = IncidentTransition(
+        incident_id=incident.id,
+        from_state=incident.evaluation_state,
+        to_state="resolved",
+        actor_type="operator",
+        actor_id=actor_id,
+        reason_code=reason_code,
+    )
+    db.add(row); db.flush()
+    return row
 
 
 def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> bool:

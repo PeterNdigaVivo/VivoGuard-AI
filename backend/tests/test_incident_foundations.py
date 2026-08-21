@@ -7,7 +7,8 @@ from app.models import (
     IncidentMember, IncidentTransition, Store,
 )
 from app.services.incident_foundations import (
-    event_idempotency_key, record_alert_foundations, sync_evidence_manifest,
+    acknowledge_incident, event_idempotency_key, record_alert_foundations,
+    resolve_incident, sync_evidence_manifest, transition_incident,
 )
 
 
@@ -55,7 +56,7 @@ def test_projection_is_idempotent_and_append_only_at_creation():
     assert db.query(IncidentTransition).count() == 1
     assert db.query(EvidenceManifest).count() == 1
     assert db.query(DeliveryOutbox).count() == 1
-    assert first.current_state == "provisional"
+    assert first.evaluation_state == "provisional"
     assert first.severity == "high"
     assert db.query(IncidentMember).one().idempotency_key == event_idempotency_key(event.id)
 
@@ -84,3 +85,51 @@ def test_clip_sync_uses_one_canonical_manifest():
     assert manifest.clip_eligible is None
     assert manifest.clip_available is True
     assert manifest.ineligible_reason is None
+
+
+def test_evaluation_and_operational_states_are_independent():
+    db = _session()
+    store, alert, event = _alert(db)
+    incident = record_alert_foundations(db, alert, event, store_id=store.id)
+
+    transition_incident(
+        db, incident, to_state="verified", actor_type="reviewer",
+        actor_id="reviewer-1", reason_code="evidence_confirmed",
+    )
+    acknowledge_incident(
+        db, incident, actor_id="operator-1", reason_code="operator_reviewing",
+    )
+    resolve_incident(
+        db, incident, actor_id="operator-1", reason_code="response_complete",
+    )
+    db.commit()
+
+    assert incident.evaluation_state == "verified"
+    assert incident.acknowledged_at is not None
+    assert incident.resolved_at is not None
+    assert incident.version == 4
+    assert [r.to_state for r in db.query(IncidentTransition).order_by(IncidentTransition.id)] == [
+        "provisional", "verified", "acknowledged", "resolved",
+    ]
+
+
+def test_invalid_transition_and_resolve_before_ack_are_rejected():
+    db = _session()
+    store, alert, event = _alert(db)
+    incident = record_alert_foundations(db, alert, event, store_id=store.id)
+
+    try:
+        transition_incident(
+            db, incident, to_state="provisional", actor_type="system",
+            reason_code="invalid",
+        )
+        raise AssertionError("invalid transition was accepted")
+    except ValueError:
+        pass
+    try:
+        resolve_incident(
+            db, incident, actor_id="operator-1", reason_code="too_early",
+        )
+        raise AssertionError("resolution before acknowledgement was accepted")
+    except ValueError:
+        pass

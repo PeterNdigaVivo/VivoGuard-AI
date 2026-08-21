@@ -275,7 +275,7 @@ Additive tables:
 
 - `source_event(event_uuid, camera_id, stream_epoch, source_seq, occurred_at, contract_version, payload_hash)`
 - `track_transition(source_event_uuid, tracker_id, kind, zone_id, bbox_summary, occurred_at)`
-- `incident(id, incident_key, class, camera_id, opened_at, current_state, version)`
+- `incident(id, incident_key, class, camera_id, opened_at, evaluation_state, acknowledged_at, resolved_at, version)`
 - `incident_member(incident_id, alert_id, source_event_uuid)`
 - `incident_transition(incident_id, from_state, to_state, actor_type/id, reason_code, evidence, created_at)`
 - `evidence_manifest(alert_id, snapshot_uri/hash, clip_uri/hash, starts_at, ends_at, eligibility_reason)`

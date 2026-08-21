@@ -16,7 +16,6 @@ from app.database import Base
 
 INCIDENT_STATES = (
     "provisional", "verified", "downgraded", "retracted", "expired",
-    "acknowledged", "resolved",
 )
 
 
@@ -31,8 +30,12 @@ class Incident(Base):
         ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
     detection_type: Mapped[str] = mapped_column(String(64), index=True)
     severity: Mapped[str] = mapped_column(String(16), default="info")
-    current_state: Mapped[str] = mapped_column(
+    evaluation_state: Mapped[str] = mapped_column(
         String(24), default="provisional", server_default="provisional", index=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True)
