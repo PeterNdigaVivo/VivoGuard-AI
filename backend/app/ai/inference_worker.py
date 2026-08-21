@@ -623,7 +623,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 _static_n = len(_persons) - len(_moving)
                 from app.ai.tracker import update_recent_person_tracks
                 _people_now, _held_n = update_recent_person_tracks(
-                    recent_people, _persons, time.time(),
+                    recent_people, _moving, time.time(),
                     hold_seconds=float(getattr(
                         settings, "activity_track_hold_seconds", 5.0)),
                 )
