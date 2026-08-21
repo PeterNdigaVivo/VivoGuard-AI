@@ -322,6 +322,10 @@ class Settings(BaseSettings):
     person_afterhours_grace_before_min: int = 60
     # Symmetric post-closing grace for end-of-day staff egress.
     person_afterhours_grace_after_min: int = 60
+    # A confirmed shop_closed event can occur later than the scheduled
+    # close. Allow routine staff egress for 30 minutes after that observed
+    # closure before escalating a person as an after-hours intrusion.
+    person_afterhours_actual_close_grace_min: int = 30
     # Per-camera dedupe — once an after-hours person alert has fired
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30

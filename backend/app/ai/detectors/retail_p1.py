@@ -502,6 +502,31 @@ class IntrusionDetector(Detector):
         except Exception:
             return True
 
+    @staticmethod
+    def _within_actual_close_grace(ctx: DetectorContext) -> bool:
+        """True during routine egress after an observed shop closure."""
+        if ctx.store_id is None:
+            return False
+        try:
+            import redis
+
+            from app.config import settings as _s
+            from app.utils.business_hours import (
+                ACTUAL_CLOSE_KEY_FMT,
+                actual_close_grace_active,
+            )
+
+            marker = redis.from_url(
+                _s.redis_url, decode_responses=True,
+            ).get(ACTUAL_CLOSE_KEY_FMT.format(store_id=int(ctx.store_id)))
+            return actual_close_grace_active(
+                marker,
+                now_epoch=time.time(),
+                grace_minutes=_s.person_afterhours_actual_close_grace_min,
+            )
+        except Exception:
+            return False
+
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
@@ -524,6 +549,11 @@ class IntrusionDetector(Detector):
             closed = bool((cfg.get("extra") or {}).get("always_armed"))
             time_context = "after_hours"
         if not closed:
+            return []
+        # An observed closure is stronger evidence than the scheduled close.
+        # Do not escalate routine staff egress until its 30-minute allowance
+        # has elapsed; a Redis failure deliberately leaves alerts enabled.
+        if self._within_actual_close_grace(ctx):
             return []
 
         thr = float(cfg.get("confidence_threshold", 0.5))

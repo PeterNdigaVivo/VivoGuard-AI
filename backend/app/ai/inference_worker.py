@@ -235,6 +235,24 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     )
     db.add(rec)
     db.flush()
+    # Share an observed close timestamp across every after-hours producer.
+    # This makes the requested 30-minute post-closing allowance relative to
+    # the actual shop_closed signal, not only the scheduled trading hours.
+    if store_id is not None and extra.get("rule") == "shop_closed":
+        try:
+            import redis
+
+            from app.utils.business_hours import ACTUAL_CLOSE_KEY_FMT
+
+            grace_min = max(1, int(
+                settings.person_afterhours_actual_close_grace_min))
+            redis.from_url(settings.redis_url, decode_responses=True).set(
+                ACTUAL_CLOSE_KEY_FMT.format(store_id=int(store_id)),
+                str(datetime.now(timezone.utc).timestamp()),
+                ex=max(3600, grace_min * 60 * 4),
+            )
+        except Exception as e:
+            log.warning("observed-close marker failed store=%s: %s", store_id, e)
     # Operator-visible alert — only for detectors NOT in the silent
     # metric set, and not explicitly suppressed by the caller. The
     # DetectionEvent itself is still persisted so the detector activity
@@ -331,6 +349,26 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
                 break
     if store is None:
         return False   # no store context → treat as a normal customer
+    try:
+        import redis
+
+        from app.utils.business_hours import (
+            ACTUAL_CLOSE_KEY_FMT,
+            actual_close_grace_active,
+        )
+
+        marker = redis.from_url(
+            settings.redis_url, decode_responses=True,
+        ).get(ACTUAL_CLOSE_KEY_FMT.format(store_id=int(store.id)))
+        if actual_close_grace_active(
+            marker,
+            now_epoch=datetime.now(timezone.utc).timestamp(),
+            grace_minutes=settings.person_afterhours_actual_close_grace_min,
+        ):
+            return False
+    except Exception:
+        # A missing cache must never suppress a potentially real intrusion.
+        pass
     try:
         from app.utils.business_hours import is_after_hours_with_grace
         return is_after_hours_with_grace(

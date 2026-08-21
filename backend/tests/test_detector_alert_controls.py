@@ -136,6 +136,9 @@ class _FakeRedis:
     def expire(self, key, ttl):  # noqa: ARG002
         return key in self.values
 
+    def get(self, key):
+        return self.values.get(key)
+
 
 def test_intrusion_static_warmup_and_task_restart_share_persistent_dedupe(
     monkeypatch,
@@ -179,3 +182,21 @@ def test_intrusion_static_warmup_and_task_restart_share_persistent_dedupe(
     assert len(first_task) == 1
     assert first_task[0].track_id == 1
     assert second_task == []
+
+
+def test_intrusion_suppressed_during_observed_close_grace(monkeypatch) -> None:
+    now = 1_800_000_000.0
+    fake_redis = _FakeRedis()
+    fake_redis.values["vg:store:last_closed:2"] = str(now - 13 * 60)
+    monkeypatch.setattr("redis.from_url", lambda _url, **_kwargs: fake_redis)
+    monkeypatch.setattr("app.ai.detectors.retail_p1.time.time", lambda: now)
+
+    person = _person(41, [_box(0.5)] * 8)[1]
+    ctx = DetectorContext(
+        camera_id=3, timestamp=now, raw_detections=[person], tracks=[], zones=[],
+        config={"intrusion": {"enabled": True, "confidence_threshold": 0.5}},
+        store_id=2, store_timezone="Africa/Nairobi",
+        business_hours={key: ["09:30-20:00"] for key in
+                        ("mon", "tue", "wed", "thu", "fri", "sat", "sun")},
+    )
+    assert IntrusionDetector().evaluate(ctx) == []

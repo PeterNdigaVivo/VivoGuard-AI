@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.utils.business_hours import (
-    _store_local_now, intrusion_time_context, is_open,
+    _store_local_now, actual_close_grace_active, intrusion_time_context, is_open,
     is_open_with_default, is_store_open, localised_now,
     normalise_business_hours, store_time_context,
 )
@@ -90,6 +90,21 @@ def test_legacy_short_weekday_object_is_normalised() -> None:
     legacy = {"thu": {"start": "09:30", "end": "20:00"}}
     assert is_open(legacy, AT_1055_EAT) is True
     assert is_open(legacy, AT_2030_EAT) is False
+
+
+def test_actual_close_grace_matches_yaya_timeline() -> None:
+    closed_at = datetime(2026, 8, 21, 21, 52, tzinfo=EAT).timestamp()
+    thirteen_minutes_later = datetime(2026, 8, 21, 22, 5, tzinfo=EAT).timestamp()
+    thirty_minutes_later = datetime(2026, 8, 21, 22, 22, tzinfo=EAT).timestamp()
+    assert actual_close_grace_active(
+        closed_at, now_epoch=thirteen_minutes_later, grace_minutes=30,
+    ) is True
+    assert actual_close_grace_active(
+        closed_at, now_epoch=thirty_minutes_later, grace_minutes=30,
+    ) is False
+    assert actual_close_grace_active(
+        "invalid", now_epoch=thirteen_minutes_later, grace_minutes=30,
+    ) is False
 
 
 def test_default_empty_dict_uses_default_window_not_closed() -> None:

@@ -30,6 +30,7 @@ WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturd
 # arm the detector overnight (outside the default window) instead of
 # around the clock.
 _DASHBOARD_DEFAULT_WINDOWS = ["09:00-21:00"]
+ACTUAL_CLOSE_KEY_FMT = "vg:store:last_closed:{store_id}"
 
 
 def normalise_business_hours(business_hours: Optional[dict]) -> Optional[dict]:
@@ -69,6 +70,26 @@ def normalise_business_hours(business_hours: Optional[dict]) -> Optional[dict]:
         else:
             canonical[short] = []
     return canonical
+
+
+def actual_close_grace_active(
+    closed_at_epoch: object,
+    *,
+    now_epoch: float,
+    grace_minutes: int = 30,
+) -> bool:
+    """Whether ``now`` is inside the grace period after observed closure.
+
+    The marker is deliberately a plain timestamp so every alert producer can
+    apply the same policy without querying Postgres on the inference hot path.
+    Invalid, future or stale markers fail closed (no suppression).
+    """
+    try:
+        elapsed = float(now_epoch) - float(closed_at_epoch)
+        grace_seconds = max(0, int(grace_minutes)) * 60
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return grace_seconds > 0 and 0 <= elapsed < grace_seconds
 
 
 def is_open(business_hours: Optional[dict], ts_local: datetime) -> bool:

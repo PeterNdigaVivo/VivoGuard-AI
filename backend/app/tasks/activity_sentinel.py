@@ -441,7 +441,11 @@ def live_activity_sentinel() -> None:
         return
     from app.database import SessionLocal
     from app.models import Camera, DetectionConfig, Store
-    from app.utils.business_hours import is_store_open
+    from app.utils.business_hours import (
+        ACTUAL_CLOSE_KEY_FMT,
+        actual_close_grace_active,
+        is_store_open,
+    )
 
     started = time.time()
     r = _redis()
@@ -471,15 +475,22 @@ def live_activity_sentinel() -> None:
         cam_ids = sorted(store_map.keys())
         if not cam_ids:
             return
+        active_store_ids = sorted({s for s in store_map.values() if s})
 
         # 1. Ingest: MGET current blobs → append fresh ones to the
         #    rolling windows (RPUSH + LTRIM + EXPIRE via one pipeline).
         now = time.time()
         try:
-            blobs = r.mget([ACTIVITY_KEY_FMT.format(cid=c) for c in cam_ids])
+            bulk_values = r.mget(
+                [ACTIVITY_KEY_FMT.format(cid=c) for c in cam_ids]
+                + [ACTUAL_CLOSE_KEY_FMT.format(store_id=s)
+                   for s in active_store_ids]
+            )
         except Exception as e:
             log.warning("activity sentinel: MGET failed: %s", e)
             return
+        blobs = bulk_values[:len(cam_ids)]
+        actual_close_markers = bulk_values[len(cam_ids):]
         latest_blob: dict[int, dict] = {}
         pipe = r.pipeline(transaction=False)
         for cid, blob in zip(cam_ids, blobs):
@@ -511,7 +522,6 @@ def live_activity_sentinel() -> None:
             pipe.lrange(HIST_KEY_FMT.format(cid=cid), 0, -1)
         for cid in cam_ids:
             pipe.exists(f"vg:frame:{cid}")
-        active_store_ids = sorted({s for s in store_map.values() if s})
         for sid in active_store_ids:
             pipe.exists(f"vg:afterhours:open:{sid}")
         try:
@@ -534,6 +544,15 @@ def live_activity_sentinel() -> None:
                             if results[n + i]}
         intrusion_active = {sid for j, sid in enumerate(active_store_ids)
                             if results[2 * n + j]}
+        for j, sid in enumerate(active_store_ids):
+            if actual_close_grace_active(
+                actual_close_markers[j],
+                now_epoch=now,
+                grace_minutes=settings.person_afterhours_actual_close_grace_min,
+            ):
+                # Treat the store as operationally open during routine egress
+                # so the sentinel cannot duplicate an urgent after-hours alert.
+                store_open[sid] = True
 
         # 3. Evaluate (pure).
         triggers = evaluate_activity_rules(
