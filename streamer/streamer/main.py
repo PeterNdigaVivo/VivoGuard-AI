@@ -41,6 +41,7 @@ try:
     from app.database import SessionLocal                           # type: ignore
     from app.utils.crypto  import decrypt                           # type: ignore
     from app.utils.network import build_rtsp_url                    # type: ignore
+    from app.stream.frame_buffer import FrameBuffer                 # type: ignore
     from app.stream.manager import StreamManager, CameraSpec        # type: ignore
     from app.stream import auto_transport                           # type: ignore
 except ImportError as e:                                            # pragma: no cover
@@ -88,6 +89,7 @@ STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY
 
 # camera_id -> (checked_at_epoch, reachable)
 _reachable_cache: dict[int, tuple[float, bool]] = {}
+_health_buffer = FrameBuffer()
 
 
 def _run_migrations() -> None:
@@ -397,6 +399,27 @@ async def _async_check_all(specs: list[CameraSpec]) -> dict[int, bool]:
     return {cam_id: ok for cam_id, ok in results}
 
 
+def _report_tcp_preflight_failure(spec: CameraSpec) -> None:
+    """Expose a rejected preflight probe on the normal health surface.
+
+    Without this write, the worker is intentionally never spawned and Live
+    View incorrectly says the streamer has not attempted the camera.  Health
+    reporting is best-effort and must never interfere with reconciliation.
+    """
+    endpoint = _spec_probe_endpoint(spec)
+    target = f"{endpoint[0]}:{endpoint[1]}" if endpoint else "stream endpoint"
+    try:
+        _health_buffer.update_health(
+            spec.camera_id,
+            fps=0,
+            error=(f"TCP preflight failed: {target} unreachable; "
+                   f"retrying in {RETRY_UNREACHABLE_SECONDS}s"),
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must not block streams
+        log.warning("camera %s: could not publish TCP preflight health: %s",
+                    spec.camera_id, exc)
+
+
 def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
     """Drop specs whose camera failed a recent TCP probe. Cameras
     that haven't been probed (or whose cache entry expired) get
@@ -442,6 +465,8 @@ def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
         _reachable_cache[spec.camera_id] = (now, ok)
         if ok:
             reachable.append(spec)
+        else:
+            _report_tcp_preflight_failure(spec)
     return reachable
 
 
