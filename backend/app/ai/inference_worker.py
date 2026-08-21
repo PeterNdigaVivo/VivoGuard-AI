@@ -516,7 +516,8 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             if store_id is not None:
                 store = db.get(Store, store_id)
                 if store:
-                    business_hours = store.business_hours_json
+                    from app.utils.business_hours import normalise_business_hours
+                    business_hours = normalise_business_hours(store.business_hours_json)
                     store_tz = store.timezone or "Africa/Nairobi"
                     store_name = store.name
 

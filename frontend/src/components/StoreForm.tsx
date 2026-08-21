@@ -36,11 +36,26 @@ function defaultBusinessHours(): FormState['business_hours'] {
   return out
 }
 
-function parseBusinessHours(json: Record<string, string[]> | null): FormState['business_hours'] {
+function parseBusinessHours(json: Record<string, unknown> | null): FormState['business_hours'] {
   const base = defaultBusinessHours()
   if (!json) return base
+  const fullNames: Record<string, string> = {
+    mon: 'monday', tue: 'tuesday', wed: 'wednesday', thu: 'thursday',
+    fri: 'friday', sat: 'saturday', sun: 'sunday',
+  }
   for (const d of WEEKDAYS) {
-    const wins = json[d.key]
+    const raw = json[d.key] ?? json[fullNames[d.key]]
+    const wins = Array.isArray(raw)
+      ? raw.filter((value): value is string => typeof value === 'string')
+      : raw && typeof raw === 'object'
+        ? (() => {
+            const legacy = raw as Record<string, unknown>
+            const start = legacy.open ?? legacy.start
+            const end = legacy.close ?? legacy.end
+            return typeof start === 'string' && typeof end === 'string'
+              ? [`${start}-${end}`] : []
+          })()
+        : typeof raw === 'string' ? [raw] : undefined
     if (wins && wins.length > 0) {
       const [start, end] = wins[0].split('-')
       base[d.key] = { open: true, start: start || '09:00', end: end || '20:00' }

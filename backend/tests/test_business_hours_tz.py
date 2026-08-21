@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from app.utils.business_hours import (
     _store_local_now, intrusion_time_context, is_open,
     is_open_with_default, is_store_open, localised_now,
-    store_time_context,
+    normalise_business_hours, store_time_context,
 )
 
 EAT = ZoneInfo("Africa/Nairobi")
@@ -69,6 +69,27 @@ def test_default_configured_hours_still_honoured() -> None:
     assert is_open_with_default(HOURS, AT_1055_EAT) is True
     assert is_open_with_default(HOURS, AT_2030_EAT) is False  # 20:00 close
     assert is_open_with_default(HOURS, AT_0300_EAT) is False
+
+
+def test_legacy_full_weekday_object_is_normalised() -> None:
+    legacy = {
+        "monday": {"open": "09:30", "close": "20:00"},
+        "thursday": {"open": "09:30", "close": "20:00"},
+        "sunday": [],
+    }
+    assert normalise_business_hours(legacy) == {
+        "mon": ["09:30-20:00"],
+        "thu": ["09:30-20:00"],
+        "sun": [],
+    }
+    assert is_open_with_default(legacy, AT_1055_EAT) is True
+    assert is_open_with_default(legacy, AT_2030_EAT) is False
+
+
+def test_legacy_short_weekday_object_is_normalised() -> None:
+    legacy = {"thu": {"start": "09:30", "end": "20:00"}}
+    assert is_open(legacy, AT_1055_EAT) is True
+    assert is_open(legacy, AT_2030_EAT) is False
 
 
 def test_default_empty_dict_uses_default_window_not_closed() -> None:

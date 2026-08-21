@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 _WARNED_BAD_TZ: set[str] = set()
 
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 # When a store has no business_hours_json at all, fall back to the
 # dominant Vivo schedule (09:00-21:00 every day). `is_open()` stays
@@ -31,12 +32,52 @@ WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DASHBOARD_DEFAULT_WINDOWS = ["09:00-21:00"]
 
 
+def normalise_business_hours(business_hours: Optional[dict]) -> Optional[dict]:
+    """Return the canonical ``{"mon": ["09:00-20:00"]}`` shape.
+
+    Early VivoOps records used full weekday names and an object value,
+    for example ``{"monday": {"open": "09:30", "close": "20:00"}}``.
+    Treating that object as a list yields the strings ``open`` and
+    ``close`` and silently activates the fleet default instead of the
+    configured hours.  Read both shapes so existing stores remain safe;
+    all new writes continue to use the canonical format.
+    """
+    if not isinstance(business_hours, dict):
+        return business_hours
+
+    canonical: dict[str, list[str]] = {}
+    for short, full in zip(WEEKDAY_KEYS, WEEKDAY_NAMES):
+        if short in business_hours:
+            raw = business_hours[short]
+        elif full in business_hours:
+            raw = business_hours[full]
+        else:
+            continue
+
+        if isinstance(raw, dict):
+            start = raw.get("open") or raw.get("start")
+            end = raw.get("close") or raw.get("end")
+            canonical[short] = (
+                [f"{start}-{end}"]
+                if isinstance(start, str) and isinstance(end, str)
+                else []
+            )
+        elif isinstance(raw, str):
+            canonical[short] = [raw]
+        elif isinstance(raw, (list, tuple)):
+            canonical[short] = [value for value in raw if isinstance(value, str)]
+        else:
+            canonical[short] = []
+    return canonical
+
+
 def is_open(business_hours: Optional[dict], ts_local: datetime) -> bool:
     """True if `ts_local` falls inside any open window for that weekday.
 
     If `business_hours` is None or missing the day, defaults to **closed**
     (most stores opt in explicitly; closed-by-default is safer for the
     intrusion detector that fires when *closed*)."""
+    business_hours = normalise_business_hours(business_hours)
     if not business_hours:
         return False
     key = WEEKDAY_KEYS[ts_local.weekday()]
@@ -83,6 +124,7 @@ def _effective_windows(business_hours: Optional[dict],
     semantics: configured+parseable → as configured; explicitly empty
     day → [] (closed all day); unconfigured / all-malformed → the
     default Vivo window."""
+    business_hours = normalise_business_hours(business_hours)
     key = WEEKDAY_KEYS[weekday_idx]
     if isinstance(business_hours, dict) and key in business_hours:
         windows = list(business_hours.get(key) or [])
@@ -178,7 +220,7 @@ def _store_local_now(store, now_utc: Optional[datetime] = None) -> datetime:
 
 
 def _windows_for_day(store, weekday_idx: int) -> list[str]:
-    bh = getattr(store, "business_hours_json", None)
+    bh = normalise_business_hours(getattr(store, "business_hours_json", None))
     key = WEEKDAY_KEYS[weekday_idx]
     if isinstance(bh, dict):
         if key in bh:
