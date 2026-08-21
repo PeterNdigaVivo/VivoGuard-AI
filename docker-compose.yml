@@ -377,6 +377,13 @@ services:
     image: nginx:alpine
     container_name: vivoguard-nginx
     restart: unless-stopped
+    # The base image links access.log to /dev/stdout.  Replace that link with
+    # a regular file in the shared log volume so the assurance worker can
+    # tail it without blocking on another container's stdout device.
+    command:
+      - /bin/sh
+      - -c
+      - "rm -f /var/log/nginx/access.log && touch /var/log/nginx/access.log && exec nginx -g 'daemon off;'"
     # TLS terminated here. The active server config is chosen at container
     # start by the cert-presence guard (10-tls-guard.sh): it copies the
     # HTTPS profile to conf.d/default.conf when the Let's Encrypt certs
