@@ -25,6 +25,25 @@ def missing_feedback_fields(inputs: dict) -> list[str]:
 
 
 def evaluate(kind: str, inputs: dict) -> dict:
+    if kind == "intrusion_incident":
+        actionable_person = bool(inputs.get("motion_history"))
+        fingerprint_active = bool(inputs.get("incident_fingerprint_active"))
+        alert = actionable_person and not fingerprint_active
+        return {"alert": alert,
+                "duplicate_suppressed": fingerprint_active}
+    if kind == "crowd_policy":
+        staff_priority = bool(inputs.get("staff_zone_overlap"))
+        alert = (int(inputs.get("people", 0)) >= 6
+                 and float(inputs.get("stationary_seconds", 0)) >= 300
+                 and not staff_priority)
+        return {"alert": alert, "staff_area_priority": staff_priority}
+    if kind == "quality_policy":
+        detected = bool(inputs.get("detected"))
+        review_only = str(inputs.get("mode")) in {"review_only", "quarantined"}
+        return {"alert_recorded": detected, "evidence_retained": detected,
+                "notification_sent": detected and not review_only,
+                "training_eligible": detected and not review_only,
+                "review_only": review_only}
     if kind == "person_motion":
         return {"alert": bool(inputs.get("moving") or inputs.get("motion_history"))}
     if kind == "camera_handoff":

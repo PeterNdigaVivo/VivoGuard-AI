@@ -2,6 +2,22 @@ from app.simulation.catalog import SCENARIOS
 from app.simulation.runner import evaluate, missing_feedback_fields, run_catalog
 
 
+def test_junction_and_crowd_release_scenarios_are_explicit_and_pass():
+    report = run_catalog()
+    required = {
+        "junction-mannequin-survives-worker-restart",
+        "real-person-first-entry-alerts-once",
+        "five-moving-passersby-not-a-crowd",
+        "six-people-under-five-minutes-not-a-crowd",
+        "six-stationary-for-five-minutes-is-one-crowd",
+        "staff-area-intrusion-outranks-generic-crowd",
+        "quarantine-retains-evidence-without-notifying-or-learning",
+    }
+    results = {item["scenario_id"]: item for item in report["results"]}
+    assert required <= results.keys()
+    assert all(results[scenario_id]["passed"] for scenario_id in required)
+
+
 def test_full_scenario_catalog_passes_in_isolation():
     result = run_catalog()
     assert result["failed"] == 0
