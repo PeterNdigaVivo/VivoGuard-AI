@@ -120,6 +120,20 @@ _BRAND_TO_CONN_TYPE = {
 }
 
 
+def _channel_map(cameras: list[Camera]) -> dict[int, Camera]:
+    """Index materialised NVR channels, keeping the oldest row.
+
+    Quick Add and Add Channels are operator-facing retryable actions.  A
+    repeated request must return the already-materialised channel instead of
+    inserting a second camera for the same physical source.
+    """
+    out: dict[int, Camera] = {}
+    for camera in sorted(cameras, key=lambda c: c.id or 0):
+        if camera.channel_number is not None:
+            out.setdefault(camera.channel_number, camera)
+    return out
+
+
 @router.post("/quick-add", response_model=list[CameraOut])
 def quick_add_nvr(payload: QuickAddNvrIn, db: Session = Depends(get_db),
                   _u: User = Depends(require_role("admin", "operator"))):
@@ -151,8 +165,19 @@ def quick_add_nvr(payload: QuickAddNvrIn, db: Session = Depends(get_db),
     conn_type = _BRAND_TO_CONN_TYPE[payload.brand]
     name_prefix = payload.name_prefix or store.name
 
+    existing = _channel_map(
+        db.query(Camera).filter(
+            Camera.host == payload.host,
+            Camera.rtsp_port == rtsp_port,
+            Camera.store_id == payload.store_id,
+        ).all()
+    )
+
     out: list[Camera] = []
     for ch in range(1, payload.channel_count + 1):
+        if ch in existing:
+            out.append(existing[ch])
+            continue
         # No override URL — let build_rtsp_url() pick the right
         # per-brand template at stream time. That way if an operator
         # later corrects credentials or port, the URL stays in sync.
@@ -200,8 +225,17 @@ async def add_channels(nvr_id: int, payload: AddChannelsIn, db: Session = Depend
     from app.models import Store
     if not db.get(Store, payload.store_id):
         raise HTTPException(400, f"store_id={payload.store_id} not found")
+    existing = _channel_map(
+        db.query(Camera).filter(
+            Camera.nvr_id == nvr.id,
+            Camera.store_id == payload.store_id,
+        ).all()
+    )
     out: list[Camera] = []
     for ch in payload.channels:
+        if ch.channel in existing:
+            out.append(existing[ch.channel])
+            continue
         cam = Camera(
             name=f"{nvr.name} - {ch.name}",
             brand=nvr.brand,
