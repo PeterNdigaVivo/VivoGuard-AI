@@ -39,24 +39,52 @@ def save_uploaded_image(dataset_id: int, filename: str, data: bytes) -> Path:
 def split_dataset(db: Session, dataset_id: int, *,
                   train: float = 0.7, val: float = 0.2, test: float = 0.1,
                   seed: int = 1337) -> dict[str, int]:
-    """Stamp each image's `split` column. Idempotent — re-running re-splits."""
+    """Stamp each image's ``split`` column without leaking alert siblings.
+
+    Frames harvested from the same alert (the detection frame plus temporal
+    context frames) are highly correlated.  Treat them as one group so they
+    can never be divided between train and validation/test.  Images without a
+    source alert remain independent groups.  Assignment is deterministic for
+    a given seed and remains idempotent.
+    """
     images = (db.query(TrainingImage)
                 .filter(TrainingImage.dataset_id == dataset_id,
                         TrainingImage.labeled == True)            # noqa: E712
                 .all())
-    random.Random(seed).shuffle(images)
+
+    if min(train, val, test) < 0 or train + val + test <= 0:
+        raise ValueError("split fractions must be non-negative and sum to > 0")
+
+    # A source_alert_id ties the original feedback frame to any ±1 second
+    # temporal siblings.  Prefix keys so an alert id can never collide with an
+    # ordinary TrainingImage id.
+    grouped: dict[tuple[str, int], list[TrainingImage]] = {}
+    for img in images:
+        key = (("alert", int(img.source_alert_id))
+               if img.source_alert_id is not None
+               else ("image", int(img.id)))
+        grouped.setdefault(key, []).append(img)
+
+    groups = list(grouped.values())
+    random.Random(seed).shuffle(groups)
     n = len(images)
-    n_train = int(n * train)
-    n_val   = int(n * val)
+    total_fraction = train + val + test
+    targets = {
+        "train": n * train / total_fraction,
+        "val": n * val / total_fraction,
+        "test": n * test / total_fraction,
+    }
     counts = {"train": 0, "val": 0, "test": 0}
-    for i, img in enumerate(images):
-        if i < n_train:
-            img.split = "train"
-        elif i < n_train + n_val:
-            img.split = "val"
-        else:
-            img.split = "test"
-        counts[img.split] += 1
+    enabled = [name for name, fraction in
+               (("train", train), ("val", val), ("test", test))
+               if fraction > 0]
+    for group in groups:
+        # Put the whole group in the split with the largest remaining target.
+        # This keeps proportions close while making leakage impossible.
+        split = max(enabled, key=lambda name: targets[name] - counts[name])
+        for img in group:
+            img.split = split
+        counts[split] += len(group)
     db.commit()
     return counts
 
