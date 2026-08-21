@@ -15,14 +15,35 @@ def _aware(value: datetime) -> datetime:
 
 
 def build_scorecard(name: str, reports: list[AgentReport], *, now: datetime,
-                    window_seconds: int) -> dict:
+                    window_seconds: int,
+                    observation_started_at: datetime | None = None) -> dict:
     policy = AGENT_POLICIES[name]
     interval = int(policy["interval_seconds"])
-    expected = max(1, math.floor(window_seconds / interval))
+    window_start = now - timedelta(seconds=window_seconds)
+    observed_start = max(
+        window_start,
+        _aware(observation_started_at) if observation_started_at else window_start,
+    )
+    observed_seconds = max(0, int((now - observed_start).total_seconds()))
+    full_window_expected = max(1, math.floor(window_seconds / interval))
+    # A newly introduced agent cannot have run before it existed. Count from
+    # its first durable report during rollout instead of charging it a full
+    # 24-hour history immediately. Established agents retain the full-window
+    # denominator, so ordinary missed runs are not hidden.
+    expected = full_window_expected
+    warming_up = observed_start > window_start
+    if warming_up:
+        expected = min(full_window_expected,
+                       max(1, math.floor(observed_seconds / interval) + 1))
     completed = len(reports)
     successful = sum(1 for report in reports if not report.error_message)
-    valid = sum(1 for report in reports if report.status in {"ok", "warning", "critical"}
-                and isinstance(report.findings, dict) and bool(report.findings))
+    valid = sum(
+        1 for report in reports
+        if report.status in {"ok", "warning", "critical"}
+        and isinstance(report.findings, dict)
+        and bool(report.findings)
+        and not report.findings.get("_errors")
+    )
     last = max((_aware(r.run_at) for r in reports if r.run_at), default=None)
     freshness_limit = interval + int(policy["start_grace_seconds"])
     fresh = bool(last and (now - last).total_seconds() <= freshness_limit)
@@ -40,12 +61,18 @@ def build_scorecard(name: str, reports: list[AgentReport], *, now: datetime,
         breaches.append("valid_output_below_99pct")
     if not fresh:
         breaches.append("latest_evidence_stale")
-    active_critical = any(r.status == "critical" for r in reports[:1])
-    if active_critical:
-        breaches.append("latest_run_critical")
+    # A critical domain finding proves the agent ran and produced valid
+    # evidence; it is not an agent execution-SLA failure. Surface it
+    # separately so operators still see the operational problem.
+    latest_domain_status = reports[0].status if reports else None
+    domain_critical = latest_domain_status == "critical"
     return {"agent_name": name, "owner": policy["owner"], "score": score,
-            "compliant": not breaches, "active_critical_override": active_critical,
+            "compliant": not breaches, "active_critical_override": False,
+            "latest_domain_status": latest_domain_status,
+            "domain_critical": domain_critical,
             "breaches": breaches, "window_seconds": window_seconds,
+            "measurement_started_at": observed_start.isoformat(),
+            "measurement_warmup": warming_up,
             "expected_runs": expected, "completed_runs": completed,
             "successful_runs": successful, "valid_outputs": valid,
             "run_coverage": round(availability, 4), "completion_reliability": round(reliability, 4),
@@ -64,10 +91,16 @@ def scorecards(db: Session, *, now: datetime | None = None, window_hours: int = 
     since = now - timedelta(hours=window_hours)
     cards = []
     for name, policy in AGENT_POLICIES.items():
+        first_report_at = (db.query(AgentReport.run_at)
+                           .filter(AgentReport.agent_name == name)
+                           .order_by(AgentReport.run_at.asc()).limit(1).scalar())
         reports = (db.query(AgentReport).filter(AgentReport.agent_name == name,
                                                 AgentReport.run_at >= since)
                    .order_by(AgentReport.run_at.desc()).all())
-        card = build_scorecard(name, reports, now=now, window_seconds=window_hours * 3600)
+        card = build_scorecard(
+            name, reports, now=now, window_seconds=window_hours * 3600,
+            observation_started_at=first_report_at,
+        )
         cards.append(card)
         if persist_cases:
             key = f"agent-sla:{name}"

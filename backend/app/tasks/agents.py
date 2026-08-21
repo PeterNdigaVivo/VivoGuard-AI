@@ -220,6 +220,22 @@ def _safe(findings: dict, key: str, fn):
         findings.setdefault("_errors", {})[key] = str(e)
 
 
+def _heartbeat_age_seconds(raw: str | None, now_ts: int | None = None) -> int | None:
+    """Read current JSON and legacy numeric supervisor breadcrumbs."""
+    if raw is None:
+        return None
+    now_ts = int(time.time()) if now_ts is None else now_ts
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        payload = raw
+    if isinstance(payload, dict):
+        stamp = payload.get("last_run_ts") or payload.get("ts")
+    else:
+        stamp = payload
+    return now_ts - int(float(stamp))
+
+
 # ── AI reasoning (the "agent brain") ─────────────────────────────────────
 def _extract_json(text: str) -> dict | None:
     """Pull the first JSON OBJECT out of an LLM response (tolerates code
@@ -459,12 +475,7 @@ def _run_backend_health() -> dict:
     # Inference supervisor breadcrumb freshness (written every 30s).
     try:
         raw = r.get("vg:inference:health")
-        age = None
-        if raw is not None:
-            try:
-                age = int(time.time()) - int(json.loads(raw).get("ts"))
-            except Exception:
-                age = int(time.time()) - int(float(raw))
+        age = _heartbeat_age_seconds(raw)
         f["inference_health_age_s"] = age
         if age is None or age > 600:
             gaps.append({"inference": f"health breadcrumb stale (age={age}s)"})
