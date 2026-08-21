@@ -21,6 +21,7 @@ from app.operations.assurance import (
     DELIVERY_EVENT_TYPES, POS_EVENT_TYPES, assess_coverage, correlate_event,
     create_alert_quality_cases, create_lone_worker_cases, upsert_case,
 )
+from app.simulation.runner import missing_feedback_fields
 
 router = APIRouter(prefix="/operations", tags=["operations-assurance"])
 
@@ -71,6 +72,27 @@ class CaseResolutionIn(BaseModel):
     status: str = Field(pattern="^(resolved|monitoring|insufficient_evidence)$")
 
 
+class FeedbackIntakeIn(BaseModel):
+    message_id: str = Field(min_length=1, max_length=128)
+    urgency: str = Field(default="high", pattern="^(urgent|high|routine)$")
+    store: str | None = Field(default=None, max_length=128)
+    camera: str | None = Field(default=None, max_length=128)
+    occurred_at: datetime | None = None
+    observed: str | None = Field(default=None, max_length=2000)
+    expected: str | None = Field(default=None, max_length=2000)
+    evidence_ref: str | None = Field(default=None, max_length=1000)
+
+
+class FeedbackClarificationIn(BaseModel):
+    response: str = Field(min_length=2, max_length=4000)
+    store: str | None = Field(default=None, max_length=128)
+    camera: str | None = Field(default=None, max_length=128)
+    occurred_at: datetime | None = None
+    observed: str | None = Field(default=None, max_length=2000)
+    expected: str | None = Field(default=None, max_length=2000)
+    evidence_ref: str | None = Field(default=None, max_length=1000)
+
+
 def _audit(db: Session, user, action: str, entity_type: str, entity_id, details: dict | None = None):
     db.add(GovernanceAuditLog(actor_user_id=user.id, actor_email=user.email,
                               action=action, entity_type=entity_type,
@@ -88,6 +110,84 @@ def _safe_payload(payload: dict | None) -> dict | None:
         return payload
     blocked = {"employee_name", "customer_name", "email", "phone", "biometric", "face_embedding"}
     return {key: value for key, value in payload.items() if key.lower() not in blocked}
+
+
+def _clarification_question(missing: list[str]) -> str:
+    labels = {"store": "store", "camera": "camera/channel", "occurred_at": "incident time",
+              "observed": "what you observed", "expected": "what you expected the system to do"}
+    needed = ", ".join(labels[field] for field in missing)
+    return f"Please clarify the {needed}, and attach the relevant screenshot or clip if available. I will not classify or train on this report until it is clear."
+
+
+@router.post("/feedback/intake")
+def intake_feedback(body: FeedbackIntakeIn, db: Session = Depends(get_db),
+                    user=Depends(require_role("admin", "operator"))):
+    payload = body.model_dump(mode="json")
+    missing = missing_feedback_fields(payload)
+    deadlines = {"urgent": 15, "high": 30, "routine": 120}
+    now = datetime.now(timezone.utc)
+    question = _clarification_question(missing) if missing else None
+    evidence = {**payload, "ambiguity_reasons": missing, "clarification_question": question,
+                "clarification_asked_at": now.isoformat() if missing else None,
+                "clarification_due_at": (now + timedelta(minutes=deadlines[body.urgency])).isoformat() if missing else None,
+                "reminder_count": 0}
+    case = upsert_case(db, dedup_key=f"human-feedback:{body.message_id}",
+                       case_type="feedback_clarification" if missing else "human_feedback",
+                       severity="high" if body.urgency != "routine" else "medium",
+                       title="Clarification required for human feedback" if missing else "Human feedback ready for investigation",
+                       description=body.observed, evidence=evidence,
+                       training_status="blocked_ambiguous_feedback" if missing else "blocked_pending_investigation")
+    if missing:
+        case.status = "blocked_waiting_human"
+    db.flush()
+    _audit(db, user, "human_feedback.intake", "assurance_case", case.id,
+           {"missing_fields": missing, "message_id": body.message_id})
+    db.commit()
+    return {"case_id": case.id, "clarification_required": bool(missing),
+            "question_to_send_on_whatsapp": question,
+            "training_eligible": False, "deadline": evidence["clarification_due_at"]}
+
+
+@router.post("/feedback/{case_id}/clarify")
+def clarify_feedback(case_id: int, body: FeedbackClarificationIn,
+                     db: Session = Depends(get_db),
+                     user=Depends(require_role("admin", "operator"))):
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type not in {"feedback_clarification", "human_feedback"}:
+        raise HTTPException(404, "human feedback case not found")
+    evidence = dict(case.evidence or {})
+    for key, value in body.model_dump(mode="json", exclude_none=True).items():
+        evidence[key] = value
+    missing = missing_feedback_fields(evidence)
+    evidence["ambiguity_reasons"] = missing
+    evidence["clarified_at"] = datetime.now(timezone.utc).isoformat()
+    case.evidence = evidence
+    case.status = "blocked_waiting_human" if missing else "investigating"
+    case.case_type = "feedback_clarification" if missing else "human_feedback"
+    case.training_status = "blocked_ambiguous_feedback" if missing else "blocked_pending_investigation"
+    _audit(db, user, "human_feedback.clarified", "assurance_case", case.id,
+           {"remaining_missing_fields": missing})
+    db.commit()
+    return {"case_id": case.id, "clarification_required": bool(missing),
+            "remaining_missing_fields": missing, "training_eligible": False}
+
+
+@router.post("/feedback/{case_id}/reminder")
+def record_feedback_reminder(case_id: int, db: Session = Depends(get_db),
+                             user=Depends(require_role("admin", "operator"))):
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type != "feedback_clarification":
+        raise HTTPException(404, "feedback clarification case not found")
+    evidence = dict(case.evidence or {})
+    if int(evidence.get("reminder_count") or 0) >= 1:
+        raise HTTPException(409, "one reminder already recorded; escalate ownership instead")
+    evidence["reminder_count"] = 1
+    evidence["reminder_sent_at"] = datetime.now(timezone.utc).isoformat()
+    case.evidence = evidence
+    _audit(db, user, "human_feedback.reminder_recorded", "assurance_case", case.id)
+    db.commit()
+    return {"case_id": case.id, "reminder_count": 1,
+            "next_action": "escalate accountable owner if no substantive response"}
 
 
 @router.post("/coverage/requirements")
@@ -155,7 +255,9 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
     db.flush()
     training_image_id = None
     if body.evidence_path and case.training_status not in {
-        "verified_labelled_sample_created", "sample_created_pending_bbox_verification"}:
+        "labelled_sample_pending_independent_verification",
+        "sample_created_pending_bbox_verification",
+        "verified_and_eligible_for_training"}:
         dataset = db.query(Dataset).filter(Dataset.name == "human_missed_events").first()
         if not dataset:
             dataset = Dataset(name="human_missed_events",
@@ -168,6 +270,9 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
         image = TrainingImage(dataset_id=dataset.id, camera_id=body.camera_id,
                               file_path=body.evidence_path, captured_at=occurred,
                               labeled=bool(body.bbox_yolo),
+                              source_kind="human_missed_event",
+                              eligible_for_training=False,
+                              review_state="pending",
                               source_extra={"assurance_case_id": case.id, "target_label": body.label,
                                             "source": body.source, "human_review_required": True})
         db.add(image)
@@ -176,8 +281,8 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
         if body.bbox_yolo:
             db.add(Annotation(image_id=image.id, class_label=body.label,
                               bbox_json=body.bbox_yolo, annotated_by=user.id,
-                              verified=True, auto_suggested=False))
-            case.training_status = "verified_labelled_sample_created"
+                              verified=False, auto_suggested=False))
+            case.training_status = "labelled_sample_pending_independent_verification"
         else:
             case.training_status = "sample_created_pending_bbox_verification"
     _audit(db, user, "missed_event.reported", "assurance_case", case.id,
@@ -186,6 +291,35 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
     return {"case_id": case.id, "root_cause": root_cause,
             "training_status": case.training_status, "training_image_id": training_image_id,
             "matched_event_id": matched.id if matched else None}
+
+
+@router.post("/missed-events/{case_id}/verify-training")
+def verify_missed_event_training(case_id: int, db: Session = Depends(get_db),
+                                 user=Depends(require_role("admin", "operator"))):
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type != "missed_event":
+        raise HTTPException(404, "missed-event case not found")
+    image = (db.query(TrainingImage)
+             .filter(TrainingImage.source_extra["assurance_case_id"].as_integer() == case.id)
+             .order_by(TrainingImage.id.desc()).first())
+    if not image:
+        raise HTTPException(409, "no visual training sample is attached")
+    annotations = db.query(Annotation).filter(Annotation.image_id == image.id).all()
+    if not annotations:
+        raise HTTPException(409, "a reviewed bounding box is required")
+    high_consequence = {"weapon", "brandished_weapon", "fight", "violence", "theft"}
+    if any(a.class_label in high_consequence and a.annotated_by == user.id for a in annotations):
+        raise HTTPException(409, "high-consequence labels require an independent second reviewer")
+    for annotation in annotations:
+        annotation.verified = True
+    image.eligible_for_training = True
+    image.review_state = "approved"
+    case.training_status = "verified_and_eligible_for_training"
+    _audit(db, user, "missed_event.training_verified", "training_image", image.id,
+           {"case_id": case.id, "annotation_ids": [a.id for a in annotations]})
+    db.commit()
+    return {"case_id": case.id, "training_image_id": image.id,
+            "eligible_for_training": True, "reviewed_by": user.id}
 
 
 def _ingest_event(body: OperationalEventIn, db: Session, user):

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import AgentReport
+from app.agent_control.accountability import scorecards
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -57,7 +58,7 @@ def latest_per_agent(
     """One row per agent — the newest report — for the dashboard grid."""
     from app.tasks.agents import AGENT_INTERVAL_SECONDS
     out = []
-    for name in list(AGENT_INTERVAL_SECONDS) + ["watchdog"]:
+    for name in list(AGENT_INTERVAL_SECONDS) + ["watchdog", "accountability"]:
         rep = (db.query(AgentReport)
                  .filter(AgentReport.agent_name == name)
                  .order_by(AgentReport.run_at.desc())
@@ -65,6 +66,14 @@ def latest_per_agent(
         out.append({"agent_name": name,
                     "report": _serialize(rep) if rep else None})
     return {"agents": out}
+
+
+@router.get("/scorecards")
+def agent_scorecards(window_hours: int = Query(24, ge=1, le=168),
+                     db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    cards = scorecards(db, window_hours=window_hours)
+    return {"target": 0.99, "scorecards": cards,
+            "warning": "Agent SLA score is not detector precision or recall."}
 
 
 @router.post("/{name}/run")

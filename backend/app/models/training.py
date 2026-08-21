@@ -56,6 +56,15 @@ class TrainingImage(Base):
         ForeignKey("alerts.id", ondelete="SET NULL"),
         nullable=True, index=True,
     )
+    # Provenance gate. Synthetic, simulation, mined and ambiguous-human
+    # evidence is quarantined until an explicit review makes it trainable.
+    source_kind: Mapped[str] = mapped_column(String(32), default="operator_verified",
+                                              server_default="operator_verified", index=True)
+    eligible_for_training: Mapped[bool] = mapped_column(Boolean, default=True,
+                                                         server_default="true", index=True)
+    review_state: Mapped[str] = mapped_column(String(24), default="approved",
+                                               server_default="approved", index=True)
+    simulation_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     dataset     = relationship("Dataset", back_populates="images")

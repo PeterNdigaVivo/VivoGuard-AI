@@ -49,7 +49,9 @@ def split_dataset(db: Session, dataset_id: int, *,
     """
     images = (db.query(TrainingImage)
                 .filter(TrainingImage.dataset_id == dataset_id,
-                        TrainingImage.labeled == True)            # noqa: E712
+                        TrainingImage.labeled == True,            # noqa: E712
+                        TrainingImage.eligible_for_training.is_(True),
+                        TrainingImage.review_state == "approved")
                 .all())
 
     if min(train, val, test) < 0 or train + val + test <= 0:
@@ -141,14 +143,21 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     dataset_ids = [dataset_id, *(extra_dataset_ids or [])]
     images = (db.query(TrainingImage)
                 .filter(TrainingImage.dataset_id.in_(dataset_ids),
-                        TrainingImage.labeled == True)            # noqa: E712
+                        TrainingImage.labeled == True,            # noqa: E712
+                        TrainingImage.eligible_for_training.is_(True),
+                        TrainingImage.review_state == "approved")
                 .all())
 
     # Pass 1 — bucket per split into (positives, negatives) so we can
     # apply the per-split negative cap fairly.
     by_split: dict[str, dict[str, list]] = {}
     for img in images:
-        anns = db.query(Annotation).filter(Annotation.image_id == img.id).all()
+        all_anns = db.query(Annotation).filter(Annotation.image_id == img.id).all()
+        anns = [ann for ann in all_anns if ann.verified]
+        # An object-labelled image with only pending annotations is neither a
+        # positive nor a background negative. Quarantine it until review.
+        if all_anns and not anns:
+            continue
         split = img.split or "train"
         bucket = by_split.setdefault(split, {"pos": [], "neg": []})
         if anns:
@@ -220,12 +229,15 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     if mix_dataset_id is not None and mix_dataset_id != dataset_id:
         pool = (db.query(TrainingImage)
                   .filter(TrainingImage.dataset_id == mix_dataset_id,
-                          TrainingImage.labeled == True)          # noqa: E712
+                          TrainingImage.labeled == True,          # noqa: E712
+                          TrainingImage.eligible_for_training.is_(True),
+                          TrainingImage.review_state == "approved")
                   .all())
         eligible: list[tuple[TrainingImage, list[Annotation]]] = []
         for img in pool:
             anns = (db.query(Annotation)
-                      .filter(Annotation.image_id == img.id).all())
+                      .filter(Annotation.image_id == img.id,
+                              Annotation.verified.is_(True)).all())
             if anns and any(a.class_label in cls_map for a in anns):
                 eligible.append((img, anns))
         n_mix = min(len(eligible), max(1, int(len(train_list) * mix_fraction)))

@@ -129,10 +129,14 @@ def _new_samples_since(db: Session, detection_type: str,
     None → all samples ever."""
     q_pos = (db.query(TrainingImage)
                 .join(Dataset, Dataset.id == TrainingImage.dataset_id)
-                .filter(Dataset.name == f"feedback-{detection_type}"))
+                .filter(Dataset.name == f"feedback-{detection_type}",
+                        TrainingImage.eligible_for_training.is_(True),
+                        TrainingImage.review_state == "approved"))
     q_neg = (db.query(TrainingImage)
                 .join(Dataset, Dataset.id == TrainingImage.dataset_id)
-                .filter(Dataset.name == f"feedback-negative-{detection_type}"))
+                .filter(Dataset.name == f"feedback-negative-{detection_type}",
+                        TrainingImage.eligible_for_training.is_(True),
+                        TrainingImage.review_state == "approved"))
     if since is not None:
         q_pos = q_pos.filter(TrainingImage.created_at > since)
         q_neg = q_neg.filter(TrainingImage.created_at > since)
@@ -238,7 +242,9 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     pos_count = 0
     if pos_dataset_ids:
         pos_count = (db.query(TrainingImage)
-                       .filter(TrainingImage.dataset_id.in_(pos_dataset_ids)).count())
+                       .filter(TrainingImage.dataset_id.in_(pos_dataset_ids),
+                               TrainingImage.eligible_for_training.is_(True),
+                               TrainingImage.review_state == "approved").count())
         _floor = _min_images(detection_type)
         if pos_count < _floor:
             log.warning(
@@ -279,7 +285,9 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     neg_ids = ([neg_ds.id] if neg_ds is not None else []) + \
               [d.id for d in extra_neg_ds]
     neg_count = (db.query(TrainingImage)
-                   .filter(TrainingImage.dataset_id.in_(neg_ids)).count()
+                   .filter(TrainingImage.dataset_id.in_(neg_ids),
+                           TrainingImage.eligible_for_training.is_(True),
+                           TrainingImage.review_state == "approved").count()
                  if neg_ids else 0)
     _mix_frac = float(getattr(_settings, "base_mix_fraction", 0.18))
     projected = (pos_count + min(neg_count, int(3.0 * pos_count))
@@ -362,7 +370,9 @@ def enqueue_full_retrain(db: Session, detection_type: str) -> dict:
         return {"detection_type": detection_type, "status": "skipped",
                 "reason": "no positive pool"}
     pos_count = (db.query(TrainingImage)
-                   .filter(TrainingImage.dataset_id == pos_ds.id).count())
+                   .filter(TrainingImage.dataset_id == pos_ds.id,
+                           TrainingImage.eligible_for_training.is_(True),
+                           TrainingImage.review_state == "approved").count())
     if pos_count < _min_images(detection_type):
         return {"detection_type": detection_type, "status": "skipped",
                 "reason": f"only {pos_count} positives "

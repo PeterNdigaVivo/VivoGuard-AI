@@ -1,5 +1,6 @@
 """Scheduled deterministic assurance agents; all outputs require human review."""
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.database import SessionLocal
@@ -13,33 +14,54 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 
+def _report(name: str, started: float, findings: dict, *, status: str = "ok", gaps=None):
+    from app.tasks.agents import _heartbeat, _redis, _write_report
+    _heartbeat(_redis(), name)
+    _write_report(name, status, findings, gaps=gaps,
+                  duration_ms=int((time.time() - started) * 1000))
+
+
 @celery_app.task(name="operations.coverage_assurance", ignore_result=True)
 def coverage_assurance():
+    started = time.time()
     with SessionLocal() as db:
         results = assess_coverage(db, persist=True)
         db.commit()
         log.info("coverage assurance: %s requirements assessed", len(results))
+    failures = [result for result in results if result["status"] != "pass"]
+    _report("coverage_assurance", started, {"requirements": len(results),
+            "failures": len(failures)}, status="warning" if failures else "ok",
+            gaps=failures or None)
 
 
 @celery_app.task(name="operations.alert_quality", ignore_result=True)
 def alert_quality():
+    started = time.time()
     with SessionLocal() as db:
         count = create_alert_quality_cases(db)
         db.commit()
         log.info("alert quality: %s exceptions", count)
+    _report("alert_quality", started, {"exceptions": count},
+            status="warning" if count else "ok",
+            gaps=[{"alert_quality_cases": count}] if count else None)
 
 
 @celery_app.task(name="operations.lone_worker", ignore_result=True)
 def lone_worker():
+    started = time.time()
     with SessionLocal() as db:
         count = create_lone_worker_cases(db)
         db.commit()
         log.info("lone worker: %s review cases", count)
+    _report("lone_worker", started, {"review_cases": count},
+            status="warning" if count else "ok",
+            gaps=[{"review_cases": count}] if count else None)
 
 
 @celery_app.task(name="operations.event_fusion", ignore_result=True)
 def event_fusion():
     """Recover imported events that did not complete synchronous correlation."""
+    started = time.time()
     with SessionLocal() as db:
         events = (db.query(OperationalEvent)
                   .outerjoin(RiskReview, RiskReview.operational_event_id == OperationalEvent.id)
@@ -49,6 +71,7 @@ def event_fusion():
             correlate_event(db, event)
         db.commit()
         log.info("event fusion: %s pending events correlated", len(events))
+    _report("event_fusion", started, {"events_correlated": len(events)})
 
 
 @celery_app.task(name="operations.retention", ignore_result=True)

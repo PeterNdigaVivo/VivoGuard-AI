@@ -54,21 +54,13 @@ from celery.exceptions import SoftTimeLimitExceeded, MaxRetriesExceededError
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
+from app.agent_control.policies import AGENT_POLICIES
 
 log = logging.getLogger(__name__)
 
 # ── schedule map (seconds) — drives heartbeat TTL + watchdog liveness ────
 AGENT_INTERVAL_SECONDS: dict[str, int] = {
-    "ml_dataset":       6 * 3600,
-    "training":         3600,
-    "backend_health":   1800,
-    "frontend":         3600,
-    "db_admin":         6 * 3600,
-    "streamer":         300,
-    "simulation":       6 * 3600,
-    "detector_alerts":  900,
-    "retail_standards": 24 * 3600,
-    "inspection":       24 * 3600,
+    name: int(policy["interval_seconds"]) for name, policy in AGENT_POLICIES.items()
 }
 CIRCUIT_MAX_FAILS = 5
 SUSPEND_SECONDS   = 3600
@@ -832,12 +824,14 @@ def agent_watchdog(self):
         if age is None or age >= 2 * interval:
             dead.append({"agent": name, "hb_age_s": age})
             task = AGENT_TASKS.get(name)
-            if task is not None:
-                try:
-                    task.delay()                # re-enqueue immediately
-                    revived.append(name)
-                except Exception as e:
-                    log.warning("watchdog could not re-enqueue %s: %s", name, e)
+            try:
+                if task is not None:
+                    task.delay()
+                else:
+                    celery_app.send_task(AGENT_POLICIES[name]["task"])
+                revived.append(name)
+            except Exception as e:
+                log.warning("watchdog could not re-enqueue %s: %s", name, e)
     if dead:
         _ops_alert("AGENTS DEAD",
                    "re-enqueued: " + ", ".join(revived) if revived

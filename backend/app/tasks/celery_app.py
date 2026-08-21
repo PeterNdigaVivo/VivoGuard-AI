@@ -45,6 +45,8 @@ celery_app = Celery(
         "app.tasks.system_health_report",
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
+        "app.tasks.scenario_simulation",
+        "app.tasks.agent_accountability",
     ],
 )
 celery_app.conf.update(
@@ -70,7 +72,7 @@ celery_app.conf.update(
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
         "alerting.live_activity_sentinel":      {"queue": "alerts"},
-        "simulation.mine_uniform_crops":        {"queue": "alerts"},
+        "training.mine_live_uniform_crops":     {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
@@ -141,6 +143,8 @@ celery_app.conf.update(
         "operations.lone_worker":        {"queue": "alerts"},
         "operations.event_fusion":       {"queue": "alerts"},
         "operations.retention":          {"queue": "beat"},
+        "agents.scenario_simulator":      {"queue": "alerts"},
+        "agents.accountability":          {"queue": "alerts"},
         # Rolling recorder — runs in the dedicated `recorder` compose service
         # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
         "recorder.tick":                  {"queue": "recorder"},
@@ -388,7 +392,7 @@ celery_app.conf.update(
         # Staff-uniform crop miner (Part 6) — mines live frames for training
         # data every 2 hours (30 cameras/run, rotating cursor).
         "uniform-crop-miner-every-2h": {
-            "task": "simulation.mine_uniform_crops",
+            "task": "training.mine_live_uniform_crops",
             "schedule": timedelta(hours=2),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
@@ -489,6 +493,12 @@ celery_app.conf.update(
         },
         "operations-retention-daily": {
             "task": "operations.retention", "schedule": crontab(minute=40, hour=3),
+        },
+        "agents-scenario-simulator-hourly": {
+            "task": "agents.scenario_simulator", "schedule": timedelta(hours=1),
+        },
+        "agents-accountability-every-5min": {
+            "task": "agents.accountability", "schedule": timedelta(minutes=5),
         },
 
         # ── Rolling recorder ──────────────────────────────────────────

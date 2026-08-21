@@ -19,8 +19,26 @@ export interface AgentLatest {
   report: AgentReport | null
 }
 
+export interface AgentScorecard {
+  agent_name: string
+  owner: string
+  score: number
+  compliant: boolean
+  active_critical_override: boolean
+  breaches: string[]
+  completed_runs: number
+  expected_runs: number
+  run_coverage: number
+  completion_reliability: number
+  valid_output_rate: number
+}
+
 export function fetchLatest(): Promise<{ agents: AgentLatest[] }> {
   return api('/agents/latest')
+}
+
+export function fetchScorecards(): Promise<{ target: number; scorecards: AgentScorecard[] }> {
+  return api('/agents/scorecards?window_hours=24')
 }
 
 export function fetchReports(

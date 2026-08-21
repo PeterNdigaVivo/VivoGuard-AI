@@ -3,8 +3,8 @@
 // and expands to that agent's recent report history. Polls every 30s.
 import { useEffect, useState, useCallback } from 'react'
 import {
-  fetchLatest, fetchReports, runAgent,
-  type AgentLatest, type AgentReport, type AgentStatus,
+  fetchLatest, fetchReports, fetchScorecards, runAgent,
+  type AgentLatest, type AgentReport, type AgentScorecard, type AgentStatus,
 } from '@/api/agents'
 
 const STATUS_STYLE: Record<string, string> = {
@@ -68,11 +68,13 @@ export default function AgentsPage() {
   const [selected, setSelected] = useState<string | null>(null)
   const [history, setHistory] = useState<AgentReport[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [scorecards, setScorecards] = useState<Record<string, AgentScorecard>>({})
 
   const load = useCallback(async () => {
     try {
-      const { agents } = await fetchLatest()
+      const [{ agents }, { scorecards }] = await Promise.all([fetchLatest(), fetchScorecards()])
       setAgents(agents)
+      setScorecards(Object.fromEntries(scorecards.map((card) => [card.agent_name, card])))
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load agents')
@@ -126,7 +128,7 @@ export default function AgentsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Monitoring Agents</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            10 autonomous domain agents + watchdog. Auto-refreshing every 30s.
+            Accountable monitoring agents, isolated simulation and watchdog. Auto-refreshing every 30s.
           </p>
         </div>
         <div className="flex gap-2 text-xs">
@@ -147,6 +149,7 @@ export default function AgentsPage() {
         {agents.map((a) => {
           const rep = a.report
           const gaps = countKeys(rep?.gaps)
+          const scorecard = scorecards[a.agent_name]
           return (
             <div
               key={a.agent_name}
@@ -161,6 +164,13 @@ export default function AgentsPage() {
                 <span>last run {relTime(rep?.run_at ?? null)}</span>
                 <span>{rep?.duration_ms != null ? `${rep.duration_ms}ms` : '—'}</span>
               </div>
+              {scorecard && (
+                <div className={`rounded px-2 py-1 text-xs ${scorecard.compliant ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
+                  SLA {scorecard.score.toFixed(1)}% · {scorecard.completed_runs}/{scorecard.expected_runs} runs
+                  <div className="text-[11px] opacity-80">Owner: {scorecard.owner}</div>
+                  {!scorecard.compliant && <div>{scorecard.breaches.join(' · ')}</div>}
+                </div>
+              )}
               {aiSummary(rep) && (
                 <p className="text-xs text-slate-600 dark:text-slate-300 italic leading-snug">
                   🤖 {aiSummary(rep)}

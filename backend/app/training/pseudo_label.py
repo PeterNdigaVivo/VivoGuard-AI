@@ -113,7 +113,8 @@ def pseudo_label_dataset(db: Session, dataset_id: int, *,
     pseudo-label them. Returns {processed, labelled, total_annotations}."""
     pending = (db.query(TrainingImage)
                  .filter(TrainingImage.dataset_id == dataset_id,
-                         TrainingImage.labeled == False)           # noqa: E712
+                         TrainingImage.labeled == False,           # noqa: E712
+                         TrainingImage.eligible_for_training.is_(True))
                  .limit(int(limit))
                  .all())
     processed = 0
@@ -142,6 +143,7 @@ def pseudo_label_all_pending(db: Session, *,
     ds_rows = (db.query(Dataset.id)
                   .join(TrainingImage, TrainingImage.dataset_id == Dataset.id)
                   .filter(TrainingImage.labeled == False)           # noqa: E712
+                  .filter(TrainingImage.eligible_for_training.is_(True))
                   .distinct()
                   .all())
     summary = {"datasets": 0, "labelled": 0, "total_annotations": 0,
