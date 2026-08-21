@@ -32,3 +32,11 @@ else
     echo "[tls-guard] falling back to HTTP-only on :80 (nginx will still start)"
     cp "$SRC/http-only.conf" "$ACTIVE"
 fi
+
+# The stock image links access.log to /dev/stdout.  In the shared log volume
+# that device belongs to the reading container, so opening it can block the
+# assurance worker.  Keep a regular access log that both containers can read.
+if [ -L /var/log/nginx/access.log ]; then
+    rm -f /var/log/nginx/access.log
+fi
+touch /var/log/nginx/access.log
