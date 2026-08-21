@@ -143,7 +143,7 @@ def schema_check(db: Session = Depends(get_db), _u=Depends(get_current_user)):
 @router.get("/health")
 def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     fb = FrameBuffer()
-    cameras = db.query(Camera).all()
+    cameras = db.query(Camera).filter(Camera.is_deleted.is_(False)).all()
     health_by_camera = fb.health_many([c.id for c in cameras])
     now = time.time()
     cam_health = []
