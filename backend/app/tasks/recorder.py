@@ -2,14 +2,15 @@
 service (celery worker -Q recorder), so it survives worker/inference
 rebuilds. ffmpeg subprocesses are children of THIS container.
 
-Windows (EAT), business hours only:
+Windows (EAT), 24/7 for key/entrance cameras:
+    00:00-07:00  window "<date>_0000"  (25200s)
     07:00-14:00  window "<date>_0700"  (25200s)
     14:00-19:00  window "<date>_1400"  (18000s)
     19:00-20:00  window "<date>_1900"  ( 3600s)
-Outside 07:00-20:00 EAT: nothing records. The first window starts two
-hours before official trading: early openers kept beating the recorder
-(08:0x crossings first, then Yaya 07:06 / Garden City 07:12 on the
-08:00 window) — 07:00 covers the whole observed opening spread.
+    20:00-24:00  window "<date>_2000"  (14400s)
+Overnight coverage is intentional: intrusion evidence is most valuable
+outside trading hours. Only key cameras are recorded, and the previous
+bounded window is deleted at rollover, keeping storage constrained.
 
 At each transition the PREVIOUS window's directory is deleted. Recording is
 substream, stream-copy (no re-encode), fragmented-mp4 so an in-progress file
@@ -43,7 +44,13 @@ from app.tasks.celery_app import celery_app
 log = logging.getLogger(__name__)
 
 # Ordered windows: (start_hour, end_hour, suffix, seconds).
-_WINDOWS = [(7, 14, "0700", 25200), (14, 19, "1400", 18000), (19, 20, "1900", 3600)]
+_WINDOWS = [
+    (0, 7, "0000", 25200),
+    (7, 14, "0700", 25200),
+    (14, 19, "1400", 18000),
+    (19, 20, "1900", 3600),
+    (20, 24, "2000", 14400),
+]
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
@@ -68,7 +75,7 @@ def _alert_clips_root() -> Path:
 
 def _current_window(now_eat: datetime):
     """Return (window_id, seconds, window_start_eat) for the active window, or
-    None outside business hours."""
+    None only if the window configuration has a gap."""
     h = now_eat.hour
     for start_h, end_h, suffix, secs in _WINDOWS:
         if start_h <= h < end_h:
@@ -263,7 +270,7 @@ def tick() -> None:
     win = _current_window(now_eat)
     prev = r.get(_CURRENT_WINDOW_KEY)
 
-    # Outside business hours → ensure everything is stopped + purged.
+    # A configuration gap → ensure everything is stopped + purged.
     if win is None:
         if prev:
             _stop_all(r)

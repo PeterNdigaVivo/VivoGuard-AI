@@ -173,7 +173,7 @@ def auto_suggest_image(image_id: int, db: Session = Depends(get_db),
 @router.post("/annotate", response_model=list[AnnotationOut])
 def save_annotations(image_id: int, payload: list[AnnotationIn],
                      db: Session = Depends(get_db),
-                     _u=Depends(require_role("admin", "operator"))):
+                     user=Depends(require_role("admin", "operator"))):
     img = db.get(TrainingImage, image_id)
     if not img:
         raise HTTPException(404, "image not found")
@@ -181,9 +181,16 @@ def save_annotations(image_id: int, payload: list[AnnotationIn],
     db.query(Annotation).filter(Annotation.image_id == image_id).delete()
     out: list[Annotation] = []
     for a in payload:
-        row = Annotation(image_id=image_id, **a.model_dump())
+        row = Annotation(image_id=image_id, annotated_by=user.id, **a.model_dump())
         db.add(row); out.append(row)
     img.labeled = bool(payload)
+    all_verified = bool(payload) and all(a.verified for a in payload)
+    # Saving boxes is not the same as approving them. Synthetic evidence is
+    # evaluation-only; missed-event evidence uses its independent-review API.
+    forbidden_direct_promotion = {"synthetic", "simulation", "human_missed_event"}
+    img.eligible_for_training = bool(
+        all_verified and img.source_kind not in forbidden_direct_promotion)
+    img.review_state = "approved" if img.eligible_for_training else "pending"
     db.commit()
     for r in out:
         db.refresh(r)

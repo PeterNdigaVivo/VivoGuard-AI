@@ -77,8 +77,8 @@ class AlertEngine:
                     zone_name = z.name
 
         alert_payload = AlertPayload(
-            alert_id=int(payload["id"]),
-            event_id=int(payload["id"]),
+            alert_id=int(payload.get("alert_id") or payload["id"]),
+            event_id=int(payload.get("event_id") or payload["id"]),
             camera_id=camera_id,
             camera_name=camera_name,
             detection_type=dtype,

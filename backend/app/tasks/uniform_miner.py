@@ -169,14 +169,17 @@ def run_uniform_mining() -> dict:
                                 description="auto: mined civilian (non-uniform) crops")
                         ds = neg_ds
 
-                    fname = f"sim_cam{cid}_{label}.jpg"
+                    fname = f"mined_cam{cid}_{label}.jpg"
                     path = save_uploaded_image(ds.id, fname, bytes(buf))
                     img = TrainingImage(
                         dataset_id=ds.id, camera_id=int(cid),
                         file_path=str(path), labeled=True,
+                        source_kind="auto_live_uniform_miner",
+                        eligible_for_training=False,
+                        review_state="pending",
                         source_extra={
-                            "source": "simulation", "approved": True,
-                            "verified": True, "label": label,
+                            "source": "auto_live_uniform_miner", "approved": False,
+                            "verified": False, "label": label,
                             "dual_black": dual_black, "in_staff_zone": in_staff,
                             "uniform_confidence": round(float(feats.get("confidence") or 0), 3),
                         },
@@ -185,7 +188,8 @@ def run_uniform_mining() -> dict:
                     # Positive → full-frame annotation (the crop IS the person).
                     if kind == "pos":
                         db.add(Annotation(image_id=img.id, class_label=label,
-                                          bbox_json=[0.5, 0.5, 1.0, 1.0], verified=True))
+                                          bbox_json=[0.5, 0.5, 1.0, 1.0],
+                                          verified=False, auto_suggested=True))
                         summary["staff_crops"] += 1
                     else:
                         summary["customer_crops"] += 1
@@ -220,7 +224,7 @@ def run_uniform_mining() -> dict:
     return summary
 
 
-@celery_app.task(name="simulation.mine_uniform_crops", ignore_result=True)
+@celery_app.task(name="training.mine_live_uniform_crops", ignore_result=True)
 def mine_uniform_crops() -> None:
     """Beat entry — runs the miner every 2 hours. Best-effort."""
     try:

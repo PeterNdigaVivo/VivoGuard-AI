@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     mannequin_filter_enabled: bool = True
     activity_static_displacement_px: int = 5
     activity_static_window_frames: int = 10
+    # Keep recently tracked people through short YOLO misses/occlusions.
+    # Alert detectors still evaluate only the current frame.
+    activity_track_hold_seconds: float = 5.0
     activity_presence_enabled: bool = True
     activity_presence_threshold: int = 5
     activity_presence_sustain_samples: int = 2

@@ -114,6 +114,8 @@ _OPTIONAL_ROUTERS = [
     ("app.api.system_health",      ["router"]),
     ("app.api.websockets",         ["router"]),
     ("app.api.agents",             ["router"]),
+    ("app.api.operations",         ["router"]),
+    ("app.api.simulations",        ["router"]),
 ]
 for _module_name, _attrs in _OPTIONAL_ROUTERS:
     try:

@@ -15,6 +15,9 @@ class AlertOut(BaseModel):
     notes: str | None = None
     feedback_used_for_training: bool
     created_at: datetime
+    event_timestamp: datetime | None = None
+    delivery_delay_seconds: int | None = None
+    scope: str = "camera"
 
     # Joined event fields (filled by the route).
     camera_id: int | None = None

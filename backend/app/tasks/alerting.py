@@ -170,15 +170,13 @@ def queue_escalation_check() -> None:
 # uncovered RIGHT NOW and ops must know.
 
 INFERENCE_STALL_THRESHOLD_S      = 10 * 60   # 10 min
-INFERENCE_STALL_DEDUP_TTL_S      = 30 * 60   # one URGENT per 30 min
 
 
 @celery_app.task(name="alerting.inference_pipeline_health_check",
                   ignore_result=True)
 def inference_pipeline_health_check() -> None:
-    """Fire URGENT when the supervisor health breadcrumb ages past
-    INFERENCE_STALL_THRESHOLD_S. Per-30-min dedup. Early warning
-    before a full outage."""
+    """Fire once when the supervisor health breadcrumb ages past the
+    threshold, then remain quiet until recovery starts a new outage."""
     from zoneinfo import ZoneInfo
     r = _redis()
     if r is None:
@@ -232,14 +230,16 @@ def inference_pipeline_health_check() -> None:
                   .strftime("%H:%M EAT")
             if last_run_ts else "unknown")
     age_min = int((age or 0) / 60)
-    body = (f"Inference pipeline stalled — {cameras_total} cameras "
-            f"not being monitored. Last successful supervisor tick: "
-            f"{when} ({age_min} min ago).")
+    body = (f"VivoGuard AI monitoring is offline for {cameras_total} cameras. "
+            f"Last successful AI supervisor check: {when} ({age_min} min ago). "
+            "This does not by itself mean the NVR is offline.")
     extra = {
         "priority":   "high",
         "rule":       "inference_pipeline_stalled",
         "store_id":   None,
-        "title":      "🚨 AI inference pipeline stalled",
+        "scope":      "fleet",
+        "component":  "ai_inference_pipeline",
+        "title":      "🚨 VivoGuard AI monitoring offline",
         "message":    body,
         "what_to_do": [
             "Check that the worker-inference container is running",
@@ -279,7 +279,9 @@ def inference_pipeline_health_check() -> None:
     except Exception:
         pass
 
-    r.set(sent_key, "1", ex=INFERENCE_STALL_DEDUP_TTL_S)
+    # No TTL: one incident must create one operator alert, not recur every
+    # 30 minutes.  The healthy branch above clears this key on recovery.
+    r.set(sent_key, "1")
     log.warning("inference_pipeline_stalled: cameras=%d age_min=%d",
                 cameras_total, age_min)
 

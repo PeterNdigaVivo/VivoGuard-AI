@@ -44,6 +44,9 @@ celery_app = Celery(
         "app.tasks.uniform_miner",
         "app.tasks.system_health_report",
         "app.tasks.feedback_harvest",
+        "app.tasks.operations_assurance",
+        "app.tasks.scenario_simulation",
+        "app.tasks.agent_accountability",
     ],
 )
 celery_app.conf.update(
@@ -69,7 +72,7 @@ celery_app.conf.update(
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
         "alerting.live_activity_sentinel":      {"queue": "alerts"},
-        "simulation.mine_uniform_crops":        {"queue": "alerts"},
+        "training.mine_live_uniform_crops":     {"queue": "alerts"},
         "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
@@ -135,6 +138,13 @@ celery_app.conf.update(
         "agents.retail_standards": {"queue": "alerts"},
         "agents.inspection":       {"queue": "alerts"},
         "agents.agent_watchdog":   {"queue": "alerts"},
+        "operations.coverage_assurance": {"queue": "alerts"},
+        "operations.alert_quality":      {"queue": "alerts"},
+        "operations.lone_worker":        {"queue": "alerts"},
+        "operations.event_fusion":       {"queue": "alerts"},
+        "operations.retention":          {"queue": "beat"},
+        "agents.scenario_simulator":      {"queue": "alerts"},
+        "agents.accountability":          {"queue": "alerts"},
         # Rolling recorder — runs in the dedicated `recorder` compose service
         # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
         "recorder.tick":                  {"queue": "recorder"},
@@ -382,7 +392,7 @@ celery_app.conf.update(
         # Staff-uniform crop miner (Part 6) — mines live frames for training
         # data every 2 hours (30 cameras/run, rotating cursor).
         "uniform-crop-miner-every-2h": {
-            "task": "simulation.mine_uniform_crops",
+            "task": "training.mine_live_uniform_crops",
             "schedule": timedelta(hours=2),
         },
         # Daily 18:00 EAT WhatsApp summary — same routing rationale.
@@ -468,6 +478,27 @@ celery_app.conf.update(
         "agents-watchdog-10min": {
             "task": "agents.agent_watchdog",
             "schedule": timedelta(minutes=10),
+        },
+        "operations-coverage-every-5min": {
+            "task": "operations.coverage_assurance", "schedule": timedelta(minutes=5),
+        },
+        "operations-alert-quality-every-5min": {
+            "task": "operations.alert_quality", "schedule": timedelta(minutes=5),
+        },
+        "operations-lone-worker-every-5min": {
+            "task": "operations.lone_worker", "schedule": timedelta(minutes=5),
+        },
+        "operations-event-fusion-every-5min": {
+            "task": "operations.event_fusion", "schedule": timedelta(minutes=5),
+        },
+        "operations-retention-daily": {
+            "task": "operations.retention", "schedule": crontab(minute=40, hour=3),
+        },
+        "agents-scenario-simulator-hourly": {
+            "task": "agents.scenario_simulator", "schedule": timedelta(hours=1),
+        },
+        "agents-accountability-every-5min": {
+            "task": "agents.accountability", "schedule": timedelta(minutes=5),
         },
 
         # ── Rolling recorder ──────────────────────────────────────────

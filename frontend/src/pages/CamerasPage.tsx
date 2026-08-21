@@ -89,9 +89,16 @@ export default function CamerasPage() {
   ]).catch(e => setError(String(e)))
   useEffect(() => { reload() }, [])
 
-  async function remove(id: number) {
-    if (!confirm('Remove this camera?')) return
-    await camsApi.remove(id)
+  async function remove(cam: Camera) {
+    const expected = `REMOVE ${cam.id}`
+    const entered = prompt(
+      `Remove ${cam.name} (camera ${cam.id}) from active monitoring?\n\n` +
+      'Inference will stop, but its zones, configuration and history will be ' +
+      'retained so an administrator can restore it. ' +
+      `Type ${expected} to continue.`,
+    )
+    if (entered !== expected) return
+    await camsApi.remove(cam.id)
     reload()
   }
 
@@ -393,7 +400,7 @@ export default function CamerasPage() {
                     <Link className="text-slate-500 dark:text-slate-300 hover:underline text-xs mr-3"
                           to={`/cameras/${c.id}/detection`}>advanced</Link>
                     <button className="text-red-600 hover:underline"
-                            onClick={() => remove(c.id)}>Remove</button>
+                            onClick={() => remove(c)}>Remove</button>
                   </td>
                 </tr>
               ))}

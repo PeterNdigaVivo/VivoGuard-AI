@@ -1,5 +1,7 @@
 """/cameras endpoints — add, list, update, delete, test, discover, snapshot."""
 from __future__ import annotations
+import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +23,7 @@ from app.utils.crypto import encrypt
 from app.utils.network import build_rtsp_url
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
+log = logging.getLogger(__name__)
 
 
 # ---------- helpers ---------------------------------------------------
@@ -50,7 +53,9 @@ def list_cameras(db: Session = Depends(get_db), _u: User = Depends(get_current_u
     import logging as _l
     _l_log = _l.getLogger(__name__)
     try:
-        return db.query(Camera).order_by(Camera.id).all()
+        return (db.query(Camera)
+                .filter(Camera.is_deleted.is_(False))
+                .order_by(Camera.id).all())
     except Exception as e:
         _l_log.exception("GET /cameras failed (likely schema drift): %s", e)
         db.rollback()
@@ -181,7 +186,9 @@ def list_unassigned(db: Session = Depends(get_db),
                     _u: User = Depends(get_current_user)):
     """Legacy/orphan cameras with no store_id — surfaced in the UI as
     an "Assign to store" prompt so operators can clean them up."""
-    return db.query(Camera).filter(Camera.store_id.is_(None)).order_by(Camera.id).all()
+    return (db.query(Camera)
+            .filter(Camera.store_id.is_(None), Camera.is_deleted.is_(False))
+            .order_by(Camera.id).all())
 
 
 class TcpProbeIn(BaseModel):
@@ -680,11 +687,62 @@ def update_camera(camera_id: int, patch: CameraUpdate, db: Session = Depends(get
 def delete_camera(camera_id: int, db: Session = Depends(get_db),
                   _u: User = Depends(require_role("admin"))):
     cam = db.get(Camera, camera_id)
-    if not cam:
+    if not cam or cam.is_deleted:
         raise HTTPException(404, "camera not found")
-    db.delete(cam)
+    # Keep the row and all dependent zones/config/history recoverable. Logs are
+    # deliberately credential-free; attribution is also retained on the row.
+    log.warning(
+        "camera_soft_deleted actor_user_id=%s actor_email=%s camera_id=%s "
+        "camera_name=%r store_id=%s brand=%s host=%s rtsp_port=%s channel=%s",
+        _u.id,
+        _u.email,
+        cam.id,
+        cam.name,
+        cam.store_id,
+        cam.brand,
+        cam.host,
+        cam.rtsp_port,
+        cam.channel_number,
+    )
+    cam.deleted_previous_status = cam.status
+    cam.deleted_previous_ai_enabled = cam.ai_enabled
+    cam.is_deleted = True
+    cam.deleted_at = datetime.now(timezone.utc)
+    cam.deleted_by_user_id = _u.id
+    cam.deleted_by_email = _u.email
+    cam.restored_at = None
+    cam.restored_by_user_id = None
+    cam.restored_by_email = None
+    cam.ai_enabled = False
+    cam.status = "offline"
     db.commit()
     return {"deleted": camera_id}
+
+
+@router.post("/{camera_id}/restore")
+def restore_camera(camera_id: int, db: Session = Depends(get_db),
+                   _u: User = Depends(require_role("admin"))):
+    """Restore a soft-deleted camera with zones, config and history intact."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not cam.is_deleted:
+        raise HTTPException(409, "camera is not deleted")
+
+    cam.is_deleted = False
+    cam.status = cam.deleted_previous_status or "pending"
+    cam.ai_enabled = (cam.deleted_previous_ai_enabled
+                      if cam.deleted_previous_ai_enabled is not None else True)
+    cam.restored_at = datetime.now(timezone.utc)
+    cam.restored_by_user_id = _u.id
+    cam.restored_by_email = _u.email
+    log.warning(
+        "camera_restored actor_user_id=%s actor_email=%s camera_id=%s "
+        "camera_name=%r original_deleted_by_user_id=%s",
+        _u.id, _u.email, cam.id, cam.name, cam.deleted_by_user_id,
+    )
+    db.commit()
+    return {"restored": camera_id}
 
 
 # ---------- test connection (no DB write) -----------------------------

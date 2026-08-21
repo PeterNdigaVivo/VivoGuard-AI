@@ -106,6 +106,78 @@ def is_static_track(history_norm: list[list[float]],
     return max_d < float(min_px)
 
 
+def partition_static_person_tracks(
+    detections: list[dict],
+    tracks: list[tuple[Track, dict]],
+    frame_wh: tuple[int, int],
+    *,
+    enabled: bool = True,
+    min_px: float = 5.0,
+    window: int = 10,
+) -> tuple[list[dict], list[tuple[Track, dict]], set[int]]:
+    """Remove stationary *person* tracks from actionable detector input.
+
+    The detector can occasionally label a fixed chair, mannequin, or item of
+    merchandise as a person.  Those boxes used to be marked static only in
+    the live overlay, while the very same boxes still reached every alert
+    detector.  This function provides one shared partition for both paths.
+
+    Motion is latched for the lifetime of a track: once a track has shown
+    meaningful movement it is never treated as a fixture later merely
+    because a real person pauses.  Untracked detections fail open and remain
+    actionable.
+    """
+    if not enabled:
+        return detections, tracks, set()
+
+    static_ids: set[int] = set()
+    for track, det in tracks:
+        if det.get("cls") != "person":
+            continue
+        currently_static = is_static_track(
+            track.history, frame_wh, min_px=min_px, window=window,
+        )
+        if len(track.history) >= window and not currently_static:
+            track.extra["observed_motion"] = True
+        if currently_static and not track.extra.get("observed_motion", False):
+            static_ids.add(track.track_id)
+
+    actionable_detections = [
+        det for det in detections
+        if not (det.get("cls") == "person" and det.get("track_id") in static_ids)
+    ]
+    actionable_tracks = [
+        pair for pair in tracks if pair[0].track_id not in static_ids
+    ]
+    return actionable_detections, actionable_tracks, static_ids
+
+
+def update_recent_person_tracks(
+    recent: dict[int, float], detections: list[dict], now: float, *,
+    hold_seconds: float = 5.0,
+) -> tuple[int, int]:
+    """Return a stable live count across short misses and occlusions.
+
+    Only tracked people are held. Untracked detections count for the current
+    frame and therefore cannot linger as ghosts.
+    """
+    current_ids = {
+        int(det["track_id"]) for det in detections
+        if det.get("cls") == "person" and det.get("track_id") is not None
+    }
+    for track_id in current_ids:
+        recent[track_id] = now
+    cutoff = now - max(0.0, float(hold_seconds))
+    for track_id in [tid for tid, seen_at in recent.items() if seen_at < cutoff]:
+        del recent[track_id]
+    untracked_now = sum(
+        1 for det in detections
+        if det.get("cls") == "person" and det.get("track_id") is None
+    )
+    held_count = len(set(recent) - current_ids)
+    return len(recent) + untracked_now, held_count
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ByteTrack adapter (Roboflow Supervision) — drop-in for IOUTracker.
 #

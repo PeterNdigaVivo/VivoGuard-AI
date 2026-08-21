@@ -223,7 +223,7 @@ def collect_system_health(db: Session) -> dict:
 
     # ---- cameras -----------------------------------------------------
     def _cameras() -> dict:
-        cams = db.query(Camera).all()
+        cams = db.query(Camera).filter(Camera.is_deleted.is_(False)).all()
         cam_ids = [c.id for c in cams]
         fb = FrameBuffer()
         health = fb.health_many(cam_ids) if cam_ids else {}

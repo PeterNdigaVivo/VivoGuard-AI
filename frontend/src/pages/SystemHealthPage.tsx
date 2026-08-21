@@ -6,7 +6,9 @@ import { Badge, Card, PageHeader } from '@/components/ui/Primitives'
 
 interface CamHealth {
   camera_id: number; name: string; status: string
+  configured_status: string
   fps: number | null; last_frame_at: number | null
+  seconds_since_last_frame: number | null
   error: string | null; network_type: string
 }
 interface SystemHealth {
@@ -142,6 +144,7 @@ export default function SystemHealthPage() {
             <tr>
               <th className="text-left p-3">Camera</th>
               <th className="text-left p-3">Status</th>
+              <th className="text-left p-3">Configured</th>
               <th className="text-left p-3">FPS</th>
               <th className="text-left p-3">Network</th>
               <th className="text-left p-3">Last frame</th>
@@ -157,6 +160,7 @@ export default function SystemHealthPage() {
                     {c.status}
                   </Badge>
                 </td>
+                <td className="p-3 text-xs text-slate-500 dark:text-slate-400">{c.configured_status}</td>
                 <td className="p-3">{c.fps ? c.fps.toFixed(1) : '—'}</td>
                 <td className="p-3 uppercase text-xs">{c.network_type}</td>
                 <td className="p-3 text-xs text-slate-500 dark:text-slate-400">
@@ -166,7 +170,7 @@ export default function SystemHealthPage() {
               </tr>
             ))}
             {!data.cameras.length && (
-              <tr><td colSpan={6} className="p-6 text-center text-slate-500 dark:text-slate-300">No cameras configured.</td></tr>
+              <tr><td colSpan={7} className="p-6 text-center text-slate-500 dark:text-slate-300">No cameras configured.</td></tr>
             )}
           </tbody>
         </table>

@@ -164,7 +164,9 @@ def list_store_cameras(store_id: int, db: Session = Depends(get_db),
                        _u=Depends(get_current_user)):
     if not db.get(Store, store_id):
         raise HTTPException(404, "store not found")
-    return db.query(Camera).filter(Camera.store_id == store_id).order_by(Camera.id).all()
+    return (db.query(Camera)
+            .filter(Camera.store_id == store_id, Camera.is_deleted.is_(False))
+            .order_by(Camera.id).all())
 
 
 # ---------- attach / detach cameras ----------
