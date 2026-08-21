@@ -5,7 +5,7 @@ from app.models.camera    import Camera, NVRDevice, CONNECTION_TYPES, NETWORK_TY
 from app.models.detection import AlertQualityControl, DetectionConfig, DETECTION_TYPES
 from app.models.zone      import Zone
 from app.models.event     import DetectionEvent
-from app.models.alert     import Alert, ALERT_STATUSES
+from app.models.alert     import Alert, AlertReviewDecision, ALERT_STATUSES
 from app.models.ai_model  import AIModel
 from app.models.model_metric import ModelMetric
 from app.models.training  import Dataset, TrainingImage, Annotation, TrainingJob, TrainingSample
@@ -30,7 +30,7 @@ __all__ = [
     "DetectionConfig", "AlertQualityControl", "DETECTION_TYPES",
     "Zone",
     "DetectionEvent",
-    "Alert", "ALERT_STATUSES",
+    "Alert", "AlertReviewDecision", "ALERT_STATUSES",
     "AIModel", "ModelMetric",
     "Dataset", "TrainingImage", "Annotation", "TrainingJob", "TrainingSample",
     # Retail extension.

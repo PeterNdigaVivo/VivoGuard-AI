@@ -18,7 +18,7 @@ from typing import Literal, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import Alert, DetectionEvent, User
+from app.models import Alert, AlertReviewDecision, DetectionEvent, User
 from app.schemas.alert import AlertActionOut
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,12 @@ def record_verdict(
     a.status          = "confirmed" if verdict == "confirm" else "dismissed"
     a.assigned_to     = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
+    # Append before updating the current-state workflow. Repeated decisions by
+    # the same reviewer remain auditable; agreement uses each reviewer's
+    # latest decision and therefore never destroys history.
+    db.add(AlertReviewDecision(
+        alert_id=a.id, reviewer_id=user.id,
+        verdict="confirmed" if verdict == "confirm" else "dismissed"))
     db.flush()
 
     # Recalculate the pair circuit breaker using this verdict before any

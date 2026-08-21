@@ -167,7 +167,8 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
                     Alert.created_at >= review_cutoff,
                     DetectionEvent.detection_type != "store_intelligence")
             .order_by(Alert.created_at.desc()).limit(500).all())
-    critical_types = {"weapon", "brandished_weapon", "fight", "fire", "smoke", "intrusion"}
+    critical_types = {"weapon", "weapon_brandished", "brandished_weapon",
+                      "fight", "fire", "smoke", "intrusion"}
     active_case_keys: set[str] = set()
     for alert, event, camera in rows:
         age = (now - ensure_aware(alert.created_at)).total_seconds()
@@ -176,6 +177,8 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
         issues = []
         if not alert.acknowledged_at and age > sla:
             issues.append("acknowledgement_sla_breached")
+            if alert.review_only:
+                issues.append("quality_controlled_review_sla_breached")
         if latency > 120:
             issues.append("delivery_latency_over_120s")
         if not event.clip_path and not alert.snapshot_paths:
@@ -183,11 +186,22 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
         if issues:
             key = f"alert-quality:{alert.id}:{','.join(sorted(issues))}"
             active_case_keys.add(key)
+            quality = ((event.extra or {}).get("quality_control") or {})
             upsert_case(db, dedup_key=key,
                         case_type="alert_quality", severity="critical" if event.detection_type in critical_types else "high",
-                        title=f"Alert {alert.id} requires operational follow-up", store_id=camera.store_id,
+                        title=(f"Review-only alert {alert.id} breached human-review SLA"
+                               if alert.review_only else
+                               f"Alert {alert.id} requires operational follow-up"),
+                        description=("Accountable owner: Loss Prevention Operations. "
+                                     "Quarantine suppresses escalation but never removes the human-review SLA."
+                                     if alert.review_only else None),
+                        store_id=camera.store_id,
                         camera_id=camera.id, alert_id=alert.id, event_id=event.id,
-                        evidence={"issues": issues, "age_seconds": age, "delivery_latency_seconds": latency, "sla_seconds": sla})
+                        evidence={"issues": issues, "age_seconds": age,
+                                  "delivery_latency_seconds": latency,
+                                  "sla_seconds": sla,
+                                  "accountable_owner": "Loss Prevention Operations",
+                                  "quality_mode": quality.get("mode", "review_only" if alert.review_only else "active")})
             count += 1
     historical_count = (db.query(Alert).join(
         DetectionEvent, DetectionEvent.id == Alert.event_id).filter(

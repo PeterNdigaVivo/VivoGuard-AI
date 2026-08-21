@@ -253,6 +253,7 @@ def inference_pipeline_health_check() -> None:
     # (matches the shop_not_opened URGENT pattern; the alert is fleet-
     # scoped but the schema needs a camera_id).
     anchor_cam_id = None
+    created_event = None
     try:
         from app.database import SessionLocal as _SL
         from app.models import Camera as _Cam
@@ -262,7 +263,7 @@ def inference_pipeline_health_check() -> None:
                      .order_by(_Cam.id.asc()).first())
             anchor_cam_id = int(row[0]) if row else None
             if anchor_cam_id:
-                _create_info_alert(
+                created_event = _create_info_alert(
                     db, camera_id=anchor_cam_id, zone_id=None, store_id=None,
                     detection_type="system_health",
                     cls="inference_pipeline_stalled", extra=extra,
@@ -274,7 +275,7 @@ def inference_pipeline_health_check() -> None:
 
     try:
         recipients = _dashboard_recipients()
-        if recipients:
+        if recipients and _info_notification_allowed(created_event):
             _send_whatsapp(recipients, f"🚨 {body}")
     except Exception:
         pass
@@ -954,6 +955,15 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     return rec
 
 
+def _info_notification_allowed(event) -> bool:
+    """Apply the persisted pair policy to direct-task notifications."""
+    if event is None:
+        return True
+    quality = ((getattr(event, "extra", None) or {})
+               .get("quality_control") or {})
+    return not bool(quality.get("notification_suppressed"))
+
+
 def _save_alert_thumbnail(camera_id: int, detection_type: str) -> str | None:
     """Pull the latest cached JPEG for `camera_id` from the streamer
     and save it under data/recordings/snapshots/YYYY-MM-DD/. Returns
@@ -1592,10 +1602,9 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     }
     # Anchor the event on the first entrance camera so the snapshot
     # path has a real FK to attach to.
-    _create_info_alert(db, camera_id=entrance_cam_ids[0],
-                       zone_id=None, store_id=store.id,
-                       detection_type="shop_open_close",
-                       cls="shop_not_opened", extra=extra)
+    created_event = _create_info_alert(
+        db, camera_id=entrance_cam_ids[0], zone_id=None, store_id=store.id,
+        detection_type="shop_open_close", cls="shop_not_opened", extra=extra)
     db.commit()
     r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
 
@@ -1606,7 +1615,7 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         recipients.append(mgr)
     recipients.extend(_dashboard_recipients())
     recipients = list(dict.fromkeys(recipients))
-    if recipients:
+    if recipients and _info_notification_allowed(created_event):
         _send_whatsapp(recipients, f"🚨 {body}")
     log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
                 store.id, store.name, cutoff_hhmm)
@@ -1940,10 +1949,9 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
         "duration_text":      duration_text or None,
         "eat_time":           local_now.strftime("%H:%M"),
     }
-    _create_info_alert(db, camera_id=cams[0].id, zone_id=None,
-                       store_id=store.id,
-                       detection_type="shop_open_close",
-                       cls="shop_daily_summary", extra=extra)
+    created_event = _create_info_alert(
+        db, camera_id=cams[0].id, zone_id=None, store_id=store.id,
+        detection_type="shop_open_close", cls="shop_daily_summary", extra=extra)
     db.commit()
 
     recipients: list[str] = []
@@ -1952,7 +1960,7 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
         recipients.append(mgr)
     recipients.extend(_dashboard_recipients())
     recipients = list(dict.fromkeys(recipients))
-    if recipients:
+    if recipients and _info_notification_allowed(created_event):
         _send_whatsapp(recipients, f"📋 {summary}")
     log.info("shop_daily_summary: store=%s %s", store.id, summary)
 

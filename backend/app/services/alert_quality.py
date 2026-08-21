@@ -6,7 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models import Alert, AlertQualityControl, Camera, DetectionEvent, Store
+from app.models import (
+    Alert, AlertQualityControl, AlertReviewDecision, Camera, DetectionEvent,
+    Store,
+)
 
 MIN_REVIEWED_SAMPLES = 20
 ROLLING_SAMPLE_SIZE = 50
@@ -158,6 +161,17 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
     for alert, event, camera, store in rows:
         groups[(camera.store_id, store.name if store else camera.site,
                 camera.id, camera.name, event.detection_type)].append((alert, event))
+    alert_ids = [alert.id for alert, *_rest in rows]
+    decisions = (db.query(AlertReviewDecision)
+                   .filter(AlertReviewDecision.alert_id.in_(alert_ids))
+                   .order_by(AlertReviewDecision.created_at,
+                             AlertReviewDecision.id).all()) if alert_ids else []
+    # Append-only history; the latest decision from each reviewer is their
+    # current position for agreement measurement.
+    latest_by_alert_reviewer = {}
+    for decision in decisions:
+        latest_by_alert_reviewer[(decision.alert_id,
+                                  decision.reviewer_id)] = decision.verdict
     cards = []
     for key, samples in groups.items():
         confirmed = sum(a.status == "confirmed" for a, _ in samples)
@@ -165,6 +179,15 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
         unreviewed = len(samples) - confirmed - dismissed
         reviewed = confirmed + dismissed
         clips = sum(bool(e.clip_path) for _, e in samples)
+        multi_review = []
+        for alert, _event in samples:
+            verdicts = [verdict for (alert_id, _reviewer), verdict
+                        in latest_by_alert_reviewer.items()
+                        if alert_id == alert.id]
+            if len(verdicts) >= 2:
+                multi_review.append(len(set(verdicts)) == 1)
+        agreements = sum(multi_review)
+        disagreements = len(multi_review) - agreements
         state = (db.query(AlertQualityControl)
                    .filter(AlertQualityControl.camera_id == key[2],
                            AlertQualityControl.detection_type == key[4]).first())
@@ -179,8 +202,14 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
             "recall_limitation": "Requires independently reported missed events; alerts alone cannot measure recall.",
             "incident_clips_available": clips,
             "clip_availability_rate": clips / len(samples),
-            "reviewer_agreement": None,
-            "reviewer_agreement_limitation": "One verdict is stored per alert; independent second-review decisions are not yet available.",
+            "multi_reviewer_alerts": len(multi_review),
+            "reviewer_agreement": (agreements / len(multi_review)
+                                   if multi_review else None),
+            "reviewer_agreement_count": agreements,
+            "reviewer_disagreement_count": disagreements,
+            "reviewer_agreement_limitation": (
+                None if multi_review else
+                "No alerts in this slice have decisions from at least two distinct reviewers."),
             "quality_mode": state.mode if state else "active",
             "notification_suppressed": bool(state and state.mode != "active"),
         })

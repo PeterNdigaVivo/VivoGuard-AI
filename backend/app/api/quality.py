@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user, require_role
-from app.models import AlertQualityControl, Camera, User
+from app.models import Alert, AlertQualityControl, AlertReviewDecision, Camera, User
 from app.services.alert_quality import quality_scorecards, set_manual_mode
 
 router = APIRouter(prefix="/quality", tags=["quality"])
@@ -50,6 +50,28 @@ def controls(db: Session = Depends(get_db),
               .order_by(AlertQualityControl.camera_id,
                         AlertQualityControl.detection_type).all())
     return {"controls": [_control_out(row) for row in rows]}
+
+
+@router.get("/reviews/{alert_id}")
+def review_history(alert_id: int, db: Session = Depends(get_db),
+                   _user: User = Depends(get_current_user)):
+    if db.get(Alert, alert_id) is None:
+        raise HTTPException(404, "alert not found")
+    rows = (db.query(AlertReviewDecision)
+              .filter(AlertReviewDecision.alert_id == alert_id)
+              .order_by(AlertReviewDecision.created_at,
+                        AlertReviewDecision.id).all())
+    distinct_reviewers = len({row.reviewer_id for row in rows})
+    return {
+        "alert_id": alert_id,
+        "distinct_reviewers": distinct_reviewers,
+        "decisions": [{
+            "id": row.id, "reviewer_id": row.reviewer_id,
+            "verdict": row.verdict, "classification": row.classification,
+            "note": row.note,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        } for row in rows],
+    }
 
 
 @router.put("/controls/{camera_id}/{detection_type}")

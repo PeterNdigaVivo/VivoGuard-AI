@@ -5,8 +5,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Alert, AlertQualityControl, Camera, DetectionEvent, User
+from app.models import (
+    Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
+    DetectionEvent, User,
+)
+from app.operations.assurance import create_alert_quality_cases
 from app.services.alert_feedback import record_verdict
+from app.tasks.alerting import _info_notification_allowed
 from app.services.alert_quality import (
     apply_quality_control, quality_scorecards, refresh_pair_control,
     set_manual_mode,
@@ -137,3 +142,60 @@ def test_threshold_crossing_verdict_is_not_sent_to_training(db, monkeypatch):
     assert current.notification_suppressed is True
     assert current.training_eligible is False
     assert called == []
+    decisions = db.query(AlertReviewDecision).filter_by(alert_id=current.id).all()
+    assert [(row.reviewer_id, row.verdict) for row in decisions] == [
+        (user.id, "dismissed")]
+
+
+def test_scorecard_measures_latest_distinct_reviewer_disagreement(db):
+    cam = _camera(db)
+    alert, _ = _alert(db, cam, "confirmed", clip=True)
+    first = User(email="first@vivo", password_hash="x", role="operator")
+    second = User(email="second@vivo", password_hash="x", role="operator")
+    db.add_all([first, second])
+    db.flush()
+    # History remains append-only. The first reviewer's latest position is
+    # dismissed, which disagrees with the second reviewer's confirmation.
+    db.add_all([
+        AlertReviewDecision(alert_id=alert.id, reviewer_id=first.id,
+                            verdict="confirmed"),
+        AlertReviewDecision(alert_id=alert.id, reviewer_id=first.id,
+                            verdict="dismissed"),
+        AlertReviewDecision(alert_id=alert.id, reviewer_id=second.id,
+                            verdict="confirmed"),
+    ])
+    db.commit()
+    card = quality_scorecards(db)[0]
+    assert card["multi_reviewer_alerts"] == 1
+    assert card["reviewer_agreement"] == 0
+    assert card["reviewer_agreement_count"] == 0
+    assert card["reviewer_disagreement_count"] == 1
+    assert db.query(AlertReviewDecision).count() == 3
+
+
+def test_overdue_review_only_critical_alert_opens_accountable_case(db):
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=10)
+    alert.review_only = True
+    alert.training_eligible = False
+    alert.notification_suppressed = True
+    event.extra = {"quality_control": {"mode": "quarantined"}}
+    db.commit()
+
+    count = create_alert_quality_cases(db, now=datetime.now(timezone.utc))
+    assert count == 1
+    case = db.query(AssuranceCase).one()
+    assert case.severity == "critical"
+    assert "review SLA" in case.title
+    assert case.evidence["accountable_owner"] == "Loss Prevention Operations"
+    assert case.evidence["quality_mode"] == "quarantined"
+    assert "quality_controlled_review_sla_breached" in case.evidence["issues"]
+    create_alert_quality_cases(db, now=datetime.now(timezone.utc))
+    assert db.query(AssuranceCase).count() == 1
+
+
+def test_direct_task_notification_obeys_persisted_quality_decision():
+    class Event:
+        extra = {"quality_control": {"notification_suppressed": True}}
+
+    assert _info_notification_allowed(Event()) is False

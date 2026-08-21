@@ -38,9 +38,23 @@ def upgrade() -> None:
     for name in ("camera_id", "detection_type", "mode"):
         op.create_index(f"ix_alert_quality_controls_{name}",
                         "alert_quality_controls", [name])
+    op.create_table(
+        "alert_review_decisions",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("alert_id", sa.Integer(), sa.ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("reviewer_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column("verdict", sa.String(16), nullable=False),
+        sa.Column("classification", sa.String(64), nullable=True),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    )
+    for name in ("alert_id", "reviewer_id", "verdict", "created_at"):
+        op.create_index(f"ix_alert_review_decisions_{name}",
+                        "alert_review_decisions", [name])
 
 
 def downgrade() -> None:
+    op.drop_table("alert_review_decisions")
     op.drop_table("alert_quality_controls")
     for name in ("notification_suppressed", "training_eligible", "review_only"):
         op.drop_index(f"ix_alerts_{name}", table_name="alerts")
