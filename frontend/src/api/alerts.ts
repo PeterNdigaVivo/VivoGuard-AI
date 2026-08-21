@@ -20,7 +20,7 @@ export interface Alert {
   // renders these.
   severity: 'critical' | 'warning' | 'info' | null
   // Non-technical traffic-light label: 'URGENT' | 'ATTENTION' | 'INFO'.
-  severity_label: 'URGENT' | 'ATTENTION' | 'INFO' | null
+  severity_label: 'URGENT' | 'ATTENTION' | 'INFO' | 'POSITIVE – AUTOMATED' | 'POSITIVE – VERIFIED' | null
   // Four-tier severity ladder used by the redesigned page.
   severity_4: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | null
   severity_4_color: string | null     // hex e.g. "#dc2626"

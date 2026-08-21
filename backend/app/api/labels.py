@@ -104,6 +104,7 @@ def queue(
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
            .filter(Alert.status == "new")
+           .filter(DetectionEvent.detection_type != "positive_operational")
            .filter(Alert.feedback_used_for_training == False))   # noqa: E712
     if detection_type:
         q = q.filter(DetectionEvent.detection_type == detection_type)

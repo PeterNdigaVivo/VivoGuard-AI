@@ -183,11 +183,19 @@ def _write_report(name: str, status: str, findings: dict | None = None, *,
         from app.database import SessionLocal
         from app.models import AgentReport
         with SessionLocal() as db:
-            db.add(AgentReport(
+            previous = (db.query(AgentReport)
+                          .filter(AgentReport.agent_name == name)
+                          .order_by(AgentReport.run_at.desc(),
+                                    AgentReport.id.desc()).first())
+            current = AgentReport(
                 agent_name=name, status=status,
                 findings=findings, actions_taken=actions_taken, gaps=gaps,
                 duration_ms=duration_ms, error_message=error_message,
-            ))
+            )
+            db.add(current)
+            db.flush()
+            from app.services.positive_alerts import emit_agent_recovery
+            emit_agent_recovery(db, previous, current)
             db.commit()
     except Exception as e:
         log.exception("agent %s report write failed: %s", name, e)

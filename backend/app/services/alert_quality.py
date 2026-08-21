@@ -156,7 +156,8 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
               .join(Camera, DetectionEvent.camera_id == Camera.id)
               .outerjoin(Store, Camera.store_id == Store.id)
-              .filter(Alert.created_at >= cutoff).all())
+              .filter(Alert.created_at >= cutoff,
+                      DetectionEvent.detection_type != "positive_operational").all())
     groups: dict[tuple, list] = defaultdict(list)
     for alert, event, camera, store in rows:
         groups[(camera.store_id, store.name if store else camera.site,

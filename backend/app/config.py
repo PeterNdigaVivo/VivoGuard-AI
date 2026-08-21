@@ -218,6 +218,10 @@ class Settings(BaseSettings):
     # (retail standards, inspection). The analytical agents override to
     # claude-haiku-4-5 in agents.py.
     agents_llm_model: str = "claude-sonnet-4-6"
+    # Emit a silent, resolved, evidence-backed in-app alert only when an
+    # autonomous agent transitions from warning/critical back to ok.
+    positive_agent_alerts_enabled: bool = True
+    positive_agent_alert_dedup_hours: int = Field(default=6, ge=1, le=168)
     agents_llm_timeout_seconds: int = 45
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [

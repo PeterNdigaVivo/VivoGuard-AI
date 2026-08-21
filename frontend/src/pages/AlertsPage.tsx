@@ -10,15 +10,17 @@ import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 
 // Simple quick-filter buttons non-technical staff understand.
-type Quick = 'store' | 'urgent' | 'attention' | 'resolved' | 'all'
+type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
 // actionable tabs (urgent / attention / resolved / all). Everything else —
 // including the routine sales_floor_insight + system_health heartbeats —
 // flows into the actionable tabs by severity/status like any other alert.
 const STORE_INTEL_TYPE = 'store_intelligence'
+const POSITIVE_TYPE = 'positive_operational'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
-const _isActionable = (a: Alert) => !_isStoreIntel(a)
+const _isPositive = (a: Alert) => a.detection_type === POSITIVE_TYPE
+const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isPositive(a)
 const _isOpen = (a: Alert) => !['resolved', 'confirmed', 'dismissed'].includes(a.status)
 const PAGE_SIZE = 100
 
@@ -139,6 +141,8 @@ export default function AlertsPage() {
     let rows = items
     if (quick === 'store') {
       rows = rows.filter(_isStoreIntel)
+    } else if (quick === 'positive') {
+      rows = rows.filter(_isPositive)
     } else {
       // Actionable tabs exclude store_intelligence only.
       rows = rows.filter(_isActionable)
@@ -168,6 +172,7 @@ export default function AlertsPage() {
     return {
       // Store Update badge = unread (new) store_intelligence updates.
       store:     items.filter(a => _isStoreIntel(a) && _isOpen(a)).length,
+      positive:  items.filter(_isPositive).length,
       urgent:    actionable.filter(a => a.severity_label === 'URGENT' && _isOpen(a)).length,
       attention: actionable.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a)).length,
       resolved:  actionable.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
@@ -273,6 +278,10 @@ export default function AlertsPage() {
                   tone="teal">
           🏪 Store Update ({counts.store})
         </QuickBtn>
+        <QuickBtn active={quick === 'positive'} onClick={() => setQuick('positive')}
+                  tone="green">
+          ✅ Positive ({counts.positive})
+        </QuickBtn>
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
           🔴 Urgent ({counts.urgent})
         </QuickBtn>
@@ -359,7 +368,7 @@ export default function AlertsPage() {
 
 function QuickBtn({ active, onClick, children, tone = 'default' }: {
   active: boolean; onClick: () => void; children: React.ReactNode
-  tone?: 'default' | 'teal'
+  tone?: 'default' | 'teal' | 'green'
 }) {
   // Same padding / sizing across tones — only the colour swap differs.
   // The teal tone marks the Store Update tab so it stands apart from the
@@ -368,6 +377,10 @@ function QuickBtn({ active, onClick, children, tone = 'default' }: {
     ? (active
         ? 'bg-teal-600 text-white font-bold hover:bg-teal-700'
         : 'bg-teal-500 text-white font-bold hover:bg-teal-600')
+    : tone === 'green'
+      ? (active
+          ? 'bg-emerald-700 text-white font-bold hover:bg-emerald-800'
+          : 'bg-emerald-100 text-emerald-800 font-bold hover:bg-emerald-200')
     : (active
         ? 'bg-slate-800 text-white font-medium'
         : 'bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')

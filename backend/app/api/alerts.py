@@ -63,6 +63,7 @@ _SEVERITY: dict[str, str] = {
     "shop_open_close":   "info",
     "sales_floor_insight": "info",
     "store_intelligence":  "info",
+    "positive_operational": "info",
 }
 
 # Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
@@ -202,6 +203,9 @@ def _severity_4_color(label: str) -> str:
 def _severity_label(detection_type: str | None,
                     event: DetectionEvent | None = None,
                     zone: Zone | None = None, store=None) -> str:
+    if detection_type == "positive_operational":
+        return str((event.extra or {}).get("positive_label")
+                   if event is not None else "POSITIVE – AUTOMATED")
     # Person detection is context-aware: customer = INFO, after-hours
     # or restricted-zone = URGENT. When called without context (e.g.
     # the summary count), a persisted person ALERT is always URGENT —
@@ -274,6 +278,8 @@ _PLAIN_TITLES: dict[str, str] = {
 def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) -> str:
     dt = event.detection_type or "alert"
     extra = event.extra or {}
+    if dt == "positive_operational":
+        return str(extra.get("title") or "Positive Operational Update")
     if dt == "person":
         ctxt = _person_context(event, zone, store)
         if ctxt == "restricted":
@@ -404,6 +410,8 @@ _WHAT_TO_DO: dict[str, list[str]] = {
 
 def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[str]:
     dt = event.detection_type or ""
+    if dt == "positive_operational":
+        return []
     if dt == "checkout_dwell":
         # The body lists the three plausible causes inline; an
         # additional "what to do" list would be redundant noise.
@@ -634,6 +642,8 @@ def _title(event: DetectionEvent, camera: Camera | None,
     dt = event.detection_type or "alert"
     extra = event.extra or {}
     icon = _icon(dt)
+    if dt == "positive_operational":
+        return str(extra.get("title") or "Positive Operational Update")
 
     if dt == "person":
         ctxt = _person_context(event, zone, store)
@@ -749,6 +759,8 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
     dt = event.detection_type or ""
     extra = event.extra or {}
     zone_name = zone.name if zone else None
+    if dt == "positive_operational":
+        return str(extra.get("message") or "A monitored condition returned to normal.")
 
     if dt == "person":
         ctxt = _person_context(event, zone, store)
@@ -1060,9 +1072,13 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     # (3-tier URGENT/ATTENTION/INFO) stays for backwards-compat with
     # any cached client bundles.
     s4 = _severity_4_label(event.detection_type, event, zone, store)
+    if event.detection_type == "positive_operational":
+        s4 = "LOW"
     item.severity_4       = s4
-    item.severity_4_color = _severity_4_color(s4)
-    item.severity_4_emoji = _SEVERITY_4_EMOJI.get(s4, "•")
+    item.severity_4_color = ("#16a34a" if event.detection_type == "positive_operational"
+                             else _severity_4_color(s4))
+    item.severity_4_emoji = ("✅" if event.detection_type == "positive_operational"
+                             else _SEVERITY_4_EMOJI.get(s4, "•"))
     item.title          = _title(event, scoped_camera, zone, store)
     item.plain_title    = _plain_title(event, zone, store)
     item.body           = _body(event, zone, store)
@@ -1148,7 +1164,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .filter(DetectionEvent.timestamp >= yest_start,
-                    DetectionEvent.timestamp < today))
+                    DetectionEvent.timestamp < today,
+                    DetectionEvent.detection_type != "positive_operational"))
     if store_id is not None:
         yq = yq.filter(Camera.store_id == store_id)
     yest_count = int(yq.scalar() or 0)
@@ -1166,7 +1183,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .outerjoin(_Store, Camera.store_id == _Store.id)
             .filter(DetectionEvent.timestamp >= today,
-                    DetectionEvent.timestamp < tomorrow))
+                    DetectionEvent.timestamp < tomorrow,
+                    DetectionEvent.detection_type != "positive_operational"))
     if store_id is not None:
         tq = tq.filter(Camera.store_id == store_id)
     rows = tq.all()

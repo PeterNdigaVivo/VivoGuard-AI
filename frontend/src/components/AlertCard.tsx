@@ -299,6 +299,8 @@ const SEVERITY_LABEL: Record<'critical' | 'warning' | 'info' | 'default', string
 }
 const LABEL_FROM_SERVER: Record<string, string> = {
   URGENT: '🔴 URGENT', ATTENTION: '🟡 ATTENTION', INFO: '🔵 INFO',
+  'POSITIVE – AUTOMATED': '✅ POSITIVE – AUTOMATED',
+  'POSITIVE – VERIFIED': '✅ POSITIVE – VERIFIED',
 }
 
 // Alert types that get a VLM scene description (mirrors backend
@@ -371,6 +373,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [alert, setLocal] = useState(incoming)
   useEffect(() => { setLocal(incoming) }, [incoming])
   const sev = sevKey(alert.severity)
+  const isPositive = alert.detection_type === 'positive_operational'
   // "Resolved" covers the three terminal statuses the API can set:
   // resolved (everyday "I handled it") + confirmed (legacy alias the
   // /resolve endpoint still uses) + dismissed ("not a problem").
@@ -459,11 +462,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   useEffect(() => { setClipPlayError(false) }, [clipSrc])
 
   return (
-    <div className={'relative bg-white rounded border border-slate-200 overflow-hidden transition-opacity '
-                    + (isClosed ? 'opacity-60' : '')}>
+    <div className={'relative bg-white rounded border overflow-hidden transition-opacity '
+                    + (isPositive ? 'border-emerald-200 ' : 'border-slate-200 ')
+                    + (isClosed && !isPositive ? 'opacity-60' : '')}>
       {/* Severity colour bar — greyed when resolved/dismissed. */}
       <div className={'absolute left-0 top-0 bottom-0 w-1 '
-                      + (isClosed ? 'bg-slate-300' : SEVERITY_BAR[sev])} />
+                      + (isPositive ? 'bg-emerald-500' : isClosed ? 'bg-slate-300' : SEVERITY_BAR[sev])} />
 
       <div className="pl-4 pr-3 py-3 flex flex-col sm:flex-row gap-3">
         {/* Left: title + body + actions */}
@@ -472,7 +476,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             {/* When still new, show the traffic-light severity badge.
                 When resolved/dismissed, show the closure badge instead
                 so the operator sees its state at a glance. */}
-            {isResolved ? (
+            {isPositive ? (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800">
+                {LABEL_FROM_SERVER[alert.severity_label ?? ''] ?? '✅ POSITIVE'}
+              </span>
+            ) : isResolved ? (
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800">
                 ✅ RESOLVED
               </span>
@@ -569,7 +577,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               Resolved. Filled steps are dark; the active step pulses;
               future steps are pale. Hides when the alert is dismissed
               (acknowledge / resolve aren't the relevant flow). */}
-          {!isDismissed && (
+          {!isDismissed && !isPositive && (
             <LifecyclePip
               createdAt={alert.created_at}
               acknowledgedAt={alert.acknowledged_at}
@@ -579,7 +587,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           )}
 
           {/* Closure footer — shown only when already resolved or dismissed. */}
-          {isClosed && (
+          {isClosed && !isPositive && (
             <div className="mt-2 text-xs text-slate-500">
               {isResolved ? 'Resolved' : 'Dismissed'}
               {alert.resolved_at ? ` at ${formatTime(alert.resolved_at)}` : ''}
@@ -597,7 +605,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               and can't be double-submitted. */}
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
             {/* store_intelligence is informational — no True/False verdict. */}
-            {alert.detection_type === 'store_intelligence' ? null
+            {alert.detection_type === 'store_intelligence' || isPositive ? null
               : alert.status === 'new' ? (
               <>
                 <FeedbackBtn onClick={markTrue} tone="green" disabled={busy}>

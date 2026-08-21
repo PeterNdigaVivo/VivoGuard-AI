@@ -135,6 +135,9 @@ export function AlertNotificationProvider({ children }: { children: ReactNode })
       // urgentOnly is set.
       rows = await alertsApi.list({ status: 'new', order: 'recent', limit: 100 })
     } catch { return }   // poll error — retry next tick
+    // Positive operational updates are intentionally silent. Keep this
+    // guard even though the server creates automated positives resolved.
+    rows = rows.filter(a => a.detection_type !== 'positive_operational')
     const s = settingsRef.current
     const urgentNew = rows.filter(a => a.severity_label === 'URGENT')
     setUnreadUrgent(urgentNew.length)
