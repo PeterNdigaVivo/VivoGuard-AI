@@ -332,6 +332,12 @@ class UniformComplianceDetector(Detector):
                     (sum(_buf) / len(_buf)) < _min_avg:
                 continue
 
+            # Run the stable-state clock concurrently with the staff-dwell
+            # gate below. Previously it started only after five minutes of
+            # confirmed dwell, silently turning a two-minute violation rule
+            # into a roughly seven-minute wait.
+            self._observe_state(tid, state, now)
+
             # Staff exclusion — anyone scoring as uniformed staff (any
             # of the three uniform-present states plus the explicit
             # STAFF class) is excluded from the visitor / dwell counts
@@ -621,16 +627,17 @@ class UniformComplianceDetector(Detector):
         except Exception:
             return None
 
-    def _maybe_alert(self, ctx: DetectorContext, det: dict, tid: int,
-                     state: str, now: float) -> DetectionEvent | None:
-        # Maintain the sustained-duration timer per track.
+    def _observe_state(self, tid: int, state: str, now: float) -> float:
+        """Record a stable state and return how long it has persisted."""
         prev = self._state_since.get(tid)
         if prev is None or prev[0] != state:
             self._state_since[tid] = (state, now)
-            since = now
-        else:
-            since = prev[1]
-        elapsed = now - since
+            return 0.0
+        return now - prev[1]
+
+    def _maybe_alert(self, ctx: DetectorContext, det: dict, tid: int,
+                     state: str, now: float) -> DetectionEvent | None:
+        elapsed = self._observe_state(tid, state, now)
 
         if state == NON_COMPLIANT and elapsed >= VIOLATION_SECONDS:
             if now - self._fired.get((tid, NON_COMPLIANT), 0) >= DEDUP_SECONDS:

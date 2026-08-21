@@ -152,6 +152,32 @@ def partition_static_person_tracks(
     return actionable_detections, actionable_tracks, static_ids
 
 
+def update_recent_person_tracks(
+    recent: dict[int, float], detections: list[dict], now: float, *,
+    hold_seconds: float = 5.0,
+) -> tuple[int, int]:
+    """Return a stable live count across short misses and occlusions.
+
+    Only tracked people are held. Untracked detections count for the current
+    frame and therefore cannot linger as ghosts.
+    """
+    current_ids = {
+        int(det["track_id"]) for det in detections
+        if det.get("cls") == "person" and det.get("track_id") is not None
+    }
+    for track_id in current_ids:
+        recent[track_id] = now
+    cutoff = now - max(0.0, float(hold_seconds))
+    for track_id in [tid for tid, seen_at in recent.items() if seen_at < cutoff]:
+        del recent[track_id]
+    untracked_now = sum(
+        1 for det in detections
+        if det.get("cls") == "person" and det.get("track_id") is None
+    )
+    held_count = len(set(recent) - current_ids)
+    return len(recent) + untracked_now, held_count
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ByteTrack adapter (Roboflow Supervision) — drop-in for IOUTracker.
 #

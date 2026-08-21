@@ -182,6 +182,14 @@ _TEMPORAL_GATE_EXEMPT: set[str] = {
     "checkout_dwell", "trespass", "uniform_compliance", "staff_present",
 }
 
+# Static person-shaped fixtures are suppressed only for alert types where a
+# stationary false person can create an incident. Staff/compliance/analytics
+# detectors still need stationary real people (for example a cashier at a
+# counter), especially immediately after an inference-worker restart.
+_STATIC_PERSON_FILTER_TYPES: set[str] = {
+    "person", "intrusion", "trespass", "loitering",
+}
+
 
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
@@ -365,6 +373,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
     pub      = redis.from_url(settings.redis_url)
     started  = time.time()
     dets_pub_at = 0.0        # vg:dets publish throttle (1s cadence)
+    recent_people: dict[int, float] = {}  # short occlusion/missed-frame hold
 
     # Sprint 2.2 cross-camera Re-ID. Encoder + gallery are lazily/best-
     # effort built; both stay None and the whole feature no-ops when
@@ -546,6 +555,14 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
 
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
+                raw_detections=raw, tracks=tracks,
+                zones=zones, config=cfg,
+                db=db, store_id=store_id,
+                business_hours=business_hours, store_timezone=store_tz,
+                frame_bgr=frame,
+            )
+            static_filtered_ctx = DetectorContext(
+                camera_id=camera_id, timestamp=time.time(),
                 raw_detections=detector_raw, tracks=detector_tracks,
                 zones=zones, config=cfg,
                 db=db, store_id=store_id,
@@ -604,7 +621,12 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 _static_flags = [d.get("track_id") in _static_ids for d in _persons]
                 _moving = [d for d in _persons if d.get("track_id") not in _static_ids]
                 _static_n = len(_persons) - len(_moving)
-                _people_now = len(_moving)
+                from app.ai.tracker import update_recent_person_tracks
+                _people_now, _held_n = update_recent_person_tracks(
+                    recent_people, _persons, time.time(),
+                    hold_seconds=float(getattr(
+                        settings, "activity_track_hold_seconds", 5.0)),
+                )
                 # ByteTrack context (ADDITIVE for the tab endpoint):
                 # MOVING persons only — the sentinel's snapshots and the
                 # tab's counts both exclude static mannequins/fixtures.
@@ -622,6 +644,8 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         "bboxes_px": [[int(v) for v in d["bbox_px"]]
                                       for d in _tracked],
                         "static_filtered": _static_n,
+                        "currently_visible": len(_moving),
+                        "temporarily_occluded": _held_n,
                     }),
                     ex=300,
                 )
@@ -656,7 +680,10 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 if frame_idx % max(1, step) != 0:
                     continue
                 try:
-                    for ev in det.evaluate(ctx):
+                    eval_ctx = (static_filtered_ctx
+                                if det.detection_type in _STATIC_PERSON_FILTER_TYPES
+                                else ctx)
+                    for ev in det.evaluate(eval_ctx):
                         sig = (
                             ev.detection_type, getattr(ev, "cls", None),
                             tuple(round(float(c), 2) for c in (ev.bbox_norm or [])),

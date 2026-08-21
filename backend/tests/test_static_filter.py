@@ -6,7 +6,10 @@ window's first position).
 """
 from __future__ import annotations
 
-from app.ai.tracker import Track, is_static_track, partition_static_person_tracks
+from app.ai.tracker import (
+    Track, is_static_track, partition_static_person_tracks,
+    update_recent_person_tracks,
+)
 
 FRAME = (640, 360)          # (w, h)
 
@@ -101,3 +104,18 @@ def test_person_who_moved_is_never_filtered_after_pausing() -> None:
     assert raw == [det]
     assert tracks == [(track, det)]
     assert static_ids == set()
+
+
+def test_recent_track_hold_smooths_short_detection_miss() -> None:
+    recent: dict[int, float] = {}
+    dets = [{"cls": "person", "track_id": 8}]
+    assert update_recent_person_tracks(recent, dets, 100.0) == (1, 0)
+    assert update_recent_person_tracks(recent, [], 103.0) == (1, 1)
+    assert update_recent_person_tracks(recent, [], 106.0) == (0, 0)
+
+
+def test_untracked_person_is_never_held_as_a_ghost() -> None:
+    recent: dict[int, float] = {}
+    dets = [{"cls": "person", "track_id": None}]
+    assert update_recent_person_tracks(recent, dets, 100.0) == (1, 0)
+    assert update_recent_person_tracks(recent, [], 100.1) == (0, 0)
