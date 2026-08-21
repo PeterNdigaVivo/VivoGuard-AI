@@ -42,11 +42,13 @@ docker compose build api
 echo "→ building remaining images"
 docker compose build streamer worker frontend
 
-# 4. Bring everything up.
-echo "→ starting all services"
-docker compose up -d
+# 4. Start only stateful dependencies.  Keep the currently running API and
+# workers on the old image while the new schema is applied; migrations in a
+# release must remain backwards-compatible for this short overlap window.
+echo "→ starting database and queue"
+docker compose up -d postgres redis
 
-# 5. Wait for postgres health, then migrate.
+# 5. Wait for postgres health, then migrate with the newly built API image.
 echo "→ waiting for postgres health"
 for i in $(seq 1 60); do
   if docker compose exec -T postgres pg_isready -U "$(grep POSTGRES_USER .env | cut -d= -f2)" >/dev/null 2>&1; then
@@ -56,9 +58,29 @@ for i in $(seq 1 60); do
 done
 
 echo "→ running alembic migrations"
-docker compose exec -T api alembic upgrade head
+docker compose run --rm --no-deps api alembic upgrade head
 
-# 6. (Optional) pre-download base YOLOv8 weights so the first inference run
+# 6. Recreate the application tier only after the schema is ready.  Nginx
+# resolves Compose service names at startup, so refresh it after an API
+# container replacement to avoid a stale upstream address and public 502s.
+echo "→ starting application services"
+docker compose up -d
+docker compose restart nginx
+
+echo "→ waiting for API health"
+for i in $(seq 1 60); do
+  if docker compose exec -T api curl -fsS http://localhost:8000/healthz >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "API failed to become healthy"
+    docker compose ps
+    exit 1
+  fi
+  sleep 2
+done
+
+# 7. (Optional) pre-download base YOLOv8 weights so the first inference run
 # isn't blocked on a network fetch.
 echo "→ pre-downloading YOLOv8 base weights"
 mkdir -p data/models
