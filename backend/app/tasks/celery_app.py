@@ -19,6 +19,19 @@ from celery.schedules import crontab  # noqa: F401  (kept for other tasks that m
 from app.config import settings
 
 
+def _safe_crontab(value: str, *, minute: int, hour: int):
+    """Parse a five-field cron without allowing bad env to break startup."""
+    try:
+        parts = value.split()
+        if len(parts) != 5:
+            raise ValueError
+        return crontab(minute=parts[0], hour=parts[1],
+                       day_of_month=parts[2], month_of_year=parts[3],
+                       day_of_week=parts[4])
+    except (TypeError, ValueError):
+        return crontab(minute=minute, hour=hour)
+
+
 celery_app = Celery(
     "vivoguard",
     broker=settings.redis_url,
@@ -47,6 +60,7 @@ celery_app = Celery(
         "app.tasks.operations_assurance",
         "app.tasks.scenario_simulation",
         "app.tasks.agent_accountability",
+        "app.tasks.odoo_sync",
     ],
 )
 celery_app.conf.update(
@@ -143,6 +157,10 @@ celery_app.conf.update(
         "operations.lone_worker":        {"queue": "alerts"},
         "operations.event_fusion":       {"queue": "alerts"},
         "operations.retention":          {"queue": "beat"},
+        "odoo.sync_store_master":        {"queue": "beat"},
+        "odoo.sync_roster":              {"queue": "beat"},
+        "odoo.sync_pos_sessions":        {"queue": "beat"},
+        "odoo.sync_sales_and_assurance": {"queue": "beat"},
         "agents.scenario_simulator":      {"queue": "alerts"},
         "agents.accountability":          {"queue": "alerts"},
         # Rolling recorder — runs in the dedicated `recorder` compose service
@@ -493,6 +511,23 @@ celery_app.conf.update(
         },
         "operations-retention-daily": {
             "task": "operations.retention", "schedule": crontab(minute=40, hour=3),
+        },
+        # Odoo pull tasks are feature-flagged in their bodies and always fail
+        # soft. They use the short-task pool and never block inference.
+        "odoo-store-master-nightly": {
+            "task": "odoo.sync_store_master",
+            "schedule": _safe_crontab(settings.odoo_master_cron, minute=15, hour=2),
+        },
+        "odoo-roster-nightly": {
+            "task": "odoo.sync_roster", "schedule": crontab(minute=35, hour=2),
+        },
+        "odoo-pos-sessions-every-15min": {
+            "task": "odoo.sync_pos_sessions",
+            "schedule": timedelta(minutes=settings.odoo_txn_minutes),
+        },
+        "odoo-sales-assurance-every-15min": {
+            "task": "odoo.sync_sales_and_assurance",
+            "schedule": timedelta(minutes=settings.odoo_txn_minutes),
         },
         "agents-scenario-simulator-hourly": {
             "task": "agents.scenario_simulator", "schedule": timedelta(hours=1),

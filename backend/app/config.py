@@ -41,6 +41,25 @@ class Settings(BaseSettings):
     # An empty secret keeps the service endpoint unavailable, never unsigned.
     odoo_webhook_secret: str = ""
     odoo_webhook_max_age_seconds: int = 300
+    # Read-only Odoo pull integration. OFF by default and independent of the
+    # inbound webhook above. The API key belongs in the deployment secret
+    # store, never in source control or an image layer.
+    odoo_sync_enabled: bool = False
+    odoo_url: str = ""
+    odoo_db: str = ""
+    odoo_user: str = ""
+    odoo_api_key: str = ""
+    odoo_master_cron: str = "15 2 * * *"
+    odoo_txn_minutes: int = Field(default=15, ge=5, le=120)
+    odoo_hours_max_age_hours: int = Field(default=48, ge=1, le=720)
+    odoo_roster_max_age_hours: int = Field(default=24, ge=1, le=168)
+    odoo_roster_retention_days: int = Field(default=45, ge=7, le=180)
+    odoo_request_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    odoo_page_size: int = Field(default=200, ge=20, le=1000)
+    odoo_conversion_max: float = Field(default=0.60, ge=0.05, le=2.0)
+    odoo_changing_room_grace_minutes: int = Field(default=15, ge=1, le=120)
+    odoo_circuit_failures: int = Field(default=3, ge=1, le=20)
+    odoo_circuit_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     bootstrap_admin_email: str = "admin@example.com"
     bootstrap_admin_password: str = "change-me-now"
 

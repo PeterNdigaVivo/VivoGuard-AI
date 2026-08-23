@@ -54,6 +54,7 @@ const CameraSetupPage      = lazy(() => import('@/pages/CameraSetupPage'))
 const StoreHeatmapsPage    = lazy(() => import('@/pages/StoreHeatmapsPage'))
 const DetectorsPage        = lazy(() => import('@/pages/DetectorsPage'))
 const UsersPage            = lazy(() => import('@/pages/UsersPage'))
+const OdooAssurancePage    = lazy(() => import('@/pages/OdooAssurancePage'))
 
 
 function Protected({ children }: { children: ReactNode }) {
@@ -116,6 +117,7 @@ export default function App() {
               {/* Restricted mission-control dashboard — allowlist-gated
                   in the page itself AND server-side on the API. */}
               <Route path="/system-health"            element={<MissionControlPage />} />
+              <Route path="/odoo-assurance"           element={<OdooAssurancePage />} />
               <Route path="/agents"                   element={<AgentsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

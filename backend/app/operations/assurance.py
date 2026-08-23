@@ -261,6 +261,16 @@ def create_lone_worker_cases(db: Session, now: datetime | None = None) -> int:
         if estimated_people == 1:
             evidence = {"event_ids": [e.id for e in events[:10]], "window_minutes": 15,
                         "estimated_people": estimated_people, "basis": "single tracked person after business hours"}
+            try:
+                from app.config import settings
+                from app.operations.odoo_assurance import roster_advisory
+                evidence.update(roster_advisory(
+                    db, store.id, now,
+                    max_age_hours=settings.odoo_roster_max_age_hours))
+            except Exception:
+                # External context is fail-soft and never blocks the case.
+                evidence.update({"expected_staff_window": "unknown",
+                                 "alert_suppressed": False})
             key = f"lone-worker:{store.id}:{now.date().isoformat()}"
             active_case_keys.add(key)
             upsert_case(db, dedup_key=key,

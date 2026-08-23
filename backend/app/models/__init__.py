@@ -27,6 +27,10 @@ from app.models.incident import (
     DeliveryOutbox, EvidenceManifest, Incident, IncidentMember,
     IncidentTransition, INCIDENT_STATES,
 )
+from app.models.odoo import (
+    OdooConversionMetric, OdooPosActivityBucket, OdooPosSession, OdooRosterWindow, OdooStoreMap,
+    OdooStoreSalesHourly, OdooSyncState, OdooTillConflict, StoreBusinessHours,
+)
 
 __all__ = [
     "User",
@@ -49,4 +53,7 @@ __all__ = [
     "OperationalEvent", "RiskReview",
     "Incident", "IncidentMember", "IncidentTransition", "INCIDENT_STATES",
     "EvidenceManifest", "DeliveryOutbox",
+    "OdooStoreMap", "StoreBusinessHours", "OdooRosterWindow",
+    "OdooPosSession", "OdooTillConflict", "OdooStoreSalesHourly",
+    "OdooPosActivityBucket", "OdooConversionMetric", "OdooSyncState",
 ]

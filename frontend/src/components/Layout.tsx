@@ -27,6 +27,7 @@ const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   // Visible ONLY to the platform operators in lib/systemAdmins.ts —
   // hidden from everyone else, including regular admins.
   { to: '/system-health', label: '💓 System Health', systemAdminOnly: true },
+  { to: '/odoo-assurance', label: '🔗 Odoo Assurance', systemAdminOnly: true },
   { to: '/ai-progress', label: '📈 AI Progress' },
   { to: '/ai-learning', label: 'AI Learning' },
   { to: '/sprint',      label: 'Sprint' },

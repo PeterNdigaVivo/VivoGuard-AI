@@ -2344,7 +2344,12 @@ def after_hours_intrusion_check() -> None:
         for store in db.query(Store).filter(Store.is_active.is_(True)).all():
             skey = _afterhours_key(store.id)
             # Store OPEN now → end the night session (staff have arrived).
-            if is_store_open(store, now):
+            from app.operations.odoo_assurance import effective_business_hours
+            from app.utils.business_hours import _store_local_now, is_open_with_default
+            effective_hours, hours_source = effective_business_hours(
+                db, store, now, max_age_hours=settings.odoo_hours_max_age_hours)
+            local_now = _store_local_now(store, now)
+            if is_open_with_default(effective_hours, local_now):
                 r.delete(skey)
                 continue
             # Most recent intrusion event across this store's cameras — both
@@ -2368,8 +2373,8 @@ def after_hours_intrusion_check() -> None:
 
             # ── First detection this night → new alert + snapshot #1 ──
             if sess is None:
-                from app.utils.business_hours import store_time_context
-                t_ctx = store_time_context(store, now)
+                from app.utils.business_hours import intrusion_time_context
+                t_ctx = intrusion_time_context(effective_hours, local_now)
                 best_cam, jpeg = _best_store_camera_jpeg(db, store.id)
                 anchor_cam = recent.camera_id      # guaranteed non-null
                 extra = {
@@ -2381,6 +2386,7 @@ def after_hours_intrusion_check() -> None:
                     "time_context": t_ctx,
                     "store_id":    store.id,
                     "store_name":  store.name,
+                    "business_hours_source": hours_source,
                     "title":       _afterhours_title(store.name, t_ctx),
                     "message":     _afterhours_body(store.name, 1, 0, t_ctx),
                     "what_to_do": [
@@ -2389,6 +2395,12 @@ def after_hours_intrusion_check() -> None:
                         "Escalate to security / call the manager if unrecognised",
                     ],
                 }
+                from app.operations.odoo_assurance import roster_advisory
+                # Advisory only: expected staff is context for the human
+                # reviewer and never suppresses the after-hours alert.
+                extra.update(roster_advisory(
+                    db, store.id, now,
+                    max_age_hours=settings.odoo_roster_max_age_hours))
                 ev = _create_info_alert(
                     db, camera_id=anchor_cam, zone_id=None, store_id=store.id,
                     detection_type="intrusion", cls="after_hours_intrusion",

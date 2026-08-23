@@ -11,6 +11,7 @@ from __future__ import annotations
 SYSTEM_ADMIN_EMAILS: frozenset[str] = frozenset({
     "itsupport@vivofashiongroup.com",
     "peter@vivofashiongroup.com",
+    "stephen@vivofashiongroup.com",
 })
 
 

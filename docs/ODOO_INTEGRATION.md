@@ -142,3 +142,98 @@ scrubbed of the API key, login, and configured Odoo URL.
 - Use HTTPS with a valid certificate. Do not disable TLS verification.
 - Revoke or rotate the API key if it appears in terminal output, logs, chat, or
   source control.
+
+## Reviewed production schema (23 August 2026)
+
+The read-only discovery was completed against Odoo 18 Enterprise and confirmed
+the required POS, warehouse, session, calendar and employee schema. No customer,
+employee, transaction or monetary record was read by the discovery pass.
+
+The important implementation finding is that `stock.warehouse` is **not** a
+safe store key on its own: many Kenya POS configurations share the finished-
+goods warehouse. `pos.config` is therefore the authoritative till/location key
+for store mapping, while its `warehouse_id` is retained only as metadata.
+
+Odoo has company working calendars but no confirmed authoritative retail
+trading-hours model linked to each POS location. VivoGuard therefore applies
+this precedence:
+
+1. fresh Odoo hours (only when a future authoritative source is mapped);
+2. governed manual rows in `store_business_hours`;
+3. the existing `stores.business_hours_json`; and
+4. the existing fleet-safe default.
+
+Stale or unavailable Odoo data never means “closed” and never suppresses an
+alert.
+
+## Phase 1: mapping and business-hours assurance
+
+Generate the mapping template with the dedicated read-only service account:
+
+```bash
+PYTHONPATH=backend python scripts/odoo_store_map.py export ops/odoo_store_map.csv
+```
+
+Review every `vivoguard_store_name` against the production VivoGuard store
+name, remove non-physical configurations (HQ/online), then validate before
+applying:
+
+```bash
+PYTHONPATH=backend python scripts/odoo_store_map.py apply ops/odoo_store_map.csv --dry-run
+PYTHONPATH=backend python scripts/odoo_store_map.py apply ops/odoo_store_map.csv
+```
+
+The importer is all-or-nothing when errors exist; it does not guess fuzzy
+matches. Run the seven-day classification comparison before enabling sync:
+
+```bash
+PYTHONPATH=backend python scripts/odoo_hours_dry_run.py --days 7
+```
+
+The `/odoo-assurance` page is restricted by the existing system-admin
+allowlist and shows mapping, sync state, open till conflicts, conversion data
+quality flags and changing-room review cases.
+
+## Phase 2: roster context
+
+Only `hr.employee.id`, `resource_calendar_id`, `work_location_name` and timezone
+are read. VivoGuard stores an HMAC pseudonym, store, date, shift start/end and
+sync time for 45 days. It never persists names, contact details, payroll data,
+badge/PIN values or facial data. Expected staff is an advisory tag; stale,
+missing or positive roster context never suppresses CCTV alerts.
+
+## Phase 3: till conflict reporting
+
+`pos.session` is pulled every 15 minutes using an incremental `write_date`
+cursor. Opening and closing signals from both CCTV and POS are retained. A
+greater-than-30-minute mismatch, or one missing source, creates a reporting-only
+conflict. It does not change detector thresholds or accuse a staff member.
+
+## Phase 4: conversion and changing-room review
+
+VivoGuard reads only the POS configuration, order timestamp, total and state,
+then persists hourly store aggregates plus anonymous one-minute transaction
+counts for the changing-room grace check. Conversion above 60% is labelled a
+data-quality flag because it normally indicates a footfall/POS mismatch.
+
+A configured `changing_room` tripwire may create a neutral human-review case
+when an exit signal has no aggregate sale in the grace window. A fresh matching
+sale creates no case. Missing or stale POS creates `pos_unverified`; visual
+evidence remains available and the wording explicitly states that the signal
+is not evidence of theft or misconduct.
+
+## Activation and rollback
+
+`ODOO_SYNC_ENABLED=false` is the default. Before enabling it:
+
+- migrate through `0041`;
+- create a least-privilege read-only service user and store its API key in the
+  production secret store;
+- validate every physical store mapping and timezone;
+- run the seven-day hours dry run and controlled store tests; and
+- verify the Odoo Assurance page reports successful syncs without circuit
+  breaker errors.
+
+Rollback is immediate: set `ODOO_SYNC_ENABLED=false` and restart the beat/worker
+services. Existing CCTV inference and alerts continue using their manual/default
+context. No Odoo write path exists in this implementation.

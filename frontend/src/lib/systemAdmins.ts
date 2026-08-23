@@ -6,6 +6,7 @@
 export const SYSTEM_ADMIN_EMAILS = [
   'itsupport@vivofashiongroup.com',
   'peter@vivofashiongroup.com',
+  'stephen@vivofashiongroup.com',
 ] as const
 
 export function isSystemAdmin(email: string | null | undefined): boolean {

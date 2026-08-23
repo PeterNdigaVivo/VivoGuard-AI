@@ -65,6 +65,15 @@ ZONE_PURPOSES = {
         "types": ["stockroom"],
         "description": "Polygon around the stockroom door. Logs every entry/exit.",
     },
+    "changing_room":     {
+        "label": "Review changing-room flow",
+        "shape": "line",
+        "types": ["entry_exit", "changing_room"],
+        "description": (
+            "Line at the changing-room threshold. Exit events can be "
+            "cross-checked with aggregate POS activity for neutral human review."
+        ),
+    },
     "shutter":           {
         "label": "Monitor shutter state",
         "shape": "polygon",
