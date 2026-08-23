@@ -3,4 +3,8 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.3
 torchvision>=0.18
+# Ultralytics imports ONNX metadata even when an already-exported model is
+# loaded by onnxruntime. Bake it into the image so parallel worker children do
+# not race to pip-install it at runtime on every fresh deployment.
+onnx>=1.16,<2
 onnxruntime>=1.17
