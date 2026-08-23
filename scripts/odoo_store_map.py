@@ -10,6 +10,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.integrations.odoo_client import client_from_settings
 from app.models import OdooStoreMap, Store
+from sqlalchemy import func
 
 FIELDS = (
     "vivoguard_store_name", "odoo_model", "odoo_res_id", "odoo_pos_config_id",
@@ -68,10 +69,16 @@ def import_csv(path: Path, *, dry_run: bool) -> tuple[int, list[str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle, SessionLocal() as db:
         for line, item in enumerate(csv.DictReader(handle), start=2):
             store_name = (item.get("vivoguard_store_name") or "").strip()
-            store = db.query(Store).filter(Store.name == store_name).one_or_none()
-            if store is None:
+            stores = (db.query(Store)
+                      .filter(func.trim(Store.name) == store_name)
+                      .limit(2).all())
+            if not stores:
                 errors.append(f"line {line}: VivoGuard store not found: {store_name}")
                 continue
+            if len(stores) > 1:
+                errors.append(f"line {line}: ambiguous VivoGuard store name: {store_name}")
+                continue
+            store = stores[0]
             try:
                 res_id = int(item["odoo_res_id"])
                 config_id = int(item["odoo_pos_config_id"]) if item.get("odoo_pos_config_id") else None
