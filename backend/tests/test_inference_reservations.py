@@ -26,6 +26,31 @@ class FakeRedis:
         raise AssertionError("unexpected Lua script")
 
 
+class FakePipeline:
+    def __init__(self, present: set[int], *, fail: bool = False):
+        self.present = present
+        self.camera_ids: list[int] = []
+        self.fail = fail
+
+    def exists(self, key: str):
+        self.camera_ids.append(int(key.rsplit(":", 1)[-1]))
+        return self
+
+    def execute(self):
+        if self.fail:
+            raise RuntimeError("redis unavailable")
+        return [camera_id in self.present for camera_id in self.camera_ids]
+
+
+class FakeFreshnessRedis:
+    def __init__(self, present: set[int], *, fail: bool = False):
+        self.pipe = FakePipeline(present, fail=fail)
+
+    def pipeline(self, *, transaction: bool):
+        assert transaction is False
+        return self.pipe
+
+
 def test_only_reserved_task_can_claim_and_claim_shortens_active_lease():
     r = FakeRedis()
     r.values["lock"] = "current-task"
@@ -59,7 +84,20 @@ def test_stale_task_cannot_release_newer_task_keys():
 
 
 def test_pending_reservation_outlives_full_cpu_queue_rotation():
-    # 101 cameras / 14 slots * 120 seconds is under 15 minutes.  The pending
-    # lease must comfortably exceed that so Beat cannot duplicate the queue.
-    worst_case_rotation = ((101 + 14 - 1) // 14) * inference.RUN_SECONDS
+    # At the eight-slot production default, a 101-camera fail-open queue fits
+    # comfortably inside the lease, preventing duplicate reservations.
+    worst_case_rotation = ((101 + 8 - 1) // 8) * inference.RUN_SECONDS
     assert inference.PENDING_LOCK_TTL >= worst_case_rotation * 2
+
+
+def test_freshness_gate_only_schedules_cameras_with_live_frames():
+    r = FakeFreshnessRedis({2, 7})
+
+    assert inference._camera_ids_with_fresh_frames(r, [1, 2, 7, 9]) == {2, 7}
+    assert r.pipe.camera_ids == [1, 2, 7, 9]
+
+
+def test_freshness_gate_fails_open_when_redis_check_fails():
+    r = FakeFreshnessRedis(set(), fail=True)
+
+    assert inference._camera_ids_with_fresh_frames(r, [3, 4]) == {3, 4}

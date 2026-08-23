@@ -1,7 +1,7 @@
 # Reducing "Checkout Taking Too Long" false alerts
 
 Checkout-dwell alerts fire when a person stays in a `counter` zone longer
-than `checkout_alert_minutes` (default **8 min**). The #1 cause of false
+than `checkout_alert_minutes` (default **3 min**). The #1 cause of false
 alerts is **staff** working the till being timed like a stuck customer.
 This runbook is how to fix that per store.
 
@@ -40,7 +40,7 @@ Work down this list:
 - [ ] Is the `counter` zone too big (spilling into the staff area or the
       aisle)? Tighten it to just the customer-facing till point.
 - [ ] Still noisy on a genuinely busy till? Raise `checkout_alert_minutes`
-      (e.g. 8 → 12) in `.env` and recreate the workers — fewer short
+      (e.g. 3 → 8) in `.env` and recreate the workers — fewer short
       sessions qualify.
 - [ ] Confirm the fix is deployed: workers rebuilt after the latest pull
       (`docker compose up -d --build worker-inference worker-alerts`).

@@ -58,12 +58,12 @@ celery_app.conf.update(
     # task_queues by hand.
     task_create_missing_queues=True,
     # Two dedicated worker pools (see docker-compose.yml):
-    #   worker-inference  →  -Q inference,default  (14 slots)
+    #   worker-inference  →  -Q inference,default  ( 8 slots by default)
     #   worker-alerts     →  -Q alerts,beat        ( 4 slots)
     # Routing the slow inference tasks into `inference` keeps them
     # out of the way of the short bookkeeping tasks on `alerts`,
     # which used to be starved when every default-queue slot was
-    # held by a 9-minute camera loop.
+    # held by a long camera loop.
     task_routes={
         # Inference pool.
         "inference.run_camera":               {"queue": "inference"},
@@ -359,8 +359,8 @@ celery_app.conf.update(
         # interval task in this file).
         #
         # Routed to the `beat` queue so it doesn't compete with the
-        # 16 long-running inference.run_camera workers on the
-        # `default` queue (each holding a slot for ~9 minutes). The
+        # long-running inference.run_camera workers on the inference
+        # queue. The
         # worker MUST be started with `-Q default,beat` to consume
         # both, otherwise messages pile up in `beat` forever.
         "sales-floor-insights-every-30min": {

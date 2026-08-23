@@ -160,8 +160,13 @@ services:
       retries: 5
     # `docker compose up --scale api=3` to run multiple replicas behind nginx.
 
-  # --- Inference worker (camera AI). 14 concurrent slots dedicated
-  # to the long-running inference.run_camera tasks. Also runs Beat
+  # --- Inference worker (camera AI). Eight concurrent slots by default.
+  # The 30 GiB CPU host repeatedly OOM-killed 4+ GiB inference children
+  # with the old concurrency of 14. Eight keeps useful camera parallelism,
+  # while Celery recycles a child after a task if it exceeds 1.5 GiB RSS.
+  # Sites with measured memory headroom can override concurrency explicitly.
+  # Slots are dedicated to long-running inference.run_camera tasks. It also
+  # runs Beat
   # (`-B`) for the inference supervisor that wakes the pipeline every
   # 30 s. Listens on the `inference` + `default` queues so it never
   # picks up a 5-min sales-floor / shop-not-opened task and blocks
@@ -177,7 +182,7 @@ services:
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -B -Q inference,default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-14} -n inference-worker@%h"
+      - "celery -A app.tasks.celery_app worker -B -Q inference,default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings

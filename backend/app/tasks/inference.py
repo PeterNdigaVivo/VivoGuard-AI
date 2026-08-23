@@ -44,8 +44,8 @@ RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridabl
 # Redis-side TTL is the only remaining safety net (e.g. supervisor itself
 # down).
 LOCK_TTL       = RUN_SECONDS + 30                  # 150s
-# A reservation is created before publishing a task.  With ~100 cameras and
-# 14 CPU worker slots, a legitimately queued task can wait around 15 minutes
+# A reservation is created before publishing a task. With a large live fleet,
+# a legitimately queued task can wait several minutes
 # before it starts.  Giving pending reservations an hour prevents Beat from
 # publishing the same camera every LOCK_TTL while still bounding recovery if
 # the broker loses a task entirely.
@@ -86,6 +86,40 @@ SWEEP_TTL_THRESHOLD_S = 30
 
 def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url)
+
+
+def _camera_ids_with_fresh_frames(
+    r: redis.Redis, camera_ids: list[int],
+) -> set[int]:
+    """Return cameras whose raw-frame key currently exists.
+
+    A camera without ``vg:frame:{id}`` has no pixels to analyse. Scheduling
+    its two-minute task only occupies a scarce CPU worker while it polls an
+    empty buffer, delaying every live camera behind it. The streamer gives
+    raw-frame keys a 30-second TTL, so this is also a precise freshness gate.
+
+    Redis inspection fails open: if the batch check itself fails, return all
+    IDs. A cache fault must degrade efficiency, never silently suspend the
+    inference fleet.
+    """
+    if not camera_ids:
+        return set()
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.exists(f"vg:frame:{camera_id}")
+        present = pipe.execute()
+        return {
+            camera_id
+            for camera_id, exists in zip(camera_ids, present)
+            if bool(exists)
+        }
+    except Exception as exc:
+        log.warning(
+            "supervise_all: frame-freshness check failed; scheduling all "
+            "AI-enabled cameras: %s", exc,
+        )
+        return set(camera_ids)
 
 
 def _claim_reserved_task(
@@ -150,7 +184,8 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
 
 
 def _write_health(r: redis.Redis, *,
-                  cameras_total: int, cameras_enqueued: int,
+                  cameras_total: int, cameras_fresh: int,
+                  cameras_enqueued: int,
                   cameras_already_running: int, stale_cleared: int) -> None:
     """Heartbeat for the inference pipeline. The
     alerting.inference_pipeline_health_check beat task fires URGENT
@@ -159,6 +194,8 @@ def _write_health(r: redis.Redis, *,
         r.set(HEALTH_KEY, json.dumps({
             "last_run_ts":             int(time.time()),
             "cameras_total":           cameras_total,
+            "cameras_fresh":           cameras_fresh,
+            "cameras_without_frames":  max(0, cameras_total - cameras_fresh),
             "cameras_enqueued":        cameras_enqueued,
             "cameras_already_running": cameras_already_running,
             "stale_locks_cleared":     stale_cleared,
@@ -189,7 +226,9 @@ def supervise_all() -> None:
     skipped:  list[int] = []
     with SessionLocal() as db:
         cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
-    for cam in cams:
+    fresh_ids = _camera_ids_with_fresh_frames(r, [int(cam.id) for cam in cams])
+    schedulable = [cam for cam in cams if int(cam.id) in fresh_ids]
+    for cam in schedulable:
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
         # SET NX with TTL — atomic acquire. Value is a placeholder until
         # we know the real task_id; stamped below.
@@ -216,11 +255,12 @@ def supervise_all() -> None:
                 except Exception: pass
         else:
             skipped.append(cam.id)
-    log.info("inference.supervise_all: enqueued=%s, already_running=%s, "
-             "stale_locks_cleared=%d",
-             enqueued, skipped, stale_cleared)
+    log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
+             "already_running=%s, stale_locks_cleared=%d",
+             len(cams), len(schedulable), enqueued, skipped, stale_cleared)
     _write_health(r,
                   cameras_total=len(cams),
+                  cameras_fresh=len(schedulable),
                   cameras_enqueued=len(enqueued),
                   cameras_already_running=len(skipped),
                   stale_cleared=stale_cleared)
