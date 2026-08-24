@@ -207,6 +207,11 @@ def _critical_due_from_timestamp(value, *, now: float) -> bool:
     return age >= CRITICAL_REQUEUE_SECONDS
 
 
+def _schedule_order(cameras: list) -> list:
+    """Publish due critical tasks before ordinary tasks, preserving DB order."""
+    return sorted(cameras, key=lambda camera: not _camera_is_latency_critical(camera))
+
+
 def _critical_gap_health(
     r: redis.Redis,
     camera_ids: list[int],
@@ -474,7 +479,12 @@ def supervise_all() -> None:
     critical_ids = [
         int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
     ]
-    for cam in schedulable:
+    # Workers may be idle while this loop publishes. Priority only reorders
+    # messages already in Redis, so publishing ordinary tasks first can let
+    # them start before a later critical message exists. Critical-first
+    # publication closes that race; Python's stable sort keeps camera order
+    # deterministic inside each class.
+    for cam in _schedule_order(schedulable):
         if _camera_is_latency_critical(cam):
             try:
                 last_run = r.get(LAST_RUN_KEY_FMT.format(camera_id=cam.id))

@@ -224,6 +224,26 @@ def test_critical_camera_cooldown_prevents_normal_work_starvation():
     assert inference._critical_due_from_timestamp(None, now=now)
 
 
+def test_supervisor_publishes_critical_cameras_before_ordinary_cameras():
+    def camera(camera_id: int, detection_type: str):
+        return SimpleNamespace(
+            id=camera_id,
+            detection_configs=[SimpleNamespace(
+                enabled=True, detection_type=detection_type,
+            )],
+            zones=[],
+        )
+
+    ordered = inference._schedule_order([
+        camera(1, "dwell"),
+        camera(2, "intrusion"),
+        camera(3, "person"),
+        camera(4, "fire"),
+    ])
+
+    assert [row.id for row in ordered] == [2, 4, 1, 3]
+
+
 def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
     r = FakeLastRunRedis({1: "900", 2: "600", 3: None})
 
