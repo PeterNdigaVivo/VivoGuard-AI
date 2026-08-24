@@ -11,4 +11,4 @@ def test_streamer_image_copies_backend_and_streamer_from_one_checkout() -> None:
     assert "context: ." in service
     assert "dockerfile: streamer/Dockerfile" in service
     assert "COPY backend/app ./app" in dockerfile
-    assert "COPY streamer ./streamer" in dockerfile
+    assert "COPY streamer/streamer ./streamer" in dockerfile

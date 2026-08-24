@@ -11,6 +11,6 @@ FROM vivoguard/api:latest
 
 WORKDIR /app
 COPY backend/app ./app
-COPY streamer ./streamer
+COPY streamer/streamer ./streamer
 
 CMD ["python", "-m", "streamer.main"]
