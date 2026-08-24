@@ -145,3 +145,32 @@ def test_reviewed_no_person_frame_can_be_approved_as_hard_negative(tmp_path, mon
         assert result["eligible_for_training"] is True
         assert image.labeled is True
         assert db.query(Annotation).count() == 0
+
+
+def test_simulation_review_fails_closed_when_governance_case_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as db:
+        primary = User(email="primary@example.test", password_hash="x", role="operator")
+        independent = User(email="independent@example.test", password_hash="x", role="operator")
+        camera = Camera(name="Camera", brand="dahua",
+                        connection_type="nvr_dahua", host="127.0.0.1")
+        db.add_all([primary, independent, camera]); db.commit()
+        capture_live_probe_evidence(
+            db, [_candidate(camera.id, person=False, stamp=now)],
+            run_id="missing-case-run", max_per_run=1, now=now,
+        )
+        image = db.query(TrainingImage).one()
+        save_annotations(image.id, [], db=db, user=primary)
+        db.query(AssuranceCase).delete(); db.commit()
+        with pytest.raises(HTTPException, match="review case is missing"):
+            independently_review_simulation_evidence(
+                image.id,
+                SimulationEvidenceReviewIn(
+                    verdict="approve", rationale="No person is visible in the frame."),
+                db=db, user=independent,
+            )
+        db.refresh(image)
+        assert image.eligible_for_training is False

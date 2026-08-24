@@ -308,6 +308,8 @@ def independently_review_simulation_evidence(
     case = (db.query(AssuranceCase)
             .filter_by(dedup_key=f"simulation-evidence:{img.id}")
             .one_or_none())
+    if case is None or case.case_type != "simulation_evidence_review":
+        raise HTTPException(409, "governed simulation review case is missing")
     now = datetime.now(timezone.utc)
     extra.update({
         "independent_reviewer_user_id": user.id,
@@ -329,18 +331,17 @@ def independently_review_simulation_evidence(
         img.eligible_for_training = False
         img.review_state = "rejected"
         training_status = "rejected_not_eligible"
-    if case:
-        case.status = "resolved"
-        case.training_status = training_status
-        case.reviewed_by = user.id
-        case.reviewed_at = now
-        case.resolved_at = now
-        case.resolution = body.rationale
+    case.status = "resolved"
+    case.training_status = training_status
+    case.reviewed_by = user.id
+    case.reviewed_at = now
+    case.resolved_at = now
+    case.resolution = body.rationale
     audit_action = ("simulation_evidence.approved" if body.verdict == "approve"
                     else "simulation_evidence.rejected")
     _training_audit(
         db, user, audit_action, img.id,
-        {"case_id": case.id if case else None,
+        {"case_id": case.id,
          "primary_reviewer_user_id": primary_reviewer,
          "annotation_ids": [annotation.id for annotation in annotations]},
     )
