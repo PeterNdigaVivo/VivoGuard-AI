@@ -70,15 +70,32 @@ def _retry_url_after_failure(
     *, active_url: str, preferred_url: str,
     fallback_url: str, frames_received: int,
 ) -> str:
-    """Fall back only when the preferred substream never produced a frame."""
+    """Fail back to the saved mainstream after any preferred-stream exit.
+
+    A preferred substream may yield a few frames and then repeatedly collapse.
+    Treating that as healthy made its Redis frame expire between retries. Stable
+    substreams never take this path; cameras that do exit prioritise coverage.
+    ``frames_received`` stays in the signature for explicit call-site telemetry
+    and backwards compatibility with focused tests.
+    """
     if (
-        frames_received == 0
-        and active_url == preferred_url
+        active_url == preferred_url
         and fallback_url
         and fallback_url != preferred_url
     ):
         return fallback_url
     return active_url
+
+
+def _stream_has_stalled(
+    *, last_frame_at: float, started_at: float,
+    now: float, stall_seconds: float,
+) -> bool:
+    """Return true only after this FFmpeg run produced, then stopped, frames."""
+    return (
+        last_frame_at >= started_at
+        and now - last_frame_at >= max(5.0, float(stall_seconds))
+    )
 
 
 class FFmpegWorker(threading.Thread):
@@ -101,6 +118,9 @@ class FFmpegWorker(threading.Thread):
             threads if threads is not None
             else os.environ.get("STREAMER_FFMPEG_THREADS", "1")
         ))
+        self.stall_seconds = max(10, int(os.environ.get(
+            "STREAMER_FRAME_STALL_SECONDS", "20",
+        )))
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
         self._stop = threading.Event()
@@ -139,12 +159,28 @@ class FFmpegWorker(threading.Thread):
                 break
             health = self.buffer.health(self.camera_id) or {}
             # `last_frame_at` is bumped only by push_frame() — so any
-            # value > started_at means we got a real JPEG since this run
-            # began. In that case we stop writing the 'connecting' message.
+            # value > started_at means we got a real JPEG since this run.
             last_frame_at = float(health.get("last_frame_at") or 0)
-            if last_frame_at >= started_at:
+            now = time.time()
+            if _stream_has_stalled(
+                last_frame_at=last_frame_at,
+                started_at=started_at,
+                now=now,
+                stall_seconds=self.stall_seconds,
+            ):
+                self.buffer.update_health(
+                    self.camera_id, fps=0,
+                    error="Frame stream stalled; restarting ffmpeg…",
+                )
+                log.warning(
+                    "camera %s: no frame for %.1fs; restarting ffmpeg",
+                    self.camera_id, now - last_frame_at,
+                )
+                proc.kill()
                 return
-            elapsed = int(time.time() - started_at)
+            if last_frame_at >= started_at:
+                continue
+            elapsed = int(now - started_at)
             self.buffer.update_health(
                 self.camera_id, fps=0,
                 error=f"Connecting to RTSP… ({elapsed}s, ffmpeg still negotiating)",
@@ -225,8 +261,9 @@ class FFmpegWorker(threading.Thread):
             if retry_url != active_url:
                 active_url = retry_url
                 log.warning(
-                    "camera %s: preferred substream produced no frames; "
-                    "falling back to saved mainstream", self.camera_id,
+                    "camera %s: preferred substream exited after %d frames; "
+                    "falling back to saved mainstream",
+                    self.camera_id, frames_this_run,
                 )
             wait = self.backoff.fail()
             err_msg = err.strip()[:200] or "stream ended"

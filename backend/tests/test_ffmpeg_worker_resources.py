@@ -4,6 +4,7 @@ from app.stream.ffmpeg_worker import (
     FFmpegWorker,
     _build_cmd,
     _retry_url_after_failure,
+    _stream_has_stalled,
 )
 
 
@@ -50,10 +51,22 @@ def test_unavailable_preferred_substream_falls_back_to_saved_mainstream() -> Non
     ) == "rtsp://camera/main"
 
 
-def test_working_substream_does_not_fall_back_after_transient_disconnect() -> None:
+def test_preferred_substream_exit_falls_back_even_after_receiving_frames() -> None:
     assert _retry_url_after_failure(
         active_url="rtsp://camera/sub",
         preferred_url="rtsp://camera/sub",
         fallback_url="rtsp://camera/main",
         frames_received=1,
-    ) == "rtsp://camera/sub"
+    ) == "rtsp://camera/main"
+
+
+def test_stall_requires_a_frame_from_the_current_run() -> None:
+    assert not _stream_has_stalled(
+        last_frame_at=99, started_at=100, now=140, stall_seconds=20,
+    )
+    assert not _stream_has_stalled(
+        last_frame_at=125, started_at=100, now=140, stall_seconds=20,
+    )
+    assert _stream_has_stalled(
+        last_frame_at=120, started_at=100, now=140, stall_seconds=20,
+    )
