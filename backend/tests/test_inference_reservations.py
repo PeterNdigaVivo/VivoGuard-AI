@@ -244,6 +244,39 @@ def test_supervisor_publishes_critical_cameras_before_ordinary_cameras():
     assert [row.id for row in ordered] == [2, 4, 1, 3]
 
 
+def test_supervisor_prioritises_oldest_and_never_started_critical_cameras():
+    def camera(camera_id: int, detection_type: str):
+        return SimpleNamespace(
+            id=camera_id,
+            detection_configs=[SimpleNamespace(
+                enabled=True, detection_type=detection_type,
+            )],
+            zones=[],
+        )
+
+    ordered = inference._schedule_order(
+        [
+            camera(1, "dwell"),
+            camera(2, "intrusion"),
+            camera(3, "fire"),
+            camera(4, "entry_exit"),
+        ],
+        {2: 950.0, 3: None, 4: 700.0},
+    )
+
+    assert [row.id for row in ordered] == [3, 4, 2, 1]
+
+
+def test_last_run_batch_read_normalises_invalid_values_and_fails_open():
+    r = FakeLastRunRedis({1: "900", 2: "invalid", 3: None})
+
+    assert inference._last_run_timestamps(r, [1, 2, 3]) == {
+        1: 900.0,
+        2: None,
+        3: None,
+    }
+
+
 def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
     r = FakeLastRunRedis({1: "900", 2: "600", 3: None})
 

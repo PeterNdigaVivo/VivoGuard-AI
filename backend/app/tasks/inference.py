@@ -207,9 +207,61 @@ def _critical_due_from_timestamp(value, *, now: float) -> bool:
     return age >= CRITICAL_REQUEUE_SECONDS
 
 
-def _schedule_order(cameras: list) -> list:
-    """Publish due critical tasks before ordinary tasks, preserving DB order."""
-    return sorted(cameras, key=lambda camera: not _camera_is_latency_critical(camera))
+def _last_run_timestamps(
+    r: redis.Redis,
+    camera_ids: list[int],
+) -> dict[int, float | None]:
+    """Read completed-run timestamps in one Redis round trip.
+
+    Missing or malformed values deliberately become ``None`` so scheduling
+    fails open: a camera without trustworthy coverage history is treated as
+    the oldest and therefore receives service first.
+    """
+    if not camera_ids:
+        return {}
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+        values = pipe.execute()
+    except Exception as exc:
+        log.warning(
+            "supervise_all: last-run batch read failed; treating all "
+            "critical cameras as overdue: %s", exc,
+        )
+        return {camera_id: None for camera_id in camera_ids}
+
+    result: dict[int, float | None] = {}
+    for camera_id, value in zip(camera_ids, values):
+        if isinstance(value, bytes):
+            value = value.decode()
+        try:
+            result[camera_id] = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            result[camera_id] = None
+    return result
+
+
+def _schedule_order(
+    cameras: list,
+    last_run_by_camera: dict[int, float | None] | None = None,
+) -> list:
+    """Publish critical work first, oldest successful analysis first.
+
+    Stable camera/DB ordering repeatedly favoured low IDs whenever CPU
+    capacity was saturated. Ordering the critical fast lane by its actual
+    last completed run prevents that starvation pattern. Ordinary cameras
+    retain their existing stable order.
+    """
+    last_runs = last_run_by_camera or {}
+
+    def priority(camera) -> tuple[int, float]:
+        if not _camera_is_latency_critical(camera):
+            return (1, 0.0)
+        timestamp = last_runs.get(int(camera.id))
+        return (0, float("-inf") if timestamp is None else float(timestamp))
+
+    return sorted(cameras, key=priority)
 
 
 def _critical_gap_health(
@@ -479,18 +531,17 @@ def supervise_all() -> None:
     critical_ids = [
         int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
     ]
+    critical_last_runs = _last_run_timestamps(r, critical_ids)
+    schedule_now = time.time()
     # Workers may be idle while this loop publishes. Priority only reorders
     # messages already in Redis, so publishing ordinary tasks first can let
     # them start before a later critical message exists. Critical-first
-    # publication closes that race; Python's stable sort keeps camera order
-    # deterministic inside each class.
-    for cam in _schedule_order(schedulable):
+    # publication closes that race. Within the fast lane, the camera with the
+    # oldest completed run is published first to prevent CPU-era starvation.
+    for cam in _schedule_order(schedulable, critical_last_runs):
         if _camera_is_latency_critical(cam):
-            try:
-                last_run = r.get(LAST_RUN_KEY_FMT.format(camera_id=cam.id))
-            except Exception:
-                last_run = None
-            if not _critical_due_from_timestamp(last_run, now=time.time()):
+            last_run = critical_last_runs.get(int(cam.id))
+            if not _critical_due_from_timestamp(last_run, now=schedule_now):
                 cooling_down.append(int(cam.id))
                 continue
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
