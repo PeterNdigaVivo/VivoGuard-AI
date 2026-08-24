@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -63,6 +63,75 @@ def _decode_inference_pipeline(raw_pipeline) -> dict | None:
         return value if isinstance(value, dict) else None
     except (TypeError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _inference_baseline(db: Session, *, now: datetime) -> dict:
+    """Summarise 24h authoritative CPU telemetry for capacity comparison."""
+    from app.models import InferencePerfLog
+
+    rows = (
+        db.query(
+            func.count(func.distinct(InferencePerfLog.camera_id)),
+            func.coalesce(func.sum(InferencePerfLog.frame_count), 0),
+            func.max(InferencePerfLog.p95_ms),
+            func.max(InferencePerfLog.p99_ms),
+        )
+        .filter(InferencePerfLog.timestamp >= now - timedelta(hours=24))
+        .one()
+    )
+    return {
+        "window_hours": 24,
+        "cameras_reporting": int(rows[0] or 0),
+        "frames": int(rows[1] or 0),
+        "p95_ms_worst_camera_window": float(rows[2]) if rows[2] is not None else None,
+        "p99_ms_worst_camera_window": float(rows[3]) if rows[3] is not None else None,
+    }
+
+
+def _capacity_acceptance(db: Session, fb: FrameBuffer, *, now: float) -> dict:
+    from app.services.inference_acceptance import (
+        CapacityThresholds,
+        evaluate_capacity_acceptance,
+    )
+
+    authoritative = _decode_inference_pipeline(fb.r.get("vg:inference:health"))
+    shadow = _decode_inference_pipeline(
+        fb.r.get("vg:inference:batch-shadow-health"),
+    )
+    baseline = _inference_baseline(
+        db, now=datetime.fromtimestamp(now, tz=timezone.utc),
+    )
+    result = evaluate_capacity_acceptance(
+        authoritative,
+        shadow,
+        now=now,
+        baseline=baseline,
+        thresholds=CapacityThresholds(
+            max_health_age_seconds=settings.inference_batch_health_max_age_seconds,
+            min_uptime_seconds=(
+                settings.inference_batch_acceptance_min_uptime_seconds
+            ),
+            min_frames_per_camera=(
+                settings.inference_batch_acceptance_min_frames_per_camera
+            ),
+            max_p95_per_frame_ms=(
+                settings.inference_batch_acceptance_max_p95_ms
+            ),
+            max_schedule_wait_seconds=(
+                settings.inference_batch_acceptance_max_wait_seconds
+            ),
+        ),
+    )
+    result["baseline"] = baseline
+    return result
+
+
+@router.get("/inference-acceptance")
+def inference_acceptance(
+    db: Session = Depends(get_db), _u=Depends(get_current_user),
+):
+    """Report capacity evidence without over-claiming alert accuracy."""
+    return _capacity_acceptance(db, FrameBuffer(), now=time.time())
 
 
 @router.get("/cameras/{camera_id}/stream-health")
@@ -208,7 +277,6 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     inference_batch_shadow = _decode_inference_pipeline(
         fb.r.get("vg:inference:batch-shadow-health"),
     )
-
     return {
         "now":            datetime.now(timezone.utc).isoformat(),
         "cameras":        cam_health,

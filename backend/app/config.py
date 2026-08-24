@@ -325,6 +325,22 @@ class Settings(BaseSettings):
     inference_batch_size: int = Field(default=8, ge=1, le=64)
     inference_batch_refresh_seconds: int = Field(default=30, ge=5, le=300)
     inference_batch_require_cuda: bool = True
+    # Operational gates for the dark-launch coordinator. The watchdog waits
+    # through short restarts and only creates one alert per sustained outage.
+    inference_watchdog_grace_seconds: int = Field(default=300, ge=60, le=3600)
+    inference_batch_health_max_age_seconds: int = Field(default=120, ge=30, le=900)
+    inference_batch_acceptance_min_uptime_seconds: int = Field(
+        default=7200, ge=300, le=86400,
+    )
+    inference_batch_acceptance_min_frames_per_camera: int = Field(
+        default=100, ge=1, le=10000,
+    )
+    inference_batch_acceptance_max_p95_ms: float = Field(
+        default=400.0, ge=1.0, le=10000.0,
+    )
+    inference_batch_acceptance_max_wait_seconds: float = Field(
+        default=2.0, ge=0.1, le=300.0,
+    )
 
     # --- Notifications ---
     smtp_host: str = ""

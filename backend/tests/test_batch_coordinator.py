@@ -140,11 +140,13 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     assert payload["authoritative"] is False
     assert payload["frames_processed"] == 2
     assert payload["cameras_served"] == 2
+    assert payload["served_camera_ids"] == [1, 2]
     assert payload["detections_observed_not_emitted"] == 1
     assert payload["p95_per_frame_ms"] is not None
-    assert ttl == 120
+    assert ttl == 240
+    assert coordinator.redis.values[coordinator_module.EXPECTED_KEY] == (1, 21600)
     coordinator.write_health(now=100.5, candidates=0, detections=0)
-    assert coordinator.redis.set_calls == 1
+    assert coordinator.redis.set_calls == 2
 
 
 def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):

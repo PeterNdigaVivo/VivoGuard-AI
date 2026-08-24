@@ -150,5 +150,13 @@ def test_reservation_health_distinguishes_active_from_waiting_tasks():
         "cameras_waiting_for_worker": 2,
         "inference_queue_depth": 2,
         "inference_queue_depth_by_shard": {"inference": 2},
+        "inference_shards": {
+            "inference": {
+                "cameras": 3,
+                "reserved": 3,
+                "active": 1,
+                "queue_depth": 2,
+            },
+        },
         "estimated_full_rotation_seconds": 3 * inference.RUN_SECONDS,
     }

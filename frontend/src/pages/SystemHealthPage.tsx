@@ -35,6 +35,17 @@ interface SystemHealth {
   } | null
 }
 
+interface CapacityAcceptance {
+  status: 'pending' | 'failed' | 'capacity_ready'
+  capacity_gate_passed: boolean
+  promotion_ready: false
+  accuracy_gate_evaluated: false
+  accuracy_note: string
+  checks: {
+    name: string; passed: boolean; actual: unknown; required: string
+  }[]
+}
+
 // Sprint 1.2 inference-latency telemetry (GET /analytics/perf).
 interface PerfCamera {
   camera_id: number; camera_name: string | null; store_name: string | null
@@ -55,10 +66,17 @@ interface PerfReport {
 export default function SystemHealthPage() {
   const [data, setData] = useState<SystemHealth | null>(null)
   const [perf, setPerf] = useState<PerfReport | null>(null)
+  const [capacity, setCapacity] = useState<CapacityAcceptance | null>(null)
   useEffect(() => {
     const fetch = () => api<SystemHealth>('/system/health').then(setData).catch(console.error)
     fetch()
     const t = setInterval(fetch, 5000)
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => {
+    const f = () => api<CapacityAcceptance>('/system/inference-acceptance').then(setCapacity).catch(() => {})
+    f()
+    const t = setInterval(f, 60_000)
     return () => clearInterval(t)
   }, [])
   useEffect(() => {
@@ -153,6 +171,24 @@ export default function SystemHealthPage() {
           <div className="text-xs text-slate-400 mt-3">
             Detections are measured for capacity only and are not saved, notified or used for training. The existing inference loop remains authoritative.
           </div>
+          {capacity && <div className="mt-4 border-t border-violet-100 pt-3 dark:border-violet-900">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">Two-hour capacity acceptance</div>
+              <Badge color={capacity.capacity_gate_passed ? 'green' : 'amber'}>
+                {capacity.status.replace('_', ' ')}
+              </Badge>
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-1 text-xs md:grid-cols-2">
+              {capacity.checks.map(check => (
+                <div key={check.name} className={check.passed ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}>
+                  {check.passed ? '✓' : '○'} {check.name.replaceAll('_', ' ')} · {check.required}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">
+              Capacity passing never proves 99% alert accuracy. {capacity.accuracy_note}
+            </div>
+          </div>}
         </Card>
       )}
 

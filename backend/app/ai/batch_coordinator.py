@@ -33,6 +33,7 @@ from app.stream.frame_buffer import FrameBuffer
 log = logging.getLogger(__name__)
 
 HEALTH_KEY = "vg:inference:batch-shadow-health"
+EXPECTED_KEY = "vg:inference:batch-shadow-expected"
 
 _CRITICAL_TYPES = {
     "weapon", "weapon_brandished", "fire", "smoke", "fall",
@@ -268,6 +269,7 @@ class BatchShadowCoordinator:
             "uptime_seconds": round(max(0.0, now - self.started), 1),
             "configured_cameras": len(active),
             "cameras_served": len(set(self.last_processed_ts) & active),
+            "served_camera_ids": sorted(set(self.last_processed_ts) & active),
             "fresh_candidates": candidates,
             "batch_size_limit": int(settings.inference_batch_size),
             "batches_processed": self.batches,
@@ -291,7 +293,15 @@ class BatchShadowCoordinator:
                 self.scheduler.max_wait_seconds(active, now=now), 2,
             ),
         }
-        self.redis.set(HEALTH_KEY, json.dumps(payload), ex=120)
+        self.redis.set(
+            HEALTH_KEY,
+            json.dumps(payload),
+            ex=max(120, settings.inference_batch_health_max_age_seconds * 2),
+        )
+        # A six-hour expectation marker survives an unexpected process exit so
+        # the central watchdog can distinguish failure from an intentionally
+        # disabled dark launch. A planned stop must delete this marker first.
+        self.redis.set(EXPECTED_KEY, "1", ex=6 * 60 * 60)
 
 
 def run() -> None:

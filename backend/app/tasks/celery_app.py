@@ -38,6 +38,7 @@ celery_app = Celery(
     backend=None,
     include=[
         "app.tasks.inference",
+        "app.tasks.inference_watchdog",
         "app.tasks.training",
         "app.tasks.maintenance",
         "app.tasks.reports",
@@ -99,6 +100,7 @@ celery_app.conf.update(
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
         "vlm.analyse_alert_scene":              {"queue": "alerts"},
         "alerting.inference_pipeline_health_check": {"queue": "beat"},
+        "inference.health_watchdog":               {"queue": "beat"},
         "alerting.uniform_violation_check":     {"queue": "alerts"},
         "alerting.after_hours_intrusion_check": {"queue": "alerts"},
         "alerting.after_hours_prune":           {"queue": "alerts"},
@@ -199,6 +201,10 @@ celery_app.conf.update(
         # every 30s; fires when it ages past 10 min. Per-30-min dedup.
         "inference-pipeline-health-every-60s": {
             "task": "alerting.inference_pipeline_health_check",
+            "schedule": 60.0,
+        },
+        "inference-capacity-watchdog-every-60s": {
+            "task": "inference.health_watchdog",
             "schedule": 60.0,
         },
         # Alert history retention — prune alerts + snapshots older than

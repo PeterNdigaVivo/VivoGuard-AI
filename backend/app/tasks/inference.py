@@ -213,14 +213,22 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
 
 def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
     """Report active versus queued camera reservations without side effects."""
+    queues = _inference_queue_names()
     if not camera_ids:
         return {
             "cameras_reserved": 0,
             "cameras_actively_inferencing": 0,
             "cameras_waiting_for_worker": 0,
             "inference_queue_depth": 0,
-            "inference_queue_depth_by_shard": {
-                queue: 0 for queue in _inference_queue_names()
+            "inference_queue_depth_by_shard": {queue: 0 for queue in queues},
+            "inference_shards": {
+                queue: {
+                    "cameras": 0,
+                    "reserved": 0,
+                    "active": 0,
+                    "queue_depth": 0,
+                }
+                for queue in queues
             },
             "estimated_full_rotation_seconds": 0,
         }
@@ -234,15 +242,28 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
         split = len(camera_ids)
         reserved = sum(bool(value) for value in flags[:split])
         active = sum(bool(value) for value in flags[split:])
-        queue_depths = {
-            queue: int(r.llen(queue)) for queue in _inference_queue_names()
+        queue_depths = {queue: int(r.llen(queue)) for queue in queues}
+        shard_health = {
+            queue: {
+                "cameras": 0,
+                "reserved": 0,
+                "active": 0,
+                "queue_depth": queue_depths[queue],
+            }
+            for queue in queues
         }
+        for index, camera_id in enumerate(camera_ids):
+            queue = _inference_queue(camera_id)
+            shard_health[queue]["cameras"] += 1
+            shard_health[queue]["reserved"] += int(bool(flags[index]))
+            shard_health[queue]["active"] += int(bool(flags[split + index]))
         return {
             "cameras_reserved": reserved,
             "cameras_actively_inferencing": active,
             "cameras_waiting_for_worker": max(0, reserved - active),
             "inference_queue_depth": sum(queue_depths.values()),
             "inference_queue_depth_by_shard": queue_depths,
+            "inference_shards": shard_health,
             "estimated_full_rotation_seconds": (
                 math.ceil(len(camera_ids) / active) * RUN_SECONDS
                 if active else None
@@ -256,6 +277,7 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
             "cameras_waiting_for_worker": None,
             "inference_queue_depth": None,
             "inference_queue_depth_by_shard": None,
+            "inference_shards": None,
             "estimated_full_rotation_seconds": None,
         }
 
@@ -264,6 +286,7 @@ def _write_health(r: redis.Redis, *,
                   cameras_total: int, cameras_fresh: int,
                   cameras_enqueued: int,
                   cameras_already_running: int, stale_cleared: int,
+                  fresh_camera_ids: list[int] | None = None,
                   reservation_health: dict | None = None) -> None:
     """Heartbeat for the inference pipeline. The
     alerting.inference_pipeline_health_check beat task fires URGENT
@@ -273,6 +296,7 @@ def _write_health(r: redis.Redis, *,
             "last_run_ts":             int(time.time()),
             "cameras_total":           cameras_total,
             "cameras_fresh":           cameras_fresh,
+            "fresh_camera_ids":        sorted(fresh_camera_ids or []),
             "cameras_without_frames":  max(0, cameras_total - cameras_fresh),
             "cameras_enqueued":        cameras_enqueued,
             "cameras_already_running": cameras_already_running,
@@ -348,6 +372,7 @@ def supervise_all() -> None:
                   cameras_enqueued=len(enqueued),
                   cameras_already_running=len(skipped),
                   stale_cleared=stale_cleared,
+                  fresh_camera_ids=[int(cam.id) for cam in schedulable],
                   reservation_health=reservation_health)
 
 

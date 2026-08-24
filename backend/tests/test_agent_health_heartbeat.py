@@ -18,3 +18,4 @@ def test_inference_supervision_uses_non_blocking_beat_queue():
     routes = celery_app.conf.task_routes
     assert routes["inference.supervise_all"]["queue"] == "beat"
     assert routes["alerting.inference_pipeline_health_check"]["queue"] == "beat"
+    assert routes["inference.health_watchdog"]["queue"] == "beat"

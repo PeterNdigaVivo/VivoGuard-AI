@@ -76,6 +76,20 @@ batch latency, errors and maximum camera scheduling wait. Stop the profile if
 the health key expires, errors increase, the existing alert p99 regresses or
 GPU memory exceeds the synthetic-test ceiling.
 
+System Health and `GET /api/system/inference-acceptance` expose the automated
+capacity checklist. A pass is deliberately reported as `capacity_ready`, never
+`promotion_ready`: alert precision and recall remain a separate human-reviewed
+gate. While the service runs it refreshes
+`vg:inference:batch-shadow-expected`; a central watchdog creates one alert when
+the expected telemetry remains missing or stale beyond the configured grace.
+For an intentional stop, clear the expectation before stopping the service:
+
+```bash
+docker compose exec redis redis-cli DEL vg:inference:batch-shadow-expected
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+  --profile gpu-batch-shadow stop worker-inference-batch-shadow
+```
+
 Shadow acceptance requires zero coordinator errors, every fresh camera served,
 no starvation in the 110-camera replay, stable authoritative alert latency and
 a scheduling wait compatible with each camera's required inference FPS. Passing
