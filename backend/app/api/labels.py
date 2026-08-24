@@ -15,11 +15,12 @@ training/feedback_loop. No duplication of the confirm/dismiss logic
 from __future__ import annotations
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, case, exists, func
+from sqlalchemy import and_, case, exists, func, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -85,8 +86,15 @@ def _dwell_from_event(ev: Optional[DetectionEvent]) -> Optional[int]:
 
 def _serialise_queue_rows(
     db: Session, rows: list[tuple], *, blind: bool = False,
+    limit: int | None = None,
 ) -> list[dict]:
-    """Build review cards; blind audit cards never reveal the first verdict."""
+    """Build review cards from evidence that still exists on this worker.
+
+    A verdict without viewable evidence is not a human validation. Database
+    paths can outlive the retention window, so fail closed here instead of
+    showing a black card that an operator can still confirm or dismiss.
+    Blind audit cards also never reveal the first verdict.
+    """
     zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
     store_ids = {cam.store_id for _, _, cam in rows
                  if cam and cam.store_id is not None}
@@ -100,6 +108,13 @@ def _serialise_queue_rows(
 
     out: list[dict] = []
     for alert, event, camera in rows:
+        clip_path = (event.extra or {}).get("alert_clip_path")
+        snapshot_exists = bool(
+            event.thumbnail_path and Path(event.thumbnail_path).is_file()
+        )
+        clip_exists = bool(clip_path and Path(str(clip_path)).is_file())
+        if not snapshot_exists and not clip_exists:
+            continue
         item: AlertOut = _to_alert_out(
             alert, event, camera,
             zones_by_id.get(event.zone_id) if event.zone_id else None,
@@ -107,6 +122,12 @@ def _serialise_queue_rows(
             if (camera and camera.store_id) else None,
         )
         payload = item.model_dump()
+        payload["snapshot_url"] = (
+            f"/api/alerts/{alert.id}/snapshot" if snapshot_exists else None
+        )
+        payload["clip_url"] = (
+            f"/api/alerts/{alert.id}/clip" if clip_exists else None
+        )
         if blind:
             payload["status"] = "independent_review_pending"
         payload["dwell_seconds"] = _dwell_from_event(event)
@@ -115,9 +136,10 @@ def _serialise_queue_rows(
         payload["review_reason"] = (
             "blind independent review" if blind else reason
         )
-        payload["clip_available"] = bool(
-            event.clip_path or (event.extra or {}).get("alert_clip_path"))
+        payload["clip_available"] = clip_exists
         out.append(payload)
+        if limit is not None and len(out) >= limit:
+            break
     return out
 
 
@@ -154,6 +176,13 @@ def queue(
         q = q.filter(Camera.store_id == store_id)
     if camera_id is not None:
         q = q.filter(DetectionEvent.camera_id == camera_id)
+    # Avoid scanning the entire historical queue. This database-level filter
+    # is only a candidate filter; _serialise_queue_rows still checks that the
+    # retained file exists before exposing the card.
+    q = q.filter(or_(
+        DetectionEvent.thumbnail_path.is_not(None),
+        DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
+    ))
     priority_rank = case(
         (DetectionEvent.detection_type.in_(CRITICAL_REVIEW_TYPES), 0),
         (DetectionEvent.detection_type.in_(HIGH_REVIEW_TYPES), 1),
@@ -161,10 +190,10 @@ def queue(
     )
     # Consequential alerts first; within a tier review the oldest outstanding
     # evidence first so a stream of new routine alerts cannot starve the SLA.
-    q = q.order_by(priority_rank.asc(), Alert.created_at.asc()).limit(limit)
+    q = q.order_by(priority_rank.asc(), Alert.created_at.asc()).limit(limit * 5)
     rows = q.all()
 
-    return _serialise_queue_rows(db, rows)
+    return _serialise_queue_rows(db, rows, limit=limit)
 
 
 @router.get("/audit-queue", response_model=list[dict])
@@ -192,11 +221,15 @@ def audit_queue(
               .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
               .filter(Alert.status.in_(("confirmed", "dismissed")))
               .filter(DetectionEvent.detection_type != "positive_operational")
+              .filter(or_(
+                  DetectionEvent.thumbnail_path.is_not(None),
+                  DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
+              ))
               .filter(reviewed_by_other)
               .filter(~reviewed_by_user)
               .order_by(priority_rank.asc(), Alert.created_at.asc())
-              .limit(limit).all())
-    return _serialise_queue_rows(db, rows, blind=True)
+              .limit(limit * 5).all())
+    return _serialise_queue_rows(db, rows, blind=True, limit=limit)
 
 
 @router.post("/{alert_id}/audit", response_model=dict)

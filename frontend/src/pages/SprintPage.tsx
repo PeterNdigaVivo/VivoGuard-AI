@@ -24,6 +24,10 @@ export default function SprintPage() {
   const [showAdjudication, setShowAdjudication] = useState(false)
   const [showRecallSampling, setShowRecallSampling] = useState(false)
   const location = useLocation()
+  const recallMode = useMemo(
+    () => new URLSearchParams(location.search).get('mode') === 'recall',
+    [location.search],
+  )
   const filters = useMemo(() => {
     const q = new URLSearchParams(location.search)
     const numeric = (key: string) => {
@@ -49,6 +53,9 @@ export default function SprintPage() {
   }, [filters, independentReview])
 
   useEffect(() => { loadBatch() }, [loadBatch])
+  useEffect(() => {
+    if (recallMode) setShowRecallSampling(true)
+  }, [recallMode])
 
   const current = (queue && queue[idx]) || null
   const remaining = queue ? Math.max(0, queue.length - idx) : 0
@@ -108,7 +115,7 @@ export default function SprintPage() {
     <div className="p-6 max-w-5xl mx-auto">
       <PageHeader title="🎯 Labelling Sprint" actions={<>
         <Button variant="ghost" onClick={() => setShowRecallSampling(value => !value)}>
-          Measure recall
+          Review blind recall batch
         </Button>
         <Button variant="ghost" onClick={() => setShowAdjudication(value => !value)}>
           Resolve disagreements
@@ -203,6 +210,7 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
   onUndo?:   () => void
   busy: boolean
 }) {
+  const evidence = useAuthenticatedEvidence(alert)
   const dwell = useMemo(() => {
     if (alert.dwell_seconds == null) return 'N/A'
     const m = Math.floor(alert.dwell_seconds / 60)
@@ -220,12 +228,20 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
 
   return (
     <Card className="p-0 overflow-hidden">
-      {/* Snapshot */}
+      {/* Review evidence. Bearer-authenticated media must be fetched as a
+          blob; a bare img/video URL receives 401 in production. */}
       <div className="bg-black aspect-video flex items-center justify-center">
-        {alert.snapshot_url
-          ? <img src={alert.snapshot_url} alt={alert.title ?? 'alert'}
+        {evidence.loading
+          ? <div className="text-slate-300 text-sm">Loading incident evidence…</div>
+          : evidence.src && evidence.kind === 'video'
+          ? <video src={evidence.src} controls preload="metadata"
+                   className="w-full h-full object-contain" />
+          : evidence.src
+          ? <img src={evidence.src} alt={alert.title ?? 'alert'}
                  className="w-full h-full object-contain" />
-          : <div className="text-slate-500 text-sm">No snapshot</div>}
+          : <div className="text-amber-300 text-sm px-4 text-center">
+              Evidence is unavailable. This alert cannot be labelled.
+            </div>}
       </div>
 
       {/* Checkout-dwell timeline filmstrip (one JPEG per 60s).
@@ -282,10 +298,10 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
 
       {/* Verdict buttons */}
       <div className="p-4 flex items-center gap-2">
-        <Button onClick={onConfirm} disabled={busy}>
+        <Button onClick={onConfirm} disabled={busy || !evidence.src}>
           ✅ Confirm <span className="ml-2 opacity-60 text-xs">(C)</span>
         </Button>
-        <Button onClick={onDismiss} disabled={busy} variant="ghost">
+        <Button onClick={onDismiss} disabled={busy || !evidence.src} variant="ghost">
           ❌ Dismiss <span className="ml-2 opacity-60 text-xs">(D)</span>
         </Button>
         <div className="ml-auto">
@@ -299,6 +315,37 @@ function SprintCard({ alert, onConfirm, onDismiss, onUndo, busy }: {
       </div>
     </Card>
   )
+}
+
+
+function useAuthenticatedEvidence(alert: SprintAlert) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const url = alert.clip_url || alert.snapshot_url
+  const kind: 'video' | 'image' = alert.clip_url ? 'video' : 'image'
+
+  useEffect(() => {
+    if (!url) { setSrc(null); setLoading(false); return }
+    let cancelled = false
+    let objectUrl: string | null = null
+    setSrc(null); setLoading(true)
+    const token = localStorage.getItem('vg_access_token') ?? ''
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+      .then(response => response.ok ? response.blob() : null)
+      .then(blob => {
+        if (cancelled) return
+        if (!blob) { setLoading(false); return }
+        objectUrl = URL.createObjectURL(blob)
+        setSrc(objectUrl); setLoading(false)
+      })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [alert.id, url])
+
+  return { src, loading, kind }
 }
 
 

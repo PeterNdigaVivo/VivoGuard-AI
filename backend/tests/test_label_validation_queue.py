@@ -10,7 +10,7 @@ from app.models import (
 )
 
 
-def test_validation_queue_is_pinned_to_exact_camera_and_counts_legacy_clip():
+def test_validation_queue_is_pinned_to_exact_camera_and_requires_retained_clip(tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -27,10 +27,12 @@ def test_validation_queue_is_pinned_to_exact_camera_and_counts_legacy_clip():
     db.add_all(cameras)
     db.flush()
     for camera in cameras:
+        clip_path = tmp_path / f"{camera.id}.mp4"
+        clip_path.write_bytes(b"playable evidence")
         event = DetectionEvent(
             camera_id=camera.id, detection_type="trespass", confidence=.8,
             bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
-            extra={"alert_clip_path": f"/clips/{camera.id}.mp4"},
+            extra={"alert_clip_path": str(clip_path)},
         )
         db.add(event)
         db.flush()
@@ -48,7 +50,36 @@ def test_validation_queue_is_pinned_to_exact_camera_and_counts_legacy_clip():
     db.close()
 
 
-def test_audit_queue_is_blind_and_excludes_the_same_reviewer():
+def test_validation_queue_excludes_alerts_without_viewable_evidence(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    user = User(email="reviewer@vivo", password_hash="x", role="operator")
+    camera = Camera(
+        name="Missing Evidence Camera", brand="dahua",
+        connection_type="nvr_dahua", host="127.0.0.1",
+    )
+    db.add_all([user, camera])
+    db.flush()
+    event = DetectionEvent(
+        camera_id=camera.id, detection_type="intrusion", confidence=.8,
+        bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
+        thumbnail_path=str(tmp_path / "pruned.jpg"),
+        extra={"alert_clip_path": str(tmp_path / "pruned.mp4")},
+    )
+    db.add(event)
+    db.flush()
+    db.add(Alert(event_id=event.id, status="new"))
+    db.commit()
+
+    assert queue(
+        db=db, _user=user, limit=20, detection_type=None,
+        store_id=None, camera_id=None,
+    ) == []
+    db.close()
+
+
+def test_audit_queue_is_blind_and_excludes_the_same_reviewer(tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -62,9 +93,12 @@ def test_audit_queue_is_blind_and_excludes_the_same_reviewer():
     )
     db.add_all([primary, independent, camera])
     db.flush()
+    snapshot = tmp_path / "audit.jpg"
+    snapshot.write_bytes(b"jpeg evidence")
     event = DetectionEvent(
         camera_id=camera.id, detection_type="intrusion", confidence=.8,
         bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
+        thumbnail_path=str(snapshot),
     )
     db.add(event)
     db.flush()
