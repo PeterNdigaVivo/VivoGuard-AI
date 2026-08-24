@@ -9,6 +9,33 @@ def test_effective_fps_caps_gpu_tuned_camera_on_cpu(monkeypatch) -> None:
     assert streamer_main._effective_fps(None) >= 1
 
 
+def test_saved_dahua_mainstream_is_rewritten_to_substream(monkeypatch) -> None:
+    monkeypatch.setattr(streamer_main, "PREFER_SUBSTREAM_OVERRIDES", True)
+
+    assert streamer_main._prefer_substream_override(
+        "rtsp://operator:secret@example.test/cam/realmonitor?channel=4&subtype=0",
+        "dahua",
+    ) == (
+        "rtsp://operator:secret@example.test/cam/realmonitor?channel=4&subtype=1"
+    )
+
+
+def test_saved_hikvision_mainstream_is_rewritten_to_substream(monkeypatch) -> None:
+    monkeypatch.setattr(streamer_main, "PREFER_SUBSTREAM_OVERRIDES", True)
+
+    assert streamer_main._prefer_substream_override(
+        "rtsp://operator:secret@example.test/Streaming/Channels/1201",
+        "hikvision",
+    ) == "rtsp://operator:secret@example.test/Streaming/Channels/1202"
+
+
+def test_unknown_override_shape_is_preserved(monkeypatch) -> None:
+    monkeypatch.setattr(streamer_main, "PREFER_SUBSTREAM_OVERRIDES", True)
+    url = "rtsp://example.test/custom/main"
+
+    assert streamer_main._prefer_substream_override(url, "generic") == url
+
+
 class _HealthBuffer:
     def __init__(self):
         self.updates = []

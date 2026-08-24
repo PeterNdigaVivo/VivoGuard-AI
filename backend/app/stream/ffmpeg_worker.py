@@ -18,6 +18,7 @@ explain itself even when ffmpeg is blocked in connection negotiation:
   - "exited"   — when ffmpeg dies, with stderr captured.
 """
 from __future__ import annotations
+
 import logging
 import os
 import shlex
@@ -65,10 +66,26 @@ def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
     )
 
 
+def _retry_url_after_failure(
+    *, active_url: str, preferred_url: str,
+    fallback_url: str, frames_received: int,
+) -> str:
+    """Fall back only when the preferred substream never produced a frame."""
+    if (
+        frames_received == 0
+        and active_url == preferred_url
+        and fallback_url
+        and fallback_url != preferred_url
+    ):
+        return fallback_url
+    return active_url
+
+
 class FFmpegWorker(threading.Thread):
     """Owns one ffmpeg subprocess for a single camera, restarts on failure."""
 
     def __init__(self, camera_id: int, rtsp_url: str, *,
+                 fallback_rtsp_url: str = "",
                  fps: int = 5, width: int = 640,
                  rtsp_transport: str = "tcp",
                  threads: int | None = None,
@@ -76,6 +93,7 @@ class FFmpegWorker(threading.Thread):
         super().__init__(daemon=True, name=f"ffmpeg-{camera_id}")
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
+        self.fallback_rtsp_url = fallback_rtsp_url
         self.fps = fps
         self.width = width
         self.rtsp_transport = rtsp_transport
@@ -135,6 +153,7 @@ class FFmpegWorker(threading.Thread):
     def run(self) -> None:
         last_emit = time.time()
         frames_in_window = 0
+        active_url = self.rtsp_url
         while not self._stop.is_set():
             # Mark the camera as "attempting" the moment we enter the
             # loop. Without this, a hang in Popen / RTSP negotiation
@@ -143,7 +162,7 @@ class FFmpegWorker(threading.Thread):
             self.buffer.update_health(self.camera_id, fps=0,
                                       error="Starting ffmpeg…")
             cmd = _build_cmd(
-                self.rtsp_url,
+                active_url,
                 fps=self.fps,
                 width=self.width,
                 rtsp_transport=self.rtsp_transport,
@@ -151,6 +170,7 @@ class FFmpegWorker(threading.Thread):
             )
             log.info("camera %s: starting ffmpeg", self.camera_id)
             started_at = time.time()
+            frames_this_run = 0
             try:
                 proc = subprocess.Popen(
                     cmd, shell=True,
@@ -177,6 +197,7 @@ class FFmpegWorker(threading.Thread):
                         break
                     self.buffer.push_frame(self.camera_id, jpeg)
                     frames_in_window += 1
+                    frames_this_run += 1
                     now = time.time()
                     if now - last_emit >= 5:
                         observed = frames_in_window / (now - last_emit)
@@ -195,6 +216,18 @@ class FFmpegWorker(threading.Thread):
 
             if self._stop.is_set():
                 return
+            retry_url = _retry_url_after_failure(
+                active_url=active_url,
+                preferred_url=self.rtsp_url,
+                fallback_url=self.fallback_rtsp_url,
+                frames_received=frames_this_run,
+            )
+            if retry_url != active_url:
+                active_url = retry_url
+                log.warning(
+                    "camera %s: preferred substream produced no frames; "
+                    "falling back to saved mainstream", self.camera_id,
+                )
             wait = self.backoff.fail()
             err_msg = err.strip()[:200] or "stream ended"
             log.warning("camera %s: ffmpeg exited (err=%s) — retry in %ds",

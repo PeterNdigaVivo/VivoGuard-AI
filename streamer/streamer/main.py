@@ -24,26 +24,27 @@ Resilience rules (May-2026):
      keeps us streaming the cameras we CAN read about.
 """
 from __future__ import annotations
+
 import asyncio
 import logging
 import os
-import socket
+import re
 import sys
 import time
 
 # Backend package is mounted/copied at /app/app in the container.
 sys.path.insert(0, "/app")
 
-from sqlalchemy import text                                          # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 try:
-    from app.config   import settings                               # type: ignore
-    from app.database import SessionLocal                           # type: ignore
-    from app.utils.crypto  import decrypt                           # type: ignore
-    from app.utils.network import build_rtsp_url                    # type: ignore
-    from app.stream.frame_buffer import FrameBuffer                 # type: ignore
-    from app.stream.manager import StreamManager, CameraSpec        # type: ignore
-    from app.stream import auto_transport                           # type: ignore
+    from app.config import settings  # type: ignore
+    from app.database import SessionLocal  # type: ignore
+    from app.stream import auto_transport  # type: ignore
+    from app.stream.frame_buffer import FrameBuffer  # type: ignore
+    from app.stream.manager import CameraSpec, StreamManager  # type: ignore
+    from app.utils.crypto import decrypt  # type: ignore
+    from app.utils.network import build_rtsp_url  # type: ignore
 except ImportError as e:                                            # pragma: no cover
     print(f"streamer: backend modules not on PYTHONPATH ({e})", file=sys.stderr)
     raise
@@ -94,6 +95,9 @@ STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY
 STREAMER_MAX_FPS = max(1, int(os.environ.get(
     "STREAMER_MAX_FPS", str(settings.inference_fps_default),
 )))
+PREFER_SUBSTREAM_OVERRIDES = os.environ.get(
+    "STREAMER_PREFER_SUBSTREAM_OVERRIDES", "true",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # camera_id -> (checked_at_epoch, reachable, probed endpoint).  The endpoint
 # is part of the cache identity so a corrected port/URL is probed immediately
@@ -105,6 +109,28 @@ _health_buffer = FrameBuffer()
 def _effective_fps(configured_fps: int | None) -> int:
     requested = int(configured_fps or settings.inference_fps_default)
     return max(1, min(requested, STREAMER_MAX_FPS))
+
+
+def _prefer_substream_override(url: str | None, brand: str | None) -> str | None:
+    """Convert a known main-stream override to its equivalent substream.
+
+    This is runtime-only: the stored, operator-tested URL remains untouched.
+    Unknown vendors and URL shapes fail open to the original override.
+    """
+    if not url or not PREFER_SUBSTREAM_OVERRIDES:
+        return url
+    vendor = (brand or "").strip().lower()
+    if vendor == "dahua":
+        return re.sub(
+            r"([?&]subtype=)0(?=&|$)", r"\g<1>1", url,
+            count=1, flags=re.IGNORECASE,
+        )
+    if vendor in {"hik", "hikvision"}:
+        return re.sub(
+            r"(/Streaming/Channels/\d+)01(?=/?(?:\?|$))",
+            r"\g<1>02", url, count=1, flags=re.IGNORECASE,
+        )
+    return url
 
 
 def _run_migrations() -> None:
@@ -139,7 +165,8 @@ def _run_migrations() -> None:
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
         try:
-            from sqlalchemy import create_engine, text as _text
+            from sqlalchemy import create_engine
+            from sqlalchemy import text as _text
             eng = create_engine(settings.database_url, pool_pre_ping=True)
             with eng.connect() as conn:
                 row = conn.execute(_text(
@@ -165,8 +192,8 @@ def _run_migrations_inline() -> None:
     Don't use in production — see _run_migrations() docstring for the
     lock-contention foot-gun at scale."""
     try:
-        from alembic.config import Config
         from alembic import command
+        from alembic.config import Config
         cfg_path = "/app/alembic.ini" if os.path.exists("/app/alembic.ini") else "alembic.ini"
         if not os.path.exists(cfg_path):
             log.warning("streamer: alembic.ini not found at %s — skipping auto-migrate", cfg_path)
@@ -284,6 +311,7 @@ def _persist_transport(db, camera_id: int, updates: dict) -> None:
 
 def desired_specs() -> list[CameraSpec]:
     out: list[CameraSpec] = []
+    substream_overrides = 0
     with SessionLocal() as db:
         rows = _query_active_cameras(db)
         # One-off summary of how the negotiation budget will be spent.
@@ -313,10 +341,14 @@ def desired_specs() -> list[CameraSpec]:
             # this loop with the override cleared, OR the operator's
             # "Try alternate ports" button forces a re-probe via
             # /cameras/{id}/try-alternate-ports.
-            override = r.get("rtsp_url_override")
-            if override:
+            stored_override = r.get("rtsp_url_override")
+            override = _prefer_substream_override(
+                stored_override, r.get("brand"),
+            )
+            if stored_override:
                 log.debug("streamer: camera %s uses rtsp_url_override — skipping negotiation",
                           r.get("id"))
+                substream_overrides += int(override != stored_override)
             else:
                 # No override stored — auto-negotiate transport
                 # BEFORE building the spec. If RTSP/554 is
@@ -341,7 +373,7 @@ def desired_specs() -> list[CameraSpec]:
                 password=pw,
                 channel=r.get("channel_number"),
                 subtype=1,             # substream — cheaper for AI inference
-                override=r.get("rtsp_url_override"),
+                override=override,
             )
             snap_url = ""
             if transport == "http_snapshot":
@@ -354,6 +386,9 @@ def desired_specs() -> list[CameraSpec]:
             out.append(CameraSpec(
                 camera_id=r["id"],
                 rtsp_url=rtsp_url,
+                fallback_rtsp_url=(
+                    stored_override if override != stored_override else ""
+                ),
                 fps=_effective_fps(r.get("inference_fps")),
                 width=640,
                 transport=transport,
@@ -362,6 +397,11 @@ def desired_specs() -> list[CameraSpec]:
                 password=pw,
                 rtsp_transport=(r.get("rtsp_transport") or "tcp") or "tcp",
             ))
+    if substream_overrides:
+        log.info(
+            "streamer: using runtime substreams for %d saved main-stream "
+            "overrides (stored URLs unchanged)", substream_overrides,
+        )
     return out
 
 

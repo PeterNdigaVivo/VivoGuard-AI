@@ -9,6 +9,7 @@ Owns the worker lifecycle. The streamer service drives this via a
 poll loop that reconciles the desired set against the running set.
 """
 from __future__ import annotations
+
 import logging
 import threading
 from dataclasses import dataclass
@@ -35,7 +36,8 @@ except Exception as _e:  # pragma: no cover
 @dataclass(frozen=True)
 class CameraSpec:
     camera_id: int
-    rtsp_url: str                       # main URL (RTSP) for FFmpeg path
+    rtsp_url: str                       # preferred URL for FFmpeg path
+    fallback_rtsp_url: str = ""         # optional known-good mainstream
     fps: int = 5
     width: int = 640
     # Transport mode + companion fields used only by the HTTP path.
@@ -83,6 +85,7 @@ class StreamManager:
                  self._redact(spec.rtsp_url))
         return FFmpegWorker(
             spec.camera_id, spec.rtsp_url,
+            fallback_rtsp_url=spec.fallback_rtsp_url,
             fps=spec.fps, width=spec.width,
             rtsp_transport=spec.rtsp_transport,
             buffer=self.buffer,

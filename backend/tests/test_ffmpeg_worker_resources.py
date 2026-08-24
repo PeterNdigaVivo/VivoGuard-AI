@@ -1,6 +1,10 @@
 import shlex
 
-from app.stream.ffmpeg_worker import FFmpegWorker, _build_cmd
+from app.stream.ffmpeg_worker import (
+    FFmpegWorker,
+    _build_cmd,
+    _retry_url_after_failure,
+)
 
 
 def test_ffmpeg_command_caps_decode_filter_and_encode_threads() -> None:
@@ -35,3 +39,21 @@ def test_ffmpeg_thread_cap_never_accepts_zero() -> None:
     command = _build_cmd("rtsp://example.test/stream", fps=1, threads=0)
 
     assert command.count("-threads 1") == 2
+
+
+def test_unavailable_preferred_substream_falls_back_to_saved_mainstream() -> None:
+    assert _retry_url_after_failure(
+        active_url="rtsp://camera/sub",
+        preferred_url="rtsp://camera/sub",
+        fallback_url="rtsp://camera/main",
+        frames_received=0,
+    ) == "rtsp://camera/main"
+
+
+def test_working_substream_does_not_fall_back_after_transient_disconnect() -> None:
+    assert _retry_url_after_failure(
+        active_url="rtsp://camera/sub",
+        preferred_url="rtsp://camera/sub",
+        fallback_url="rtsp://camera/main",
+        frames_received=1,
+    ) == "rtsp://camera/sub"
