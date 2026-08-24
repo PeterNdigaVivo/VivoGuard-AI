@@ -84,7 +84,12 @@ if SHARD_INDEX >= SHARD_COUNT:
 #   3. Spawn FFmpeg workers in batches of STARTUP_BATCH_SIZE with
 #      STARTUP_BATCH_DELAY_SECONDS sleep between batches.
 TCP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("STREAMER_TCP_CHECK_TIMEOUT", "2.0"))
-RETRY_UNREACHABLE_SECONDS = int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "300"))
+# A five-minute negative cache turned a transient restart/network burst into a
+# five-minute fleet blind spot. Successful probes stay cheap; failed probes
+# must be retried promptly so a recovered NVR re-enters coverage.
+RETRY_UNREACHABLE_SECONDS = max(
+    15, int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "30")),
+)
 STARTUP_BATCH_SIZE        = int(os.environ.get("STREAMER_STARTUP_BATCH_SIZE", "10"))
 STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY", "2.0"))
 # The streamer only needs to publish frames as fast as the inference loop can
