@@ -85,7 +85,7 @@ export const operations = {
     api<AssuranceCase[]>('/operations/cases?case_type=recall_sample&limit=100'),
   getQualityScorecards: () =>
     api<{ window_days: number; scorecards: QualityScorecard[] }>(
-      '/quality/scorecards?days=90'),
+      '/quality/scorecards?days=7'),
   reviewRecallSample: (
     caseId: number,
     outcome: 'target_event' | 'no_target_event' | 'unclear',

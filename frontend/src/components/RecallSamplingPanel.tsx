@@ -43,18 +43,20 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
   const [rationale, setRationale] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [qualityError, setQualityError] = useState(false)
   const { push } = useToast()
 
   async function load() {
     try {
-      const [rows, quality] = await Promise.all([
-        operations.listRecallSamples(), operations.getQualityScorecards(),
-      ])
+      const qualityRequest = operations.getQualityScorecards()
+        .then(quality => { setScorecards(quality.scorecards); setQualityError(false) })
+        .catch(() => { setQualityError(true) })
+      const rows = await operations.listRecallSamples()
       const reviewable = rows.filter(row => !['resolved', 'insufficient_evidence'].includes(row.status))
       setCases(reviewable)
-      setScorecards(quality.scorecards)
       setSelectedId(current => reviewable.some(row => row.id === current)
         ? current : (reviewable.find(row => row.evidence?.extraction_status === 'ready')?.id ?? null))
+      await qualityRequest
     } catch (err) { setError(String(err)) }
   }
   useEffect(() => { void load() }, [])
@@ -150,6 +152,9 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
       <p className="text-xs text-slate-500 mb-3">
         Totals are workload indicators, not an accuracy claim. Each approved material camera-detector slice must pass its own precision and recall confidence bounds.
       </p>
+      {qualityError && <div className="text-xs text-amber-700 mb-3">
+        Quality metrics are temporarily unavailable; review queues remain usable.
+      </div>}
       {error && <div className="text-sm text-red-700 mb-3">{error}</div>}
       {cases === null && <div className="text-sm text-slate-500">Loading samples…</div>}
       {cases?.length === 0 && <div className="text-sm text-slate-500">No samples await review.</div>}
