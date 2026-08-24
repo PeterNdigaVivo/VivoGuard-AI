@@ -7,7 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.api.stores import (
-    delete_store, list_stores, store_deactivation_impact, update_store,
+    create_store, delete_store, list_stores, store_deactivation_impact,
+    update_store,
 )
 from app.database import Base
 from app.models import Camera, GovernanceAuditLog, OdooStoreMap, Shift, Store
@@ -185,3 +186,32 @@ def test_inactive_stores_are_hidden_from_operational_list_by_default(db):
 
     assert [row.id for row in default_rows] == [active.id]
     assert {row.id for row in audit_rows} == {active.id, inactive.id}
+
+
+def test_create_rejects_case_and_whitespace_duplicate_name(db):
+    _store(db, name="Vivo Sarit")
+    db.commit()
+
+    payload = StoreIn(name="  vivo sarit  ", code="OTHER", country="Kenya")
+    with pytest.raises(HTTPException) as exc_info:
+        create_store(payload, db=db, _u=object())
+
+    assert exc_info.value.status_code == 409
+    assert "normalising" in exc_info.value.detail
+    assert db.query(Store).count() == 1
+
+
+def test_create_rejects_normalised_duplicate_code_but_allows_distinct_name(db):
+    _store(db, name="Vivo Sarit")
+    db.commit()
+
+    duplicate_code = StoreIn(
+        name="Safari Sarit", code="  vivo-sarit  ", country="Kenya")
+    with pytest.raises(HTTPException) as exc_info:
+        create_store(duplicate_code, db=db, _u=object())
+    assert exc_info.value.status_code == 409
+
+    distinct = StoreIn(name="  Safari Sarit  ", code="SAFARI", country="Kenya")
+    created = create_store(distinct, db=db, _u=object())
+    assert created.name == "Safari Sarit"
+    assert created.code == "SAFARI"

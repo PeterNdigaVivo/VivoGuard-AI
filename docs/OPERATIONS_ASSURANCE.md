@@ -29,6 +29,9 @@ the governance audit log. Similar names alone are not evidence that two stores
 are duplicates. Inactive stores are excluded from the normal operational store
 list and remain available to administrators with
 `GET /stores?include_inactive=true` for audit and recovery.
+New store names and codes are canonicalised and protected by
+case-insensitive database uniqueness, preventing duplicates that differ only
+by capitalisation or outer whitespace.
 
 ## Minimum critical-zone map
 

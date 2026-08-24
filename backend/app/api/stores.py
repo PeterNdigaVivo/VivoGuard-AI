@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 _UNIQUE_CONFLICT_MESSAGES = {
     "stores_name_key": "A store with this name already exists. Pick a different name.",
     "stores_code_key": "A store with this code already exists. Pick a different code (or leave the code blank).",
+    "uq_stores_name_normalised": "A store with this name already exists after normalising capitalisation and whitespace.",
+    "uq_stores_code_normalised": "A store with this code already exists after normalising capitalisation and whitespace.",
 }
 
 
@@ -23,6 +25,49 @@ def _coerce_empty_strings(payload_dict: dict) -> dict:
             cleaned[k] = None
         else:
             cleaned[k] = v
+    return cleaned
+
+
+def _reject_normalised_store_duplicate(db: Session, *, name: str,
+                                       code: str | None,
+                                       exclude_store_id: int | None = None):
+    """Reject identities that differ only by case or outer whitespace.
+
+    PostgreSQL's ordinary unique constraint is case-sensitive, so records such
+    as ``Vivo Sarit`` and `` vivo sarit `` can otherwise coexist and split CCTV
+    and POS attribution.  Similar but genuinely different names (for example
+    ``Vivo Sarit`` and ``Safari Sarit``) remain allowed.
+    """
+    wanted_name = name.strip().casefold()
+    wanted_code = code.strip().casefold() if code else None
+    rows = db.query(Store.id, Store.name, Store.code).all()
+    for store_id, existing_name, existing_code in rows:
+        if exclude_store_id is not None and store_id == exclude_store_id:
+            continue
+        if existing_name.strip().casefold() == wanted_name:
+            raise HTTPException(
+                409,
+                "A store with this name already exists after normalising "
+                "capitalisation and whitespace.",
+            )
+        if (wanted_code and existing_code
+                and existing_code.strip().casefold() == wanted_code):
+            raise HTTPException(
+                409,
+                "A store with this code already exists after normalising "
+                "capitalisation and whitespace.",
+            )
+
+
+def _normalise_store_identity(values: dict) -> dict:
+    """Canonicalise name/code without altering addresses or free text."""
+    cleaned = dict(values)
+    if "name" in cleaned:
+        cleaned["name"] = cleaned["name"].strip()
+        if not cleaned["name"]:
+            raise HTTPException(422, "store name cannot be blank")
+    if isinstance(cleaned.get("code"), str):
+        cleaned["code"] = cleaned["code"].strip() or None
     return cleaned
 
 
@@ -169,7 +214,11 @@ def list_stores(include_inactive: bool = False,
 @router.post("", response_model=StoreOut)
 def create_store(payload: StoreIn, db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
-    s = Store(**_coerce_empty_strings(payload.model_dump()))
+    values = _normalise_store_identity(
+        _coerce_empty_strings(payload.model_dump()))
+    _reject_normalised_store_duplicate(
+        db, name=values["name"], code=values.get("code"))
+    s = Store(**values)
     db.add(s)
     try:
         db.commit()
@@ -220,7 +269,14 @@ def update_store(store_id: int, patch: StoreIn,
     s = db.get(Store, store_id)
     if not s:
         raise HTTPException(404, "store not found")
-    changes = _coerce_empty_strings(patch.model_dump(exclude_unset=True))
+    changes = _normalise_store_identity(
+        _coerce_empty_strings(patch.model_dump(exclude_unset=True)))
+    _reject_normalised_store_duplicate(
+        db,
+        name=changes.get("name", s.name),
+        code=changes.get("code", s.code),
+        exclude_store_id=s.id,
+    )
     if changes.get("is_active") is False and s.is_active:
         # Do not let the generic PATCH route bypass the same dependency guard
         # enforced by DELETE.  Retiring a store is an operational workflow,
