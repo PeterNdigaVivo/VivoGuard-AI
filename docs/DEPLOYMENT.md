@@ -103,10 +103,20 @@ docker compose \
 ### 2.4 GPU inference
 
 ```bash
-docker compose build --build-arg GPU=true worker     # ~5 GB CUDA image
-# Uncomment the `<<: *gpu-reservation` line under `worker:` in docker-compose.yml
-docker compose up -d worker
+bash scripts/gpu-readiness.sh
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build worker-inference
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d worker-inference
 ```
+
+The override gives inference a distinct `vivoguard/worker:cuda` image and one
+NVIDIA device. Alert, training and recorder workers retain the smaller CPU
+image and cannot overwrite the CUDA tag during a full build. Keep the shared
+`.env` setting `GPU_BACKEND=cpu`; the override applies CUDA only where needed.
+
+For a production host migration, follow
+[`GEX44_MIGRATION_RUNBOOK.md`](GEX44_MIGRATION_RUNBOOK.md). A GPU does not by
+itself increase the number of long-lived camera tasks, so concurrency and
+camera coverage must be measured rather than assumed.
 
 ### 2.5 Scaling on a single host
 

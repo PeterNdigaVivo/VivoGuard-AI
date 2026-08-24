@@ -1,0 +1,26 @@
+# VivoGuard single-host NVIDIA inference override.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build worker-inference
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d worker-inference
+#
+# Keep GPU_BACKEND=cpu in the shared .env. This override builds a distinct
+# CUDA image only for inference, so the CPU alert/training/recorder services
+# cannot overwrite its image tag during a full deployment.
+services:
+  worker-inference:
+    image: vivoguard/worker:cuda
+    build:
+      args:
+        GPU_BACKEND: cuda
+    environment:
+      GPU_BACKEND: cuda
+      USE_GPU: "true"
+      USE_OPTIMIZED: "true"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
