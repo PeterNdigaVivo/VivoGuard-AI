@@ -33,13 +33,14 @@ from app.connectors.rtsp import grab_thumbnail
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import (
-    AIModel, Annotation, Camera, Dataset, TrainingImage, TrainingJob,
-    TrainingSample,
+    AIModel, Annotation, AssuranceCase, Camera, Dataset, GovernanceAuditLog,
+    TrainingImage, TrainingJob, TrainingSample,
 )
 from app.schemas.training import (
     AIModelOut, AnnotationIn, AnnotationOut, CaptureFromCameraIn,
     DatasetCreate, DatasetOut, DeployModelIn, ExportModelIn,
-    TrainingImageOut, TrainingJobIn, TrainingJobOut,
+    SimulationEvidenceReviewIn, TrainingImageOut, TrainingJobIn,
+    TrainingJobOut,
 )
 from app.training.dataset import save_uploaded_image
 from app.utils.crypto import decrypt
@@ -47,6 +48,24 @@ from app.utils.network import build_rtsp_url
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["training"])
+
+
+def _is_live_simulation_evidence(img: TrainingImage) -> bool:
+    extra = img.source_extra or {}
+    return (extra.get("source") == "simulation_live_probe"
+            and extra.get("synthetic") is False)
+
+
+def _training_audit(db: Session, user, action: str, image_id: int,
+                    details: dict | None = None) -> None:
+    db.add(GovernanceAuditLog(
+        actor_user_id=getattr(user, "id", None),
+        actor_email=getattr(user, "email", None),
+        action=action,
+        entity_type="training_image",
+        entity_id=str(image_id),
+        details=details,
+    ))
 
 
 # ---------- datasets -------------------------------------------------
@@ -168,6 +187,15 @@ def auto_suggest_image(image_id: int, db: Session = Depends(get_db),
             for a in auto_suggest(img.file_path)]
 
 
+@router.get("/images/{image_id}/annotations", response_model=list[AnnotationOut])
+def list_image_annotations(image_id: int, db: Session = Depends(get_db),
+                           _u=Depends(require_role("admin", "operator", "viewer"))):
+    if not db.get(TrainingImage, image_id):
+        raise HTTPException(404, "image not found")
+    return (db.query(Annotation).filter(Annotation.image_id == image_id)
+            .order_by(Annotation.id).all())
+
+
 # ---------- annotations ----------------------------------------------
 
 @router.post("/annotate", response_model=list[AnnotationOut])
@@ -180,21 +208,153 @@ def save_annotations(image_id: int, payload: list[AnnotationIn],
     # Replace existing annotations for this image (simplest correct UX).
     db.query(Annotation).filter(Annotation.image_id == image_id).delete()
     out: list[Annotation] = []
+    live_simulation = _is_live_simulation_evidence(img)
     for a in payload:
-        row = Annotation(image_id=image_id, annotated_by=user.id, **a.model_dump())
+        values = a.model_dump()
+        if live_simulation:
+            # The first review supplies a label; verification belongs to the
+            # independent reviewer, never to the auto-suggester or annotator.
+            values["verified"] = False
+        row = Annotation(image_id=image_id, annotated_by=user.id, **values)
         db.add(row); out.append(row)
-    img.labeled = bool(payload)
+    img.labeled = bool(payload) or live_simulation
     all_verified = bool(payload) and all(a.verified for a in payload)
     # Saving boxes is not the same as approving them. Synthetic evidence is
     # evaluation-only; missed-event evidence uses its independent-review API.
-    forbidden_direct_promotion = {"synthetic", "simulation", "human_missed_event"}
-    img.eligible_for_training = bool(
-        all_verified and img.source_kind not in forbidden_direct_promotion)
-    img.review_state = "approved" if img.eligible_for_training else "pending"
+    forbidden_direct_promotion = {
+        "synthetic", "simulation", "human_verified_simulation",
+        "human_missed_event",
+    }
+    if live_simulation:
+        extra = dict(img.source_extra or {})
+        extra.update({
+            "primary_reviewer_user_id": user.id,
+            "primary_review_outcome": "person_present" if payload else "no_person_present",
+            "primary_reviewed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        img.source_extra = extra
+        img.source_kind = "simulation"
+        img.eligible_for_training = False
+        img.review_state = "pending_independent_review"
+        camera = db.get(Camera, img.camera_id) if img.camera_id else None
+        dedup_key = f"simulation-evidence:{img.id}"
+        case = db.query(AssuranceCase).filter_by(dedup_key=dedup_key).one_or_none()
+        if case is None:
+            case = AssuranceCase(
+                dedup_key=dedup_key,
+                case_type="simulation_evidence_review",
+                severity="medium",
+                status="open",
+                store_id=getattr(camera, "store_id", None),
+                camera_id=img.camera_id,
+                title=f"Independently review simulation evidence #{img.id}",
+                description="Real camera probe frame; verify the primary label before training.",
+                evidence={"training_image_id": img.id, "simulation_run_id": img.simulation_run_id},
+                label_json={"primary_reviewer_user_id": user.id,
+                            "primary_outcome": extra["primary_review_outcome"]},
+                training_status="pending_independent_review",
+                human_review_required=True,
+            )
+            db.add(case)
+        else:
+            case.status = "open"
+            case.training_status = "pending_independent_review"
+            case.label_json = {"primary_reviewer_user_id": user.id,
+                               "primary_outcome": extra["primary_review_outcome"]}
+            case.reviewed_by = None
+            case.reviewed_at = None
+            case.resolved_at = None
+        _training_audit(db, user, "simulation_evidence.primary_reviewed", img.id,
+                        {"annotation_count": len(payload), "case_key": dedup_key})
+    else:
+        img.eligible_for_training = bool(
+            all_verified and img.source_kind not in forbidden_direct_promotion)
+        img.review_state = "approved" if img.eligible_for_training else "pending"
     db.commit()
     for r in out:
         db.refresh(r)
     return out
+
+
+@router.post("/images/{image_id}/independent-review")
+def independently_review_simulation_evidence(
+    image_id: int,
+    body: SimulationEvidenceReviewIn,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("admin", "operator")),
+):
+    img = db.get(TrainingImage, image_id)
+    if not img:
+        raise HTTPException(404, "image not found")
+    if not _is_live_simulation_evidence(img):
+        raise HTTPException(409, "only real live-probe evidence can use this review")
+    if img.review_state != "pending_independent_review":
+        raise HTTPException(409, "a completed primary review is required")
+    extra = dict(img.source_extra or {})
+    primary_reviewer = extra.get("primary_reviewer_user_id")
+    if primary_reviewer is None:
+        raise HTTPException(409, "primary reviewer provenance is missing")
+    if int(primary_reviewer) == int(user.id):
+        raise HTTPException(409, "an independent second reviewer is required")
+
+    annotations = (db.query(Annotation).filter(Annotation.image_id == image_id)
+                   .order_by(Annotation.id).all())
+    primary_outcome = extra.get("primary_review_outcome")
+    if primary_outcome == "person_present" and not annotations:
+        raise HTTPException(409, "person-present evidence requires a bounding box")
+    if primary_outcome not in {"person_present", "no_person_present"}:
+        raise HTTPException(409, "primary review outcome is invalid")
+
+    case = (db.query(AssuranceCase)
+            .filter_by(dedup_key=f"simulation-evidence:{img.id}")
+            .one_or_none())
+    now = datetime.now(timezone.utc)
+    extra.update({
+        "independent_reviewer_user_id": user.id,
+        "independent_review_verdict": body.verdict,
+        "independent_review_rationale": body.rationale,
+        "independent_reviewed_at": now.isoformat(),
+    })
+    img.source_extra = extra
+    if body.verdict == "approve":
+        for annotation in annotations:
+            annotation.verified = True
+        img.source_kind = "human_verified_simulation"
+        img.eligible_for_training = True
+        img.review_state = "approved"
+        training_status = "verified_and_eligible_for_training"
+    else:
+        for annotation in annotations:
+            annotation.verified = False
+        img.eligible_for_training = False
+        img.review_state = "rejected"
+        training_status = "rejected_not_eligible"
+    if case:
+        case.status = "resolved"
+        case.training_status = training_status
+        case.reviewed_by = user.id
+        case.reviewed_at = now
+        case.resolved_at = now
+        case.resolution = body.rationale
+    audit_action = ("simulation_evidence.approved" if body.verdict == "approve"
+                    else "simulation_evidence.rejected")
+    _training_audit(
+        db, user, audit_action, img.id,
+        {"case_id": case.id if case else None,
+         "primary_reviewer_user_id": primary_reviewer,
+         "annotation_ids": [annotation.id for annotation in annotations]},
+    )
+    db.commit()
+    if body.verdict == "approve":
+        from app.training.feedback_loop import _maybe_enqueue_training
+        _maybe_enqueue_training(db, "person")
+    return {
+        "training_image_id": img.id,
+        "verdict": body.verdict,
+        "eligible_for_training": img.eligible_for_training,
+        "review_state": img.review_state,
+        "reviewed_by": user.id,
+    }
 
 
 # ---------- training jobs --------------------------------------------

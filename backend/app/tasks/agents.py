@@ -47,6 +47,7 @@ import json
 import logging
 import time
 import traceback
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import redis
@@ -599,7 +600,7 @@ def _run_streamer() -> dict:
 
 
 def _run_simulation() -> dict:
-    """Run the in-memory YOLO model over up to 20 rotating cameras' latest
+    """Run the in-memory YOLO model over up to 30 rotating cameras' latest
     cached frame and flag ones producing zero detections (possible silent
     detector/stream). Rotates via vg:sim:cursor; gc.collect() per camera."""
     import numpy as np
@@ -609,6 +610,9 @@ def _run_simulation() -> dict:
     from app.models import Camera
     from app.stream.frame_buffer import FrameBuffer
     from app.ai.yolov8_runner import infer
+    from app.simulation.evidence import (
+        LiveProbeCandidate, capture_live_probe_evidence,
+    )
 
     with SessionLocal() as db:
         cam_ids = sorted(c for (c,) in db.execute(
@@ -631,6 +635,7 @@ def _run_simulation() -> dict:
     processed = 0
     no_frame: list = []
     zero_det: list = []
+    evidence_candidates: list[LiveProbeCandidate] = []
     for cid in batch:
         try:
             jpeg = fb.latest_jpeg(int(cid))
@@ -646,6 +651,10 @@ def _run_simulation() -> dict:
             processed += 1
             if not dets:
                 zero_det.append(cid)
+            evidence_candidates.append(LiveProbeCandidate(
+                camera_id=int(cid), jpeg=jpeg, detections=dets,
+                captured_at=datetime.now(timezone.utc),
+            ))
         except Exception as e:
             f.setdefault("_errors", {})[str(cid)] = str(e)
         finally:
@@ -659,6 +668,23 @@ def _run_simulation() -> dict:
     f.update(cameras_this_run=len(batch), processed=processed,
              no_frame=len(no_frame), zero_detection=len(zero_det),
              cursor_next=(cursor + len(batch)) % len(cam_ids))
+    if getattr(settings, "simulation_evidence_enabled", True):
+        try:
+            with SessionLocal() as db:
+                evidence = capture_live_probe_evidence(
+                    db,
+                    evidence_candidates,
+                    run_id=str(uuid.uuid4()),
+                    max_per_run=settings.simulation_evidence_max_per_run,
+                    dedupe_days=settings.simulation_evidence_dedupe_days,
+                )
+            f["learning_evidence"] = evidence
+        except Exception as exc:
+            log.exception("live simulation evidence capture failed: %s", exc)
+            f["learning_evidence"] = {"created": 0, "error": str(exc)}
+            gaps.append({"learning_evidence_capture": "failed"})
+    else:
+        f["learning_evidence"] = {"created": 0, "disabled": True}
     if no_frame:
         gaps.append({"no_frame_cameras": no_frame[:20]})
     return {"status": "warning" if gaps else "ok", "findings": f, "gaps": gaps or None}

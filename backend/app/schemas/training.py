@@ -30,6 +30,12 @@ class TrainingImageOut(BaseModel):
     captured_at: datetime | None
     labeled: bool
     split: str | None
+    source_kind: str
+    eligible_for_training: bool
+    review_state: str
+    simulation_run_id: str | None
+    evidence_source: str | None
+    synthetic: bool | None
 
 
 class AnnotationIn(BaseModel):
@@ -43,6 +49,11 @@ class AnnotationOut(AnnotationIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
     image_id: int
+
+
+class SimulationEvidenceReviewIn(BaseModel):
+    verdict: str = Field(pattern="^(approve|reject)$")
+    rationale: str = Field(min_length=8, max_length=2000)
 
 
 class TrainingJobIn(BaseModel):

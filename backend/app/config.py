@@ -252,6 +252,12 @@ class Settings(BaseSettings):
     positive_agent_alerts_enabled: bool = True
     positive_agent_alert_dedup_hours: int = Field(default=6, ge=1, le=168)
     agents_llm_timeout_seconds: int = 45
+    # Persist a bounded sample of REAL camera frames examined by the live
+    # simulation probe. Evidence is quarantined and requires two-person review
+    # before it can become training data. Synthetic scenario rows are excluded.
+    simulation_evidence_enabled: bool = True
+    simulation_evidence_max_per_run: int = Field(default=10, ge=0, le=30)
+    simulation_evidence_dedupe_days: int = Field(default=7, ge=1, le=90)
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",

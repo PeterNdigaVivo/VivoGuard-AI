@@ -70,6 +70,16 @@ class TrainingImage(Base):
     dataset     = relationship("Dataset", back_populates="images")
     annotations = relationship("Annotation", back_populates="image", cascade="all, delete-orphan")
 
+    @property
+    def evidence_source(self) -> str | None:
+        """Expose only the provenance discriminator, not raw evidence JSON."""
+        return (self.source_extra or {}).get("source")
+
+    @property
+    def synthetic(self) -> bool | None:
+        """Public provenance flag used by the annotation UI."""
+        return (self.source_extra or {}).get("synthetic")
+
 
 class Annotation(Base):
     __tablename__ = "annotations"

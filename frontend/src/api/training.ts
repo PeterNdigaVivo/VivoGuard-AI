@@ -2,7 +2,12 @@
 import { api } from './client'
 
 export interface Dataset { id: number; name: string; description: string | null; classes_json: string[]; created_at: string }
-export interface TrainingImage { id: number; dataset_id: number; camera_id: number | null; file_path: string; labeled: boolean; split: string | null; captured_at: string | null }
+export interface TrainingImage {
+  id: number; dataset_id: number; camera_id: number | null; file_path: string
+  labeled: boolean; split: string | null; captured_at: string | null
+  source_kind: string; eligible_for_training: boolean; review_state: string
+  simulation_run_id: string | null; evidence_source: string | null; synthetic: boolean | null
+}
 export interface AnnotationIn { class_label: string; bbox_json: number[]; verified?: boolean; auto_suggested?: boolean }
 export interface AnnotationOut extends AnnotationIn { id: number; image_id: number }
 
@@ -45,8 +50,17 @@ export const training = {
   autoSuggest:   (imageId: number) =>
     api<AnnotationIn[]>(`/training/images/${imageId}/auto-suggest`, { method: 'POST' }),
 
+  listAnnotations: (imageId: number) =>
+    api<AnnotationOut[]>(`/training/images/${imageId}/annotations`),
+
   saveAnnotations: (imageId: number, payload: AnnotationIn[]) =>
     api<AnnotationOut[]>(`/training/annotate?image_id=${imageId}`, { method: 'POST', body: payload }),
+
+  reviewSimulationEvidence: (imageId: number, verdict: 'approve' | 'reject', rationale: string) =>
+    api<{ training_image_id: number; verdict: string; eligible_for_training: boolean; review_state: string }>(
+      `/training/images/${imageId}/independent-review`,
+      { method: 'POST', body: { verdict, rationale } },
+    ),
 
   startJob:      (body: Record<string, unknown>) =>
     api<TrainingJob>('/training/jobs/start', { method: 'POST', body }),

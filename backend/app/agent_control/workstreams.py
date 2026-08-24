@@ -96,6 +96,8 @@ MONDAY_WORKSTREAMS = {
             "all_catalog_scenarios_pass",
             "simulation_has_no_production_side_effects",
             "synthetic_evidence_not_training_eligible",
+            "live_probe_evidence_captured",
+            "live_probe_evidence_fail_closed",
         ],
     },
     "human_validation": {
@@ -271,6 +273,14 @@ def _cctv_evidence(db: Session, now: datetime) -> dict:
 def _simulation_evidence(db: Session, now: datetime) -> dict:
     report = _latest_report(db, "scenario_simulator", now)
     findings = report["findings"]
+    recent_cutoff = now - timedelta(hours=24)
+    recent_live = (db.query(TrainingImage).filter(
+        TrainingImage.simulation_run_id.is_not(None),
+        TrainingImage.created_at >= recent_cutoff,
+    ).all())
+    unsafe_live = [image.id for image in recent_live
+                   if image.source_kind == "simulation"
+                   and image.eligible_for_training]
     checks = {
         "scenario_evidence_fresh": report["fresh"],
         "all_catalog_scenarios_pass": (
@@ -285,8 +295,22 @@ def _simulation_evidence(db: Session, now: datetime) -> dict:
             findings.get("synthetic") is True
             and findings.get("training_eligible") is False
         ),
+        "live_probe_evidence_captured": bool(recent_live),
+        "live_probe_evidence_fail_closed": not unsafe_live,
     }
-    return {"checks": checks, "scenario_report": report}
+    return {
+        "checks": checks,
+        "scenario_report": report,
+        "live_probe_evidence_24h": {
+            "total": len(recent_live),
+            "quarantined": sum(not image.eligible_for_training
+                               for image in recent_live),
+            "approved": sum(image.eligible_for_training
+                            and image.review_state == "approved"
+                            for image in recent_live),
+            "unsafe_ids": unsafe_live[:100],
+        },
+    }
 
 
 def _human_evidence(db: Session, now: datetime) -> dict:

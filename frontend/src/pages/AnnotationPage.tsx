@@ -30,6 +30,8 @@ export default function AnnotationPage() {
   const [tempEnd, setTempEnd] = useState<{ x: number; y: number } | null>(null)
   const [activeClass, setActiveClass] = useState<string>('')
   const [selectedBox, setSelectedBox] = useState<number | null>(null)
+  const [reviewRationale, setReviewRationale] = useState('')
+  const [actionMessage, setActionMessage] = useState('')
 
   const imgRef = useRef<HTMLImageElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -43,8 +45,24 @@ export default function AnnotationPage() {
     ]).catch(console.error)
   }, [datasetId])
 
-  // When the active image changes, reset drawing state.
-  useEffect(() => { setBoxes([]); setSelectedBox(null) }, [idx])
+  // Load persisted labels (including quarantined model suggestions) whenever
+  // the active image changes. Previously the canvas appeared empty after each
+  // navigation, which made governed review impossible.
+  useEffect(() => {
+    const image = images[idx]
+    setSelectedBox(null)
+    setReviewRationale('')
+    setActionMessage('')
+    if (!image) { setBoxes([]); return }
+    training.listAnnotations(image.id).then(annotations => {
+      setBoxes(annotations.map(annotation => ({
+        class_label: annotation.class_label,
+        cx: annotation.bbox_json[0], cy: annotation.bbox_json[1],
+        w: annotation.bbox_json[2], h: annotation.bbox_json[3],
+        auto: !!annotation.auto_suggested && !annotation.verified,
+      })))
+    }).catch(() => setBoxes([]))
+  }, [idx, images[idx]?.id])
 
   // Keyboard shortcuts.
   useEffect(() => {
@@ -63,7 +81,11 @@ export default function AnnotationPage() {
 
   const currentImage = images[idx]
   const classes = dataset?.classes_json ?? []
-  const labeledCount = useMemo(() => images.filter(i => i.labeled).length, [images])
+  const trainableCount = useMemo(() => images.filter(i =>
+    i.labeled && i.eligible_for_training && i.review_state === 'approved').length, [images])
+  const isLiveSimulationEvidence = !!currentImage &&
+    currentImage.evidence_source === 'simulation_live_probe' &&
+    currentImage.synthetic === false
 
   // ------- mouse handlers (canvas-relative) -------
   function pos(e: React.MouseEvent): { x: number; y: number } {
@@ -100,6 +122,21 @@ export default function AnnotationPage() {
     // refresh image list to reflect new `labeled` flag
     const refreshed = await training.listImages(datasetId)
     setImages(refreshed)
+    setActionMessage(isLiveSimulationEvidence
+      ? 'Primary review saved. A different operator must independently approve it.'
+      : 'Annotations saved.')
+  }
+
+  async function reviewSimulation(verdict: 'approve' | 'reject') {
+    if (!currentImage || reviewRationale.trim().length < 8) {
+      setActionMessage('Add a clear rationale of at least 8 characters.')
+      return
+    }
+    await training.reviewSimulationEvidence(currentImage.id, verdict, reviewRationale.trim())
+    setImages(await training.listImages(datasetId))
+    setActionMessage(verdict === 'approve'
+      ? 'Independent review approved. This real frame is now training-eligible.'
+      : 'Evidence rejected and remains excluded from training.')
   }
 
   async function autoSuggest() {
@@ -142,8 +179,8 @@ export default function AnnotationPage() {
         actions={
           <>
             <Button variant="ghost" onClick={() => nav('/training')}>Back</Button>
-            <Button onClick={startTraining} disabled={labeledCount < 5}>
-              Start training ({labeledCount} labeled)
+            <Button onClick={startTraining} disabled={trainableCount < 5}>
+              Start training ({trainableCount} approved)
             </Button>
           </>
         }
@@ -185,6 +222,18 @@ export default function AnnotationPage() {
               Image {images.length ? idx + 1 : 0} / {images.length} —
               shortcuts: N next · P prev · D delete · S save
             </div>
+            {currentImage && (
+              <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+                <Badge color={isLiveSimulationEvidence ? 'sky' : 'slate'}>
+                  {isLiveSimulationEvidence ? 'REAL CAMERA SIMULATION EVIDENCE' : currentImage.source_kind}
+                </Badge>
+                <Badge color={currentImage.eligible_for_training ? 'green' : 'amber'}>
+                  {currentImage.review_state.replaceAll('_', ' ')}
+                </Badge>
+                {!currentImage.eligible_for_training &&
+                  <span className="text-amber-700">Excluded from training until review is complete.</span>}
+              </div>
+            )}
             <div ref={containerRef} className="relative bg-slate-200 dark:bg-slate-800 select-none"
                  style={{ width: '100%', maxWidth: 960 }}
                  onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
@@ -232,6 +281,22 @@ export default function AnnotationPage() {
               <Button variant="ghost" onClick={() => setIdx(i => Math.min(images.length - 1, i + 1))}
                       disabled={idx >= images.length - 1}>Next (N)</Button>
             </div>
+            {isLiveSimulationEvidence && currentImage.review_state === 'pending_independent_review' && (
+              <div className="mt-4 rounded border border-sky-200 bg-sky-50 p-3">
+                <div className="font-medium text-sm text-sky-900">Independent review</div>
+                <div className="text-xs text-sky-800 mt-1">
+                  A different operator must compare the real frame with the boxes. Approval never applies to synthetic scenarios.
+                </div>
+                <Input className="mt-2" value={reviewRationale}
+                       placeholder="Evidence-based rationale"
+                       onChange={e => setReviewRationale(e.target.value)} />
+                <div className="flex gap-2 mt-2">
+                  <Button onClick={() => reviewSimulation('approve')}>Approve evidence</Button>
+                  <Button variant="danger" onClick={() => reviewSimulation('reject')}>Reject evidence</Button>
+                </div>
+              </div>
+            )}
+            {actionMessage && <div className="mt-3 text-sm text-slate-700">{actionMessage}</div>}
           </Card>
         </div>
 
