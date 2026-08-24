@@ -55,4 +55,23 @@ export const operations = {
   }>(`/operations/cases/${caseId}/adjudicate`, {
     method: 'POST', body: { verdict, rationale },
   }),
+  generateRecallSamples: (body: {
+    store_id?: number
+    sample_count: number
+    duration_seconds: number
+    seed: string
+  }) => api<{ created: number; reused: number; case_ids: number[]; seed_hash: string }>(
+    '/operations/recall-samples/generate', { method: 'POST', body }),
+  listRecallSamples: () =>
+    api<AssuranceCase[]>('/operations/cases?case_type=recall_sample&limit=100'),
+  reviewRecallSample: (
+    caseId: number,
+    outcome: 'target_event' | 'no_target_event' | 'unclear',
+    eventLabel: string | null,
+    rationale: string,
+  ) => api<{ case_id: number; status: string; result: string }>(
+    `/operations/recall-samples/${caseId}/review`, {
+      method: 'POST',
+      body: { outcome, event_label: eventLabel, rationale },
+    }),
 }

@@ -43,6 +43,14 @@ camera-detector pair under quality control remain training-ineligible.
 The scheduled alert-quality task checks acknowledgement SLA, event-to-alert
 latency and missing evidence. It deduplicates cases by alert and issue set.
 
+**Measure recall** creates reproducible random samples from retained recordings.
+The extraction worker writes bounded 10–120 second clips into a dedicated
+purpose-limited directory without exposing source recording paths. Reviewers are
+blind to alert history. Two distinct reviewers must agree; disagreement requires
+a third reviewer. Only then does VivoGuard check for a matching alert and record
+an independently sampled true positive or false negative. Sample clips are
+deleted seven days after review. They never become training data automatically.
+
 ## Lone worker and late departure
 
 The scheduled task creates a human-review case only when one tracked person is
@@ -91,8 +99,9 @@ it cannot manufacture independent ground truth. The validation owner must:
 4. Use **Resolve disagreements** from a third account when the first two differ.
 5. Record real missed or late incidents with **Report missed alert** and attach
    retained visual evidence where lawful and available.
-6. Independently sample non-alerted footage for recall; alert review alone can
-   measure precision but cannot establish recall.
+6. Use **Measure recall** to generate seeded random-footage batches. Review the
+   footage before checking alert history; alert review alone cannot establish
+   recall.
 
 The acceptance gate is detector- and camera-specific: sufficient representative
 sample size, 95% confidence bounds, reviewer agreement, clip availability and

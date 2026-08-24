@@ -21,10 +21,12 @@ disagreements. No person may perform two roles on the same incident.
    completes the same evidence without being shown the first verdict.
 4. Third reviewer selects **Resolve disagreements**, opens the incident evidence,
    records a clear rationale and selects true alert, false alert or unclear.
-5. Operators use **Report missed alert** for independently found real incidents
+5. Select **Measure recall**, enter the agreed campaign seed and generate the
+   random-footage batch. Both reviewers watch each clip without first checking
+   whether VivoGuard alerted. A third reviewer resolves disagreement.
+6. Operators use **Report missed alert** for independently found real incidents
    that had no correct alert. Do not enter names, biometrics or accusations.
-6. Validation lead records independently selected non-alerted footage windows,
-   including day/night and quiet/busy periods, and checks them for missed events.
+7. Run separate seeded campaigns covering day/night and quiet/busy periods.
 
 ## Verification
 
@@ -38,6 +40,8 @@ The software checkpoint is successful when:
 - scorecards show distinct sample size, precision confidence bounds, reviewer
   agreement and separately measured missed events/recall;
 - governance audit records identify each action without exposing personal data.
+- reviewed random clips are deleted after seven days while the non-video audit
+  evidence and derived recall result remain available.
 
 Do not state that 99% has been achieved until both precision and recall meet the
 approved threshold on representative held-out production evidence. Simulation is

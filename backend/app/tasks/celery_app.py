@@ -156,6 +156,7 @@ celery_app.conf.update(
         "operations.alert_quality":      {"queue": "alerts"},
         "operations.lone_worker":        {"queue": "alerts"},
         "operations.event_fusion":       {"queue": "alerts"},
+        "operations.extract_recall_sample": {"queue": "alerts"},
         "operations.retention":          {"queue": "beat"},
         "odoo.sync_store_master":        {"queue": "beat"},
         "odoo.sync_roster":              {"queue": "beat"},

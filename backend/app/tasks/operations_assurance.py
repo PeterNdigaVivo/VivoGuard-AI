@@ -1,5 +1,8 @@
 """Scheduled deterministic assurance agents; all outputs require human review."""
 import logging
+import os
+from pathlib import Path
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +13,7 @@ from app.operations.assurance import (
     create_lone_worker_cases,
 )
 from app.tasks.celery_app import celery_app
+from app.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +78,63 @@ def event_fusion():
     _report("event_fusion", started, {"events_correlated": len(events)})
 
 
+@celery_app.task(name="operations.extract_recall_sample", ignore_result=True)
+def extract_recall_sample(case_id: int):
+    """Extract one bounded blind-review clip from a retained recording."""
+    from app.models import RecordingClip
+    with SessionLocal() as db:
+        case = db.get(AssuranceCase, case_id)
+        if not case or case.case_type != "recall_sample":
+            return
+        evidence = dict(case.evidence or {})
+        clip = db.get(RecordingClip, evidence.get("recording_clip_id"))
+        recordings_root = Path(settings.recordings_dir).resolve()
+        source = Path(clip.file_path).resolve() if clip and clip.file_path else None
+        out_root = (recordings_root / "recall_samples").resolve()
+        out = (out_root / f"{case.id}.mp4").resolve()
+        if (source is None or not source.is_file()
+                or recordings_root not in source.parents
+                or out.parent != out_root):
+            evidence["extraction_status"] = "source_unavailable"
+            case.evidence = evidence
+            case.status = "blocked_evidence_unavailable"
+            db.commit()
+            return
+        out_root.mkdir(parents=True, exist_ok=True)
+        temp = out.with_suffix(".tmp.mp4")
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-ss", str(int(evidence["offset_seconds"])), "-i", str(source),
+            "-t", str(int(evidence["duration_seconds"])),
+            "-c:v", "libx264", "-preset", "veryfast", "-an",
+            "-movflags", "+faststart", str(temp),
+        ]
+        try:
+            completed = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=180, check=False,
+            )
+            if completed.returncode != 0 or not temp.is_file() or temp.stat().st_size == 0:
+                raise RuntimeError(f"ffmpeg exited {completed.returncode}")
+            os.replace(temp, out)
+            evidence["extraction_status"] = "ready"
+            evidence["clip_bytes"] = out.stat().st_size
+            case.evidence = evidence
+            case.status = "pending_primary_review"
+            db.add(GovernanceAuditLog(
+                action="recall_sample.extracted", entity_type="assurance_case",
+                entity_id=str(case.id), details={"clip_bytes": out.stat().st_size},
+            ))
+        except Exception as exc:
+            temp.unlink(missing_ok=True)
+            evidence["extraction_status"] = "failed"
+            evidence["extraction_error"] = type(exc).__name__
+            case.evidence = evidence
+            case.status = "blocked_evidence_unavailable"
+            log.warning("recall sample extraction failed case=%s: %s", case.id, exc)
+        db.commit()
+
+
 @celery_app.task(name="operations.retention", ignore_result=True)
 def retention():
     """Delete only closed/reviewed records after documented retention windows."""
@@ -93,3 +154,16 @@ def retention():
         db.commit()
         log.info("operations retention: cases=%s events=%s audit=%s",
                  resolved_cases, reviewed_events, audit_rows)
+    # Validation clips contain ordinary CCTV footage and have a much shorter
+    # purpose-limited retention than their audit records.
+    clip_root = Path(settings.recordings_dir) / "recall_samples"
+    cutoff = now - timedelta(days=7)
+    with SessionLocal() as db:
+        expired = (db.query(AssuranceCase.id)
+                   .filter(AssuranceCase.case_type == "recall_sample",
+                           AssuranceCase.reviewed_at < cutoff).all())
+    for (case_id,) in expired:
+        try:
+            (clip_root / f"{case_id}.mp4").unlink(missing_ok=True)
+        except OSError:
+            log.warning("failed to prune recall sample clip case=%s", case_id)

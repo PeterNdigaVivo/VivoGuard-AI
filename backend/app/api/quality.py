@@ -39,7 +39,9 @@ def scorecards(days: int = Query(7, ge=1, le=90),
     return {
         "window_days": days,
         "scorecards": quality_scorecards(db, days=days),
-        "warning": "Precision excludes unreviewed alerts; recall requires independently reported missed events.",
+        "warning": ("Precision excludes unreviewed alerts. Recall is reported "
+                    "only from independently double-reviewed random footage "
+                    "containing target events."),
     }
 
 

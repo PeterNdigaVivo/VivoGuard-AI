@@ -5,9 +5,12 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+from pathlib import Path
+import random
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,7 +21,8 @@ from app.deps import get_current_user, require_role
 from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, Annotation, AssuranceCase,
     Camera, CriticalZoneRequirement, Dataset, DetectionEvent,
-    GovernanceAuditLog, OperationalEvent, RiskReview, Store, TrainingImage,
+    GovernanceAuditLog, OperationalEvent, RecordingClip, RiskReview, Store,
+    TrainingImage,
 )
 from app.integrations.odoo_pos import normalise_odoo_event
 from app.operations.assurance import (
@@ -78,6 +82,19 @@ class CaseResolutionIn(BaseModel):
 
 class DisagreementAdjudicationIn(BaseModel):
     verdict: str = Field(pattern="^(confirm|dismiss|unclear)$")
+    rationale: str = Field(min_length=8, max_length=4000)
+
+
+class RecallSampleBatchIn(BaseModel):
+    store_id: int | None = None
+    sample_count: int = Field(default=10, ge=1, le=50)
+    duration_seconds: int = Field(default=30, ge=10, le=120)
+    seed: str = Field(min_length=4, max_length=128)
+
+
+class RecallSampleReviewIn(BaseModel):
+    outcome: str = Field(pattern="^(target_event|no_target_event|unclear)$")
+    event_label: str | None = Field(default=None, min_length=2, max_length=64)
     rationale: str = Field(min_length=8, max_length=4000)
 
 
@@ -476,6 +493,224 @@ def adjudicate_reviewer_disagreement(
     return {"case_id": case.id, "status": case.status,
             "verdict": body.verdict,
             "training_eligible": bool(pair_allows_training and images)}
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+@router.post("/recall-samples/generate")
+def generate_recall_samples(
+    body: RecallSampleBatchIn,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("admin", "operator")),
+):
+    """Create a reproducible, blind random-footage recall batch."""
+    if body.store_id is not None and not db.get(Store, body.store_id):
+        raise HTTPException(404, "store not found")
+    q = (db.query(RecordingClip, Camera)
+         .join(Camera, Camera.id == RecordingClip.camera_id)
+         .filter(RecordingClip.file_path.is_not(None),
+                 RecordingClip.status.in_(("recording", "completed")),
+                 Camera.is_deleted == False,  # noqa: E712
+                 Camera.ai_enabled == True))  # noqa: E712
+    if body.store_id is not None:
+        q = q.filter(RecordingClip.store_id == body.store_id)
+    candidates = q.order_by(RecordingClip.started_at.desc()).limit(1000).all()
+    # The API shares the recordings volume. Reject stale database rows before
+    # creating work that a reviewer could never open.
+    candidates = [(clip, camera) for clip, camera in candidates
+                  if clip.file_path and Path(clip.file_path).is_file()]
+    if not candidates:
+        raise HTTPException(409, "no retained recording footage is available")
+
+    seed_hash = hashlib.sha256(body.seed.encode()).hexdigest()
+    rng = random.Random(int(seed_hash[:16], 16))
+    rng.shuffle(candidates)
+    now = datetime.now(timezone.utc)
+    selected: list[AssuranceCase] = []
+    created: list[AssuranceCase] = []
+    for clip, camera in candidates:
+        if len(selected) >= body.sample_count:
+            break
+        started = _as_utc(clip.started_at)
+        ended = _as_utc(clip.ended_at) if clip.ended_at else now
+        available = int((ended - started).total_seconds())
+        if available < body.duration_seconds + 10:
+            continue
+        offset = rng.randint(5, available - body.duration_seconds - 5)
+        dedup_key = f"recall-sample:{clip.id}:{offset}:{body.duration_seconds}"
+        existing = (db.query(AssuranceCase)
+                    .filter(AssuranceCase.dedup_key == dedup_key).one_or_none())
+        if existing:
+            selected.append(existing)
+            continue
+        sample_start = started + timedelta(seconds=offset)
+        case = AssuranceCase(
+            dedup_key=dedup_key, case_type="recall_sample", severity="medium",
+            status="pending_evidence", store_id=camera.store_id,
+            camera_id=camera.id, title="Blind random-footage recall sample",
+            description=("Review the retained clip for target events without "
+                         "checking the alert history first."),
+            evidence={
+                "recording_clip_id": clip.id,
+                "offset_seconds": offset,
+                "duration_seconds": body.duration_seconds,
+                "sample_started_at": sample_start.isoformat(),
+                "extraction_status": "queued",
+                "seed_hash": seed_hash,
+                "blind_to_alert_history": True,
+            },
+            training_status="not_training_evidence_pending_review",
+            human_review_required=True,
+        )
+        db.add(case); db.flush()
+        created.append(case)
+        selected.append(case)
+        _audit(db, user, "recall_sample.generated", "assurance_case", case.id,
+               {"seed_hash": seed_hash, "recording_clip_id": clip.id})
+    db.commit()
+    if not selected:
+        raise HTTPException(409, "no unique recording windows were available")
+    from app.tasks.operations_assurance import extract_recall_sample
+    for case in created:
+        extract_recall_sample.delay(case.id)
+    return {"created": len(created), "reused": len(selected) - len(created),
+            "case_ids": [case.id for case in selected],
+            "seed_hash": seed_hash,
+            "note": "Samples are blind review evidence, never automatic training data."}
+
+
+@router.get("/recall-samples/{case_id}/clip")
+def recall_sample_clip(case_id: int, db: Session = Depends(get_db),
+                       _user=Depends(get_current_user)):
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type != "recall_sample":
+        raise HTTPException(404, "recall sample not found")
+    if (case.evidence or {}).get("extraction_status") != "ready":
+        raise HTTPException(409, "recall sample clip is not ready")
+    root = (Path(settings.recordings_dir) / "recall_samples").resolve()
+    path = (root / f"{case.id}.mp4").resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(404, "recall sample clip is unavailable")
+    return FileResponse(path, media_type="video/mp4",
+                        filename=f"recall_sample_{case.id}.mp4")
+
+
+def _finalise_recall_sample(db: Session, case: AssuranceCase,
+                            review: dict, user) -> dict:
+    outcome = review["outcome"]
+    now = datetime.now(timezone.utc)
+    labels = dict(case.label_json or {})
+    labels["final_outcome"] = outcome
+    labels["final_event_label"] = review.get("event_label")
+    case.label_json = labels
+    if outcome == "unclear":
+        case.status = "insufficient_evidence"
+        case.root_cause = "recall_sample_unclear"
+        case.training_status = "blocked_insufficient_evidence"
+    elif outcome == "no_target_event":
+        case.status = "resolved"
+        case.root_cause = "recall_no_target_event"
+        case.training_status = "reviewed_not_training_evidence"
+        case.resolved_at = now
+    else:
+        label = review["event_label"]
+        evidence = dict(case.evidence or {})
+        start = datetime.fromisoformat(evidence["sample_started_at"])
+        end = start + timedelta(seconds=int(evidence["duration_seconds"]))
+        match = (db.query(Alert)
+                 .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+                 .filter(DetectionEvent.camera_id == case.camera_id,
+                         DetectionEvent.detection_type == label,
+                         DetectionEvent.timestamp.between(start, end))
+                 .order_by(Alert.created_at).first())
+        evidence["matched_alert_id"] = match.id if match else None
+        case.evidence = evidence
+        case.status = "resolved"
+        case.resolved_at = now
+        if match:
+            case.root_cause = "recall_true_positive"
+            case.training_status = "independently_verified_alerted_event"
+        else:
+            case.root_cause = "recall_false_negative"
+            case.training_status = "independently_verified_missed_event"
+            missed = upsert_case(
+                db, dedup_key=f"missed:recall-sample:{case.id}",
+                case_type="missed_event", severity="high",
+                title=f"Independently sampled missed event: {label}",
+                description=review["rationale"], store_id=case.store_id,
+                camera_id=case.camera_id, root_cause="detector_false_negative",
+                evidence={"source": "random_footage_sample",
+                          "source_case_id": case.id,
+                          "occurred_at": start.isoformat()},
+                label_json={"label": label,
+                            "verified_by_user_id": user.id,
+                            "independently_verified": True},
+                training_status="blocked_pending_visual_annotation",
+            )
+            db.flush()
+            evidence = dict(case.evidence or {})
+            evidence["missed_event_case_id"] = missed.id
+            case.evidence = evidence
+    case.reviewed_by = user.id
+    case.reviewed_at = now
+    case.resolution = review["rationale"]
+    return {"case_id": case.id, "status": case.status,
+            "result": case.root_cause, "training_eligible": False}
+
+
+@router.post("/recall-samples/{case_id}/review")
+def review_recall_sample(
+    case_id: int,
+    body: RecallSampleReviewIn,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("admin", "operator")),
+):
+    if body.outcome == "target_event" and not body.event_label:
+        raise HTTPException(422, "event_label is required for a target event")
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type != "recall_sample":
+        raise HTTPException(404, "recall sample not found")
+    if (case.evidence or {}).get("extraction_status") != "ready":
+        raise HTTPException(409, "recall sample clip is not ready")
+    if case.status in {"resolved", "insufficient_evidence"}:
+        raise HTTPException(409, "recall sample review is complete")
+    label_json = dict(case.label_json or {})
+    reviews = list(label_json.get("reviews") or [])
+    if any(row["reviewer_id"] == user.id for row in reviews):
+        raise HTTPException(409, "each recall review requires a distinct reviewer")
+    review = {"reviewer_id": user.id, "outcome": body.outcome,
+              "event_label": body.event_label,
+              "rationale": body.rationale,
+              "reviewed_at": datetime.now(timezone.utc).isoformat()}
+    reviews.append(review)
+    label_json["reviews"] = reviews
+    case.label_json = label_json
+    _audit(db, user, "recall_sample.reviewed", "assurance_case", case.id,
+           {"outcome": body.outcome, "review_number": len(reviews)})
+    if len(reviews) == 1:
+        case.status = "pending_second_review"
+        case.training_status = "blocked_pending_independent_review"
+        db.commit()
+        return {"case_id": case.id, "status": case.status,
+                "result": "pending_independent_review",
+                "training_eligible": False}
+    first, second = reviews[0], reviews[1]
+    agreed = (first["outcome"] == second["outcome"]
+              and (first["outcome"] != "target_event"
+                   or first["event_label"] == second["event_label"]))
+    if len(reviews) == 2 and not agreed:
+        case.status = "blocked_pending_adjudication"
+        case.training_status = "blocked_reviewer_disagreement"
+        db.commit()
+        return {"case_id": case.id, "status": case.status,
+                "result": "reviewer_disagreement",
+                "training_eligible": False}
+    final_review = first if agreed else reviews[-1]
+    result = _finalise_recall_sample(db, case, final_review, user)
+    db.commit()
+    return result
 
 
 def _ingest_event(body: OperationalEventIn, db: Session, user):

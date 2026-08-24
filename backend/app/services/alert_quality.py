@@ -9,8 +9,8 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Alert, AlertQualityControl, AlertReviewDecision, Camera, DetectionEvent,
-    EvidenceManifest, RecordingClip, Store,
+    Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
+    DetectionEvent, EvidenceManifest, RecordingClip, Store,
 )
 
 MIN_REVIEWED_SAMPLES = 20
@@ -21,6 +21,7 @@ RECOVERY_SAMPLES = 20
 CONTROLLED_MODES = {"active", "review_only", "quarantined"}
 TARGET_PRECISION = 0.99
 TARGET_MIN_REVIEWED = 300
+TARGET_MIN_RECALL_EVENTS = 300
 ONE_SIDED_95_Z = 1.6448536269514722
 
 
@@ -213,6 +214,25 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
     for alert, event, camera, store in rows:
         groups[(camera.store_id, store.name if store else camera.site,
                 camera.id, camera.name, event.detection_type)].append((alert, event))
+    recall_evidence: dict[tuple, dict[str, int]] = defaultdict(
+        lambda: {"windows": 0, "true_positives": 0, "false_negatives": 0})
+    recall_rows = (db.query(AssuranceCase, Camera, Store)
+                   .join(Camera, Camera.id == AssuranceCase.camera_id)
+                   .outerjoin(Store, Store.id == Camera.store_id)
+                   .filter(AssuranceCase.case_type == "recall_sample",
+                           AssuranceCase.reviewed_at >= cutoff,
+                           AssuranceCase.status == "resolved").all())
+    for case_row, camera, store in recall_rows:
+        final_label = (case_row.label_json or {}).get("final_event_label")
+        key = (camera.store_id, store.name if store else camera.site,
+               camera.id, camera.name, final_label)
+        if final_label:
+            groups.setdefault(key, [])
+            recall_evidence[key]["windows"] += 1
+            if case_row.root_cause == "recall_true_positive":
+                recall_evidence[key]["true_positives"] += 1
+            elif case_row.root_cause == "recall_false_negative":
+                recall_evidence[key]["false_negatives"] += 1
     alert_ids = [alert.id for alert, *_rest in rows]
     decisions = (db.query(AlertReviewDecision)
                    .filter(AlertReviewDecision.alert_id.in_(alert_ids))
@@ -249,6 +269,10 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
         unreviewed = len(samples) - confirmed - dismissed
         reviewed = confirmed + dismissed
         lower_bound = _wilson_lower_bound(confirmed, reviewed)
+        precision_gate = bool(
+            reviewed >= TARGET_MIN_REVIEWED
+            and lower_bound is not None
+            and lower_bound >= TARGET_PRECISION)
         # Legacy recorder paths were persisted in event.extra before the
         # canonical clip_path column was wired for every detector.  Counting
         # only the column understates evidence availability and can block a
@@ -305,6 +329,17 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
                 multi_review.append(len(set(reviewer_verdicts)) == 1)
         agreements = sum(multi_review)
         disagreements = len(multi_review) - agreements
+        recall_counts = recall_evidence[key]
+        recall_events = (recall_counts["true_positives"]
+                         + recall_counts["false_negatives"])
+        measured_recall = (recall_counts["true_positives"] / recall_events
+                           if recall_events else None)
+        recall_lower_bound = _wilson_lower_bound(
+            recall_counts["true_positives"], recall_events)
+        recall_gate = bool(
+            recall_events >= TARGET_MIN_RECALL_EVENTS
+            and recall_lower_bound is not None
+            and recall_lower_bound >= TARGET_PRECISION)
         state = (db.query(AlertQualityControl)
                    .filter(AlertQualityControl.camera_id == key[2],
                            AlertQualityControl.detection_type == key[4]).first())
@@ -318,12 +353,18 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
             "precision_lower_bound_95": lower_bound,
             "target_precision": TARGET_PRECISION,
             "target_minimum_reviewed": TARGET_MIN_REVIEWED,
-            "target_99_evidence_met": bool(
-                reviewed >= TARGET_MIN_REVIEWED
-                and lower_bound is not None
-                and lower_bound >= TARGET_PRECISION),
-            "recall": None,
-            "recall_limitation": "Requires independently reported missed events; alerts alone cannot measure recall.",
+            "target_99_precision_evidence_met": precision_gate,
+            "target_99_evidence_met": precision_gate and recall_gate,
+            "recall": measured_recall,
+            "recall_lower_bound_95": recall_lower_bound,
+            "target_minimum_recall_events": TARGET_MIN_RECALL_EVENTS,
+            "target_99_recall_evidence_met": recall_gate,
+            "recall_target_event_windows": recall_counts["windows"],
+            "recall_true_positive_events": recall_counts["true_positives"],
+            "recall_false_negative_events": recall_counts["false_negatives"],
+            "recall_limitation": (
+                None if measured_recall is not None else
+                "Requires independently double-reviewed random footage containing target events and missed events; alerts alone cannot measure recall."),
             "incident_clips_available": clips,
             "clip_eligible_alerts": clip_eligible,
             "clip_ineligible_alerts": clip_ineligible,

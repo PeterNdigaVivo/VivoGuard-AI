@@ -7,6 +7,7 @@ import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primi
 import { labels as labelsApi, type SprintAlert } from '@/api/labels'
 import MissedEventForm from '@/components/MissedEventForm'
 import DisagreementAdjudicationPanel from '@/components/DisagreementAdjudicationPanel'
+import RecallSamplingPanel from '@/components/RecallSamplingPanel'
 
 const BATCH = 20
 const UNDO_STACK_DEPTH = 5
@@ -21,6 +22,7 @@ export default function SprintPage() {
   const [showMissedEvent, setShowMissedEvent] = useState(false)
   const [independentReview, setIndependentReview] = useState(false)
   const [showAdjudication, setShowAdjudication] = useState(false)
+  const [showRecallSampling, setShowRecallSampling] = useState(false)
   const location = useLocation()
   const filters = useMemo(() => {
     const q = new URLSearchParams(location.search)
@@ -105,6 +107,9 @@ export default function SprintPage() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <PageHeader title="🎯 Labelling Sprint" actions={<>
+        <Button variant="ghost" onClick={() => setShowRecallSampling(value => !value)}>
+          Measure recall
+        </Button>
         <Button variant="ghost" onClick={() => setShowAdjudication(value => !value)}>
           Resolve disagreements
         </Button>
@@ -122,6 +127,9 @@ export default function SprintPage() {
       {showMissedEvent && <MissedEventForm onClose={() => setShowMissedEvent(false)} />}
       {showAdjudication && (
         <DisagreementAdjudicationPanel onClose={() => setShowAdjudication(false)} />
+      )}
+      {showRecallSampling && (
+        <RecallSamplingPanel onClose={() => setShowRecallSampling(false)} />
       )}
 
       {independentReview && (
