@@ -1,4 +1,8 @@
-from app.api.system import _decode_inference_pipeline, _runtime_camera_status
+from app.api.system import (
+    _decode_inference_pipeline,
+    _proof_of_life_state,
+    _runtime_camera_status,
+)
 
 
 def test_fresh_frames_override_pending_configuration() -> None:
@@ -55,6 +59,21 @@ def test_inference_pipeline_telemetry_decodes_only_json_objects() -> None:
     assert _decode_inference_pipeline("not-json") is None
     assert _decode_inference_pipeline("[]") is None
     assert _decode_inference_pipeline(None) is None
+
+
+def test_proof_of_life_distinguishes_active_degraded_and_offline() -> None:
+    now = 1_000.0
+    healthy = {
+        "last_run_ts": 990,
+        "cameras_total": 10,
+        "cameras_fresh": 10,
+        "cameras_waiting_for_worker": 0,
+    }
+    assert _proof_of_life_state(healthy, now=now) == "active"
+    assert _proof_of_life_state({**healthy, "cameras_fresh": 8}, now=now) == "degraded"
+    assert _proof_of_life_state({**healthy, "cameras_waiting_for_worker": 2}, now=now) == "degraded"
+    assert _proof_of_life_state({**healthy, "last_run_ts": 300}, now=now) == "offline"
+    assert _proof_of_life_state(None, now=now) == "offline"
 
 
 def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:

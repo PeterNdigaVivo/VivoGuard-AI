@@ -12,12 +12,30 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import Alert, Camera
+from app.models import Alert, Camera, DetectionEvent
 from app.stream.frame_buffer import FrameBuffer
 
 router = APIRouter(prefix="/system", tags=["system"])
 
 STREAM_FRESH_SECONDS = 10.0
+
+
+def _proof_of_life_state(pipeline: dict | None, *, now: float) -> str:
+    """Classify monitoring liveness without treating a quiet store as failed."""
+    if not pipeline:
+        return "offline"
+    try:
+        age = now - float(pipeline.get("last_run_ts") or 0)
+    except (TypeError, ValueError):
+        return "offline"
+    if age > 10 * 60:
+        return "offline"
+    total = int(pipeline.get("cameras_total") or 0)
+    fresh = int(pipeline.get("cameras_fresh") or 0)
+    waiting = int(pipeline.get("cameras_waiting_for_worker") or 0)
+    if total == 0 or fresh < total or waiting > 0:
+        return "degraded"
+    return "active"
 
 
 def _runtime_camera_status(configured_status: str, health: dict,
@@ -287,4 +305,49 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "alerts_today":   int(new_alerts_24h),
         "inference_pipeline": inference_pipeline,
         "inference_batch_shadow": inference_batch_shadow,
+    }
+
+
+@router.get("/proof-of-life")
+def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    """Lightweight operator signal that distinguishes quiet from offline."""
+    now_dt = datetime.now(timezone.utc)
+    now_ts = now_dt.timestamp()
+    fb = FrameBuffer()
+    pipeline = _decode_inference_pipeline(fb.r.get("vg:inference:health"))
+    latest_detection = db.query(func.max(DetectionEvent.timestamp)).scalar()
+    latest_alert = db.query(func.max(Alert.created_at)).scalar()
+
+    def age_seconds(value: datetime | None) -> int | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return max(0, int((now_dt - value).total_seconds()))
+
+    return {
+        "now": now_dt.isoformat(),
+        "state": _proof_of_life_state(pipeline, now=now_ts),
+        "latest_detection_at": latest_detection.isoformat() if latest_detection else None,
+        "latest_detection_age_seconds": age_seconds(latest_detection),
+        "latest_alert_at": latest_alert.isoformat() if latest_alert else None,
+        "latest_alert_age_seconds": age_seconds(latest_alert),
+        "pipeline_age_seconds": (
+            max(0, int(now_ts - float(pipeline.get("last_run_ts") or 0)))
+            if pipeline and pipeline.get("last_run_ts") else None
+        ),
+        "cameras_total": int((pipeline or {}).get("cameras_total") or 0),
+        "cameras_fresh": int((pipeline or {}).get("cameras_fresh") or 0),
+        "cameras_actively_inferencing": (
+            pipeline.get("cameras_actively_inferencing") if pipeline else None
+        ),
+        "cameras_waiting_for_worker": (
+            pipeline.get("cameras_waiting_for_worker") if pipeline else None
+        ),
+        "inference_queue_depth": (
+            pipeline.get("inference_queue_depth") if pipeline else None
+        ),
+        "estimated_full_rotation_seconds": (
+            pipeline.get("estimated_full_rotation_seconds") if pipeline else None
+        ),
     }

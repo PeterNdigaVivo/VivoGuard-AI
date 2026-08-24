@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Card, PageHeader } from '@/components/ui/Primitives'
 import DateRangePicker, { rangeFor, type DateRange } from '@/components/DateRangePicker'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import { api } from '@/api/client'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 
@@ -24,6 +25,27 @@ const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isPositive(a)
 const _isOpen = (a: Alert) => !['resolved', 'confirmed', 'dismissed'].includes(a.status)
 const PAGE_SIZE = 100
 
+interface ProofOfLife {
+  now: string
+  state: 'active' | 'degraded' | 'offline'
+  latest_detection_age_seconds: number | null
+  latest_alert_age_seconds: number | null
+  pipeline_age_seconds: number | null
+  cameras_total: number
+  cameras_fresh: number
+  cameras_actively_inferencing: number | null
+  cameras_waiting_for_worker: number | null
+  inference_queue_depth: number | null
+  estimated_full_rotation_seconds: number | null
+}
+
+function ageLabel(seconds: number | null): string {
+  if (seconds == null) return 'unknown'
+  if (seconds < 60) return `${seconds}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  return `${Math.floor(seconds / 3600)}h ago`
+}
+
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
@@ -36,6 +58,7 @@ export default function AlertsPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(false)
+  const [proof, setProof] = useState<ProofOfLife | null>(null)
   const requestSequence = useRef(0)
   const [summary, setSummary] = useState({
     urgent: 0, attention: 0,
@@ -58,6 +81,14 @@ export default function AlertsPage() {
   }, [toast])
 
   useEffect(() => { storesApi.list().then(setStores).catch(() => {}) }, [])
+
+  useEffect(() => {
+    const load = () => api<ProofOfLife>('/system/proof-of-life')
+      .then(setProof).catch(() => setProof(null))
+    load()
+    const timer = setInterval(load, 15_000)
+    return () => clearInterval(timer)
+  }, [])
 
   const loadPage = useCallback(async (append = false, beforeId?: number) => {
     const sequence = ++requestSequence.current
@@ -251,6 +282,8 @@ export default function AlertsPage() {
         </div>
       } />
 
+      {proof && <ProofOfLifeCard proof={proof} />}
+
       {/* Executive summary bar — spec Part 1 §3. Four-tier severity
           counts + resolved tally + avg-time-to-resolve + vs-yesterday
           trend in one glanceable strip. */}
@@ -363,6 +396,37 @@ export default function AlertsPage() {
         </div>
       )}
     </div>
+  )
+}
+
+function ProofOfLifeCard({ proof }: { proof: ProofOfLife }) {
+  const colour = proof.state === 'active'
+    ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
+    : proof.state === 'degraded'
+      ? 'border-amber-300 bg-amber-50 text-amber-950'
+      : 'border-red-300 bg-red-50 text-red-950'
+  const title = proof.state === 'active'
+    ? 'Monitoring active'
+    : proof.state === 'degraded'
+      ? 'Monitoring active — coverage or capacity constrained'
+      : 'Monitoring offline — investigate now'
+  return (
+    <Card className={`p-3 mb-4 border ${colour}`}>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        <div>
+          <div className="font-semibold">{title}</div>
+          <div className="text-xs opacity-75">Pipeline heartbeat {ageLabel(proof.pipeline_age_seconds)}</div>
+        </div>
+        <div><span className="text-xs opacity-70">Latest detection</span><br /><strong>{ageLabel(proof.latest_detection_age_seconds)}</strong></div>
+        <div><span className="text-xs opacity-70">Latest alert</span><br /><strong>{ageLabel(proof.latest_alert_age_seconds)}</strong></div>
+        <div><span className="text-xs opacity-70">Fresh feeds</span><br /><strong>{proof.cameras_fresh}/{proof.cameras_total}</strong></div>
+        <div><span className="text-xs opacity-70">Active / waiting</span><br /><strong>{proof.cameras_actively_inferencing ?? '—'} / {proof.cameras_waiting_for_worker ?? '—'}</strong></div>
+        <div><span className="text-xs opacity-70">Full rotation</span><br /><strong>{proof.estimated_full_rotation_seconds == null ? '—' : `${Math.ceil(proof.estimated_full_rotation_seconds / 60)} min`}</strong></div>
+      </div>
+      <div className="mt-2 text-xs opacity-75">
+        A quiet alert feed is healthy only when detections and the pipeline heartbeat remain current.
+      </div>
+    </Card>
   )
 }
 
