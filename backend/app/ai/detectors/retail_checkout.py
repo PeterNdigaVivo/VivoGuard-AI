@@ -49,6 +49,10 @@ REDIS_OPEN_TTL_SECONDS = 30 * 60       # 30 min
 # frame is considered to have exited (tracker dropouts happen). Tighter
 # than REDIS_OPEN_TTL because we still want a timely session-close.
 TRACK_LOST_GRACE_SECONDS = 60.0
+# Refresh the Redis session heartbeat often enough for the alerting task to
+# prove that the tracked person is still present. This is deliberately much
+# cheaper than writing on every inference frame.
+OPEN_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 def _redis():
@@ -98,24 +102,40 @@ class CheckoutDwellDetector(Detector):
 
     def _publish_open(self, r, cam: int, zone: int, track: int,
                        entry_ts: float, store_id: int | None,
-                       *, min_alert_seconds: int = 0) -> None:
+                       *, min_alert_seconds: int = 0,
+                       last_seen_ts: float | None = None) -> None:
         if r is None:
             return
         try:
+            key = REDIS_OPEN_KEY_FMT.format(cam=cam, zone=zone, track=track)
+            # Preserve alert linkage if a later heartbeat refreshes a session
+            # after the alerting task has attached its incident clip.
+            alert_id = None
+            existing = r.get(key)
+            if existing:
+                try:
+                    alert_id = json.loads(existing).get("alert_id")
+                except Exception:
+                    alert_id = None
+            payload = {
+                "entry_ts":          float(entry_ts),
+                "last_seen_ts":      float(last_seen_ts if last_seen_ts is not None
+                                             else entry_ts),
+                "store_id":          store_id,
+                "camera_id":         cam,
+                "zone_id":           zone,
+                "track_id":          track,
+                # Floor used by alerting.checkout_long_session_check
+                # to override the global threshold for sessions where
+                # the participant looks like medium-confidence staff
+                # (longer grace before raising attention).
+                "min_alert_seconds": int(min_alert_seconds),
+            }
+            if alert_id is not None:
+                payload["alert_id"] = alert_id
             r.set(
-                REDIS_OPEN_KEY_FMT.format(cam=cam, zone=zone, track=track),
-                json.dumps({
-                    "entry_ts":          float(entry_ts),
-                    "store_id":          store_id,
-                    "camera_id":         cam,
-                    "zone_id":           zone,
-                    "track_id":          track,
-                    # Floor used by alerting.checkout_long_session_check
-                    # to override the global threshold for sessions where
-                    # the participant looks like medium-confidence staff
-                    # (longer grace before raising attention).
-                    "min_alert_seconds": int(min_alert_seconds),
-                }),
+                key,
+                json.dumps(payload),
                 ex=REDIS_OPEN_TTL_SECONDS,
             )
         except Exception as e:
@@ -363,6 +383,7 @@ class CheckoutDwellDetector(Detector):
                     sess = {"entry_ts": now, "last_seen_ts": now,
                             "store_id": ctx.store_id,
                             "min_alert_seconds": min_alert,
+                            "last_published_ts": now,
                             "staff_level": level,
                             # Last 60s-snapshot timestamp (Q1 spec —
                             # gated on SESSION time, not inference fps).
@@ -378,7 +399,8 @@ class CheckoutDwellDetector(Detector):
                     self._sessions[key] = sess
                     self._publish_open(r, ctx.camera_id, int(z["id"]),
                                         int(track_id), now, ctx.store_id,
-                                        min_alert_seconds=min_alert)
+                                        min_alert_seconds=min_alert,
+                                        last_seen_ts=now)
                     log.debug("checkout: open cam=%s zone=%s track=%s "
                               "level=%s", ctx.camera_id, z["id"],
                               track_id, level)
@@ -388,13 +410,21 @@ class CheckoutDwellDetector(Detector):
                     # if the track has since been re-classified — the
                     # Redis payload needs to track the change so the
                     # alerter sees the new threshold.
-                    if min_alert > sess.get("min_alert_seconds", 0):
+                    threshold_upgraded = min_alert > sess.get(
+                        "min_alert_seconds", 0)
+                    if threshold_upgraded:
                         sess["min_alert_seconds"] = min_alert
                         sess["staff_level"] = level
+                    heartbeat_due = (
+                        now - sess.get("last_published_ts", 0.0)
+                        >= OPEN_HEARTBEAT_INTERVAL_SECONDS)
+                    if threshold_upgraded or heartbeat_due:
                         self._publish_open(
                             r, ctx.camera_id, int(z["id"]),
                             int(track_id), sess["entry_ts"], ctx.store_id,
-                            min_alert_seconds=min_alert)
+                            min_alert_seconds=sess.get("min_alert_seconds", 0),
+                            last_seen_ts=now)
+                        sess["last_published_ts"] = now
 
                 # Per-spec Q1: one snapshot every 60 SESSION seconds
                 # (not every inference cycle — at 2 fps the cycle is

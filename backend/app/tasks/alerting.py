@@ -309,6 +309,19 @@ def inference_pipeline_health_check() -> None:
 CHECKOUT_ALERT_DEDUP_TTL_SECONDS = 30 * 60
 
 
+def _checkout_session_is_fresh(payload: dict, now_ts: float,
+                               max_age_seconds: int) -> bool:
+    """Only trust dwell time while the person track is still observable."""
+    try:
+        last_seen_ts = float(
+            payload.get("last_seen_ts") or payload.get("entry_ts") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    age = now_ts - last_seen_ts
+    # Five seconds of forward skew is harmless; larger skew is untrustworthy.
+    return -5.0 <= age <= max(1, int(max_age_seconds))
+
+
 @celery_app.task(name="alerting.checkout_long_session_check",
                   ignore_result=True)
 def checkout_long_session_check() -> None:
@@ -318,6 +331,8 @@ def checkout_long_session_check() -> None:
 
     threshold_minutes = int(getattr(settings, "checkout_alert_minutes", 3))
     threshold_seconds = max(60, threshold_minutes * 60)
+    freshness_seconds = int(getattr(
+        settings, "checkout_session_fresh_seconds", 90))
     r = _redis()
     if r is None:
         return
@@ -346,6 +361,12 @@ def checkout_long_session_check() -> None:
             effective_threshold = max(threshold_seconds, session_floor)
             if age < effective_threshold:
                 continue
+            if not _checkout_session_is_fresh(
+                    payload, now_ts, freshness_seconds):
+                # A timer is not evidence of continuing presence. This occurs
+                # during camera/inference gaps and was the root cause of
+                # empty-clip long-checkout alerts.
+                continue
             candidates.append({
                 "key": (key.decode() if isinstance(key, bytes) else key),
                 "age": age,
@@ -353,6 +374,9 @@ def checkout_long_session_check() -> None:
                 "camera_id": int(payload.get("camera_id") or 0),
                 "zone_id":   int(payload.get("zone_id")   or 0),
                 "track_id":  payload.get("track_id"),
+                "last_seen_age_seconds": round(
+                    now_ts - float(payload.get("last_seen_ts")
+                                   or payload.get("entry_ts")), 1),
             })
     except Exception as e:
         log.exception("checkout_long_session_check: scan failed: %s", e)
@@ -404,6 +428,7 @@ def checkout_long_session_check() -> None:
                 "dwell_minutes": minutes,
                 "dwell_seconds": round(c["age"], 1),
                 "threshold_minutes": threshold_minutes,
+                "presence_last_seen_age_seconds": c["last_seen_age_seconds"],
                 "title":         f"Long Checkout — {store_name}",
                 "message":       body,
                 "what_to_do": [

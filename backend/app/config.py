@@ -493,6 +493,9 @@ class Settings(BaseSettings):
     checkout_min_dwell_seconds: int = 30
     checkout_max_dwell_seconds: int = 900
     checkout_alert_minutes:     int = 3
+    # Fail closed when inference has not observed the same track recently.
+    # A wall-clock timer alone must never claim that a customer is still there.
+    checkout_session_fresh_seconds: int = Field(default=90, ge=15, le=300)
 
     # --- After-hours intrusion snapshot filmstrip ---
     # One intrusion alert per closed store with a person present; up to
