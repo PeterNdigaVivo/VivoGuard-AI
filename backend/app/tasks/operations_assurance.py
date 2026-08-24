@@ -97,7 +97,7 @@ def extract_recall_sample(case_id: int):
                 or out.parent != out_root):
             evidence["extraction_status"] = "source_unavailable"
             case.evidence = evidence
-            case.status = "blocked_evidence_unavailable"
+            case.status = "evidence_unavailable"
             db.commit()
             return
         out_root.mkdir(parents=True, exist_ok=True)
@@ -128,9 +128,9 @@ def extract_recall_sample(case_id: int):
         except Exception as exc:
             temp.unlink(missing_ok=True)
             evidence["extraction_status"] = "failed"
-            evidence["extraction_error"] = type(exc).__name__
+            evidence["extraction_error"] = str(exc)[:128]
             case.evidence = evidence
-            case.status = "blocked_evidence_unavailable"
+            case.status = "evidence_unavailable"
             log.warning("recall sample extraction failed case=%s: %s", case.id, exc)
         db.commit()
 

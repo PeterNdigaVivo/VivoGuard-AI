@@ -69,6 +69,8 @@ def test_generate_recall_batch_is_reproducible_and_queues_extraction(
             "app.tasks.operations_assurance.extract_recall_sample.delay",
             lambda case_id: queued.append(case_id),
         )
+        monkeypatch.setattr("app.api.operations._media_duration_seconds",
+                            lambda _path: 300)
 
         result = generate_recall_samples(
             RecallSampleBatchIn(sample_count=1, duration_seconds=30,

@@ -7,6 +7,7 @@ import hmac
 import json
 from pathlib import Path
 import random
+import subprocess
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -499,6 +500,20 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _media_duration_seconds(path: str) -> int | None:
+    """Read the playable duration; active or corrupt files fail closed."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        duration = int(float(result.stdout.strip())) if result.returncode == 0 else 0
+        return duration if duration > 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+
+
 @router.post("/recall-samples/generate")
 def generate_recall_samples(
     body: RecallSampleBatchIn,
@@ -535,7 +550,11 @@ def generate_recall_samples(
             break
         started = _as_utc(clip.started_at)
         ended = _as_utc(clip.ended_at) if clip.ended_at else now
-        available = int((ended - started).total_seconds())
+        database_duration = int((ended - started).total_seconds())
+        playable_duration = _media_duration_seconds(clip.file_path)
+        if playable_duration is None:
+            continue
+        available = min(database_duration, playable_duration)
         if available < body.duration_seconds + 10:
             continue
         offset = rng.randint(5, available - body.duration_seconds - 5)
