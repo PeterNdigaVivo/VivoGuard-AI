@@ -30,6 +30,8 @@ export interface AssuranceCase {
   root_cause: string | null
   training_status: string | null
   first_seen_at: string
+  alert_id: number | null
+  evidence: Record<string, unknown> | null
 }
 
 export const operations = {
@@ -39,4 +41,18 @@ export const operations = {
     }),
   listMissedEvents: () =>
     api<AssuranceCase[]>('/operations/cases?case_type=missed_event&limit=20'),
+  listReviewerDisagreements: () =>
+    api<AssuranceCase[]>('/operations/cases?case_type=reviewer_disagreement&limit=50'),
+  adjudicateReviewerDisagreement: (
+    caseId: number,
+    verdict: 'confirm' | 'dismiss' | 'unclear',
+    rationale: string,
+  ) => api<{
+    case_id: number
+    status: string
+    verdict: string
+    training_eligible: boolean
+  }>(`/operations/cases/${caseId}/adjudicate`, {
+    method: 'POST', body: { verdict, rationale },
+  }),
 }

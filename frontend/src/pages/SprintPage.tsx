@@ -6,6 +6,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primitives'
 import { labels as labelsApi, type SprintAlert } from '@/api/labels'
 import MissedEventForm from '@/components/MissedEventForm'
+import DisagreementAdjudicationPanel from '@/components/DisagreementAdjudicationPanel'
 
 const BATCH = 20
 const UNDO_STACK_DEPTH = 5
@@ -19,6 +20,7 @@ export default function SprintPage() {
   const [err, setErr] = useState<string | null>(null)
   const [showMissedEvent, setShowMissedEvent] = useState(false)
   const [independentReview, setIndependentReview] = useState(false)
+  const [showAdjudication, setShowAdjudication] = useState(false)
   const location = useLocation()
   const filters = useMemo(() => {
     const q = new URLSearchParams(location.search)
@@ -103,6 +105,9 @@ export default function SprintPage() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <PageHeader title="🎯 Labelling Sprint" actions={<>
+        <Button variant="ghost" onClick={() => setShowAdjudication(value => !value)}>
+          Resolve disagreements
+        </Button>
         <Button variant="ghost" onClick={() => setIndependentReview(value => !value)}>
           {independentReview ? 'Primary review' : 'Independent review'}
         </Button>
@@ -115,6 +120,9 @@ export default function SprintPage() {
       </>} />
 
       {showMissedEvent && <MissedEventForm onClose={() => setShowMissedEvent(false)} />}
+      {showAdjudication && (
+        <DisagreementAdjudicationPanel onClose={() => setShowAdjudication(false)} />
+      )}
 
       {independentReview && (
         <Card className="p-3 mb-3 border-violet-200 bg-violet-50 text-violet-900 dark:bg-slate-900 dark:text-violet-200">

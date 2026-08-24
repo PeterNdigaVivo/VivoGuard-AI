@@ -9,7 +9,8 @@ Use these terms precisely:
 
 - **Implemented**: code and migration exist in the repository.
 - **Verified**: automated tests/build have passed for the commit.
-- **Deployed**: the commit is running in the production API/workers and migration 0037 is applied.
+- **Deployed**: the intended commit is running in the production API/workers
+  and the repository's current Alembic head is applied.
 - **Configured**: every active store has approved critical-zone mappings and source-system mappings.
 - **Operationally validated**: live test events, clips, SLAs and operator workflows have passed per store.
 
@@ -27,9 +28,17 @@ Missing configuration is itself a critical assurance case.
 
 `POST /operations/missed-events` records a human report, searches for nearby
 detections, assigns a root-cause category and creates a labelled assurance case.
-If visual evidence is supplied it enters the training pool; a bounding box is
-required before an object-detection annotation is verified. No synthetic or
-imagined evidence is created.
+If visual evidence is supplied it enters the quarantined training pool; a
+bounding box and a second reviewer who is independent of both the reporter and
+annotator are required before an object-detection annotation becomes eligible.
+No synthetic or imagined evidence is created.
+
+Alert verdicts also fail closed. A first review creates quarantined evidence. A
+blind second review promotes it only on agreement. Disagreement creates a
+`reviewer_disagreement` assurance case. A third operator, independent of both
+earlier reviewers, must adjudicate that case with an evidence-based rationale.
+The earlier decisions remain append-only. An `unclear` adjudication and any
+camera-detector pair under quality control remain training-ineligible.
 
 The scheduled alert-quality task checks acknowledgement SLA, event-to-alert
 latency and missing evidence. It deduplicates cases by alert and issue set.
@@ -59,7 +68,7 @@ is not removed by the scheduled retention task.
 
 ## Production activation checklist
 
-1. Deploy the verified commit and apply Alembic migration 0037.
+1. Deploy the verified commit and apply the current Alembic head.
 2. Map exact Odoo store IDs and event names in staging; use a service credential
    and signed webhook transport at the gateway.
 3. Configure and approve critical zones camera by camera.
@@ -68,3 +77,24 @@ is not removed by the scheduled retention task.
 6. Train operators on non-accusatory review, privacy and escalation.
 7. Observe for seven days, then tune thresholds from false-positive and
    false-negative evidence.
+
+## Independent-validation checkpoint
+
+Software can enforce sampling, review separation, quarantine and auditability;
+it cannot manufacture independent ground truth. The validation owner must:
+
+1. Assign at least three distinct operator accounts: primary reviewer,
+   independent reviewer and adjudicator.
+2. Review real alert evidence in **AI Learning → Labelling Sprint**.
+3. Use **Independent review** from a different account without seeing the first
+   verdict.
+4. Use **Resolve disagreements** from a third account when the first two differ.
+5. Record real missed or late incidents with **Report missed alert** and attach
+   retained visual evidence where lawful and available.
+6. Independently sample non-alerted footage for recall; alert review alone can
+   measure precision but cannot establish recall.
+
+The acceptance gate is detector- and camera-specific: sufficient representative
+sample size, 95% confidence bounds, reviewer agreement, clip availability and
+measured recall must all pass. A low alert count, simulation pass rate or overall
+fleet average is not evidence of 99% real-world performance.

@@ -16,9 +16,9 @@ from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import (
-    Annotation, AssuranceCase, Camera, CriticalZoneRequirement, Dataset,
-    DetectionEvent, GovernanceAuditLog, OperationalEvent, RiskReview, Store,
-    TrainingImage,
+    Alert, AlertQualityControl, AlertReviewDecision, Annotation, AssuranceCase,
+    Camera, CriticalZoneRequirement, Dataset, DetectionEvent,
+    GovernanceAuditLog, OperationalEvent, RiskReview, Store, TrainingImage,
 )
 from app.integrations.odoo_pos import normalise_odoo_event
 from app.operations.assurance import (
@@ -74,6 +74,11 @@ class ReviewIn(BaseModel):
 class CaseResolutionIn(BaseModel):
     resolution: str = Field(min_length=3, max_length=4000)
     status: str = Field(pattern="^(resolved|monitoring|insufficient_evidence)$")
+
+
+class DisagreementAdjudicationIn(BaseModel):
+    verdict: str = Field(pattern="^(confirm|dismiss|unclear)$")
+    rationale: str = Field(min_length=8, max_length=4000)
 
 
 class FeedbackIntakeIn(BaseModel):
@@ -342,12 +347,24 @@ def verify_missed_event_training(case_id: int, db: Session = Depends(get_db),
              .order_by(TrainingImage.id.desc()).first())
     if not image:
         raise HTTPException(409, "no visual training sample is attached")
+    if image.eligible_for_training or image.review_state == "approved":
+        raise HTTPException(409, "missed-event training evidence is already verified")
     annotations = db.query(Annotation).filter(Annotation.image_id == image.id).all()
     if not annotations:
         raise HTTPException(409, "a reviewed bounding box is required")
-    high_consequence = {"weapon", "brandished_weapon", "fight", "violence", "theft"}
-    if any(a.class_label in high_consequence and a.annotated_by == user.id for a in annotations):
-        raise HTTPException(409, "high-consequence labels require an independent second reviewer")
+    primary_reviewers = {
+        reviewer_id for reviewer_id in [
+            *(a.annotated_by for a in annotations),
+            (case.label_json or {}).get("verified_by_user_id"),
+        ] if reviewer_id is not None
+    }
+    if not primary_reviewers:
+        raise HTTPException(409, "primary reviewer provenance is missing")
+    if user.id in primary_reviewers:
+        raise HTTPException(
+            409,
+            "missed-event training evidence requires an independent second reviewer",
+        )
     for annotation in annotations:
         annotation.verified = True
     image.eligible_for_training = True
@@ -358,6 +375,107 @@ def verify_missed_event_training(case_id: int, db: Session = Depends(get_db),
     db.commit()
     return {"case_id": case.id, "training_image_id": image.id,
             "eligible_for_training": True, "reviewed_by": user.id}
+
+
+@router.post("/cases/{case_id}/adjudicate")
+def adjudicate_reviewer_disagreement(
+    case_id: int,
+    body: DisagreementAdjudicationIn,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("admin", "operator")),
+):
+    """Resolve a two-reviewer disagreement without erasing either verdict."""
+    case = db.get(AssuranceCase, case_id)
+    if not case or case.case_type != "reviewer_disagreement":
+        raise HTTPException(404, "reviewer-disagreement case not found")
+    if case.status != "open":
+        raise HTTPException(409, "reviewer-disagreement case is not open")
+    if case.alert_id is None:
+        raise HTTPException(409, "disagreement case is not linked to an alert")
+    alert = db.get(Alert, case.alert_id)
+    if not alert:
+        raise HTTPException(409, "linked alert is unavailable")
+    prior = (db.query(AlertReviewDecision)
+             .filter(AlertReviewDecision.alert_id == alert.id)
+             .order_by(AlertReviewDecision.created_at,
+                       AlertReviewDecision.id).all())
+    prior_reviewers = {decision.reviewer_id for decision in prior}
+    if len(prior_reviewers) < 2:
+        raise HTTPException(409, "two independent reviews are required before adjudication")
+    if user.id in prior_reviewers:
+        raise HTTPException(409, "adjudicator must be independent of both reviewers")
+
+    decided_at = datetime.now(timezone.utc)
+    evidence = dict(case.evidence or {})
+    evidence.update({
+        "adjudication_verdict": body.verdict,
+        "adjudicator_user_id": user.id,
+        "adjudicated_at": decided_at.isoformat(),
+    })
+    case.evidence = evidence
+    case.reviewed_by = user.id
+    case.reviewed_at = decided_at
+    case.resolution = body.rationale
+
+    if body.verdict == "unclear":
+        case.status = "insufficient_evidence"
+        case.training_status = "blocked_insufficient_evidence"
+        for image in db.query(TrainingImage).filter(
+            TrainingImage.source_alert_id == alert.id,
+        ):
+            image.eligible_for_training = False
+            image.review_state = "quarantined"
+        _audit(db, user, "review_disagreement.adjudicated", "assurance_case",
+               case.id, {"verdict": body.verdict})
+        db.commit()
+        return {"case_id": case.id, "status": case.status,
+                "verdict": body.verdict, "training_eligible": False}
+
+    final_verdict = "confirmed" if body.verdict == "confirm" else "dismissed"
+    db.add(AlertReviewDecision(
+        alert_id=alert.id, reviewer_id=user.id, verdict=final_verdict,
+        classification="independent_adjudication", note=body.rationale,
+    ))
+    alert.status = final_verdict
+    alert.assigned_to = user.id
+    event = db.get(DetectionEvent, alert.event_id)
+    quality_control = None
+    if event:
+        quality_control = (db.query(AlertQualityControl)
+                           .filter(AlertQualityControl.camera_id == event.camera_id,
+                                   AlertQualityControl.detection_type ==
+                                   event.detection_type).one_or_none())
+    pair_allows_training = not quality_control or quality_control.mode == "active"
+    images = db.query(TrainingImage).filter(
+        TrainingImage.source_alert_id == alert.id,
+    ).all()
+    for image in images:
+        image.eligible_for_training = pair_allows_training
+        image.review_state = "approved" if pair_allows_training else "quarantined"
+        source = dict(image.source_extra or {})
+        source.update({
+            "adjudication_verdict": final_verdict,
+            "adjudicator_user_id": user.id,
+            "adjudicated_at": decided_at.isoformat(),
+        })
+        image.source_extra = source
+    alert.training_eligible = pair_allows_training
+    case.status = "resolved"
+    case.resolved_at = decided_at
+    case.training_status = (
+        "adjudicated_training_eligible" if pair_allows_training and images
+        else "adjudicated_quality_controlled"
+    )
+    _audit(db, user, "review_disagreement.adjudicated", "assurance_case",
+           case.id, {"verdict": body.verdict,
+                     "training_eligible": bool(pair_allows_training and images)})
+    db.commit()
+    if pair_allows_training and images and event:
+        from app.training.feedback_loop import _maybe_enqueue_training
+        _maybe_enqueue_training(db, event.detection_type)
+    return {"case_id": case.id, "status": case.status,
+            "verdict": body.verdict,
+            "training_eligible": bool(pair_allows_training and images)}
 
 
 def _ingest_event(body: OperationalEventIn, db: Session, user):
