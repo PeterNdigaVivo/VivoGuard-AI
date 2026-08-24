@@ -32,6 +32,7 @@ export interface AssuranceCase {
   first_seen_at: string
   alert_id: number | null
   evidence: Record<string, unknown> | null
+  review_eligible?: boolean
 }
 
 export interface QualityScorecard {

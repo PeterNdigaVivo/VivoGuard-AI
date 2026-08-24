@@ -821,6 +821,17 @@ def list_cases(status: str | None = None, case_type: str | None = None,
                 for column in AssuranceCase.__table__.columns}
         labels = dict(row.label_json or {})
         reviews = list(labels.get("reviews") or [])
+        reviewer_ids = {review.get("reviewer_id") for review in reviews}
+        extraction_ready = (row.evidence or {}).get("extraction_status") == "ready"
+        item["review_eligible"] = bool(
+            extraction_ready
+            and row.status in {
+                "pending_primary_review",
+                "pending_second_review",
+                "pending_adjudication",
+            }
+            and _user.id not in reviewer_ids
+        )
         item["label_json"] = {"review_count": len(reviews)}
         if row.status in {"resolved", "insufficient_evidence"}:
             item["label_json"].update({

@@ -254,10 +254,16 @@ def test_recall_case_listing_hides_prior_blind_review():
 
         listed = next(row for row in rows if row["id"] == case.id)
         assert listed["label_json"] == {"review_count": 1}
+        assert listed["review_eligible"] is True
         serialized = str(listed)
         assert "target_event" not in serialized
         assert "protected line" not in serialized
         assert "reviewer_id" not in listed["label_json"]
+
+        primary_rows = list_cases(case_type="recall_sample", limit=100, db=db,
+                                  _user=users[0])
+        primary_view = next(row for row in primary_rows if row["id"] == case.id)
+        assert primary_view["review_eligible"] is False
 
 
 def test_scorecard_recall_uses_only_independent_random_footage_events():

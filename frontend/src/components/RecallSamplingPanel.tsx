@@ -52,16 +52,21 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
         .then(quality => { setScorecards(quality.scorecards); setQualityError(false) })
         .catch(() => { setQualityError(true) })
       const rows = await operations.listRecallSamples()
-      const reviewable = rows.filter(row => !['resolved', 'insufficient_evidence'].includes(row.status))
-      setCases(reviewable)
+      const unresolved = rows.filter(row => !['resolved', 'insufficient_evidence'].includes(row.status))
+      const reviewable = unresolved.filter(row => row.review_eligible)
+      setCases(unresolved)
       setSelectedId(current => reviewable.some(row => row.id === current)
-        ? current : (reviewable.find(row => row.evidence?.extraction_status === 'ready')?.id ?? null))
+        ? current : (reviewable[0]?.id ?? null))
       await qualityRequest
     } catch (err) { setError(String(err)) }
   }
   useEffect(() => { void load() }, [])
   const selected = useMemo(() => cases?.find(row => row.id === selectedId) ?? null,
     [cases, selectedId])
+  const reviewableCases = useMemo(
+    () => (cases ?? []).filter(row => row.review_eligible),
+    [cases],
+  )
   const progress = useMemo(() => {
     const measured = (scorecards ?? []).filter(row => row.quality_mode === 'active')
     return {
@@ -157,11 +162,13 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
       </div>}
       {error && <div className="text-sm text-red-700 mb-3">{error}</div>}
       {cases === null && <div className="text-sm text-slate-500">Loading samples…</div>}
-      {cases?.length === 0 && <div className="text-sm text-slate-500">No samples await review.</div>}
-      {cases && cases.length > 0 && (
+      {cases && reviewableCases.length === 0 && <div className="text-sm text-slate-500">
+        No samples are currently assigned to you. Fleet work shown above may require a different independent reviewer.
+      </div>}
+      {reviewableCases.length > 0 && (
         <div className="grid md:grid-cols-[17rem_1fr] gap-4">
           <div className="space-y-2 max-h-96 overflow-y-auto">
-            {cases.map(row => (
+            {reviewableCases.map(row => (
               <button key={row.id} onClick={() => setSelectedId(row.id)}
                 className={'w-full text-left rounded border p-2 text-sm ' +
                   (selectedId === row.id ? 'border-emerald-500 bg-emerald-50 dark:bg-slate-800'
