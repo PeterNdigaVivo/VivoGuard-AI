@@ -1,6 +1,14 @@
 from streamer.streamer import main as streamer_main
 
 
+def test_effective_fps_caps_gpu_tuned_camera_on_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(streamer_main, "STREAMER_MAX_FPS", 3)
+
+    assert streamer_main._effective_fps(5) == 3
+    assert streamer_main._effective_fps(1) == 1
+    assert streamer_main._effective_fps(None) >= 1
+
+
 class _HealthBuffer:
     def __init__(self):
         self.updates = []

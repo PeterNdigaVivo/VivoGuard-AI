@@ -375,6 +375,7 @@ services:
       <<: *app-env
       STREAMER_SHARD_COUNT: ${STREAMER_SHARD_COUNT:-1}
       STREAMER_SHARD_INDEX: ${STREAMER_SHARD_INDEX:-0}
+      STREAMER_MAX_FPS: ${STREAMER_MAX_FPS:-3}
     volumes:
       - ./data/recordings:/data/recordings
     depends_on:

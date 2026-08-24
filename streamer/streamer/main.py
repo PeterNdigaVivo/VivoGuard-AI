@@ -86,12 +86,25 @@ TCP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("STREAMER_TCP_CHECK_TIMEOUT", "
 RETRY_UNREACHABLE_SECONDS = int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "300"))
 STARTUP_BATCH_SIZE        = int(os.environ.get("STREAMER_STARTUP_BATCH_SIZE", "10"))
 STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY", "2.0"))
+# The streamer only needs to publish frames as fast as the inference loop can
+# consume them. Per-camera values may have been tuned for a GPU deployment;
+# cap them on a CPU host so dozens of FFmpeg encoders do not waste the cores
+# that should be running detections. Operators can raise this with measured
+# capacity after moving to GPU-backed inference.
+STREAMER_MAX_FPS = max(1, int(os.environ.get(
+    "STREAMER_MAX_FPS", str(settings.inference_fps_default),
+)))
 
 # camera_id -> (checked_at_epoch, reachable, probed endpoint).  The endpoint
 # is part of the cache identity so a corrected port/URL is probed immediately
 # instead of inheriting a five-minute negative result for the old endpoint.
 _reachable_cache: dict[int, tuple[float, bool, tuple[str, int] | None]] = {}
 _health_buffer = FrameBuffer()
+
+
+def _effective_fps(configured_fps: int | None) -> int:
+    requested = int(configured_fps or settings.inference_fps_default)
+    return max(1, min(requested, STREAMER_MAX_FPS))
 
 
 def _run_migrations() -> None:
@@ -341,7 +354,7 @@ def desired_specs() -> list[CameraSpec]:
             out.append(CameraSpec(
                 camera_id=r["id"],
                 rtsp_url=rtsp_url,
-                fps=r.get("inference_fps") or settings.inference_fps_default,
+                fps=_effective_fps(r.get("inference_fps")),
                 width=640,
                 transport=transport,
                 snapshot_url=snap_url,
