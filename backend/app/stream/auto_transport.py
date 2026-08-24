@@ -193,7 +193,13 @@ def negotiate(camera: dict, password_plain: str) -> Optional[dict]:
 
     if not host:
         return None
-    if transport != "rtsp":
+    # ``auto`` was written by the legacy camera UI and means exactly
+    # "negotiate from RTSP to the first working fallback". Treating it as an
+    # operator-pinned transport silently bypassed negotiation, so cameras with
+    # a working HTTP snapshot endpoint remained offline behind a closed 554
+    # port. Only an explicit non-RTSP mode (currently ``http_snapshot``) is a
+    # choice we must preserve.
+    if transport not in {"rtsp", "auto"}:
         # Operator has already chosen http_snapshot — respect that
         # and don't auto-revert. (Operator may have picked it for a
         # reason we can't see from here.)
