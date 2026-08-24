@@ -207,7 +207,18 @@ services:
       - sh
       - -c
       - "celery -A app.tasks.celery_app worker -B -Q inference,default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # One Celery child handles one camera loop. Without explicit native
+      # thread limits, OpenCV/ONNX/PyTorch each size their pools to the host
+      # CPU count, multiplying eight children into hundreds of runnable
+      # threads and starving every other service on the CPU deployment.
+      OMP_NUM_THREADS: ${INFERENCE_LIBRARY_THREADS:-1}
+      MKL_NUM_THREADS: ${INFERENCE_LIBRARY_THREADS:-1}
+      OPENBLAS_NUM_THREADS: ${INFERENCE_LIBRARY_THREADS:-1}
+      NUMEXPR_NUM_THREADS: ${INFERENCE_LIBRARY_THREADS:-1}
+      VECLIB_MAXIMUM_THREADS: ${INFERENCE_LIBRARY_THREADS:-1}
+      OPENCV_FOR_THREADS_NUM: ${INFERENCE_LIBRARY_THREADS:-1}
     volumes:
       - ./data/recordings:/data/recordings
       - ./data/models:/data/models

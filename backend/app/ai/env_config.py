@@ -21,12 +21,51 @@ load_optimized() returns a raw PyTorch YOLO — the system always runs.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+
+
+def configure_cpu_thread_budget(backend: str) -> int:
+    """Bound native compute pools in each CPU inference process.
+
+    Celery already provides process-level parallelism. Letting OpenCV and
+    PyTorch independently use every host core inside every child creates a
+    multiplicative thread storm. Environment variables cover libraries that
+    initialise before this function; explicit calls cover already-imported
+    runtimes. GPU backends retain their framework defaults.
+    """
+    if backend not in {"cpu", "intel"}:
+        return 0
+
+    try:
+        threads = max(1, int(os.getenv("INFERENCE_LIBRARY_THREADS", "1")))
+    except (TypeError, ValueError):
+        threads = 1
+
+    try:
+        import cv2
+        cv2.setNumThreads(threads)
+    except Exception as exc:
+        log.debug("unable to set OpenCV thread budget: %s", exc)
+
+    try:
+        import torch
+        torch.set_num_threads(threads)
+        try:
+            torch.set_num_interop_threads(threads)
+        except RuntimeError:
+            # PyTorch permits this setting only before inter-op work starts.
+            pass
+    except Exception as exc:
+        log.debug("unable to set PyTorch thread budget: %s", exc)
+
+    log.info("CPU inference native thread budget=%d per worker process", threads)
+    return threads
 
 
 # backend → Ultralytics export `format=` string. rocm has no export

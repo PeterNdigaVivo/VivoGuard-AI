@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.ai.env_config import HardwareEnv
+from app.ai.env_config import HardwareEnv, configure_cpu_thread_budget
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ def _hardware() -> HardwareEnv:
     global _env
     if _env is None:
         _env = HardwareEnv.detect()
+        configure_cpu_thread_budget(_env.backend)
         # One-line backend banner to stderr so it shows up in
         # `docker compose logs` regardless of log config.
         print(
