@@ -7,6 +7,10 @@
 // preferred React Query / SWR setup and we don't want to fight you on it.
 
 const TOKEN_KEY = 'vg_access_token'
+const REFRESH_TOKEN_KEY = 'vg_refresh_token'
+export const AUTH_EXPIRED_EVENT = 'vg:auth-expired'
+
+let refreshInFlight: Promise<string | null> | null = null
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -15,6 +19,49 @@ export function getToken(): string | null {
 export function setToken(t: string | null): void {
   if (t) localStorage.setItem(TOKEN_KEY, t)
   else localStorage.removeItem(TOKEN_KEY)
+}
+
+export function getRefreshToken(): string | null {
+  return sessionStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+export function setRefreshToken(t: string | null): void {
+  if (t) sessionStorage.setItem(REFRESH_TOKEN_KEY, t)
+  else sessionStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+export function clearTokens(): void {
+  setToken(null)
+  setRefreshToken(null)
+}
+
+function expireSession(): void {
+  clearTokens()
+  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight
+  const refreshToken = getRefreshToken()
+  if (!refreshToken) return null
+
+  refreshInFlight = fetch('/api/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  }).then(async response => {
+    if (!response.ok) return null
+    const tokens = await response.json() as {
+      access_token: string
+      refresh_token: string
+    }
+    setToken(tokens.access_token)
+    setRefreshToken(tokens.refresh_token)
+    return tokens.access_token
+  }).catch(() => null).finally(() => {
+    refreshInFlight = null
+  })
+  return refreshInFlight
 }
 
 interface RequestOpts {
@@ -27,16 +74,26 @@ interface RequestOpts {
 }
 
 export async function api<T = any>(path: string, opts: RequestOpts = {}): Promise<T> {
-  const headers: Record<string, string> = {}
-  if (!opts.form) headers['Content-Type'] = 'application/json'
-  const tok = getToken()
-  if (tok) headers['Authorization'] = `Bearer ${tok}`
+  const request = (token: string | null) => {
+    const headers: Record<string, string> = {}
+    if (!opts.form) headers['Content-Type'] = 'application/json'
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(`/api${path}`, {
+      method: opts.method ?? 'GET',
+      headers,
+      body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
+    })
+  }
 
-  const res = await fetch(`/api${path}`, {
-    method: opts.method ?? 'GET',
-    headers,
-    body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
-  })
+  const originalToken = getToken()
+  let res = await request(originalToken)
+  if (res.status === 401 && originalToken && path !== '/auth/refresh') {
+    const replacementToken = await refreshAccessToken()
+    if (replacementToken) {
+      res = await request(replacementToken)
+      if (res.status === 401) expireSession()
+    } else expireSession()
+  }
 
   if (opts.raw) return res as unknown as T
   if (!res.ok) {

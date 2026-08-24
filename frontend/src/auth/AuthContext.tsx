@@ -4,7 +4,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api, getToken, setToken } from '@/api/client'
+import {
+  api, AUTH_EXPIRED_EVENT, clearTokens, getToken, setRefreshToken, setToken,
+} from '@/api/client'
 
 export interface CurrentUser {
   id: number
@@ -29,12 +31,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // On boot: if a token exists, hydrate /auth/me. Failing that, drop it.
   useEffect(() => {
+    const handleExpired = () => setUser(null)
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleExpired)
     const tok = getToken()
-    if (!tok) { setLoading(false); return }
+    if (!tok) {
+      setLoading(false)
+      return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired)
+    }
     api<CurrentUser>('/auth/me')
       .then(setUser)
-      .catch(() => setToken(null))
+      .catch(() => clearTokens())
       .finally(() => setLoading(false))
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired)
   }, [])
 
   const login = useCallback(async (email: string, password: string) => {
@@ -42,12 +50,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       '/auth/login', { method: 'POST', body: { email, password } },
     )
     setToken(res.access_token)
+    setRefreshToken(res.refresh_token)
     const me = await api<CurrentUser>('/auth/me')
     setUser(me)
   }, [])
 
   const logout = useCallback(() => {
-    setToken(null)
+    clearTokens()
     setUser(null)
   }, [])
 
