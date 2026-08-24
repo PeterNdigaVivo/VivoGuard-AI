@@ -19,6 +19,7 @@ explain itself even when ffmpeg is blocked in connection negotiation:
 """
 from __future__ import annotations
 import logging
+import os
 import shlex
 import subprocess
 import threading
@@ -36,7 +37,7 @@ EOI = b"\xff\xd9"
 
 
 def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
-               rtsp_transport: str = "tcp") -> str:
+               rtsp_transport: str = "tcp", threads: int = 1) -> str:
     """Build the ffmpeg command. Scales to 640w to keep AI bandwidth
     light and emits MJPEG to stdout.
 
@@ -51,12 +52,15 @@ def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
     """
     if rtsp_transport not in ("tcp", "http", "udp"):
         rtsp_transport = "tcp"
+    threads = max(1, int(threads))
     return (
         "ffmpeg -hide_banner -loglevel warning "
         f"-rtsp_transport {rtsp_transport} "
         "-timeout 5000000 -fflags nobuffer -flags low_delay "
+        f"-threads {threads} -filter_threads {threads} "
         f"-i {shlex.quote(rtsp_url)} "
         f"-vf scale={width}:-2,fps={fps} "
+        f"-threads {threads} "
         "-f mjpeg -q:v 6 pipe:1"
     )
 
@@ -67,6 +71,7 @@ class FFmpegWorker(threading.Thread):
     def __init__(self, camera_id: int, rtsp_url: str, *,
                  fps: int = 5, width: int = 640,
                  rtsp_transport: str = "tcp",
+                 threads: int | None = None,
                  buffer: FrameBuffer | None = None):
         super().__init__(daemon=True, name=f"ffmpeg-{camera_id}")
         self.camera_id = camera_id
@@ -74,6 +79,10 @@ class FFmpegWorker(threading.Thread):
         self.fps = fps
         self.width = width
         self.rtsp_transport = rtsp_transport
+        self.threads = max(1, int(
+            threads if threads is not None
+            else os.environ.get("STREAMER_FFMPEG_THREADS", "1")
+        ))
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
         self._stop = threading.Event()
@@ -133,8 +142,13 @@ class FFmpegWorker(threading.Thread):
             # 'Streamer not yet attempting' for tens of seconds.
             self.buffer.update_health(self.camera_id, fps=0,
                                       error="Starting ffmpeg…")
-            cmd = _build_cmd(self.rtsp_url, fps=self.fps, width=self.width,
-                             rtsp_transport=self.rtsp_transport)
+            cmd = _build_cmd(
+                self.rtsp_url,
+                fps=self.fps,
+                width=self.width,
+                rtsp_transport=self.rtsp_transport,
+                threads=self.threads,
+            )
             log.info("camera %s: starting ffmpeg", self.camera_id)
             started_at = time.time()
             try:
