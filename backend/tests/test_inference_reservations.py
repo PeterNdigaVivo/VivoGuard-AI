@@ -212,6 +212,18 @@ def test_unsuppressed_critical_zone_enters_fast_lane():
     assert inference._camera_is_latency_critical(camera)
 
 
+def test_critical_camera_cooldown_prevents_normal_work_starvation():
+    now = 1000.0
+
+    assert not inference._critical_due_from_timestamp(
+        str(now - inference.CRITICAL_REQUEUE_SECONDS + 1), now=now,
+    )
+    assert inference._critical_due_from_timestamp(
+        str(now - inference.CRITICAL_REQUEUE_SECONDS), now=now,
+    )
+    assert inference._critical_due_from_timestamp(None, now=now)
+
+
 def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
     r = FakeLastRunRedis({1: "900", 2: "600", 3: None})
 

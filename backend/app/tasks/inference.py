@@ -41,6 +41,10 @@ log = logging.getLogger(__name__)
 RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridable
 CRITICAL_RUN_SECONDS = settings.inference_critical_slice_seconds
 CRITICAL_GAP_SLA_SECONDS = settings.inference_critical_gap_sla_seconds
+CRITICAL_REQUEUE_SECONDS = min(
+    settings.inference_critical_requeue_seconds,
+    CRITICAL_GAP_SLA_SECONDS,
+)
 # Tightened from RUN_SECONDS+60 to RUN_SECONDS+30. A lock that outlives
 # its task by >30s is stale by definition; the self-healing sweep clears
 # it before TTL expiry anyway, this just bounds the worst case when
@@ -190,6 +194,17 @@ def _task_profile(camera) -> tuple[int, int]:
         # (RabbitMQ uses the inverse convention). This service uses Redis.
         return int(CRITICAL_RUN_SECONDS), 0
     return int(RUN_SECONDS), 9
+
+
+def _critical_due_from_timestamp(value, *, now: float) -> bool:
+    """Fail open unless the camera completed inference inside its cooldown."""
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        age = max(0.0, float(now) - float(value))
+    except (TypeError, ValueError):
+        return True
+    return age >= CRITICAL_REQUEUE_SECONDS
 
 
 def _critical_gap_health(
@@ -443,6 +458,7 @@ def supervise_all() -> None:
     stale_cleared = _sweep_stale_locks(r)
     enqueued: list[int] = []
     skipped:  list[int] = []
+    cooling_down: list[int] = []
     with SessionLocal() as db:
         cams = (
             db.query(Camera)
@@ -459,6 +475,14 @@ def supervise_all() -> None:
         int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
     ]
     for cam in schedulable:
+        if _camera_is_latency_critical(cam):
+            try:
+                last_run = r.get(LAST_RUN_KEY_FMT.format(camera_id=cam.id))
+            except Exception:
+                last_run = None
+            if not _critical_due_from_timestamp(last_run, now=time.time()):
+                cooling_down.append(int(cam.id))
+                continue
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
         # SET NX with TTL — atomic acquire. Value is a placeholder until
         # we know the real task_id; stamped below.
@@ -488,8 +512,10 @@ def supervise_all() -> None:
         else:
             skipped.append(cam.id)
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
-             "already_running=%s, stale_locks_cleared=%d",
-             len(cams), len(schedulable), enqueued, skipped, stale_cleared)
+             "already_running=%s, critical_cooldown=%s, "
+             "stale_locks_cleared=%d",
+             len(cams), len(schedulable), enqueued, skipped, cooling_down,
+             stale_cleared)
     reservation_health = _reservation_health(
         r, [int(cam.id) for cam in schedulable],
     )

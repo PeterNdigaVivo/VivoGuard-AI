@@ -314,6 +314,7 @@ class Settings(BaseSettings):
     # slices so a full mixed fleet rotation cannot hide a critical view for
     # many minutes. The separate gap SLA is measured from actual task starts.
     inference_critical_slice_seconds: int = Field(default=15, ge=5, le=60)
+    inference_critical_requeue_seconds: int = Field(default=180, ge=30, le=600)
     inference_critical_gap_sla_seconds: int = Field(default=300, ge=60, le=900)
     inference_critical_watchdog_grace_seconds: int = Field(
         default=60, ge=30, le=600,
