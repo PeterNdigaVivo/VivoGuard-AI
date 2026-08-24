@@ -68,7 +68,9 @@ def _explain_db_error(e: Exception) -> tuple[int, str]:
 
 from app.database import get_db
 from app.deps import get_current_user, require_role
-from app.models import Campaign, Camera, Shift, Store
+from app.models import (
+    Campaign, Camera, GovernanceAuditLog, OdooStoreMap, Shift, Store,
+)
 from app.schemas.store import (
     CampaignIn, CampaignOut, ShiftIn, ShiftOut, StoreIn, StoreOut,
 )
@@ -78,8 +80,75 @@ router = APIRouter(prefix="/stores", tags=["stores"])
 
 # ---------- stores ----------
 
+def _store_deactivation_blockers(db: Session, store_id: int) -> dict[str, int]:
+    """Return live integrations that must be moved before retirement.
+
+    Store IDs are durable attribution keys for CCTV evidence, assurance cases
+    and Odoo aggregates.  A hard delete can cascade evidence or silently set a
+    camera's store to NULL.  Even a soft deactivation is unsafe while live
+    camera or POS inputs still target the record, so retirement fails closed
+    until those operational links are explicitly reassigned.
+    """
+    cameras = (db.query(Camera)
+                 .filter(Camera.store_id == store_id,
+                         Camera.is_deleted.is_(False)).count())
+    odoo_maps = (db.query(OdooStoreMap)
+                   .filter(OdooStoreMap.store_id == store_id).count())
+    return {
+        "linked_cameras": cameras,
+        "odoo_store_mappings": odoo_maps,
+    }
+
+
+def _deactivate_store(db: Session, store: Store, *, actor=None) -> dict:
+    """Soft-deactivate ``store`` without destroying historical attribution."""
+    if not store.is_active:
+        return {
+            "deactivated": store.id,
+            "already_inactive": True,
+            "historical_data_retained": True,
+        }
+    blockers = _store_deactivation_blockers(db, store.id)
+    if any(blockers.values()):
+        raise HTTPException(
+            409,
+            detail={
+                "message": (
+                    "Store remains active because operational dependencies "
+                    "must be reassigned before deactivation."
+                ),
+                "store_id": store.id,
+                "store_name": store.name,
+                "blockers": blockers,
+                "required_action": (
+                    "Move every linked camera and Odoo store mapping to the "
+                    "confirmed destination store, then retry deactivation."
+                ),
+            },
+        )
+    store.is_active = False
+    db.add(GovernanceAuditLog(
+        actor_user_id=getattr(actor, "id", None),
+        actor_email=getattr(actor, "email", None),
+        action="store.deactivated",
+        entity_type="store",
+        entity_id=str(store.id),
+        details={
+            "store_name": store.name,
+            "blockers_at_deactivation": blockers,
+            "historical_data_retained": True,
+        },
+    ))
+    return {
+        "deactivated": store.id,
+        "already_inactive": False,
+        "historical_data_retained": True,
+    }
+
 @router.get("", response_model=list[StoreOut])
-def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
+def list_stores(include_inactive: bool = False,
+                db: Session = Depends(get_db),
+                _u=Depends(get_current_user)):
     """List stores. Returns [] (not 500) if the underlying SELECT fails
     because of a schema/migration drift — operators see an empty stores
     page instead of a hard error, and `docker compose logs api` shows
@@ -87,7 +156,10 @@ def list_stores(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     import logging as _l
     _log = _l.getLogger(__name__)
     try:
-        return db.query(Store).order_by(Store.country, Store.name).all()
+        query = db.query(Store)
+        if not include_inactive:
+            query = query.filter(Store.is_active.is_(True))
+        return query.order_by(Store.country, Store.name).all()
     except Exception as e:
         _log.exception("GET /stores failed (likely schema drift): %s", e)
         db.rollback()
@@ -123,6 +195,24 @@ def get_store(store_id: int, db: Session = Depends(get_db),
     return s
 
 
+@router.get("/{store_id:int}/deactivation-impact")
+def store_deactivation_impact(store_id: int, db: Session = Depends(get_db),
+                              _u=Depends(require_role("admin"))):
+    """Preview whether a store can be retired without orphaning live inputs."""
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    blockers = _store_deactivation_blockers(db, store_id)
+    return {
+        "store_id": store.id,
+        "store_name": store.name,
+        "is_active": store.is_active,
+        "can_deactivate": not any(blockers.values()),
+        "blockers": blockers,
+        "historical_data_will_be_retained": True,
+    }
+
+
 @router.patch("/{store_id:int}", response_model=StoreOut)
 def update_store(store_id: int, patch: StoreIn,
                  db: Session = Depends(get_db),
@@ -130,7 +220,14 @@ def update_store(store_id: int, patch: StoreIn,
     s = db.get(Store, store_id)
     if not s:
         raise HTTPException(404, "store not found")
-    for k, v in _coerce_empty_strings(patch.model_dump(exclude_unset=True)).items():
+    changes = _coerce_empty_strings(patch.model_dump(exclude_unset=True))
+    if changes.get("is_active") is False and s.is_active:
+        # Do not let the generic PATCH route bypass the same dependency guard
+        # enforced by DELETE.  Retiring a store is an operational workflow,
+        # not an ordinary field edit.
+        _deactivate_store(db, s, actor=_u)
+        changes.pop("is_active", None)
+    for k, v in changes.items():
         setattr(s, k, v)
     try:
         db.commit()
@@ -147,11 +244,17 @@ def update_store(store_id: int, patch: StoreIn,
 @router.delete("/{store_id:int}")
 def delete_store(store_id: int, db: Session = Depends(get_db),
                  _u=Depends(require_role("admin"))):
+    """Retire an unused store while retaining its evidence and audit history.
+
+    This endpoint intentionally preserves the existing HTTP method for client
+    compatibility, but no longer issues a destructive ``DELETE`` statement.
+    """
     s = db.get(Store, store_id)
     if not s:
         raise HTTPException(404, "store not found")
-    db.delete(s); db.commit()
-    return {"deleted": store_id}
+    result = _deactivate_store(db, s, actor=_u)
+    db.commit()
+    return result
 
 
 # ---------- cameras per store ----------

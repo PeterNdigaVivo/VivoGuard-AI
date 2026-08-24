@@ -16,6 +16,20 @@ Use these terms precisely:
 
 No capability is production-ready merely because it is implemented.
 
+## Store inventory retirement
+
+Store records are durable attribution keys and are never hard-deleted through
+the API. `DELETE /stores/{id}` is a backward-compatible soft-deactivation
+operation: it retains historical CCTV, training, assurance and audit evidence.
+The operation fails closed while a non-deleted camera or Odoo store mapping is
+still linked. Administrators should call
+`GET /stores/{id}/deactivation-impact`, reassign the reported live inputs to a
+confirmed destination, then retry. Every successful deactivation is written to
+the governance audit log. Similar names alone are not evidence that two stores
+are duplicates. Inactive stores are excluded from the normal operational store
+list and remain available to administrators with
+`GET /stores?include_inactive=true` for audit and recovery.
+
 ## Minimum critical-zone map
 
 Each store should explicitly map entrance/exit, POS/cash counter, diagonal
