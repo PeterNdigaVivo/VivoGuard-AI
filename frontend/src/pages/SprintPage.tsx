@@ -18,6 +18,7 @@ export default function SprintPage() {
   const [reviewed, setReviewed] = useState(0)            // session counter
   const [err, setErr] = useState<string | null>(null)
   const [showMissedEvent, setShowMissedEvent] = useState(false)
+  const [independentReview, setIndependentReview] = useState(false)
   const location = useLocation()
   const filters = useMemo(() => {
     const q = new URLSearchParams(location.search)
@@ -35,11 +36,13 @@ export default function SprintPage() {
   const loadBatch = useCallback(async () => {
     setBusy(true); setErr(null)
     try {
-      const items = await labelsApi.queue({ ...filters, limit: BATCH })
+      const items = independentReview
+        ? await labelsApi.auditQueue(BATCH)
+        : await labelsApi.queue({ ...filters, limit: BATCH })
       setQueue(items); setIdx(0)
     } catch (e) { setErr(String(e)) }
     finally { setBusy(false) }
-  }, [filters])
+  }, [filters, independentReview])
 
   useEffect(() => { loadBatch() }, [loadBatch])
 
@@ -51,9 +54,12 @@ export default function SprintPage() {
     setBusy(true)
     const id = current.id
     try {
-      if (verdict === 'confirm') await labelsApi.confirm(id)
-      else                       await labelsApi.dismiss(id)
-      setUndoIds(prev => [id, ...prev].slice(0, UNDO_STACK_DEPTH))
+      if (independentReview) await labelsApi.audit(id, verdict)
+      else if (verdict === 'confirm') await labelsApi.confirm(id)
+      else                            await labelsApi.dismiss(id)
+      if (!independentReview) {
+        setUndoIds(prev => [id, ...prev].slice(0, UNDO_STACK_DEPTH))
+      }
       setReviewed(r => r + 1)
       // Advance — if we reach the end, transparently load the next batch.
       if (idx + 1 >= (queue?.length ?? 0)) {
@@ -92,11 +98,14 @@ export default function SprintPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, busy, undoIds])
+  }, [current, busy, undoIds, independentReview])
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <PageHeader title="🎯 Labelling Sprint" actions={<>
+        <Button variant="ghost" onClick={() => setIndependentReview(value => !value)}>
+          {independentReview ? 'Primary review' : 'Independent review'}
+        </Button>
         <Button variant="ghost" onClick={() => setShowMissedEvent(value => !value)}>
           Report missed alert
         </Button>
@@ -107,7 +116,13 @@ export default function SprintPage() {
 
       {showMissedEvent && <MissedEventForm onClose={() => setShowMissedEvent(false)} />}
 
-      {(filters.camera_id || filters.detection_type) && (
+      {independentReview && (
+        <Card className="p-3 mb-3 border-violet-200 bg-violet-50 text-violet-900 dark:bg-slate-900 dark:text-violet-200">
+          Blind independent review · the first reviewer’s verdict is hidden. Agreement can make quarantined evidence trainable; disagreement opens an adjudication case.
+        </Card>
+      )}
+
+      {!independentReview && (filters.camera_id || filters.detection_type) && (
         <Card className="p-3 mb-3 border-sky-200 bg-sky-50 text-sky-900">
           Validation campaign
           {filters.camera_id && <> · camera #{filters.camera_id}</>}
@@ -157,7 +172,7 @@ export default function SprintPage() {
       {current && (
         <SprintCard alert={current} onConfirm={() => vote('confirm')}
                                      onDismiss={() => vote('dismiss')}
-                                     onUndo={undoIds.length ? undo : undefined}
+                                     onUndo={!independentReview && undoIds.length ? undo : undefined}
                                      busy={busy} />
       )}
     </div>

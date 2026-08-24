@@ -42,9 +42,9 @@ def _training_provenance(verdict: str) -> dict:
             "review_state": "pending",
         }
     return {
-        "source_kind": "operator_verified",
-        "eligible_for_training": True,
-        "review_state": "approved",
+        "source_kind": "operator_confirmed",
+        "eligible_for_training": False,
+        "review_state": "pending",
     }
 
 
@@ -214,7 +214,9 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     # moment bbox above must never be copied onto frames where the
     # person has moved.
     _enqueue_temporal_harvest(alert_id)
-    _maybe_enqueue_training(db, cls)   # immediate fine-tune if threshold crossed
+    # A first reviewer creates evidence but cannot make it trainable alone.
+    # The independent-review workflow promotes the sample and evaluates the
+    # retraining threshold only after a second reviewer agrees.
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 

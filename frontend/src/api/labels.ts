@@ -33,6 +33,12 @@ export const labels = {
   dismiss: (id: number) =>
     api<{ id: number; status: string }>(`/labels/${id}`, {
       method: 'POST', body: { verdict: 'dismiss' } }),
+  auditQueue: (limit = 20) =>
+    api<SprintAlert[]>(`/labels/audit-queue?limit=${limit}`),
+  audit: (id: number, verdict: 'confirm' | 'dismiss') =>
+    api<{
+      alert_id: number; agreed: boolean; training_eligible: boolean
+    }>(`/labels/${id}/audit`, { method: 'POST', body: { verdict } }),
   undo: (id: number) =>
     api<UndoResult>(`/labels/${id}/undo`, { method: 'DELETE' }),
   today: () => api<TodayCounts>(`/labels/today`),

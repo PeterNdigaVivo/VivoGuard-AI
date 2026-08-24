@@ -19,12 +19,14 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, exists, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user, require_role
-from app.models import Alert, Camera, DetectionEvent, Store, User, Zone
+from app.models import (
+    Alert, AlertReviewDecision, Camera, DetectionEvent, Store, User, Zone,
+)
 from app.schemas.alert import AlertActionOut, AlertOut
 
 log = logging.getLogger(__name__)
@@ -81,6 +83,44 @@ def _dwell_from_event(ev: Optional[DetectionEvent]) -> Optional[int]:
         return None
 
 
+def _serialise_queue_rows(
+    db: Session, rows: list[tuple], *, blind: bool = False,
+) -> list[dict]:
+    """Build review cards; blind audit cards never reveal the first verdict."""
+    zone_ids = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
+    store_ids = {cam.store_id for _, _, cam in rows
+                 if cam and cam.store_id is not None}
+    zones_by_id = ({z.id: z for z in db.query(Zone)
+                                      .filter(Zone.id.in_(zone_ids)).all()}
+                   if zone_ids else {})
+    stores_by_id = ({s.id: s for s in db.query(Store)
+                                       .filter(Store.id.in_(store_ids)).all()}
+                    if store_ids else {})
+    from app.api.alerts import _to_alert_out
+
+    out: list[dict] = []
+    for alert, event, camera in rows:
+        item: AlertOut = _to_alert_out(
+            alert, event, camera,
+            zones_by_id.get(event.zone_id) if event.zone_id else None,
+            stores_by_id.get(camera.store_id)
+            if (camera and camera.store_id) else None,
+        )
+        payload = item.model_dump()
+        if blind:
+            payload["status"] = "independent_review_pending"
+        payload["dwell_seconds"] = _dwell_from_event(event)
+        rank, reason = _review_priority(event.detection_type)
+        payload["review_priority"] = rank
+        payload["review_reason"] = (
+            "blind independent review" if blind else reason
+        )
+        payload["clip_available"] = bool(
+            event.clip_path or (event.extra or {}).get("alert_clip_path"))
+        out.append(payload)
+    return out
+
+
 # ---- GET /labels/queue ----------------------------------------------
 
 @router.get("/queue", response_model=list[dict])
@@ -124,38 +164,50 @@ def queue(
     q = q.order_by(priority_rank.asc(), Alert.created_at.asc()).limit(limit)
     rows = q.all()
 
-    # Bulk-fetch zones + stores referenced by the page (same trick as
-    # the /alerts list endpoint) so _to_alert_out has names without
-    # N round-trips.
-    zone_ids  = {ev.zone_id for _, ev, _ in rows if ev.zone_id is not None}
-    store_ids = {cam.store_id for _, _, cam in rows
-                  if cam and cam.store_id is not None}
-    zones_by_id  = ({z.id: z for z in db.query(Zone)
-                                          .filter(Zone.id.in_(zone_ids)).all()}
-                    if zone_ids else {})
-    stores_by_id = ({s.id: s for s in db.query(Store)
-                                          .filter(Store.id.in_(store_ids)).all()}
-                    if store_ids else {})
+    return _serialise_queue_rows(db, rows)
 
-    # Reuse the existing serialiser per Rule #5.
-    from app.api.alerts import _to_alert_out
 
-    out: list[dict] = []
-    for a, ev, cam in rows:
-        item: AlertOut = _to_alert_out(
-            a, ev, cam,
-            zones_by_id.get(ev.zone_id) if ev.zone_id else None,
-            stores_by_id.get(cam.store_id) if (cam and cam.store_id) else None,
-        )
-        d = item.model_dump()
-        d["dwell_seconds"] = _dwell_from_event(ev)   # spliced in
-        rank, reason = _review_priority(ev.detection_type)
-        d["review_priority"] = rank
-        d["review_reason"] = reason
-        d["clip_available"] = bool(
-            ev.clip_path or (ev.extra or {}).get("alert_clip_path"))
-        out.append(d)
-    return out
+@router.get("/audit-queue", response_model=list[dict])
+def audit_queue(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int = Query(DEFAULT_BATCH, ge=1, le=MAX_BATCH),
+):
+    """Blind second-review sample, excluding the primary reviewer."""
+    reviewed_by_other = exists().where(and_(
+        AlertReviewDecision.alert_id == Alert.id,
+        AlertReviewDecision.reviewer_id != user.id,
+    ))
+    reviewed_by_user = exists().where(and_(
+        AlertReviewDecision.alert_id == Alert.id,
+        AlertReviewDecision.reviewer_id == user.id,
+    ))
+    priority_rank = case(
+        (DetectionEvent.detection_type.in_(CRITICAL_REVIEW_TYPES), 0),
+        (DetectionEvent.detection_type.in_(HIGH_REVIEW_TYPES), 1),
+        else_=2,
+    )
+    rows = (db.query(Alert, DetectionEvent, Camera)
+              .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+              .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+              .filter(Alert.status.in_(("confirmed", "dismissed")))
+              .filter(DetectionEvent.detection_type != "positive_operational")
+              .filter(reviewed_by_other)
+              .filter(~reviewed_by_user)
+              .order_by(priority_rank.asc(), Alert.created_at.asc())
+              .limit(limit).all())
+    return _serialise_queue_rows(db, rows, blind=True)
+
+
+@router.post("/{alert_id}/audit", response_model=dict)
+def audit_label(
+    alert_id: int,
+    body: VerdictIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin", "operator")),
+):
+    from app.services.alert_feedback import record_independent_verdict
+    return record_independent_verdict(db, alert_id, body.verdict, user)
 
 
 # ---- POST /labels/{alert_id} ----------------------------------------

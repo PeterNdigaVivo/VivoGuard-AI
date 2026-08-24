@@ -18,12 +18,95 @@ from typing import Literal, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import Alert, AlertReviewDecision, DetectionEvent, User
+from app.models import (
+    Alert, AlertReviewDecision, AssuranceCase, DetectionEvent, TrainingImage,
+    User,
+)
 from app.schemas.alert import AlertActionOut
 
 log = logging.getLogger(__name__)
 
 VerdictLiteral = Literal["confirm", "dismiss"]
+
+
+def record_independent_verdict(
+    db: Session,
+    alert_id: int,
+    verdict: VerdictLiteral,
+    user: User,
+) -> dict:
+    """Append a blind second review and govern the training evidence.
+
+    Agreement promotes the first review's quarantined sample. Disagreement
+    keeps it quarantined and opens an assurance case for adjudication. The
+    alert's original operational status is never silently rewritten.
+    """
+    if verdict not in ("confirm", "dismiss"):
+        raise HTTPException(422, "verdict must be 'confirm' or 'dismiss'")
+    alert = db.get(Alert, alert_id)
+    if not alert or alert.status not in {"confirmed", "dismissed"}:
+        raise HTTPException(409, "alert requires a completed primary review")
+    prior = (db.query(AlertReviewDecision)
+             .filter(AlertReviewDecision.alert_id == alert.id)
+             .order_by(AlertReviewDecision.created_at,
+                       AlertReviewDecision.id).all())
+    if not prior:
+        raise HTTPException(409, "primary review evidence is missing")
+    if any(row.reviewer_id == user.id for row in prior):
+        raise HTTPException(409, "reviewer must be independent")
+
+    second = "confirmed" if verdict == "confirm" else "dismissed"
+    first = alert.status
+    agreed = first == second
+    db.add(AlertReviewDecision(
+        alert_id=alert.id, reviewer_id=user.id, verdict=second,
+        classification="independent_agreement" if agreed
+        else "independent_disagreement",
+    ))
+    images = (db.query(TrainingImage)
+              .filter(TrainingImage.source_alert_id == alert.id).all())
+    for image in images:
+        image.eligible_for_training = agreed
+        image.review_state = "approved" if agreed else "quarantined"
+        source = dict(image.source_extra or {})
+        source.update({
+            "independent_reviewer_id": user.id,
+            "independent_review_agreed": agreed,
+        })
+        image.source_extra = source
+
+    event = db.get(DetectionEvent, alert.event_id)
+    if not agreed:
+        alert.training_eligible = False
+        alert.review_only = True
+        existing = (db.query(AssuranceCase)
+                    .filter(AssuranceCase.dedup_key ==
+                            f"review-disagreement:{alert.id}").one_or_none())
+        if existing is None:
+            db.add(AssuranceCase(
+                dedup_key=f"review-disagreement:{alert.id}",
+                case_type="reviewer_disagreement", severity="high",
+                status="open", title=f"Independent review disagreement: alert {alert.id}",
+                camera_id=event.camera_id if event else None,
+                alert_id=alert.id, event_id=event.id if event else None,
+                root_cause="human_review_disagreement",
+                evidence={"primary_verdict": first,
+                          "independent_verdict": second},
+                training_status="blocked_pending_adjudication",
+                human_review_required=True,
+            ))
+    db.commit()
+    if agreed and event is not None and images:
+        from app.training.feedback_loop import _maybe_enqueue_training
+        _maybe_enqueue_training(db, event.detection_type)
+    return {
+        "alert_id": alert.id,
+        "primary_verdict": first,
+        "independent_verdict": second,
+        "agreed": agreed,
+        "training_evidence_count": len(images),
+        "training_eligible": bool(agreed and images),
+    }
 
 
 def record_verdict(
