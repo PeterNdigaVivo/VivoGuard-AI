@@ -81,6 +81,20 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
+echo "→ verifying nginx-to-API routing"
+for i in $(seq 1 20); do
+  if docker compose exec -T nginx wget -qO- http://localhost/api/healthz \
+       | grep -q '"status":"ok"'; then
+    break
+  fi
+  if [ "$i" -eq 20 ]; then
+    echo "nginx cannot reach the healthy API"
+    docker compose logs --tail=100 nginx api
+    exit 1
+  fi
+  sleep 1
+done
+
 # 7. (Optional) pre-download base YOLOv8 weights so the first inference run
 # isn't blocked on a network fetch.
 echo "→ pre-downloading YOLOv8 base weights"
