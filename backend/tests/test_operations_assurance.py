@@ -13,7 +13,7 @@ from app.api.operations import (
 )
 from app.database import Base
 from app.integrations.odoo_pos import normalise_odoo_event
-from app.models import AssuranceCase, Camera, Store
+from app.models import AssuranceCase, Camera, Store, Zone
 from app.operations.assurance import (
     assess_coverage, create_alert_quality_cases, create_lone_worker_cases, risk_band,
     score_operational_event, store_is_open,
@@ -159,3 +159,43 @@ def test_missed_event_without_identified_camera_stays_pending_investigation():
         case = db.get(AssuranceCase, result["case_id"])
         assert case.camera_id is None
         assert case.root_cause == "camera_unconfirmed"
+
+
+def test_missed_event_with_evidence_ignores_stale_current_camera_status():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        store = Store(name="Evidence Store", country="Kenya")
+        db.add(store)
+        db.flush()
+        camera = Camera(
+            name="Evidence Camera", site="Evidence Store", brand="dahua",
+            connection_type="nvr_dahua", host="127.0.0.1",
+            status="offline", store_id=store.id,
+        )
+        camera.zones.append(Zone(
+            name="Entrance", shape="polygon",
+            polygon_coords_json=[[0, 0], [1, 0], [1, 1]],
+            detection_types_json=["shutter"],
+        ))
+        db.add(camera)
+        db.commit()
+
+        result = report_missed_event(
+            MissedEventIn(
+                source_ref="evidence-backed-historical-miss",
+                store_id=store.id,
+                camera_id=camera.id,
+                occurred_at=datetime.now(timezone.utc),
+                report_text="A retained frame shows a missed shutter event.",
+                label="shutter",
+                evidence_path="/data/recordings/missed-events/frame.jpg",
+            ),
+            db=db,
+            user=SimpleNamespace(id=1, email="reviewer@example.test"),
+        )
+
+        assert result["root_cause"] == "detector_false_negative"
+        assert result["training_status"] == (
+            "sample_created_pending_bbox_verification"
+        )

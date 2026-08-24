@@ -296,13 +296,21 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
     elif camera is None:
         root_cause = "camera_unconfirmed"
         training_status = "blocked_pending_camera_identification"
-    elif camera and (camera.status != "online" or not camera.last_seen_at):
-        root_cause, training_status = "camera_unavailable", "blocked_no_visual_evidence"
     elif camera and not camera.zones:
         root_cause, training_status = "zone_unconfigured", "labelled_case_pending_evidence_review"
+    elif body.evidence_path:
+        # A retained image/clip proves that visual evidence exists for this
+        # historical incident. Camera.status and last_seen_at describe the
+        # database row *now* and may be stale because live health is sourced
+        # from Redis; they must not relabel an evidence-backed miss as a
+        # camera outage.
+        root_cause = "detector_false_negative"
+        training_status = "labelled_sample_pending_human_verification"
+    elif camera and (camera.status != "online" or not camera.last_seen_at):
+        root_cause, training_status = "camera_unavailable", "blocked_no_visual_evidence"
     else:
         root_cause = "detector_false_negative"
-        training_status = "labelled_sample_pending_human_verification" if body.evidence_path else "blocked_no_visual_evidence"
+        training_status = "blocked_no_visual_evidence"
     case = upsert_case(
         db, dedup_key=f"missed:{body.source}:{body.source_ref}", case_type="missed_event",
         severity="high", title=f"Human-reported event: {body.label}",
