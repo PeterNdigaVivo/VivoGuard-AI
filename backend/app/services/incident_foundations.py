@@ -1,7 +1,9 @@
 """Feature-off incident/evidence/outbox shadow projection."""
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import or_
@@ -22,6 +24,23 @@ VALID_EVALUATION_TRANSITIONS = {
     "retracted": {"verified", "downgraded"},
     "expired": {"verified", "downgraded", "retracted"},
 }
+
+
+def _sha256_file(path: str | None) -> str | None:
+    """Hash evidence without allowing a missing/pruned file to look valid."""
+    if not path:
+        return None
+    target = Path(path)
+    if not target.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def event_idempotency_key(event_id: int) -> str:
@@ -49,7 +68,7 @@ def clip_eligibility(
     policy.
     """
     clip_path = event.clip_path or (event.extra or {}).get("alert_clip_path")
-    if clip_path:
+    if clip_path and Path(clip_path).is_file():
         return True, None
     if event.timestamp is None:
         return False, "event_timestamp_missing"
@@ -122,14 +141,18 @@ def record_alert_foundations(
     eligible, ineligible_reason = clip_eligibility(
         db, event, store_id=store_id,
     )
+    snapshot_sha256 = _sha256_file(event.thumbnail_path)
+    clip_sha256 = _sha256_file(clip_path)
     db.add(EvidenceManifest(
         alert_id=alert.id,
         snapshot_path=event.thumbnail_path,
         clip_path=clip_path,
         filmstrip_paths_json=alert.snapshot_paths,
         clip_eligible=eligible,
-        clip_available=bool(clip_path),
+        clip_available=clip_sha256 is not None,
         ineligible_reason=ineligible_reason,
+        snapshot_sha256=snapshot_sha256,
+        clip_sha256=clip_sha256,
     ))
 
     if queue_delivery and not alert.notification_suppressed:
@@ -239,8 +262,10 @@ def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> 
     row.snapshot_path = event.thumbnail_path
     row.clip_path = clip_path
     row.filmstrip_paths_json = alert.snapshot_paths
-    row.clip_available = bool(clip_path)
-    if clip_path:
+    row.snapshot_sha256 = _sha256_file(event.thumbnail_path)
+    row.clip_sha256 = _sha256_file(clip_path)
+    row.clip_available = row.clip_sha256 is not None
+    if row.clip_available:
         row.clip_eligible = True
         row.ineligible_reason = None
     elif row.clip_eligible is None:

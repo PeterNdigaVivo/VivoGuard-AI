@@ -72,19 +72,35 @@ def test_suppressed_alert_never_enters_delivery_outbox():
     assert db.query(DeliveryOutbox).count() == 0
 
 
-def test_clip_sync_uses_one_canonical_manifest():
+def test_clip_sync_uses_one_canonical_manifest(tmp_path):
     db = _session()
     store, alert, event = _alert(db)
     record_alert_foundations(db, alert, event, store_id=store.id)
-    event.extra = {**(event.extra or {}), "alert_clip_path": "/tmp/alert.mp4"}
+    clip = tmp_path / "alert.mp4"
+    clip.write_bytes(b"bound incident evidence")
+    event.extra = {**(event.extra or {}), "alert_clip_path": str(clip)}
 
     assert sync_evidence_manifest(db, alert, event) is True
     db.commit()
     manifest = db.query(EvidenceManifest).one()
-    assert manifest.clip_path == "/tmp/alert.mp4"
+    assert manifest.clip_path == str(clip)
     assert manifest.clip_eligible is True
     assert manifest.clip_available is True
     assert manifest.ineligible_reason is None
+    assert len(manifest.clip_sha256) == 64
+
+
+def test_manifest_marks_missing_clip_path_unavailable():
+    db = _session()
+    store, alert, event = _alert(db)
+    event.extra = {**(event.extra or {}), "alert_clip_path": "/missing/clip.mp4"}
+
+    record_alert_foundations(db, alert, event, store_id=store.id)
+    manifest = db.query(EvidenceManifest).one()
+
+    assert manifest.clip_path == "/missing/clip.mp4"
+    assert manifest.clip_available is False
+    assert manifest.clip_sha256 is None
 
 
 def test_recording_window_sets_honest_clip_eligibility_before_extraction():

@@ -26,6 +26,7 @@ RTSP URLs contain decrypted camera passwords — they are NEVER logged.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import redis
+from sqlalchemy import or_
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
@@ -186,11 +188,82 @@ def _entrance_clip_for(db, ev, ev_ts):
     # the Path.exists() check at every call site is the real gate — a
     # status filter only created a boundary race for alerts processed
     # right after a window transition.
-    return (db.query(RecordingClip)
-              .filter(RecordingClip.camera_id.in_(sorted(entrance)),
-                      RecordingClip.started_at <= ev_ts)
-              .order_by(RecordingClip.started_at.desc())
-              .first())
+    candidates = (db.query(RecordingClip)
+                    .filter(RecordingClip.camera_id.in_(sorted(entrance)),
+                            RecordingClip.started_at <= ev_ts)
+                    .order_by(RecordingClip.started_at.desc())
+                    .limit(20)
+                    .all())
+    return next((clip for clip in candidates
+                 if _recording_covers_event(clip, ev_ts)), None)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None
+            else value.astimezone(timezone.utc))
+
+
+def _recording_covers_event(clip, event_ts: datetime) -> bool:
+    """Prove that a recording row/file covers the event instant.
+
+    A `started_at <= event` test alone is unsafe: an old row can survive a
+    recorder crash with `ended_at=NULL`, and a prior window's file may still
+    exist briefly.  For closed rows the durable end timestamp is authoritative.
+    For open rows, require the file to have been written at approximately the
+    event time as an additional stale-recorder guard.
+    """
+    if not clip or not clip.started_at or not clip.file_path:
+        return False
+    event_utc = _as_utc(event_ts)
+    if _as_utc(clip.started_at) > event_utc:
+        return False
+    if clip.ended_at is not None:
+        return _as_utc(clip.ended_at) >= event_utc
+    target = Path(clip.file_path)
+    if not target.is_file():
+        return False
+    try:
+        # Fragmented MP4 writes may update in chunks. Two minutes tolerates a
+        # slow share while rejecting a recorder that stopped before the event.
+        return target.stat().st_mtime >= event_utc.timestamp() - 120
+    except OSError:
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _clip_source_matches_event(db, ev, clip) -> bool:
+    """Allow alternate-camera evidence only for a same-store entrance.
+
+    Store-open alerts may intentionally be anchored on an occupancy camera
+    while showing the door camera. Every other cross-camera attachment is an
+    evidence mismatch and must be rejected.
+    """
+    if int(clip.camera_id) == int(ev.camera_id):
+        return True
+    if (ev.detection_type or "") != "shop_open_close":
+        return False
+    from app.models import Camera, Zone
+    event_store_id = (ev.extra or {}).get("store_id")
+    if event_store_id is None:
+        event_store_id = db.query(Camera.store_id).filter(
+            Camera.id == ev.camera_id).scalar()
+    source_store_id = clip.store_id
+    if source_store_id is None:
+        source_store_id = db.query(Camera.store_id).filter(
+            Camera.id == clip.camera_id).scalar()
+    if (event_store_id is None or source_store_id is None
+            or int(event_store_id) != int(source_store_id)):
+        return False
+    source_zones = (db.query(Zone.detection_types_json)
+                      .filter(Zone.camera_id == clip.camera_id).all())
+    return any("entry_exit" in (types or []) for (types,) in source_zones)
 
 
 def _pid_is_ffmpeg(pid: int) -> bool:
@@ -317,6 +390,13 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
     15s of the door opening. RE-ENCODED (libx264+aac+faststart), not
     stream-copied: the window recordings are fragmented mp4, which
     HTML5 <video> can't play directly."""
+    if (not _recording_covers_event(clip, ev_ts)
+            or not _clip_source_matches_event(db, ev, clip)):
+        log.warning(
+            "recorder: rejected unbound evidence alert=%s cam=%s src_cam=%s",
+            alert.id, ev.camera_id, getattr(clip, "camera_id", None),
+        )
+        return False
     started = clip.started_at
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
@@ -340,7 +420,15 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
         log.warning("recorder: clip extract failed alert=%s: %s", alert.id, e)
         return False
     if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
-        ev.extra = {**(ev.extra or {}), "alert_clip_path": str(out)}
+        ev.extra = {
+            **(ev.extra or {}),
+            "alert_clip_path": str(out),
+            "alert_clip_source_camera_id": int(clip.camera_id),
+            "alert_clip_source_recording_id": int(clip.id),
+            "alert_clip_event_timestamp": _as_utc(ev_ts).isoformat(),
+            "alert_clip_offset_seconds": offset,
+            "alert_clip_sha256": _sha256_file(out),
+        }
         if bool(getattr(settings, "incident_foundations_enabled", False)):
             try:
                 from app.services.incident_foundations import (
@@ -385,21 +473,24 @@ def extract_pending_clips() -> None:
                         RecordingClip.camera_id == DetectionEvent.camera_id)
                   .filter(Alert.created_at >= since,
                           RecordingClip.status == "recording",
-                          DetectionEvent.timestamp >= RecordingClip.started_at)
+                          DetectionEvent.timestamp >= RecordingClip.started_at,
+                          or_(RecordingClip.ended_at.is_(None),
+                              RecordingClip.ended_at >= DetectionEvent.timestamp))
                   .order_by(RecordingClip.started_at.desc())
                   .all())
         seen: set[int] = set()
         for alert, ev, clip in rows:
             if alert.id in seen:          # a camera can have >1 window row
                 continue
-            seen.add(alert.id)
             if (ev.extra or {}).get("alert_clip_path"):
-                continue
-            if not clip.file_path or not Path(clip.file_path).exists():
+                seen.add(alert.id)
                 continue
             ev_ts = ev.timestamp
             if ev_ts.tzinfo is None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
+            if not _recording_covers_event(clip, ev_ts):
+                continue
+            seen.add(alert.id)
             # Store-open clips must show the DOOR: prefer an entrance
             # camera's recording over the (possibly occupancy) camera
             # that anchored the event.
@@ -441,13 +532,16 @@ def extract_pending_clips() -> None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
             clip = _entrance_clip_for(db, ev, ev_ts)
             if clip is None and ev.camera_id:
-                clip = (db.query(RecordingClip)
-                          .filter(RecordingClip.camera_id == ev.camera_id,
-                                  RecordingClip.started_at <= ev_ts)
-                          .order_by(RecordingClip.started_at.desc())
-                          .first())
+                candidates = (db.query(RecordingClip)
+                                .filter(RecordingClip.camera_id == ev.camera_id,
+                                        RecordingClip.started_at <= ev_ts)
+                                .order_by(RecordingClip.started_at.desc())
+                                .limit(20)
+                                .all())
+                clip = next((row for row in candidates
+                             if _recording_covers_event(row, ev_ts)), None)
             if (clip is None or not clip.file_path
-                    or not Path(clip.file_path).exists()):
+                    or not _recording_covers_event(clip, ev_ts)):
                 continue
             _extract_one(db, alert, ev, clip, ev_ts)
 
@@ -459,6 +553,7 @@ def prune_alert_clips() -> None:
     from datetime import timedelta
     from app.database import SessionLocal
     from app.models import Alert, DetectionEvent
+    from app.services.incident_foundations import sync_evidence_manifest
     hours = int(getattr(settings, "recording_alert_clip_retention_hours", 48))
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     cleared = 0
@@ -475,7 +570,14 @@ def prune_alert_clips() -> None:
                 Path(p).unlink(missing_ok=True)
             except Exception:
                 pass
-            ev.extra = {k: v for k, v in (ev.extra or {}).items() if k != "alert_clip_path"}
+            provenance_keys = {
+                "alert_clip_path", "alert_clip_source_camera_id",
+                "alert_clip_source_recording_id", "alert_clip_event_timestamp",
+                "alert_clip_offset_seconds", "alert_clip_sha256",
+            }
+            ev.extra = {k: v for k, v in (ev.extra or {}).items()
+                        if k not in provenance_keys}
+            sync_evidence_manifest(db, _alert, ev)
             cleared += 1
         if cleared:
             db.commit()
