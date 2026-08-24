@@ -584,6 +584,20 @@ def prune_alert_clips() -> None:
             log.info("recorder: pruned %d alert clips", cleared)
 
 
+@celery_app.task(name="recorder.backfill_evidence_hashes", ignore_result=True)
+def backfill_evidence_hashes() -> None:
+    """Bounded legacy evidence verification; never touches inference."""
+    from app.database import SessionLocal
+    from app.services.incident_foundations import (
+        backfill_evidence_hashes as backfill_batch,
+    )
+    with SessionLocal() as db:
+        result = backfill_batch(db, limit=100)
+        db.commit()
+    if result["processed"]:
+        log.info("recorder: legacy evidence verification %s", result)
+
+
 # ── Storage health ─────────────────────────────────────────────────────────
 def _dir_size_bytes(p: Path) -> int:
     total = 0

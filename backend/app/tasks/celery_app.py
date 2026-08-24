@@ -169,6 +169,7 @@ celery_app.conf.update(
         "recorder.tick":                  {"queue": "recorder"},
         "recorder.extract_pending_clips": {"queue": "recorder"},
         "recorder.prune_alert_clips":     {"queue": "recorder"},
+        "recorder.backfill_evidence_hashes": {"queue": "recorder"},
         "recorder.storage_health_check":  {"queue": "recorder"},
     },
     # Pin Beat's clock to EAT (NOT settings.app_timezone, which is UTC on the
@@ -553,6 +554,10 @@ celery_app.conf.update(
         "recorder-prune-alert-clips-hourly": {
             "task": "recorder.prune_alert_clips",
             "schedule": 60 * 60.0,
+        },
+        "recorder-verify-legacy-evidence-every-30min": {
+            "task": "recorder.backfill_evidence_hashes",
+            "schedule": timedelta(minutes=30),
         },
         "recorder-storage-health-every-30min": {
             "task": "recorder.storage_health_check",

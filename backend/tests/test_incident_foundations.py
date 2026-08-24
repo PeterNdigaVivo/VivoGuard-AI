@@ -7,8 +7,9 @@ from app.models import (
     IncidentMember, IncidentTransition, RecordingClip, Store,
 )
 from app.services.incident_foundations import (
-    acknowledge_incident, event_idempotency_key, record_alert_foundations,
-    resolve_incident, sync_evidence_manifest, transition_incident,
+    acknowledge_incident, backfill_evidence_hashes, event_idempotency_key,
+    record_alert_foundations, resolve_incident, sync_evidence_manifest,
+    transition_incident,
 )
 
 
@@ -101,6 +102,32 @@ def test_manifest_marks_missing_clip_path_unavailable():
     assert manifest.clip_path == "/missing/clip.mp4"
     assert manifest.clip_available is False
     assert manifest.clip_sha256 is None
+
+
+def test_legacy_evidence_backfill_hashes_present_and_closes_missing(tmp_path):
+    db = _session()
+    present = tmp_path / "present.mp4"
+    present.write_bytes(b"legacy evidence")
+    rows = [
+        EvidenceManifest(alert_id=1, clip_path=str(present), clip_available=True),
+        EvidenceManifest(alert_id=2, clip_path=str(tmp_path / "gone.mp4"),
+                         clip_available=True),
+    ]
+    # These isolated rows deliberately omit Alert FKs; SQLite does not enforce
+    # them in this in-memory unit test and the service only needs manifests.
+    db.add_all(rows); db.flush()
+
+    result = backfill_evidence_hashes(db)
+
+    assert result == {
+        "processed": 2, "clips_hashed": 1, "clips_unavailable": 1,
+        "snapshots_hashed": 0,
+    }
+    assert rows[0].clip_available is True
+    assert len(rows[0].clip_sha256) == 64
+    assert rows[1].clip_available is False
+    assert rows[1].clip_sha256 is None
+    assert backfill_evidence_hashes(db)["processed"] == 0
 
 
 def test_recording_window_sets_honest_clip_eligibility_before_extraction():

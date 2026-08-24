@@ -275,3 +275,42 @@ def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> 
             db, event, store_id=store_id,
         )
     return True
+
+
+def backfill_evidence_hashes(db: Session, *, limit: int = 100) -> dict[str, int]:
+    """Verify a bounded batch of legacy manifests that claimed clip access.
+
+    Old rows predate digest population. A referenced file that has since been
+    pruned is marked unavailable; a present file receives its immutable hash.
+    The `clip_available` filter makes missing files terminal instead of
+    reprocessing them forever. The caller owns the transaction.
+    """
+    rows = (db.query(EvidenceManifest)
+              .filter(EvidenceManifest.clip_available.is_(True),
+                      EvidenceManifest.clip_sha256.is_(None))
+              .order_by(EvidenceManifest.id)
+              .limit(max(1, min(int(limit), 500)))
+              .all())
+    hashed = 0
+    unavailable = 0
+    snapshots_hashed = 0
+    for row in rows:
+        digest = _sha256_file(row.clip_path)
+        if digest is None:
+            row.clip_available = False
+            unavailable += 1
+        else:
+            row.clip_sha256 = digest
+            hashed += 1
+        if row.snapshot_sha256 is None:
+            snapshot_digest = _sha256_file(row.snapshot_path)
+            if snapshot_digest is not None:
+                row.snapshot_sha256 = snapshot_digest
+                snapshots_hashed += 1
+    db.flush()
+    return {
+        "processed": len(rows),
+        "clips_hashed": hashed,
+        "clips_unavailable": unavailable,
+        "snapshots_hashed": snapshots_hashed,
+    }
