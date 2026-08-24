@@ -118,6 +118,13 @@ For a production host migration, follow
 itself increase the number of long-lived camera tasks, so concurrency and
 camera coverage must be measured rather than assumed.
 
+The GPU runbook includes the isolated `gpu_concurrency_benchmark.py` command.
+It compiles an explicit TensorRT batch profile and records latency, throughput,
+VRAM and failures before any live feed is moved. Controlled multi-worker
+distribution is available through `INFERENCE_SHARD_COUNT` and
+`INFERENCE_QUEUES`; keep both at their one-queue defaults unless every shard
+consumer and shared evidence path has been provisioned and tested.
+
 ### 2.5 Scaling on a single host
 
 ```bash

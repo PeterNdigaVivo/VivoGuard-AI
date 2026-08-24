@@ -99,34 +99,64 @@ def resolve_weights(model_name: str | None = None) -> str:
     return name
 
 
-def infer(frame: np.ndarray, *, weights: str | None = None,
-          conf: float = 0.25, imgsz: int = 640) -> list[dict]:
-    """Run inference on a single BGR frame.
-    Returns a list of detection dicts."""
-    model = load_model(resolve_weights(weights))
-    device = _hardware().device
-    results = model.predict(frame, conf=conf, imgsz=imgsz, device=device,
-                            verbose=False)
+def _normalise_result(result, frame: np.ndarray, model) -> list[dict]:
+    """Convert one Ultralytics result into VivoGuard's stable schema."""
     out: list[dict] = []
-    if not results:
-        return out
-    r = results[0]
-    if r.boxes is None or len(r.boxes) == 0:
+    if result is None or result.boxes is None or len(result.boxes) == 0:
         return out
     h, w = frame.shape[:2]
-    names: dict[int, str] = r.names if hasattr(r, "names") else getattr(model, "names", {})
-    xyxy = r.boxes.xyxy.cpu().numpy()
-    confs = r.boxes.conf.cpu().numpy()
-    clss  = r.boxes.cls.cpu().numpy().astype(int)
+    names: dict[int, str] = (
+        result.names if hasattr(result, "names") else getattr(model, "names", {})
+    )
+    xyxy = result.boxes.xyxy.cpu().numpy()
+    confs = result.boxes.conf.cpu().numpy()
+    clss = result.boxes.cls.cpu().numpy().astype(int)
     for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
         cls_name = names.get(int(k), str(int(k)))
         out.append({
-            "cls":    cls_name,
-            "cls_id": int(k),      # int COCO id — the ByteTrack adapter builds
-                                   # sv.Detections.class_id from this (additive;
-                                   # existing consumers read `cls`).
+            "cls": cls_name,
+            "cls_id": int(k),
             "conf": float(c),
-            "bbox_px":   [float(x1), float(y1), float(x2), float(y2)],
-            "bbox_norm": [float(x1)/w, float(y1)/h, float(x2)/w, float(y2)/h],
+            "bbox_px": [float(x1), float(y1), float(x2), float(y2)],
+            "bbox_norm": [float(x1) / w, float(y1) / h,
+                          float(x2) / w, float(y2) / h],
         })
     return out
+
+
+def infer_batch(frames: list[np.ndarray], *, weights: str | None = None,
+                conf: float = 0.25, imgsz: int = 640) -> list[list[dict]]:
+    """Run one model call for a bounded batch of camera frames.
+
+    This is the model-level primitive used by the GPU capacity benchmark and
+    the future round-robin camera coordinator. Keeping it independent of the
+    scheduler lets us prove CUDA batch safety before changing the production
+    inference loop. Result order always matches input order.
+    """
+    if not frames:
+        return []
+    model = load_model(resolve_weights(weights))
+    device = _hardware().device
+    results = model.predict(frames, conf=conf, imgsz=imgsz, device=device,
+                            verbose=False)
+    if len(results) != len(frames):
+        raise RuntimeError(
+            f"model returned {len(results)} results for {len(frames)} frames"
+        )
+    return [
+        _normalise_result(result, frame, model)
+        for result, frame in zip(results, frames)
+    ]
+
+
+def infer(frame: np.ndarray, *, weights: str | None = None,
+          conf: float = 0.25, imgsz: int = 640) -> list[dict]:
+    """Run inference on a single BGR frame using the established hot path."""
+    model = load_model(resolve_weights(weights))
+    results = model.predict(
+        frame, conf=conf, imgsz=imgsz, device=_hardware().device,
+        verbose=False,
+    )
+    if not results:
+        return []
+    return _normalise_result(results[0], frame, model)

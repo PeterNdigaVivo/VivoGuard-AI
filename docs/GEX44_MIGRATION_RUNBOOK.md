@@ -8,11 +8,10 @@ SFF Ada GPU. The complete stack moves together so PostgreSQL, Redis,
 recordings and incident evidence remain on one trusted host.
 
 Do not treat the GPU purchase as proof of coverage or 99% accuracy. The
-current inference design uses long-lived per-camera Celery processes. Begin
-with the existing eight inference slots, measure VRAM and end-to-end latency,
-then raise concurrency only within a documented capacity test. A later
-multi-camera batching service may still be required for continuous inference
-across every fresh feed.
+current production loop uses long-lived per-camera Celery tasks. Controlled
+distribution and the model-level batch primitive are available, but both stay
+at their backward-compatible defaults until the actual GPU capacity test
+passes. Buying hardware is not permission to guess a concurrency setting.
 
 ## Purchase checkpoint
 
@@ -35,6 +34,47 @@ without a separate cost and architecture decision.
    history.
 6. Run `bash scripts/gpu-readiness.sh`. Do not migrate data until every check
    passes.
+
+## GPU batch and concurrency validation
+
+Before copying production data, build a dynamic TensorRT profile and benchmark
+it in an isolated container. This test uses synthetic frames and neither reads
+camera feeds nor writes VivoGuard data:
+
+```bash
+INFERENCE_MAX_BATCH_SIZE=32 docker compose \
+  -f docker-compose.yml -f docker-compose.gpu.yml build worker-inference
+INFERENCE_MAX_BATCH_SIZE=32 docker compose \
+  -f docker-compose.yml -f docker-compose.gpu.yml run --rm --no-deps \
+  worker-inference python scripts/gpu_concurrency_benchmark.py \
+  --batch-sizes 1,2,4,8,16,32 --iterations 50 \
+  > gpu-capacity-baseline.json
+```
+
+The script fails when CUDA is unavailable and reports p50/p95 batch latency,
+p95 latency per frame, throughput, peak allocated VRAM, failures and the
+largest batch passing the initial 400 ms/frame and 80% VRAM ceilings. Retain
+the JSON as deployment evidence. These are safety ceilings, not the final
+service SLA; the two-hour live canary below must also pass end-to-end alert
+latency and missed-event tests.
+
+Do not equate batch size with Celery concurrency. The current per-camera path
+remains the production rollback path. Start its GPU worker conservatively and
+only increase worker concurrency while total VRAM stays below the measured
+ceiling and p99 alert latency improves. Multiple worker processes duplicate
+model/engine memory.
+
+## Controlled distribution
+
+The default remains one shard and the historical `inference` queue. For a
+future multi-GPU or multi-host deployment, set the supervisor's
+`INFERENCE_SHARD_COUNT=N`; camera `id` is deterministically assigned to
+`inference.(id % N)`. Provision consumers for every queue before changing the
+count, for example `INFERENCE_QUEUES=inference.0` on worker zero. Never expose
+Redis directly to the internet: use a private network or authenticated tunnel,
+and provide shared durable evidence storage before separating inference from
+the application host. Queue depth is reported per shard in
+`vg:inference:health`, so an absent consumer is visible immediately.
 
 ## Storage and backups
 

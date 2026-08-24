@@ -309,6 +309,14 @@ class Settings(BaseSettings):
     # immediately; LOCK_TTL tracks this value + 60s purely as a
     # crashed-worker safety net. Env: INFERENCE_RUN_SECONDS.
     inference_run_seconds: int = 120
+    # Deterministic distribution for multi-worker / multi-host inference.
+    # One shard preserves the existing ``inference`` queue. With N > 1 the
+    # supervisor routes camera K to ``inference.{K % N}``; every configured
+    # queue must have exactly one consuming worker pool.
+    inference_shard_count: int = Field(default=1, ge=1, le=64)
+    # Maximum batch compiled into an optimized TensorRT engine. Keep one on
+    # existing hosts. Set explicitly before the first GEX44 engine export.
+    inference_max_batch_size: int = Field(default=1, ge=1, le=64)
 
     # --- Notifications ---
     smtp_host: str = ""

@@ -89,6 +89,33 @@ def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url)
 
 
+def _inference_queue(camera_id: int, shard_count: int | None = None) -> str:
+    """Return the stable worker queue for a camera.
+
+    The one-shard default deliberately retains the historical ``inference``
+    queue, making this feature a no-op until operators provision all shard
+    consumers. Modulo assignment is deterministic across supervisor restarts
+    and does not require mutable routing state.
+    """
+    count = int(
+        settings.inference_shard_count if shard_count is None else shard_count
+    )
+    if count < 1:
+        raise ValueError("INFERENCE_SHARD_COUNT must be at least 1")
+    return "inference" if count == 1 else f"inference.{int(camera_id) % count}"
+
+
+def _inference_queue_names(shard_count: int | None = None) -> list[str]:
+    count = int(
+        settings.inference_shard_count if shard_count is None else shard_count
+    )
+    if count < 1:
+        raise ValueError("INFERENCE_SHARD_COUNT must be at least 1")
+    return ["inference"] if count == 1 else [
+        f"inference.{index}" for index in range(count)
+    ]
+
+
 def _camera_ids_with_fresh_frames(
     r: redis.Redis, camera_ids: list[int],
 ) -> set[int]:
@@ -192,6 +219,9 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
             "cameras_actively_inferencing": 0,
             "cameras_waiting_for_worker": 0,
             "inference_queue_depth": 0,
+            "inference_queue_depth_by_shard": {
+                queue: 0 for queue in _inference_queue_names()
+            },
             "estimated_full_rotation_seconds": 0,
         }
     try:
@@ -204,12 +234,15 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
         split = len(camera_ids)
         reserved = sum(bool(value) for value in flags[:split])
         active = sum(bool(value) for value in flags[split:])
-        queue_depth = int(r.llen("inference"))
+        queue_depths = {
+            queue: int(r.llen(queue)) for queue in _inference_queue_names()
+        }
         return {
             "cameras_reserved": reserved,
             "cameras_actively_inferencing": active,
             "cameras_waiting_for_worker": max(0, reserved - active),
-            "inference_queue_depth": queue_depth,
+            "inference_queue_depth": sum(queue_depths.values()),
+            "inference_queue_depth_by_shard": queue_depths,
             "estimated_full_rotation_seconds": (
                 math.ceil(len(camera_ids) / active) * RUN_SECONDS
                 if active else None
@@ -222,6 +255,7 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
             "cameras_actively_inferencing": None,
             "cameras_waiting_for_worker": None,
             "inference_queue_depth": None,
+            "inference_queue_depth_by_shard": None,
             "estimated_full_rotation_seconds": None,
         }
 
@@ -243,6 +277,7 @@ def _write_health(r: redis.Redis, *,
             "cameras_enqueued":        cameras_enqueued,
             "cameras_already_running": cameras_already_running,
             "stale_locks_cleared":     stale_cleared,
+            "inference_shard_count":   int(settings.inference_shard_count),
         }
         payload.update(reservation_health or {})
         r.set(HEALTH_KEY, json.dumps(payload), ex=24 * 3600)
@@ -284,7 +319,7 @@ def supervise_all() -> None:
                 ar = run_camera_inference.apply_async(
                     args=[cam.id],
                     kwargs={"max_seconds": RUN_SECONDS},
-                    queue="inference",
+                    queue=_inference_queue(int(cam.id)),
                 )
                 # Stamp the reservation with the real task_id.  It remains a
                 # long pending lease until that exact task atomically claims

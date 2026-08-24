@@ -250,7 +250,13 @@ class HardwareEnv:
             base = Path("data/models/optimized")
 
         stem = Path(model_path).stem
-        cache_dir = base / f"{stem}_{self.backend}"
+        max_batch = max(1, int(getattr(
+            settings, "inference_max_batch_size", 1,
+        )))
+        # A TensorRT engine has a compiled batch profile. Never reuse a
+        # batch-1 artifact for a batch-32 deployment (or vice versa).
+        batch_suffix = f"_b{max_batch}" if max_batch > 1 else ""
+        cache_dir = base / f"{stem}_{self.backend}{batch_suffix}"
         cache_dir.mkdir(parents=True, exist_ok=True)
         artifact = self._cached_artifact(cache_dir, stem, spec_format)
 
@@ -289,7 +295,15 @@ class HardwareEnv:
         from ultralytics import YOLO
         t0 = time.perf_counter()
         src = YOLO(model_path)
-        exported = src.export(format=fmt, device=self.device)
+        kwargs = {"format": fmt, "device": self.device}
+        if fmt == "engine":
+            from app.config import settings
+            max_batch = max(1, int(getattr(
+                settings, "inference_max_batch_size", 1,
+            )))
+            kwargs["batch"] = max_batch
+            kwargs["dynamic"] = max_batch > 1
+        exported = src.export(**kwargs)
         self.export_ms = (time.perf_counter() - t0) * 1000.0
         # Ultralytics returns the produced path (str). Move it into the
         # cache dir so all backends share one predictable layout.

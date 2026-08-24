@@ -10,6 +10,7 @@ def test_gpu_override_is_isolated_to_inference():
     assert "vivoguard/worker:cuda" in profile
     assert "GPU_BACKEND: cuda" in profile
     assert 'USE_GPU: "true"' in profile
+    assert "INFERENCE_MAX_BATCH_SIZE" in profile
     assert "driver: nvidia" in profile
     assert "count: 1" in profile
     assert "worker-training:" not in profile
@@ -36,6 +37,21 @@ def test_migration_runbook_has_safety_and_rollback_gates():
         "Public API",
         "silently falls back to CPU",
         "at least 20% sustained headroom",
+        "gpu_concurrency_benchmark.py",
+        "p95 latency per frame",
+        "INFERENCE_SHARD_COUNT",
         "## Rollback",
     ):
         assert required in runbook
+
+
+def test_gpu_benchmark_is_packaged_and_rejects_cpu_fallback():
+    dockerfile = (ROOT / "backend" / "Dockerfile.worker").read_text()
+    benchmark = (
+        ROOT / "backend" / "scripts" / "gpu_concurrency_benchmark.py"
+    ).read_text()
+
+    assert "COPY scripts ./scripts" in dockerfile
+    assert 'env.backend != "cuda"' in benchmark
+    assert "torch.cuda.synchronize()" in benchmark
+    assert '"recommended_batch_size"' in benchmark

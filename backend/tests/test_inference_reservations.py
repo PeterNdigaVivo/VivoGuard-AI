@@ -112,6 +112,19 @@ def test_pending_reservation_outlives_full_cpu_queue_rotation():
     assert inference.PENDING_LOCK_TTL >= worst_case_rotation * 2
 
 
+def test_inference_queue_preserves_legacy_default_and_distributes_stably():
+    assert inference._inference_queue(41, 1) == "inference"
+    assert inference._inference_queue(41, 4) == "inference.1"
+    assert inference._inference_queue(45, 4) == "inference.1"
+
+
+def test_inference_queue_rejects_invalid_shard_count():
+    import pytest
+
+    with pytest.raises(ValueError, match="at least 1"):
+        inference._inference_queue(1, 0)
+
+
 def test_freshness_gate_only_schedules_cameras_with_live_frames():
     r = FakeFreshnessRedis({2, 7})
 
@@ -136,5 +149,6 @@ def test_reservation_health_distinguishes_active_from_waiting_tasks():
         "cameras_actively_inferencing": 1,
         "cameras_waiting_for_worker": 2,
         "inference_queue_depth": 2,
+        "inference_queue_depth_by_shard": {"inference": 2},
         "estimated_full_rotation_seconds": 3 * inference.RUN_SECONDS,
     }

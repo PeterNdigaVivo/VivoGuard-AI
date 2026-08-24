@@ -17,6 +17,10 @@ services:
       GPU_BACKEND: cuda
       USE_GPU: "true"
       USE_OPTIMIZED: "true"
+      # Start conservatively. Raise only after gpu-concurrency-benchmark.py
+      # passes the documented p95/VRAM/error gates on the actual host.
+      INFERENCE_SHARD_COUNT: ${INFERENCE_SHARD_COUNT:-1}
+      INFERENCE_MAX_BATCH_SIZE: ${INFERENCE_MAX_BATCH_SIZE:-1}
     deploy:
       resources:
         reservations:
