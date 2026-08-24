@@ -372,8 +372,11 @@ services:
   # -f docker-compose.scale.yml up -d`).
   streamer:
     build:
-      context: ./streamer
-      dockerfile: Dockerfile
+      # Root context lets the image copy both the streamer entrypoint and the
+      # matching backend app package. This prevents streamer-only builds from
+      # inheriting stale app.* code from a previously built api:latest image.
+      context: .
+      dockerfile: streamer/Dockerfile
     image: vivoguard/streamer:latest
     restart: unless-stopped
     environment:
