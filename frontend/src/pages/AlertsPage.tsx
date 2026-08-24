@@ -57,6 +57,7 @@ export default function AlertsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(true)
   const [hasMore, setHasMore] = useState(false)
   const [proof, setProof] = useState<ProofOfLife | null>(null)
   const requestSequence = useRef(0)
@@ -129,9 +130,11 @@ export default function AlertsPage() {
   useEffect(() => {
     reload()
     setSummaryError(null)
+    setSummaryLoading(true)
     alertsApi.summary(storeId ? Number(storeId) : undefined)
       .then(setSummary)
       .catch(error => setSummaryError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setSummaryLoading(false))
   }, [reload, storeId])
 
   // Real-time: when /ws/alerts pushes a new event, refetch.
@@ -213,6 +216,8 @@ export default function AlertsPage() {
 
   const groups = groupAlerts(filtered)
   const rawTotal = range.key === 'today' ? summary.today_count : null
+  const countsUnavailable = Boolean(loadError && items.length === 0)
+  const shownCount = (count: number) => countsUnavailable ? '—' : String(count)
 
   // Excel export — fetch with the bearer header (an <a href> can't
   // carry it) and trigger a download of the returned .xlsx blob.
@@ -287,45 +292,55 @@ export default function AlertsPage() {
       {/* Executive summary bar — spec Part 1 §3. Four-tier severity
           counts + resolved tally + avg-time-to-resolve + vs-yesterday
           trend in one glanceable strip. */}
-      <ExecutiveSummaryBar summary={summary} />
-      {summaryError && (
-        <div className="mb-3 text-xs text-red-700" role="alert">
-          Today’s summary could not be refreshed: {summaryError}
-        </div>
+      {summaryLoading ? (
+        <Card className="p-3 mb-3 text-sm text-slate-500 dark:text-slate-300">
+          Refreshing today’s alert counts…
+        </Card>
+      ) : summaryError ? (
+        <Card className="p-3 mb-3 text-sm text-red-800 bg-red-50 border-red-200">
+          <div role="alert">
+            <strong>Alert counts are unavailable — this does not mean zero alerts.</strong>
+            <div className="text-xs mt-1 break-words">{summaryError}</div>
+          </div>
+        </Card>
+      ) : (
+        <ExecutiveSummaryBar summary={summary} />
       )}
 
       {/* Legacy compact tally — kept beneath the bar for the operators
           who still scan for it. Drops once everyone's adopted the new
           card-style bar above. */}
-      <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
-        Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
-        {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
-        {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
-        {' · '}<strong className="text-slate-600 dark:text-slate-300">{summary.dismissed_today} dismissed</strong>
-      </div>
+      {!summaryLoading && !summaryError && (
+        <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
+          Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
+          {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
+          {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
+          {' · '}<strong className="text-slate-600 dark:text-slate-300">{summary.dismissed_today} dismissed</strong>
+        </div>
+      )}
 
       {/* Simple filter bar. Each button shows a live count so the
           operator sees at a glance how much is in each bucket. */}
       <Card className="p-3 mb-4 flex flex-wrap gap-2 items-center">
         <QuickBtn active={quick === 'store'}     onClick={() => setQuick('store')}
                   tone="teal">
-          🏪 Store Update ({counts.store})
+          🏪 Store Update ({shownCount(counts.store)})
         </QuickBtn>
         <QuickBtn active={quick === 'positive'} onClick={() => setQuick('positive')}
                   tone="green">
-          ✅ Positive ({counts.positive})
+          ✅ Positive ({shownCount(counts.positive)})
         </QuickBtn>
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
-          🔴 Urgent ({counts.urgent})
+          🔴 Urgent ({shownCount(counts.urgent)})
         </QuickBtn>
         <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>
-          🟡 Needs Attention ({counts.attention})
+          🟡 Needs Attention ({shownCount(counts.attention)})
         </QuickBtn>
         <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>
-          ✅ Resolved ({counts.resolved})
+          ✅ Resolved ({shownCount(counts.resolved)})
         </QuickBtn>
         <QuickBtn active={quick === 'all'}       onClick={() => setQuick('all')}>
-          📋 All ({counts.all})
+          📋 All ({shownCount(counts.all)})
         </QuickBtn>
 
         <select className="border rounded px-2 py-1 text-sm ml-2"
