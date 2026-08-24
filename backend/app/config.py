@@ -325,7 +325,7 @@ class Settings(BaseSettings):
     # queue must have exactly one consuming worker pool.
     inference_shard_count: int = Field(default=1, ge=1, le=64)
     # Maximum batch compiled into an optimized TensorRT engine. Keep one on
-    # existing hosts. Set explicitly before the first GEX44 engine export.
+    # existing hosts. Set explicitly before the first GPU-host engine export.
     inference_max_batch_size: int = Field(default=1, ge=1, le=64)
     # GPU-only shadow coordinator. It exercises live multi-camera batching but
     # never emits detections/alerts; the established per-camera loop remains

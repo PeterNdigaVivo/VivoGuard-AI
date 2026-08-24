@@ -1,11 +1,12 @@
-# GEX44 production migration runbook
+# RTX 6000 Ada production migration runbook
 
 ## Decision and constraints
 
-The target is one Hetzner GEX44 in Falkenstein with Ubuntu 24.04 LTS,
-primary IPv4, 64 GB RAM, two 1.92 TB NVMe drives and one NVIDIA RTX 4000
-SFF Ada GPU. The complete stack moves together so PostgreSQL, Redis,
-recordings and incident evidence remain on one trusted host.
+The approved target is one Hetzner Server Auction host in Falkenstein with
+Ubuntu 24.04 LTS, primary IPv4, 128 GB DDR5 ECC RAM, two 1.92 TB U.2 NVMe
+datacentre SSDs and one NVIDIA RTX 6000 Ada GPU. The complete stack moves
+together so PostgreSQL, Redis, recordings and incident evidence remain on one
+trusted host.
 
 Do not treat the GPU purchase as proof of coverage or 99% accuracy. The
 current production loop uses long-lived per-camera Celery tasks. Controlled
@@ -17,8 +18,8 @@ passes. Buying hardware is not permission to guess a concurrency setting.
 
 Before placing the order, record the live monthly price, setup fee, VAT
 treatment, location and stock status. Ordering is a financial commitment and
-requires action-time approval. Do not substitute GEX131 or another server
-without a separate cost and architecture decision.
+requires action-time approval. Do not substitute another server without a
+separate cost and architecture decision.
 
 ## Prepare the host
 
@@ -127,7 +128,7 @@ the application host. Queue depth is reported per shard in
 
 ## Rehearsal
 
-1. Restore a recent database dump on the GEX44 while the old production host
+1. Restore a recent database dump on the GPU host while the old production host
    remains authoritative.
 2. Start the stack on a temporary private hostname. Do not send production
    notifications during rehearsal.
@@ -152,7 +153,7 @@ the application host. Queue depth is reported per shard in
 2. Announce a controlled maintenance window and pause application writes and
    workers on the old host. Camera/NVR recording continues independently.
 3. Create the final PostgreSQL dump and final incremental evidence sync.
-4. Restore on GEX44, run `alembic upgrade head`, then start the stack with the
+4. Restore on the GPU host, run `alembic upgrade head`, then start the stack with the
    GPU override.
 5. Issue/restore TLS certificates, update the DNS A record and verify public
    `/api/healthz` before allowing user traffic.
@@ -174,7 +175,7 @@ the application host. Queue depth is reported per shard in
 
 ## Rollback
 
-If any acceptance gate fails, stop writes and notifications on GEX44, point DNS
+If any acceptance gate fails, stop writes and notifications on the GPU host, point DNS
 back to the unchanged old host, restore its workers, and reconcile only the
 audited records created during the cutover window. Never run both hosts as
 independent writable production systems against different databases.
