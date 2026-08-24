@@ -7,13 +7,14 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
-    DetectionEvent, User,
+    DetectionEvent, RecordingClip, User,
 )
 from app.operations.assurance import create_alert_quality_cases
 from app.services.alert_feedback import record_verdict
 from app.tasks.alerting import _info_notification_allowed
 from app.services.alert_quality import (
-    apply_quality_control, quality_scorecards, refresh_pair_control,
+    _wilson_lower_bound, apply_quality_control, pair_metrics,
+    quality_scorecards, refresh_pair_control,
     set_manual_mode,
 )
 
@@ -116,10 +117,16 @@ def test_scorecard_is_honest_about_precision_recall_and_agreement(db):
     assert card["unreviewed_alerts"] == 1
     assert card["reviewed_sample_size"] == 2
     assert card["precision"] == pytest.approx(.5)
+    assert card["precision_lower_bound_95"] < card["precision"]
+    assert card["target_99_evidence_met"] is False
     assert card["recall"] is None
     assert "missed events" in card["recall_limitation"]
     assert card["incident_clips_available"] == 1
-    assert card["clip_availability_rate"] == pytest.approx(1 / 3)
+    assert card["clip_eligible_alerts"] == 1
+    assert card["clip_ineligible_alerts"] == 2
+    assert card["clip_eligibility_unknown"] == 0
+    assert card["clip_availability_rate"] == 1.0
+    assert card["clip_availability_limitation"] is None
     assert card["reviewer_agreement"] is None
 
 
@@ -131,7 +138,41 @@ def test_scorecard_counts_legacy_extra_clip_path(db):
 
     card = quality_scorecards(db)[0]
     assert card["incident_clips_available"] == 1
+    assert card["clip_eligible_alerts"] == 1
     assert card["clip_availability_rate"] == 1.0
+
+
+def test_scorecard_excludes_alert_without_recording_from_clip_sla(db):
+    cam = _camera(db)
+    _alert(db, cam, "confirmed")
+
+    card = quality_scorecards(db)[0]
+
+    assert card["incident_clips_available"] == 0
+    assert card["clip_eligible_alerts"] == 0
+    assert card["clip_ineligible_alerts"] == 1
+    assert card["clip_eligibility_unknown"] == 0
+    assert card["clip_availability_rate"] is None
+
+
+def test_scorecard_uses_retained_recording_as_legacy_clip_denominator(db):
+    cam = _camera(db)
+    _alert_row, event = _alert(db, cam, "confirmed")
+    db.add(RecordingClip(
+        camera_id=cam.id, store_id=cam.store_id,
+        window_id="legacy-test", file_path=None,
+        started_at=event.timestamp - timedelta(seconds=30),
+        ended_at=event.timestamp + timedelta(seconds=30),
+        status="deleted",
+    ))
+    db.commit()
+
+    card = quality_scorecards(db)[0]
+
+    assert card["incident_clips_available"] == 0
+    assert card["clip_eligible_alerts"] == 1
+    assert card["clip_ineligible_alerts"] == 0
+    assert card["clip_availability_rate"] == 0.0
 
 
 def test_threshold_crossing_verdict_is_not_sent_to_training(db, monkeypatch):
@@ -182,6 +223,30 @@ def test_scorecard_measures_latest_distinct_reviewer_disagreement(db):
     assert card["reviewer_agreement_count"] == 0
     assert card["reviewer_disagreement_count"] == 1
     assert db.query(AlertReviewDecision).count() == 3
+
+
+def test_resolving_alert_does_not_erase_append_only_human_verdict(db):
+    cam = _camera(db)
+    alert, _event = _alert(db, cam, "resolved", clip=True)
+    reviewer = User(email="reviewer@vivo", password_hash="x", role="operator")
+    db.add(reviewer)
+    db.flush()
+    db.add(AlertReviewDecision(
+        alert_id=alert.id, reviewer_id=reviewer.id, verdict="confirmed"))
+    db.commit()
+
+    card = quality_scorecards(db)[0]
+    metrics = pair_metrics(db, cam.id, "intrusion")
+
+    assert card["true_alerts"] == 1
+    assert card["reviewed_sample_size"] == 1
+    assert metrics["true_alerts"] == 1
+    assert metrics["sample_size"] == 1
+
+
+def test_99_percent_gate_requires_sample_size_and_confidence():
+    assert _wilson_lower_bound(299, 300) < .99
+    assert _wilson_lower_bound(300, 300) >= .99
 
 
 def test_overdue_review_only_critical_alert_opens_accountable_case(db):

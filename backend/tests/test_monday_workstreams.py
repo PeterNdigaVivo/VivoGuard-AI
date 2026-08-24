@@ -4,11 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.agent_control.workstreams import (
-    MONDAY_DEADLINE, MONDAY_WORKSTREAMS, evaluate_workstream,
+    MONDAY_DEADLINE, MONDAY_WORKSTREAMS, _cctv_evidence, evaluate_workstream,
     reconcile_workstream_case, workstream_statuses,
 )
 from app.database import Base
-from app.models import AssuranceCase
+from app.models import AssuranceCase, Camera
 
 
 def _evidence(name: str, value: bool) -> dict:
@@ -90,3 +90,39 @@ def test_accountability_collection_persists_one_case_per_workstream():
         assert all(result["status"] == "at_risk" for result in results)
         assert db.query(AssuranceCase).filter(
             AssuranceCase.case_type == "monday_workstream").count() == 4
+
+
+def test_cctv_workstream_uses_runtime_frames_not_stale_camera_columns(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 8, 24, 7, 0, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        pending_but_live = Camera(
+            name="Live pending", brand="generic", connection_type="lan_rtsp",
+            host="127.0.0.1", status="pending", ai_enabled=True,
+        )
+        configured_online_but_dark = Camera(
+            name="Dark online", brand="generic", connection_type="lan_rtsp",
+            host="127.0.0.2", status="online", ai_enabled=True,
+        )
+        db.add_all([pending_but_live, configured_online_but_dark])
+        db.commit()
+
+        monkeypatch.setattr(
+            "app.agent_control.workstreams.FrameBuffer.health_many",
+            lambda _self, _ids: {
+                pending_but_live.id: {
+                    "last_frame_at": now.timestamp() - 2, "fps": 2.0,
+                },
+                configured_online_but_dark.id: {
+                    "last_frame_at": now.timestamp() - 900, "fps": 0,
+                },
+            },
+        )
+        evidence = _cctv_evidence(db, now)
+
+    assert evidence["unavailable_camera_ids"] == [configured_online_but_dark.id]
+    assert evidence["runtime_status_counts"]["online"] == 1
+    assert evidence["runtime_status_counts"]["stale"] == 1
+    assert evidence["configured_status_drift_count"] == 2
+    assert evidence["runtime_health_source"] == "redis_frame_telemetry"

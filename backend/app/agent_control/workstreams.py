@@ -12,10 +12,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.agent_control.policies import AGENT_POLICIES
+from app.api.system import _runtime_camera_status
 from app.models import (
     AgentReport, Alert, AssuranceCase, Camera, DetectionEvent, RiskReview,
     TrainingImage,
 )
+from app.stream.frame_buffer import FrameBuffer
 
 MONDAY_DEADLINE = datetime(2026, 8, 24, 5, 0, tzinfo=timezone.utc)  # 08:00 EAT
 WATCHDOG_INTERVAL_SECONDS = 600
@@ -210,12 +212,31 @@ def _deployment_evidence(db: Session, now: datetime) -> dict:
 def _cctv_evidence(db: Session, now: datetime) -> dict:
     reports = {name: _latest_report(db, name, now)
                for name in ("streamer", "coverage_assurance", "detector_alerts")}
-    stale_cutoff = now - timedelta(seconds=120)
     active_cameras = (db.query(Camera).filter(
         Camera.ai_enabled.is_(True), Camera.is_deleted.is_(False)).all())
-    unavailable_ids = [camera.id for camera in active_cameras if (
-        camera.status != "online" or not camera.last_seen_at
-        or _aware(camera.last_seen_at) < stale_cutoff)]
+    # Camera.status/last_seen_at are configuration and legacy workflow fields;
+    # they are not maintained by the streamer.  Redis frame telemetry is the
+    # runtime source of truth used by /system/health and must also drive the
+    # accountability result, otherwise every healthy pending camera is marked
+    # unavailable while genuinely dark feeds can look healthy for months.
+    try:
+        health_by_camera = FrameBuffer().health_many(
+            [camera.id for camera in active_cameras])
+    except Exception:
+        health_by_camera = {}
+    runtime = {
+        camera.id: _runtime_camera_status(
+            camera.status, health_by_camera.get(camera.id, {}),
+            now=now.timestamp(),
+        )[0]
+        for camera in active_cameras
+    }
+    unavailable_ids = [camera.id for camera in active_cameras
+                       if runtime[camera.id] != "online"]
+    configured_status_drift_ids = [
+        camera.id for camera in active_cameras
+        if runtime[camera.id] != camera.status
+    ]
     streamer = reports["streamer"]
     coverage = reports["coverage_assurance"]
     detector = reports["detector_alerts"]
@@ -237,7 +258,14 @@ def _cctv_evidence(db: Session, now: datetime) -> dict:
     return {"checks": checks, "agent_reports": reports,
             "active_ai_cameras": len(active_cameras),
             "unavailable_camera_count": len(unavailable_ids),
-            "unavailable_camera_ids": unavailable_ids[:100]}
+            "unavailable_camera_ids": unavailable_ids[:100],
+            "runtime_status_counts": {
+                status: sum(value == status for value in runtime.values())
+                for status in ("online", "offline", "stale", "pending", "degraded")
+            },
+            "configured_status_drift_count": len(configured_status_drift_ids),
+            "configured_status_drift_ids": configured_status_drift_ids[:100],
+            "runtime_health_source": "redis_frame_telemetry"}
 
 
 def _simulation_evidence(db: Session, now: datetime) -> dict:

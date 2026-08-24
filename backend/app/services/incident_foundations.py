@@ -4,9 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import Alert, DetectionEvent
+from app.models import Alert, Camera, DetectionEvent, RecordingClip
 from app.models.incident import (
     DeliveryOutbox, EvidenceManifest, Incident, IncidentMember,
     IncidentTransition,
@@ -33,6 +34,39 @@ def _severity(event: DetectionEvent) -> str:
     if priority in {"critical", "high", "medium", "low", "info", "positive"}:
         return priority
     return "info"
+
+
+def clip_eligibility(
+    db: Session, event: DetectionEvent, *, store_id: int | None = None,
+) -> tuple[bool, str | None]:
+    """Return whether an incident clip was expected for this event.
+
+    Recording rows are retained after their files are pruned, so they are a
+    durable denominator: an alert is eligible when a recording window covered
+    its event timestamp, independently of whether extraction has completed or
+    retention has since removed the file.  Store-open events may use another
+    entrance camera in the same store, matching the recorder's extraction
+    policy.
+    """
+    clip_path = event.clip_path or (event.extra or {}).get("alert_clip_path")
+    if clip_path:
+        return True, None
+    if event.timestamp is None:
+        return False, "event_timestamp_missing"
+
+    q = db.query(RecordingClip.id).filter(
+        RecordingClip.started_at <= event.timestamp,
+        or_(RecordingClip.ended_at.is_(None),
+            RecordingClip.ended_at >= event.timestamp),
+    )
+    if event.detection_type == "shop_open_close" and store_id is not None:
+        q = q.filter(or_(RecordingClip.camera_id == event.camera_id,
+                         RecordingClip.store_id == store_id))
+    else:
+        q = q.filter(RecordingClip.camera_id == event.camera_id)
+    if q.first() is not None:
+        return True, None
+    return False, "no_recording_coverage"
 
 
 def record_alert_foundations(
@@ -85,14 +119,17 @@ def record_alert_foundations(
     ))
 
     clip_path = event.clip_path or (event.extra or {}).get("alert_clip_path")
+    eligible, ineligible_reason = clip_eligibility(
+        db, event, store_id=store_id,
+    )
     db.add(EvidenceManifest(
         alert_id=alert.id,
         snapshot_path=event.thumbnail_path,
         clip_path=clip_path,
         filmstrip_paths_json=alert.snapshot_paths,
-        clip_eligible=None,
+        clip_eligible=eligible,
         clip_available=bool(clip_path),
-        ineligible_reason=None,
+        ineligible_reason=ineligible_reason,
     ))
 
     if queue_delivery and not alert.notification_suppressed:
@@ -203,4 +240,13 @@ def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> 
     row.clip_path = clip_path
     row.filmstrip_paths_json = alert.snapshot_paths
     row.clip_available = bool(clip_path)
+    if clip_path:
+        row.clip_eligible = True
+        row.ineligible_reason = None
+    elif row.clip_eligible is None:
+        store_id = db.query(Camera.store_id).filter(
+            Camera.id == event.camera_id).scalar()
+        row.clip_eligible, row.ineligible_reason = clip_eligibility(
+            db, event, store_id=store_id,
+        )
     return True

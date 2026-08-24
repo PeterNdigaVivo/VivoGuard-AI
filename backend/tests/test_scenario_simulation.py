@@ -12,6 +12,12 @@ def test_junction_and_crowd_release_scenarios_are_explicit_and_pass():
         "six-stationary-for-five-minutes-is-one-crowd",
         "staff-area-intrusion-outranks-generic-crowd",
         "quarantine-retains-evidence-without-notifying-or-learning",
+        "same-track-repeat-within-rearm-is-suppressed",
+        "same-track-after-rearm-can-alert-again",
+        "new-track-is-not-suppressed-by-prior-person",
+        "public-passage-exclusion-never-intrudes",
+        "protected-zone-transient-does-not-alert",
+        "protected-zone-sustained-entry-alerts",
     }
     results = {item["scenario_id"]: item for item in report["results"]}
     assert required <= results.keys()
@@ -63,6 +69,24 @@ def test_zone_boundary_requires_spatial_and_temporal_confirmation():
         "inside_ratio": 0.9, "consecutive_frames": 3,
         "min_inside_ratio": 0.6, "min_frames": 3,
     })["alert"] is True
+
+
+def test_track_rearm_deduplicates_only_the_same_active_track():
+    assert evaluate("track_rearm", {
+        "same_track": True, "elapsed_seconds": 119, "rearm_seconds": 120,
+    })["duplicate_suppressed"] is True
+    assert evaluate("track_rearm", {
+        "same_track": False, "elapsed_seconds": 1, "rearm_seconds": 120,
+    })["alert"] is True
+
+
+def test_clip_sla_never_treats_unknown_as_failed_eligible_evidence():
+    result = evaluate("clip_sla", {
+        "eligible": 0, "available": 0, "unknown": 100,
+        "minimum_rate": 0.95,
+    })
+    assert result == {"availability_rate": None, "breach": False,
+                      "denominator_valid": False}
 
 
 def test_handoff_id_loss_never_claims_a_confident_unique_count():

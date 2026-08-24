@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import (
     Alert, Camera, DeliveryOutbox, DetectionEvent, EvidenceManifest, Incident,
-    IncidentMember, IncidentTransition, Store,
+    IncidentMember, IncidentTransition, RecordingClip, Store,
 )
 from app.services.incident_foundations import (
     acknowledge_incident, event_idempotency_key, record_alert_foundations,
@@ -82,9 +82,38 @@ def test_clip_sync_uses_one_canonical_manifest():
     db.commit()
     manifest = db.query(EvidenceManifest).one()
     assert manifest.clip_path == "/tmp/alert.mp4"
-    assert manifest.clip_eligible is None
+    assert manifest.clip_eligible is True
     assert manifest.clip_available is True
     assert manifest.ineligible_reason is None
+
+
+def test_recording_window_sets_honest_clip_eligibility_before_extraction():
+    db = _session()
+    store, alert, event = _alert(db)
+    db.add(RecordingClip(
+        camera_id=event.camera_id, store_id=store.id, window_id="test-window",
+        file_path="/tmp/window.mp4", started_at=event.timestamp,
+        status="recording",
+    ))
+    db.flush()
+
+    record_alert_foundations(db, alert, event, store_id=store.id)
+    manifest = db.query(EvidenceManifest).one()
+
+    assert manifest.clip_eligible is True
+    assert manifest.clip_available is False
+    assert manifest.ineligible_reason is None
+
+
+def test_alert_without_recording_is_excluded_from_clip_sla_denominator():
+    db = _session()
+    store, alert, event = _alert(db)
+    record_alert_foundations(db, alert, event, store_id=store.id)
+    manifest = db.query(EvidenceManifest).one()
+
+    assert manifest.clip_eligible is False
+    assert manifest.clip_available is False
+    assert manifest.ineligible_reason == "no_recording_coverage"
 
 
 def test_evaluation_and_operational_states_are_independent():

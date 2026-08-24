@@ -228,6 +228,7 @@ class Settings(BaseSettings):
     vlm_model: str = "claude-haiku-4-5"
     # Secret — env-only, never logged or committed.
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
     vlm_timeout_seconds: int = 10
 
     # ── Autonomous AI monitoring agents (app/tasks/agents.py) ──────────
@@ -237,10 +238,15 @@ class Settings(BaseSettings):
     # unreachable, agents fall back to their rule-based verdict so they
     # never break. Shares anthropic_api_key with the VLM.
     agents_llm_enabled: bool = True
+    # Provider order is fail-open: deterministic agent results are always
+    # retained. If the primary provider fails, the optional fallback is tried.
+    agents_llm_provider: str = "anthropic"
+    agents_llm_fallback_provider: str = "openai"
     # Default (Sonnet) model — used by the two daily strategic agents
     # (retail standards, inspection). The analytical agents override to
     # claude-haiku-4-5 in agents.py.
     agents_llm_model: str = "claude-sonnet-4-6"
+    agents_llm_openai_model: str = "gpt-5.4-mini"
     # Emit a silent, resolved, evidence-backed in-app alert only when an
     # autonomous agent transitions from warning/critical back to ok.
     positive_agent_alerts_enabled: bool = True

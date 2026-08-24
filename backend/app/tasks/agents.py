@@ -105,6 +105,22 @@ AGENT_MODEL_OVERRIDES: dict[str, str] = {
 }
 
 
+def _agent_model(name: str, provider: str) -> str:
+    if provider == "openai":
+        return getattr(settings, "agents_llm_openai_model", "gpt-5.4-mini")
+    return AGENT_MODEL_OVERRIDES.get(
+        name, getattr(settings, "agents_llm_model", "claude-sonnet-4-6"))
+
+
+def _agent_providers() -> list[str]:
+    configured = [
+        getattr(settings, "agents_llm_provider", "anthropic"),
+        getattr(settings, "agents_llm_fallback_provider", "openai"),
+    ]
+    return list(dict.fromkeys(
+        str(provider).strip().lower() for provider in configured if provider))
+
+
 # ── shared infra ─────────────────────────────────────────────────────────
 def _redis():
     """String-decoded client for the agent bookkeeping keys (separate from
@@ -271,21 +287,12 @@ def _extract_json(text: str) -> dict | None:
 
 def _ai_reason(name: str, role: str, telemetry: dict,
                *, model: str | None = None) -> dict | None:
-    """Ask Claude to diagnose this agent's telemetry. Returns a dict
+    """Ask a configured provider to diagnose this agent's telemetry. Returns a dict
     {status, summary, findings, gaps, recommended_actions} or None if the
     LLM is disabled / no key / SDK missing / any error (caller falls back
     to the rule-based verdict). Never raises."""
     if not getattr(settings, "agents_llm_enabled", True):
         return None
-    api_key = getattr(settings, "anthropic_api_key", "") or ""
-    if not api_key:
-        return None
-    try:
-        import anthropic
-    except Exception:
-        log.warning("agents: anthropic SDK not installed — LLM reasoning off")
-        return None
-    mdl = model or getattr(settings, "agents_llm_model", "claude-sonnet-5")
     timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
     system = (
         f"You are the {role} for VivoGuard-AI, an AI video-surveillance and "
@@ -303,17 +310,30 @@ def _ai_reason(name: str, role: str, telemetry: dict,
     )
     user = ("Telemetry JSON for this run:\n"
             + json.dumps(telemetry, default=str)[:12000])
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-        msg = client.messages.create(
-            model=mdl, max_tokens=1024, system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = " ".join(getattr(b, "text", "") or "" for b in (msg.content or [])).strip()
-        return _extract_json(text)
-    except Exception as e:
-        log.warning("agent %s LLM reasoning failed (model=%s): %s", name, mdl, e)
-        return None
+    from app.ai.llm_provider import LLMProviderError, complete_text
+    for provider in _agent_providers():
+        api_key = (getattr(settings, "openai_api_key", "") if provider == "openai"
+                   else getattr(settings, "anthropic_api_key", "")) or ""
+        if not api_key:
+            continue
+        selected_model = model or _agent_model(name, provider)
+        try:
+            text = complete_text(
+                provider=provider, api_key=api_key, model=selected_model,
+                system=system, user=user, timeout_seconds=timeout,
+                max_tokens=1024,
+            )
+            verdict = _extract_json(text)
+            if verdict is not None:
+                verdict["_provider"] = provider
+                verdict["_model"] = selected_model
+                return verdict
+            log.warning("agent %s %s response was not a JSON object",
+                        name, provider)
+        except LLMProviderError as exc:
+            log.warning("agent %s LLM reasoning failed (provider=%s, model=%s): %s",
+                        name, provider, selected_model, exc)
+    return None
 
 
 def _apply_ai(name: str, result: dict) -> dict:
@@ -322,7 +342,7 @@ def _apply_ai(name: str, result: dict) -> dict:
     it set status/gaps/recommendations, otherwise we keep the fallback."""
     telemetry = result.get("findings", {}) or {}
     verdict = _ai_reason(name, AGENT_ROLES.get(name, "monitoring agent"),
-                         telemetry, model=AGENT_MODEL_OVERRIDES.get(name))
+                         telemetry)
     if not verdict:
         findings = dict(telemetry)
         findings["ai"] = {"used": False, "reason": "llm unavailable/disabled"}
@@ -347,8 +367,8 @@ def _apply_ai(name: str, result: dict) -> dict:
         "status": status,
         "findings": {"telemetry": telemetry,
                      "ai": {"used": True,
-                            "model": AGENT_MODEL_OVERRIDES.get(
-                                name, getattr(settings, "agents_llm_model", "")),
+                            "provider": verdict.get("_provider"),
+                            "model": verdict.get("_model"),
                             "summary": verdict.get("summary"),
                             "findings": verdict.get("findings")}},
         "gaps": gaps or None,

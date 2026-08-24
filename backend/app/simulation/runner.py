@@ -46,6 +46,22 @@ def evaluate(kind: str, inputs: dict) -> dict:
                 "review_only": review_only}
     if kind == "person_motion":
         return {"alert": bool(inputs.get("moving") or inputs.get("motion_history"))}
+    if kind == "track_rearm":
+        same_track = bool(inputs.get("same_track"))
+        elapsed = max(0.0, float(inputs.get("elapsed_seconds", 0)))
+        rearm = max(0.0, float(inputs.get("rearm_seconds", 0)))
+        suppressed = same_track and elapsed < rearm
+        return {"alert": not suppressed,
+                "duplicate_suppressed": suppressed,
+                "rearmed": not suppressed}
+    if kind == "protected_zone":
+        excluded = bool(inputs.get("inside_excluded_public_area"))
+        dwell_satisfied = float(inputs.get("dwell_seconds", 0)) >= float(
+            inputs.get("minimum_dwell_seconds", 0))
+        alert = (bool(inputs.get("inside_protected_zone"))
+                 and not excluded and dwell_satisfied)
+        return {"alert": alert, "excluded_as_public": excluded,
+                "dwell_satisfied": dwell_satisfied}
     if kind == "camera_handoff":
         source_id, target_id = inputs.get("source_global_id"), inputs.get("target_global_id")
         in_time = float(inputs.get("gap_seconds", 0)) <= float(inputs.get("max_gap_seconds", 15))
@@ -58,6 +74,15 @@ def evaluate(kind: str, inputs: dict) -> dict:
         if int(inputs.get("fresh", 0)) < int(inputs.get("required", 1)):
             return {"status": "critical"}
         return {"status": "pass" if inputs.get("clip") else "warning"}
+    if kind == "clip_sla":
+        eligible = max(0, int(inputs.get("eligible", 0)))
+        available = max(0, int(inputs.get("available", 0)))
+        rate = _rate(min(available, eligible), eligible)
+        valid = eligible > 0
+        return {"availability_rate": rate,
+                "breach": bool(valid and rate is not None and rate < float(
+                    inputs.get("minimum_rate", 0.95))),
+                "denominator_valid": valid}
     if kind == "merchandise_flow":
         outbound = max(0, int(inputs.get("outbound_qty", 0)))
         matched = sum(max(0, int(inputs.get(key, 0)))
