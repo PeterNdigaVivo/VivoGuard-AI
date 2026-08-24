@@ -258,6 +258,7 @@ class Settings(BaseSettings):
     simulation_evidence_enabled: bool = True
     simulation_evidence_max_per_run: int = Field(default=10, ge=0, le=30)
     simulation_evidence_dedupe_days: int = Field(default=7, ge=1, le=90)
+    simulation_evidence_control_fraction: float = Field(default=0.30, ge=0.0, le=1.0)
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",

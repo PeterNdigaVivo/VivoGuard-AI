@@ -21,7 +21,8 @@ Endpoints (spec §7):
 from __future__ import annotations
 import base64
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import (APIRouter, Depends, File, HTTPException, UploadFile,
@@ -68,6 +69,18 @@ def _training_audit(db: Session, user, action: str, image_id: int,
     ))
 
 
+def _wilson_lower_bound(successes: int, total: int, z: float = 1.96) -> float | None:
+    """Conservative 95% lower confidence bound for a binomial proportion."""
+    if total <= 0:
+        return None
+    proportion = successes / total
+    z2 = z * z
+    centre = proportion + z2 / (2 * total)
+    spread = z * math.sqrt(
+        (proportion * (1 - proportion) + z2 / (4 * total)) / total)
+    return max(0.0, (centre - spread) / (1 + z2 / total))
+
+
 # ---------- datasets -------------------------------------------------
 
 @router.post("/datasets/create", response_model=DatasetOut)
@@ -83,6 +96,88 @@ def create_dataset(payload: DatasetCreate, db: Session = Depends(get_db),
 def list_datasets(db: Session = Depends(get_db),
                   _u=Depends(require_role("admin", "operator", "viewer"))):
     return db.query(Dataset).order_by(Dataset.id.desc()).all()
+
+
+@router.get("/simulation-evidence/summary")
+def simulation_evidence_summary(
+    db: Session = Depends(get_db),
+    _u=Depends(require_role("admin", "operator", "viewer")),
+):
+    """Governed review queue and honest precision/recall evidence.
+
+    Metrics use only independently approved real-camera frames. A 99% claim
+    requires the 95% Wilson lower bound for both precision and recall to reach
+    0.99; a tiny perfect sample therefore never reports success.
+    """
+    rows = (db.query(TrainingImage).filter(
+        TrainingImage.simulation_run_id.is_not(None)).all())
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=30)
+    overdue = (db.query(AssuranceCase.id).filter(
+        AssuranceCase.case_type == "simulation_evidence_review",
+        AssuranceCase.status == "open",
+        AssuranceCase.first_seen_at < cutoff,
+    ).count())
+    approved = [row for row in rows
+                if row.eligible_for_training and row.review_state == "approved"
+                and row.source_kind == "human_verified_simulation"]
+    confusion = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    models: dict[str, int] = {}
+    per_camera: dict[int, dict[str, int]] = {}
+    for row in rows:
+        extra = row.source_extra or {}
+        model = str(extra.get("model_name") or "unknown")
+        models[model] = models.get(model, 0) + 1
+    for row in approved:
+        extra = row.source_extra or {}
+        predicted = extra.get("probe_result") == "person_detected"
+        actual = extra.get("primary_review_outcome") == "person_present"
+        cell = "tp" if predicted and actual else (
+            "fp" if predicted else ("fn" if actual else "tn"))
+        confusion[cell] += 1
+        camera = per_camera.setdefault(int(row.camera_id or 0),
+                                       {"tp": 0, "fp": 0, "fn": 0, "tn": 0})
+        camera[cell] += 1
+    precision_n = confusion["tp"] + confusion["fp"]
+    recall_n = confusion["tp"] + confusion["fn"]
+    precision = confusion["tp"] / precision_n if precision_n else None
+    recall = confusion["tp"] / recall_n if recall_n else None
+    precision_lower = _wilson_lower_bound(confusion["tp"], precision_n)
+    recall_lower = _wilson_lower_bound(confusion["tp"], recall_n)
+    threshold = 0.99
+
+    def _camera_proven(values: dict[str, int]) -> bool:
+        p_n = values["tp"] + values["fp"]
+        r_n = values["tp"] + values["fn"]
+        p_l = _wilson_lower_bound(values["tp"], p_n)
+        r_l = _wilson_lower_bound(values["tp"], r_n)
+        return bool(p_l is not None and r_l is not None
+                    and p_l >= threshold and r_l >= threshold)
+
+    dataset = db.query(Dataset).filter(Dataset.name == "feedback-person").first()
+    return {
+        "dataset_id": dataset.id if dataset else None,
+        "total": len(rows),
+        "pending_primary": sum(row.review_state == "quarantined" for row in rows),
+        "pending_independent": sum(
+            row.review_state == "pending_independent_review" for row in rows),
+        "approved": len(approved),
+        "rejected": sum(row.review_state == "rejected" for row in rows),
+        "overdue": overdue,
+        "confusion_matrix": confusion,
+        "precision": precision,
+        "recall": recall,
+        "precision_lower_95": precision_lower,
+        "recall_lower_95": recall_lower,
+        "target": threshold,
+        "claimable_99": bool(precision_lower is not None and recall_lower is not None
+                             and precision_lower >= threshold
+                             and recall_lower >= threshold),
+        "camera_slices_total": len(per_camera),
+        "camera_slices_proven_99": sum(_camera_proven(v) for v in per_camera.values()),
+        "model_sample_counts": models,
+        "method": "independently_reviewed_real_frames_wilson_95",
+    }
 
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetOut)

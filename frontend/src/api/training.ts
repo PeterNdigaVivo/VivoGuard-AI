@@ -11,6 +11,27 @@ export interface TrainingImage {
 export interface AnnotationIn { class_label: string; bbox_json: number[]; verified?: boolean; auto_suggested?: boolean }
 export interface AnnotationOut extends AnnotationIn { id: number; image_id: number }
 
+export interface SimulationEvidenceSummary {
+  dataset_id: number | null
+  total: number
+  pending_primary: number
+  pending_independent: number
+  approved: number
+  rejected: number
+  overdue: number
+  confusion_matrix: { tp: number; fp: number; fn: number; tn: number }
+  precision: number | null
+  recall: number | null
+  precision_lower_95: number | null
+  recall_lower_95: number | null
+  target: number
+  claimable_99: boolean
+  camera_slices_total: number
+  camera_slices_proven_99: number
+  model_sample_counts: Record<string, number>
+  method: string
+}
+
 export interface TrainingJob {
   id: number; model_name: string; dataset_id: number; status: string
   current_epoch: number; total_epochs: number; best_map50: number | null
@@ -61,6 +82,9 @@ export const training = {
       `/training/images/${imageId}/independent-review`,
       { method: 'POST', body: { verdict, rationale } },
     ),
+
+  simulationEvidenceSummary: () =>
+    api<SimulationEvidenceSummary>('/training/simulation-evidence/summary'),
 
   startJob:      (body: Record<string, unknown>) =>
     api<TrainingJob>('/training/jobs/start', { method: 'POST', body }),

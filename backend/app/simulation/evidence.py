@@ -59,6 +59,8 @@ def capture_live_probe_evidence(
     run_id: str,
     max_per_run: int = 10,
     dedupe_days: int = 7,
+    control_fraction: float = 0.30,
+    model_name: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, int]:
     """Persist bounded real-frame evidence, quarantined for human review.
@@ -86,14 +88,33 @@ def capture_live_probe_evidence(
 
     prepared: list[tuple[LiveProbeCandidate, list[list[float]], str]] = []
     invalid = 0
+    deduplicated = 0
     for candidate in candidates:
         if not candidate.jpeg:
             invalid += 1
             continue
         suggestions = _person_suggestions(candidate.detections)
         result = "person_detected" if suggestions else "no_person_detected"
+        if (int(candidate.camera_id), result) in seen:
+            deduplicated += 1
+            continue
         prepared.append((candidate, suggestions, result))
-    prepared.sort(key=lambda item: (bool(item[1]), int(item[0].camera_id)))
+    no_person = sorted((item for item in prepared if not item[1]),
+                       key=lambda item: int(item[0].camera_id))
+    person_controls = sorted((item for item in prepared if item[1]),
+                             key=lambda item: int(item[0].camera_id))
+    fraction = max(0.0, min(1.0, float(control_fraction)))
+    requested_controls = round(limit * fraction)
+    if fraction > 0 and person_controls:
+        requested_controls = max(1, requested_controls)
+    control_budget = min(len(person_controls), requested_controls)
+    miss_budget = min(len(no_person), max(0, limit - control_budget))
+    selected = [*no_person[:miss_budget], *person_controls[:control_budget]]
+    if len(selected) < limit:
+        selected_keys = {(int(item[0].camera_id), item[2]) for item in selected}
+        remainder = [item for item in [*no_person, *person_controls]
+                     if (int(item[0].camera_id), item[2]) not in selected_keys]
+        selected.extend(remainder[:limit - len(selected)])
 
     dataset = _ensure_dataset(
         db,
@@ -103,17 +124,13 @@ def capture_live_probe_evidence(
     )
     created_paths: list[Path] = []
     created = 0
-    deduplicated = 0
     camera_store_ids = {
         int(camera.id): camera.store_id
         for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()
     }
     try:
-        for candidate, suggestions, result in prepared:
+        for candidate, suggestions, result in selected:
             key = (int(candidate.camera_id), result)
-            if key in seen:
-                deduplicated += 1
-                continue
             if created >= limit:
                 break
             filename = (
@@ -137,6 +154,7 @@ def capture_live_probe_evidence(
                     "synthetic": False,
                     "probe_result": result,
                     "model_confidence_threshold": 0.25,
+                    "model_name": model_name or "unknown",
                     "human_review_required": True,
                     "independent_review_required": True,
                     "suggestion_count": len(suggestions),

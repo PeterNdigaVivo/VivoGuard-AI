@@ -677,6 +677,8 @@ def _run_simulation() -> dict:
                     run_id=str(uuid.uuid4()),
                     max_per_run=settings.simulation_evidence_max_per_run,
                     dedupe_days=settings.simulation_evidence_dedupe_days,
+                    control_fraction=settings.simulation_evidence_control_fraction,
+                    model_name=settings.default_model,
                 )
             f["learning_evidence"] = evidence
         except Exception as exc:
