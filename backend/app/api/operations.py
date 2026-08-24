@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import random
 import subprocess
+import time
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -500,13 +501,13 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-def _media_duration_seconds(path: str) -> int | None:
+def _media_duration_seconds(path: str, timeout_seconds: float = 5) -> int | None:
     """Read the playable duration; active or corrupt files fail closed."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, timeout=timeout_seconds, check=False,
         )
         duration = int(float(result.stdout.strip())) if result.returncode == 0 else 0
         return duration if duration > 0 else None
@@ -531,7 +532,8 @@ def generate_recall_samples(
                  Camera.ai_enabled == True))  # noqa: E712
     if body.store_id is not None:
         q = q.filter(RecordingClip.store_id == body.store_id)
-    candidates = q.order_by(RecordingClip.started_at.desc()).limit(1000).all()
+    candidates = q.order_by(RecordingClip.started_at.desc(),
+                            RecordingClip.id.desc()).limit(1000).all()
     # The API shares the recordings volume. Reject stale database rows before
     # creating work that a reviewer could never open.
     candidates = [(clip, camera) for clip, camera in candidates
@@ -543,6 +545,7 @@ def generate_recall_samples(
     rng = random.Random(int(seed_hash[:16], 16))
     rng.shuffle(candidates)
     now = datetime.now(timezone.utc)
+    probe_deadline = time.monotonic() + 25
     selected: list[AssuranceCase] = []
     created: list[AssuranceCase] = []
     for clip, camera in candidates:
@@ -551,7 +554,11 @@ def generate_recall_samples(
         started = _as_utc(clip.started_at)
         ended = _as_utc(clip.ended_at) if clip.ended_at else now
         database_duration = int((ended - started).total_seconds())
-        playable_duration = _media_duration_seconds(clip.file_path)
+        remaining_probe_time = probe_deadline - time.monotonic()
+        if remaining_probe_time <= 0:
+            break
+        playable_duration = _media_duration_seconds(
+            clip.file_path, min(5, remaining_probe_time))
         if playable_duration is None:
             continue
         available = min(database_duration, playable_duration)
@@ -562,6 +569,11 @@ def generate_recall_samples(
         existing = (db.query(AssuranceCase)
                     .filter(AssuranceCase.dedup_key == dedup_key).one_or_none())
         if existing:
+            if existing.status == "evidence_unavailable":
+                # A reproducible seed must not count a failed source as a
+                # usable review sample. Continue deterministically to the next
+                # playable window instead.
+                continue
             selected.append(existing)
             continue
         sample_start = started + timedelta(seconds=offset)
@@ -602,7 +614,7 @@ def generate_recall_samples(
 
 @router.get("/recall-samples/{case_id}/clip")
 def recall_sample_clip(case_id: int, db: Session = Depends(get_db),
-                       _user=Depends(get_current_user)):
+                       _user=Depends(require_role("admin", "operator"))):
     case = db.get(AssuranceCase, case_id)
     if not case or case.case_type != "recall_sample":
         raise HTTPException(404, "recall sample not found")
@@ -720,7 +732,10 @@ def review_recall_sample(
               and (first["outcome"] != "target_event"
                    or first["event_label"] == second["event_label"]))
     if len(reviews) == 2 and not agreed:
-        case.status = "blocked_pending_adjudication"
+        # AssuranceCase.status is VARCHAR(24) in PostgreSQL.  Keep workflow
+        # state within that contract; the longer explanation belongs in
+        # training_status (VARCHAR(40)).
+        case.status = "pending_adjudication"
         case.training_status = "blocked_reviewer_disagreement"
         db.commit()
         return {"case_id": case.id, "status": case.status,
@@ -794,7 +809,26 @@ def list_cases(status: str | None = None, case_type: str | None = None,
         q = q.filter(AssuranceCase.status == status)
     if case_type:
         q = q.filter(AssuranceCase.case_type == case_type)
-    return q.order_by(AssuranceCase.first_seen_at.desc()).limit(limit).all()
+    rows = q.order_by(AssuranceCase.first_seen_at.desc()).limit(limit).all()
+    result = []
+    for row in rows:
+        if row.case_type != "recall_sample":
+            result.append(row)
+            continue
+        # Blind reviewers must not receive an earlier verdict, rationale, or
+        # reviewer identity through the generic case-listing endpoint.
+        item = {column.name: getattr(row, column.name)
+                for column in AssuranceCase.__table__.columns}
+        labels = dict(row.label_json or {})
+        reviews = list(labels.get("reviews") or [])
+        item["label_json"] = {"review_count": len(reviews)}
+        if row.status in {"resolved", "insufficient_evidence"}:
+            item["label_json"].update({
+                "final_outcome": labels.get("final_outcome"),
+                "final_event_label": labels.get("final_event_label"),
+            })
+        result.append(item)
+    return result
 
 
 @router.post("/cases/{case_id}/resolve")

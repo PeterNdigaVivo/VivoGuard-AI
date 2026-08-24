@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { operations, type AssuranceCase } from '@/api/operations'
+import { operations, type AssuranceCase, type QualityScorecard } from '@/api/operations'
 import { Button, Card, Input, useToast } from '@/components/ui/Primitives'
 
 const EVENT_LABELS = [
@@ -36,6 +36,7 @@ function useAuthenticatedClip(caseId: number | null) {
 
 export default function RecallSamplingPanel({ onClose }: { onClose: () => void }) {
   const [cases, setCases] = useState<AssuranceCase[] | null>(null)
+  const [scorecards, setScorecards] = useState<QualityScorecard[] | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [seed, setSeed] = useState(() => `validation-${new Date().toISOString().slice(0, 10)}`)
   const [label, setLabel] = useState('intrusion')
@@ -46,9 +47,12 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
 
   async function load() {
     try {
-      const rows = await operations.listRecallSamples()
+      const [rows, quality] = await Promise.all([
+        operations.listRecallSamples(), operations.getQualityScorecards(),
+      ])
       const reviewable = rows.filter(row => !['resolved', 'insufficient_evidence'].includes(row.status))
       setCases(reviewable)
+      setScorecards(quality.scorecards)
       setSelectedId(current => reviewable.some(row => row.id === current)
         ? current : (reviewable.find(row => row.evidence?.extraction_status === 'ready')?.id ?? null))
     } catch (err) { setError(String(err)) }
@@ -56,6 +60,22 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
   useEffect(() => { void load() }, [])
   const selected = useMemo(() => cases?.find(row => row.id === selectedId) ?? null,
     [cases, selectedId])
+  const progress = useMemo(() => {
+    const measured = (scorecards ?? []).filter(row => row.quality_mode === 'active')
+    return {
+      measured: measured.length,
+      passed: measured.filter(row => row.target_99_evidence_met).length,
+      reviewedAlerts: measured.reduce((sum, row) => sum + row.reviewed_sample_size, 0),
+      recallEvents: measured.reduce((sum, row) => sum + row.recall_true_positive_events
+        + row.recall_false_negative_events, 0),
+    }
+  }, [scorecards])
+  const queues = useMemo(() => ({
+    primary: (cases ?? []).filter(row => row.status === 'pending_primary_review').length,
+    independent: (cases ?? []).filter(row => row.status === 'pending_second_review').length,
+    adjudication: (cases ?? []).filter(row => row.status === 'pending_adjudication').length,
+    unavailable: (cases ?? []).filter(row => row.status === 'evidence_unavailable').length,
+  }), [cases])
   const clip = useAuthenticatedClip(
     selected?.evidence?.extraction_status === 'ready' ? selected.id : null,
   )
@@ -106,6 +126,30 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
           Generate 10 × 30-second samples
         </Button>
       </div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 mb-3 text-sm">
+        <div className="rounded border border-slate-200 dark:border-slate-700 p-2">
+          <div className="font-medium">99% evidence gate</div>
+          <div className={progress.measured > 0 && progress.passed === progress.measured
+            ? 'text-emerald-700' : 'text-amber-700'}>
+            {progress.passed}/{progress.measured} measured active camera-detector slices pass both bounds
+          </div>
+        </div>
+        <div className="rounded border border-slate-200 dark:border-slate-700 p-2">
+          <div className="font-medium">Evidence reviewed</div>
+          <div>{progress.reviewedAlerts} alert verdicts · {progress.recallEvents} independently found target events</div>
+        </div>
+        <div className="rounded border border-slate-200 dark:border-slate-700 p-2">
+          <div className="font-medium">Review queues</div>
+          <div>{queues.primary} primary · {queues.independent} independent · {queues.adjudication} adjudication</div>
+        </div>
+        <div className="rounded border border-slate-200 dark:border-slate-700 p-2">
+          <div className="font-medium">Evidence unavailable</div>
+          <div>{queues.unavailable} samples excluded from review and training</div>
+        </div>
+      </div>
+      <p className="text-xs text-slate-500 mb-3">
+        Totals are workload indicators, not an accuracy claim. Each approved material camera-detector slice must pass its own precision and recall confidence bounds.
+      </p>
       {error && <div className="text-sm text-red-700 mb-3">{error}</div>}
       {cases === null && <div className="text-sm text-slate-500">Loading samples…</div>}
       {cases?.length === 0 && <div className="text-sm text-slate-500">No samples await review.</div>}

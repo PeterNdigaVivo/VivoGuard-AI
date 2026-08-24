@@ -50,6 +50,10 @@ blind to alert history. Two distinct reviewers must agree; disagreement requires
 a third reviewer. Only then does VivoGuard check for a matching alert and record
 an independently sampled true positive or false negative. Sample clips are
 deleted seven days after review. They never become training data automatically.
+Unplayable sources are excluded and do not count as reusable campaign samples.
+Media probing has a bounded request-time budget so corrupt retained footage cannot
+hold an API worker indefinitely. The unfinished case listing redacts all earlier
+review outcomes and identities to preserve blind review.
 
 ## Lone worker and late departure
 

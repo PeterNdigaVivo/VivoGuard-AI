@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.operations import (
     RecallSampleBatchIn, RecallSampleReviewIn, generate_recall_samples,
-    review_recall_sample,
+    list_cases, review_recall_sample,
 )
 from app.database import Base
 from app.models import (
@@ -70,7 +70,7 @@ def test_generate_recall_batch_is_reproducible_and_queues_extraction(
             lambda case_id: queued.append(case_id),
         )
         monkeypatch.setattr("app.api.operations._media_duration_seconds",
-                            lambda _path: 300)
+                            lambda _path, _timeout=5: 300)
 
         result = generate_recall_samples(
             RecallSampleBatchIn(sample_count=1, duration_seconds=30,
@@ -93,6 +93,24 @@ def test_generate_recall_batch_is_reproducible_and_queues_extraction(
         assert repeated["created"] == 0
         assert repeated["reused"] == 1
         assert repeated["case_ids"] == [case.id]
+
+        case.status = "evidence_unavailable"
+        second_recording = tmp_path / "recording-2.mp4"
+        second_recording.write_bytes(b"second-retained-video-placeholder")
+        db.add(RecordingClip(
+            camera_id=camera.id, store_id=store.id, window_id="test-2",
+            file_path=str(second_recording), started_at=started - timedelta(minutes=5),
+            ended_at=started, status="completed",
+        ))
+        db.commit()
+
+        replacement = generate_recall_samples(
+            RecallSampleBatchIn(sample_count=1, duration_seconds=30,
+                                seed="repeatable-campaign"),
+            db=db, user=users[0],
+        )
+        assert replacement["created"] == 1
+        assert replacement["case_ids"] != [case.id]
 
 
 def test_double_reviewed_random_sample_matches_existing_alert():
@@ -204,6 +222,9 @@ def test_recall_disagreement_requires_third_distinct_reviewer():
         )
         review_recall_sample(case.id, target, db=db, user=users[0])
         disagreement = review_recall_sample(case.id, empty, db=db, user=users[1])
+        db.refresh(case)
+        assert case.status == "pending_adjudication"
+        assert len(case.status) <= 24
         with pytest.raises(HTTPException, match="distinct reviewer"):
             review_recall_sample(case.id, empty, db=db, user=users[1])
         final = review_recall_sample(case.id, empty, db=db, user=users[2])
@@ -211,6 +232,32 @@ def test_recall_disagreement_requires_third_distinct_reviewer():
         assert disagreement["result"] == "reviewer_disagreement"
         assert final["result"] == "recall_no_target_event"
         assert len(case.label_json["reviews"]) == 3
+
+
+def test_recall_case_listing_hides_prior_blind_review():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        _store, camera, users = _base(db)
+        case = _sample(db, camera, started=datetime.now(timezone.utc))
+        review_recall_sample(
+            case.id,
+            RecallSampleReviewIn(
+                outcome="target_event", event_label="intrusion",
+                rationale="A person crosses the protected line in view.",
+            ),
+            db=db, user=users[0],
+        )
+
+        rows = list_cases(case_type="recall_sample", limit=100, db=db,
+                          _user=users[1])
+
+        listed = next(row for row in rows if row["id"] == case.id)
+        assert listed["label_json"] == {"review_count": 1}
+        serialized = str(listed)
+        assert "target_event" not in serialized
+        assert "protected line" not in serialized
+        assert "reviewer_id" not in listed["label_json"]
 
 
 def test_scorecard_recall_uses_only_independent_random_footage_events():

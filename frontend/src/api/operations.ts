@@ -34,6 +34,25 @@ export interface AssuranceCase {
   evidence: Record<string, unknown> | null
 }
 
+export interface QualityScorecard {
+  store_name: string | null
+  camera_name: string
+  detection_type: string
+  reviewed_sample_size: number
+  target_minimum_reviewed: number
+  precision: number | null
+  precision_lower_bound_95: number | null
+  recall: number | null
+  recall_lower_bound_95: number | null
+  recall_true_positive_events: number
+  recall_false_negative_events: number
+  target_minimum_recall_events: number
+  target_99_precision_evidence_met: boolean
+  target_99_recall_evidence_met: boolean
+  target_99_evidence_met: boolean
+  quality_mode: string
+}
+
 export const operations = {
   reportMissedEvent: (body: MissedEventInput) =>
     api<MissedEventResult>('/operations/missed-events', {
@@ -64,6 +83,9 @@ export const operations = {
     '/operations/recall-samples/generate', { method: 'POST', body }),
   listRecallSamples: () =>
     api<AssuranceCase[]>('/operations/cases?case_type=recall_sample&limit=100'),
+  getQualityScorecards: () =>
+    api<{ window_days: number; scorecards: QualityScorecard[] }>(
+      '/quality/scorecards?days=90'),
   reviewRecallSample: (
     caseId: number,
     outcome: 'target_event' | 'no_target_event' | 'unclear',
