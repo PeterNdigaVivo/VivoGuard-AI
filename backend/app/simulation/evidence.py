@@ -15,7 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Annotation, TrainingImage
+from app.models import Annotation, AssuranceCase, Camera, TrainingImage
 from app.training.dataset import save_uploaded_image
 from app.training.feedback_loop import _ensure_dataset
 
@@ -104,6 +104,10 @@ def capture_live_probe_evidence(
     created_paths: list[Path] = []
     created = 0
     deduplicated = 0
+    camera_store_ids = {
+        int(camera.id): camera.store_id
+        for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()
+    }
     try:
         for candidate, suggestions, result in prepared:
             key = (int(candidate.camera_id), result)
@@ -140,6 +144,26 @@ def capture_live_probe_evidence(
             )
             db.add(image)
             db.flush()
+            db.add(AssuranceCase(
+                dedup_key=f"simulation-evidence:{image.id}",
+                case_type="simulation_evidence_review",
+                severity="medium",
+                status="open",
+                store_id=camera_store_ids.get(int(candidate.camera_id)),
+                camera_id=int(candidate.camera_id),
+                title=f"Review live simulation evidence #{image.id}",
+                description=(
+                    "Real camera probe frame; complete primary labelling, "
+                    "then hand it to an independent reviewer."
+                ),
+                evidence={
+                    "training_image_id": image.id,
+                    "simulation_run_id": run_id,
+                    "review_sla_minutes": 30,
+                },
+                training_status="pending_primary_review",
+                human_review_required=True,
+            ))
             for bbox in suggestions:
                 db.add(Annotation(
                     image_id=image.id,

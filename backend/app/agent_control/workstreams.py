@@ -98,6 +98,7 @@ MONDAY_WORKSTREAMS = {
             "synthetic_evidence_not_training_eligible",
             "live_probe_evidence_captured",
             "live_probe_evidence_fail_closed",
+            "no_overdue_simulation_reviews",
         ],
     },
     "human_validation": {
@@ -281,6 +282,12 @@ def _simulation_evidence(db: Session, now: datetime) -> dict:
     unsafe_live = [image.id for image in recent_live
                    if image.source_kind == "simulation"
                    and image.eligible_for_training]
+    review_cutoff = now - timedelta(minutes=30)
+    overdue_reviews = (db.query(AssuranceCase.id).filter(
+        AssuranceCase.case_type == "simulation_evidence_review",
+        AssuranceCase.status == "open",
+        AssuranceCase.first_seen_at < review_cutoff,
+    ).limit(500).all())
     checks = {
         "scenario_evidence_fresh": report["fresh"],
         "all_catalog_scenarios_pass": (
@@ -297,6 +304,7 @@ def _simulation_evidence(db: Session, now: datetime) -> dict:
         ),
         "live_probe_evidence_captured": bool(recent_live),
         "live_probe_evidence_fail_closed": not unsafe_live,
+        "no_overdue_simulation_reviews": not overdue_reviews,
     }
     return {
         "checks": checks,
@@ -309,6 +317,7 @@ def _simulation_evidence(db: Session, now: datetime) -> dict:
                             and image.review_state == "approved"
                             for image in recent_live),
             "unsafe_ids": unsafe_live[:100],
+            "overdue_review_case_ids": [row[0] for row in overdue_reviews],
         },
     }
 

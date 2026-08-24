@@ -51,6 +51,10 @@ def test_live_probe_capture_is_bounded_deduplicated_and_quarantined(tmp_path, mo
         assert all(row.eligible_for_training is False for row in rows)
         assert all(row.review_state == "quarantined" for row in rows)
         assert all(row.source_extra["synthetic"] is False for row in rows)
+        cases = db.query(AssuranceCase).order_by(AssuranceCase.id).all()
+        assert len(cases) == 2
+        assert all(case.training_status == "pending_primary_review" for case in cases)
+        assert all(case.evidence["review_sla_minutes"] == 30 for case in cases)
         public_row = TrainingImageOut.model_validate(rows[0])
         assert public_row.evidence_source == "simulation_live_probe"
         assert public_row.synthetic is False
