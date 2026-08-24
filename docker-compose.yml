@@ -223,7 +223,7 @@ services:
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
+      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --disable-prefetch --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
     environment:
       <<: *app-env
       # One Celery child handles one camera loop. Without explicit native
