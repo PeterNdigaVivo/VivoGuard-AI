@@ -24,13 +24,20 @@ WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 # When a store has no business_hours_json at all, fall back to the
-# dominant Vivo schedule (09:00-21:00 every day). `is_open()` stays
+# authorised Vivo schedule. `is_open()` stays
 # closed-by-default for callers that want strict semantics; the
 # intrusion gate uses `is_open_with_default()` so unconfigured hours
 # arm the detector overnight (outside the default window) instead of
 # around the clock.
-_DASHBOARD_DEFAULT_WINDOWS = ["09:00-21:00"]
+_DEFAULT_BUSINESS_HOURS = {
+    **{key: ["09:30-20:00"] for key in WEEKDAY_KEYS[:6]},
+    "sun": ["10:00-19:00"],
+}
 ACTUAL_CLOSE_KEY_FMT = "vg:store:last_closed:{store_id}"
+
+
+def _default_windows(weekday_idx: int) -> list[str]:
+    return list(_DEFAULT_BUSINESS_HOURS[WEEKDAY_KEYS[weekday_idx]])
 
 
 def normalise_business_hours(business_hours: Optional[dict]) -> Optional[dict]:
@@ -154,7 +161,7 @@ def _effective_windows(business_hours: Optional[dict],
         parsed = [p for p in (_parse_window(w) for w in windows) if p]
         if parsed:
             return parsed
-    return [p for p in (_parse_window(w) for w in _DASHBOARD_DEFAULT_WINDOWS) if p]
+    return [p for p in (_parse_window(w) for w in _default_windows(weekday_idx)) if p]
 
 
 def intrusion_time_context(business_hours: Optional[dict],
@@ -247,7 +254,7 @@ def _windows_for_day(store, weekday_idx: int) -> list[str]:
         if key in bh:
             return list(bh.get(key) or [])
     # Permissive default — see module comment for rationale.
-    return list(_DASHBOARD_DEFAULT_WINDOWS)
+    return _default_windows(weekday_idx)
 
 
 def _parse_window(s: str) -> tuple[time, time] | None:

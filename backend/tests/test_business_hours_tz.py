@@ -114,6 +114,15 @@ def test_default_empty_dict_uses_default_window_not_closed() -> None:
     assert is_open_with_default({}, AT_0300_EAT) is False     # still armed overnight
 
 
+def test_fleet_default_uses_authorised_sunday_hours() -> None:
+    before_open = datetime(2026, 8, 23, 9, 45, tzinfo=EAT)
+    during_trade = datetime(2026, 8, 23, 10, 0, tzinfo=EAT)
+    at_close = datetime(2026, 8, 23, 19, 0, tzinfo=EAT)
+    assert is_open_with_default(None, before_open) is False
+    assert is_open_with_default(None, during_trade) is True
+    assert is_open_with_default(None, at_close) is False
+
+
 def test_default_missing_weekday_key_uses_default_window() -> None:
     assert is_open_with_default({"mon": ["09:00-20:00"]}, AT_1055_EAT) is True
 
@@ -143,7 +152,7 @@ def test_time_context_before_vs_after() -> None:
 
 
 def test_time_context_unconfigured_uses_default_window() -> None:
-    # No hours → default 09:00-21:00 boundary decides the wording.
+    # No hours → the authorised fleet default decides the wording.
     assert intrusion_time_context({}, AT_0730_EAT) == "before_hours"
     assert intrusion_time_context(None, AT_2130_EAT) == "after_hours"
 

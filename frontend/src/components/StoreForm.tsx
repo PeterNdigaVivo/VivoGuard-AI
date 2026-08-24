@@ -31,7 +31,9 @@ type FormState = {
 function defaultBusinessHours(): FormState['business_hours'] {
   const out: FormState['business_hours'] = {}
   for (const d of WEEKDAYS) {
-    out[d.key] = { open: d.key !== 'sun', start: '09:00', end: '20:00' }
+    out[d.key] = d.key === 'sun'
+      ? { open: true, start: '10:00', end: '19:00' }
+      : { open: true, start: '09:30', end: '20:00' }
   }
   return out
 }
@@ -58,7 +60,11 @@ function parseBusinessHours(json: Record<string, unknown> | null): FormState['bu
         : typeof raw === 'string' ? [raw] : undefined
     if (wins && wins.length > 0) {
       const [start, end] = wins[0].split('-')
-      base[d.key] = { open: true, start: start || '09:00', end: end || '20:00' }
+      base[d.key] = {
+        open: true,
+        start: start || (d.key === 'sun' ? '10:00' : '09:30'),
+        end: end || (d.key === 'sun' ? '19:00' : '20:00'),
+      }
     } else if (wins && wins.length === 0) {
       base[d.key] = { ...base[d.key], open: false }
     }
