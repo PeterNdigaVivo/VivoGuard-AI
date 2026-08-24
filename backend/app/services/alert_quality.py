@@ -250,6 +250,19 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
                     .filter(RecordingClip.started_at <= datetime.now(timezone.utc),
                             or_(RecordingClip.ended_at.is_(None),
                                 RecordingClip.ended_at >= cutoff)).all())
+    recording_intervals_by_camera: dict[int, list[tuple[datetime, datetime | None]]] = defaultdict(list)
+    recording_intervals_by_store: dict[int, list[tuple[datetime, datetime | None]]] = defaultdict(list)
+    for recording in recordings:
+        started = (recording.started_at.replace(tzinfo=timezone.utc)
+                   if recording.started_at.tzinfo is None
+                   else recording.started_at)
+        ended = recording.ended_at
+        if ended is not None and ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        interval = (started, ended)
+        recording_intervals_by_camera[recording.camera_id].append(interval)
+        if recording.store_id is not None:
+            recording_intervals_by_store[recording.store_id].append(interval)
     # Append-only history; the latest decision from each reviewer is their
     # current position for agreement measurement.
     latest_by_alert_reviewer = {}
@@ -294,23 +307,13 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
             elif eligibility is None and event.timestamp is not None:
                 event_at = (event.timestamp.replace(tzinfo=timezone.utc)
                             if event.timestamp.tzinfo is None else event.timestamp)
-                covered = False
-                for recording in recordings:
-                    started = (recording.started_at.replace(tzinfo=timezone.utc)
-                               if recording.started_at.tzinfo is None
-                               else recording.started_at)
-                    ended = recording.ended_at
-                    if ended is not None and ended.tzinfo is None:
-                        ended = ended.replace(tzinfo=timezone.utc)
-                    same_source = recording.camera_id == event.camera_id
-                    if (event.detection_type == "shop_open_close"
-                            and key[0] is not None):
-                        same_source = (same_source
-                                       or recording.store_id == key[0])
-                    if (same_source and started <= event_at
-                            and (ended is None or ended >= event_at)):
-                        covered = True
-                        break
+                intervals = recording_intervals_by_camera[event.camera_id]
+                if event.detection_type == "shop_open_close" and key[0] is not None:
+                    intervals = intervals + recording_intervals_by_store[key[0]]
+                covered = any(
+                    started <= event_at and (ended is None or ended >= event_at)
+                    for started, ended in intervals
+                )
                 eligibility = covered
             if eligibility is True:
                 clip_eligible += 1
