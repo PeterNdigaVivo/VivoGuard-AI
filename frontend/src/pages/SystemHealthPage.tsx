@@ -17,6 +17,13 @@ interface SystemHealth {
   disk_total_gb: number; disk_used_gb: number; disk_free_gb: number
   gpus: { index: number; name: string; total_mb: number; free_mb: number }[]
   alerts_today: number
+  inference_pipeline: {
+    cameras_total: number; cameras_fresh: number
+    cameras_actively_inferencing: number | null
+    cameras_waiting_for_worker: number | null
+    inference_queue_depth: number | null
+    estimated_full_rotation_seconds: number | null
+  } | null
 }
 
 // Sprint 1.2 inference-latency telemetry (GET /analytics/perf).
@@ -88,6 +95,33 @@ export default function SystemHealthPage() {
           <div className="text-3xl font-semibold">{data.alerts_today}</div>
         </Card>
       </div>
+
+      <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+            Inference Coverage and Capacity
+          </div>
+          {data.inference_pipeline && (
+            <Badge color={(data.inference_pipeline.cameras_waiting_for_worker ?? 0) > 0 ? 'amber' : 'green'}>
+              {(data.inference_pipeline.cameras_waiting_for_worker ?? 0) > 0 ? 'Backlog' : 'Current'}
+            </Badge>
+          )}
+        </div>
+        {!data.inference_pipeline ? (
+          <div className="text-sm text-slate-400 dark:text-slate-400">No inference supervisor telemetry.</div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+            <div><div className="text-xs text-slate-500">AI cameras</div><div className="text-xl font-semibold">{data.inference_pipeline.cameras_total}</div></div>
+            <div><div className="text-xs text-slate-500">Fresh feeds</div><div className="text-xl font-semibold">{data.inference_pipeline.cameras_fresh}</div></div>
+            <div><div className="text-xs text-slate-500">Active tasks</div><div className="text-xl font-semibold">{data.inference_pipeline.cameras_actively_inferencing ?? '—'}</div></div>
+            <div><div className="text-xs text-slate-500">Waiting / queue</div><div className="text-xl font-semibold">{data.inference_pipeline.cameras_waiting_for_worker ?? '—'} / {data.inference_pipeline.inference_queue_depth ?? '—'}</div></div>
+            <div><div className="text-xs text-slate-500">Estimated full rotation</div><div className="text-xl font-semibold">{data.inference_pipeline.estimated_full_rotation_seconds == null ? '—' : `${Math.ceil(data.inference_pipeline.estimated_full_rotation_seconds / 60)} min`}</div></div>
+          </div>
+        )}
+        <div className="text-xs text-slate-400 mt-3">
+          Waiting cameras have fresh video but are not actively being analysed. Rotation is a scheduling estimate, not alert-delivery latency.
+        </div>
+      </Card>
 
       {/* Inference performance (Sprint 1.2 PerfTracker) */}
       <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">

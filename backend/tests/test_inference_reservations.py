@@ -51,6 +51,28 @@ class FakeFreshnessRedis:
         return self.pipe
 
 
+class FakeReservationRedis:
+    def __init__(self, present: set[str], queue_depth: int):
+        self.present = present
+        self.keys = []
+        self.queue_depth = queue_depth
+
+    def pipeline(self, *, transaction: bool):
+        assert transaction is False
+        return self
+
+    def exists(self, key: str):
+        self.keys.append(key)
+        return self
+
+    def execute(self):
+        return [key in self.present for key in self.keys]
+
+    def llen(self, queue: str):
+        assert queue == "inference"
+        return self.queue_depth
+
+
 def test_only_reserved_task_can_claim_and_claim_shortens_active_lease():
     r = FakeRedis()
     r.values["lock"] = "current-task"
@@ -101,3 +123,18 @@ def test_freshness_gate_fails_open_when_redis_check_fails():
     r = FakeFreshnessRedis(set(), fail=True)
 
     assert inference._camera_ids_with_fresh_frames(r, [3, 4]) == {3, 4}
+
+
+def test_reservation_health_distinguishes_active_from_waiting_tasks():
+    r = FakeReservationRedis({
+        "vg:inference-lock:1", "vg:inference-lock:2",
+        "vg:inference-lock:3", "vg:inference-hb:1",
+    }, queue_depth=2)
+
+    assert inference._reservation_health(r, [1, 2, 3]) == {
+        "cameras_reserved": 3,
+        "cameras_actively_inferencing": 1,
+        "cameras_waiting_for_worker": 2,
+        "inference_queue_depth": 2,
+        "estimated_full_rotation_seconds": 3 * inference.RUN_SECONDS,
+    }

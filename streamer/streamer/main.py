@@ -87,8 +87,10 @@ RETRY_UNREACHABLE_SECONDS = int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "30
 STARTUP_BATCH_SIZE        = int(os.environ.get("STREAMER_STARTUP_BATCH_SIZE", "10"))
 STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY", "2.0"))
 
-# camera_id -> (checked_at_epoch, reachable)
-_reachable_cache: dict[int, tuple[float, bool]] = {}
+# camera_id -> (checked_at_epoch, reachable, probed endpoint).  The endpoint
+# is part of the cache identity so a corrected port/URL is probed immediately
+# instead of inheriting a five-minute negative result for the old endpoint.
+_reachable_cache: dict[int, tuple[float, bool, tuple[str, int] | None]] = {}
 _health_buffer = FrameBuffer()
 
 
@@ -437,8 +439,10 @@ def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
     for spec in specs:
         entry = _reachable_cache.get(spec.camera_id)
         if entry is not None:
-            checked_at, was_reachable = entry
-            if (now - checked_at) < RETRY_UNREACHABLE_SECONDS:
+            checked_at, was_reachable, cached_endpoint = entry
+            endpoint = _spec_probe_endpoint(spec)
+            if (cached_endpoint == endpoint
+                    and (now - checked_at) < RETRY_UNREACHABLE_SECONDS):
                 if was_reachable:
                     reachable.append(spec)
                 # Unreachable + within retry window → skip silently.
@@ -462,7 +466,9 @@ def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
 
     for spec in need_check:
         ok = results.get(spec.camera_id, False)
-        _reachable_cache[spec.camera_id] = (now, ok)
+        _reachable_cache[spec.camera_id] = (
+            now, ok, _spec_probe_endpoint(spec),
+        )
         if ok:
             reachable.append(spec)
         else:

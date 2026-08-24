@@ -54,3 +54,27 @@ def test_health_write_failure_does_not_block_reconciliation(monkeypatch) -> None
             rtsp_url="rtsp://camera.example.invalid:554/live",
         ),
     ]) == []
+
+
+def test_endpoint_change_invalidates_negative_reachability_cache(monkeypatch) -> None:
+    calls = []
+
+    async def check(specs):
+        calls.append([streamer_main._spec_probe_endpoint(spec) for spec in specs])
+        return {spec.camera_id: False for spec in specs}
+
+    monkeypatch.setattr(streamer_main, "_async_check_all", check)
+    streamer_main._reachable_cache.clear()
+    old = streamer_main.CameraSpec(
+        camera_id=163, rtsp_url="rtsp://camera.example.invalid:554/live",
+    )
+    corrected = streamer_main.CameraSpec(
+        camera_id=163, rtsp_url="rtsp://camera.example.invalid:8080/live",
+    )
+
+    assert streamer_main._filter_reachable([old]) == []
+    assert streamer_main._filter_reachable([corrected]) == []
+    assert calls == [
+        [("camera.example.invalid", 554)],
+        [("camera.example.invalid", 8080)],
+    ]

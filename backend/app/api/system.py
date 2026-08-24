@@ -1,5 +1,6 @@
 """System health endpoints — used by the System Health page (step 14)."""
 from __future__ import annotations
+import json
 import shutil
 import time
 from datetime import datetime, timezone
@@ -49,6 +50,19 @@ def _runtime_camera_status(configured_status: str, health: dict,
     if configured_status in {"offline", "pending", "degraded"}:
         return configured_status, None
     return "offline", None
+
+
+def _decode_inference_pipeline(raw_pipeline) -> dict | None:
+    """Decode supervisor telemetry without breaking the health endpoint."""
+    try:
+        if isinstance(raw_pipeline, bytes):
+            raw_pipeline = raw_pipeline.decode()
+        if not raw_pipeline:
+            return None
+        value = json.loads(raw_pipeline)
+        return value if isinstance(value, dict) else None
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return None
 
 
 @router.get("/cameras/{camera_id}/stream-health")
@@ -188,6 +202,10 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
                         .filter(Alert.created_at >= datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0))
                         .scalar() or 0)
 
+    inference_pipeline = _decode_inference_pipeline(
+        fb.r.get("vg:inference:health"),
+    )
+
     return {
         "now":            datetime.now(timezone.utc).isoformat(),
         "cameras":        cam_health,
@@ -196,4 +214,5 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "disk_free_gb":   round(du.free  / (1024 ** 3), 1),
         "gpus":           gpu_info,
         "alerts_today":   int(new_alerts_24h),
+        "inference_pipeline": inference_pipeline,
     }

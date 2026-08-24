@@ -24,6 +24,7 @@ Two tasks here:
 from __future__ import annotations
 import json
 import logging
+import math
 import time
 
 import redis
@@ -183,15 +184,58 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
     return cleared
 
 
+def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
+    """Report active versus queued camera reservations without side effects."""
+    if not camera_ids:
+        return {
+            "cameras_reserved": 0,
+            "cameras_actively_inferencing": 0,
+            "cameras_waiting_for_worker": 0,
+            "inference_queue_depth": 0,
+            "estimated_full_rotation_seconds": 0,
+        }
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.exists(LOCK_KEY_FMT.format(camera_id=camera_id))
+        for camera_id in camera_ids:
+            pipe.exists(HB_KEY_FMT.format(camera_id=camera_id))
+        flags = pipe.execute()
+        split = len(camera_ids)
+        reserved = sum(bool(value) for value in flags[:split])
+        active = sum(bool(value) for value in flags[split:])
+        queue_depth = int(r.llen("inference"))
+        return {
+            "cameras_reserved": reserved,
+            "cameras_actively_inferencing": active,
+            "cameras_waiting_for_worker": max(0, reserved - active),
+            "inference_queue_depth": queue_depth,
+            "estimated_full_rotation_seconds": (
+                math.ceil(len(camera_ids) / active) * RUN_SECONDS
+                if active else None
+            ),
+        }
+    except Exception as exc:
+        log.warning("supervise_all: reservation telemetry failed: %s", exc)
+        return {
+            "cameras_reserved": None,
+            "cameras_actively_inferencing": None,
+            "cameras_waiting_for_worker": None,
+            "inference_queue_depth": None,
+            "estimated_full_rotation_seconds": None,
+        }
+
+
 def _write_health(r: redis.Redis, *,
                   cameras_total: int, cameras_fresh: int,
                   cameras_enqueued: int,
-                  cameras_already_running: int, stale_cleared: int) -> None:
+                  cameras_already_running: int, stale_cleared: int,
+                  reservation_health: dict | None = None) -> None:
     """Heartbeat for the inference pipeline. The
     alerting.inference_pipeline_health_check beat task fires URGENT
     when this key ages past 10 min."""
     try:
-        r.set(HEALTH_KEY, json.dumps({
+        payload = {
             "last_run_ts":             int(time.time()),
             "cameras_total":           cameras_total,
             "cameras_fresh":           cameras_fresh,
@@ -199,7 +243,9 @@ def _write_health(r: redis.Redis, *,
             "cameras_enqueued":        cameras_enqueued,
             "cameras_already_running": cameras_already_running,
             "stale_locks_cleared":     stale_cleared,
-        }), ex=24 * 3600)
+        }
+        payload.update(reservation_health or {})
+        r.set(HEALTH_KEY, json.dumps(payload), ex=24 * 3600)
     except Exception as e:
         log.debug("supervise_all: health write failed: %s", e)
 
@@ -258,12 +304,16 @@ def supervise_all() -> None:
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
              "already_running=%s, stale_locks_cleared=%d",
              len(cams), len(schedulable), enqueued, skipped, stale_cleared)
+    reservation_health = _reservation_health(
+        r, [int(cam.id) for cam in schedulable],
+    )
     _write_health(r,
                   cameras_total=len(cams),
                   cameras_fresh=len(schedulable),
                   cameras_enqueued=len(enqueued),
                   cameras_already_running=len(skipped),
-                  stale_cleared=stale_cleared)
+                  stale_cleared=stale_cleared,
+                  reservation_health=reservation_health)
 
 
 # -------------------------------------------------------------------------

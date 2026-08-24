@@ -1,4 +1,4 @@
-from app.api.system import _runtime_camera_status
+from app.api.system import _decode_inference_pipeline, _runtime_camera_status
 
 
 def test_fresh_frames_override_pending_configuration() -> None:
@@ -46,3 +46,12 @@ def test_invalid_health_values_fail_closed() -> None:
         {"last_frame_at": "not-a-timestamp", "fps": "unknown"},
         now=1000.0,
     ) == ("offline", None)
+
+
+def test_inference_pipeline_telemetry_decodes_only_json_objects() -> None:
+    assert _decode_inference_pipeline(b'{"cameras_fresh": 65}') == {
+        "cameras_fresh": 65,
+    }
+    assert _decode_inference_pipeline("not-json") is None
+    assert _decode_inference_pipeline("[]") is None
+    assert _decode_inference_pipeline(None) is None
