@@ -71,6 +71,16 @@ def test_failed_tcp_preflight_is_visible_in_camera_health(monkeypatch) -> None:
     }]
 
 
+def test_reachability_cache_retries_failures_before_healthy_endpoints(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(streamer_main, "RETRY_UNREACHABLE_SECONDS", 30)
+    monkeypatch.setattr(streamer_main, "RECHECK_REACHABLE_SECONDS", 300)
+
+    assert streamer_main._reachability_cache_ttl(False) == 30
+    assert streamer_main._reachability_cache_ttl(True) == 300
+
+
 def test_health_write_failure_does_not_block_reconciliation(monkeypatch) -> None:
     class BrokenHealthBuffer:
         def update_health(self, *_args, **_kwargs):

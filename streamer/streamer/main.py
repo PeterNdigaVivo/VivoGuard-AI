@@ -90,6 +90,10 @@ TCP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("STREAMER_TCP_CHECK_TIMEOUT", "
 RETRY_UNREACHABLE_SECONDS = max(
     15, int(os.environ.get("STREAMER_RETRY_UNREACHABLE", "30")),
 )
+RECHECK_REACHABLE_SECONDS = max(
+    RETRY_UNREACHABLE_SECONDS,
+    int(os.environ.get("STREAMER_RECHECK_REACHABLE", "300")),
+)
 STARTUP_BATCH_SIZE        = int(os.environ.get("STREAMER_STARTUP_BATCH_SIZE", "10"))
 STARTUP_BATCH_DELAY_SECONDS = float(os.environ.get("STREAMER_STARTUP_BATCH_DELAY", "2.0"))
 # The streamer only needs to publish frames as fast as the inference loop can
@@ -446,6 +450,14 @@ async def _tcp_open(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _reachability_cache_ttl(was_reachable: bool) -> int:
+    """Keep healthy workers stable while retrying failures promptly."""
+    return (
+        RECHECK_REACHABLE_SECONDS if was_reachable
+        else RETRY_UNREACHABLE_SECONDS
+    )
+
+
 async def _async_check_all(specs: list[CameraSpec]) -> dict[int, bool]:
     """TCP-probe every spec in parallel. Total wall time ≈ the
     longest single timeout (2 s default), not N × 2 s."""
@@ -499,8 +511,10 @@ def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
         if entry is not None:
             checked_at, was_reachable, cached_endpoint = entry
             endpoint = _spec_probe_endpoint(spec)
-            if (cached_endpoint == endpoint
-                    and (now - checked_at) < RETRY_UNREACHABLE_SECONDS):
+            if (
+                cached_endpoint == endpoint
+                and (now - checked_at) < _reachability_cache_ttl(was_reachable)
+            ):
                 if was_reachable:
                     reachable.append(spec)
                 # Unreachable + within retry window → skip silently.
