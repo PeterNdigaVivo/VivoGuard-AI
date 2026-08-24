@@ -61,6 +61,7 @@ HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # set once at task start
 LAST_RUN_KEY_FMT = "vg:inference:last-run:{camera_id}"
 HEALTH_KEY     = "vg:inference:health"             # supervisor breadcrumb
 LOCK_KEY_PREFIX = "vg:inference-lock:"
+REDIS_PRIORITY_SEP = "\x06\x16"
 
 # These risks need prompt observation even while the CPU host is rotating
 # through slower dwell, analytics and merchandising work. ``person`` is
@@ -342,7 +343,19 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
         split = len(camera_ids)
         reserved = sum(bool(value) for value in flags[:split])
         active = sum(bool(value) for value in flags[split:])
-        queue_depths = {queue: int(r.llen(queue)) for queue in queues}
+        # Kombu's Redis priority emulation stores priority 0 in the base list
+        # and priorities 1..9 in suffixed lists. Counting only the base queue
+        # hides ordinary pending tasks as soon as the fast lane is enabled.
+        queue_depths = {
+            queue: sum(
+                int(r.llen(
+                    queue if priority == 0
+                    else f"{queue}{REDIS_PRIORITY_SEP}{priority}"
+                ))
+                for priority in range(10)
+            )
+            for queue in queues
+        }
         shard_health = {
             queue: {
                 "cameras": 0,

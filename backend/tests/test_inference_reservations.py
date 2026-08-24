@@ -71,8 +71,7 @@ class FakeReservationRedis:
         return [key in self.present for key in self.keys]
 
     def llen(self, queue: str):
-        assert queue == "inference"
-        return self.queue_depth
+        return self.queue_depth if queue == "inference" else 0
 
 
 class FakeLastRunRedis:
