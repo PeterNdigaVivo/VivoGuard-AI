@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge, Button, Card, PageHeader, Skeleton } from '@/components/ui/Primitives'
 import { labels as labelsApi, type SprintAlert } from '@/api/labels'
+import MissedEventForm from '@/components/MissedEventForm'
 
 const BATCH = 20
 const UNDO_STACK_DEPTH = 5
@@ -16,6 +17,7 @@ export default function SprintPage() {
   const [undoIds, setUndoIds] = useState<number[]>([])   // FIFO, head = most recent
   const [reviewed, setReviewed] = useState(0)            // session counter
   const [err, setErr] = useState<string | null>(null)
+  const [showMissedEvent, setShowMissedEvent] = useState(false)
   const location = useLocation()
   const filters = useMemo(() => {
     const q = new URLSearchParams(location.search)
@@ -94,11 +96,16 @@ export default function SprintPage() {
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
-      <PageHeader title="🎯 Labelling Sprint" actions={
-        <Link to="/ai-learning" className="text-sm text-sky-600 hover:underline">
+      <PageHeader title="🎯 Labelling Sprint" actions={<>
+        <Button variant="ghost" onClick={() => setShowMissedEvent(value => !value)}>
+          Report missed alert
+        </Button>
+        <Link to="/ai-learning" className="text-sm text-sky-600 hover:underline self-center">
           ← Back to AI Learning
         </Link>
-      } />
+      </>} />
+
+      {showMissedEvent && <MissedEventForm onClose={() => setShowMissedEvent(false)} />}
 
       {(filters.camera_id || filters.detection_type) && (
         <Card className="p-3 mb-3 border-sky-200 bg-sky-50 text-sky-900">

@@ -251,6 +251,14 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
     store = db.get(Store, body.store_id)
     if not store:
         raise HTTPException(404, "store not found")
+    camera = db.get(Camera, body.camera_id) if body.camera_id else None
+    if body.camera_id and (not camera or camera.is_deleted):
+        raise HTTPException(404, "camera not found")
+    if camera and camera.store_id != body.store_id:
+        raise HTTPException(
+            422,
+            "camera does not belong to the selected store",
+        )
     occurred = body.occurred_at if body.occurred_at.tzinfo else body.occurred_at.replace(tzinfo=timezone.utc)
     q = db.query(DetectionEvent).join(Camera, Camera.id == DetectionEvent.camera_id).filter(
         Camera.store_id == body.store_id,
@@ -259,9 +267,11 @@ def report_missed_event(body: MissedEventIn, db: Session = Depends(get_db),
     if body.camera_id:
         q = q.filter(DetectionEvent.camera_id == body.camera_id)
     matched = q.order_by(DetectionEvent.timestamp.desc()).first()
-    camera = db.get(Camera, body.camera_id) if body.camera_id else None
     if matched:
         root_cause, training_status = "alert_or_triage_gap", "labelled_case_matched_to_detection"
+    elif camera is None:
+        root_cause = "camera_unconfirmed"
+        training_status = "blocked_pending_camera_identification"
     elif camera and (camera.status != "online" or not camera.last_seen_at):
         root_cause, training_status = "camera_unavailable", "blocked_no_visual_evidence"
     elif camera and not camera.zones:

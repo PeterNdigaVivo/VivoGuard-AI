@@ -8,10 +8,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.api.operations import _verify_odoo_signature
+from app.api.operations import (
+    MissedEventIn, _verify_odoo_signature, report_missed_event,
+)
 from app.database import Base
 from app.integrations.odoo_pos import normalise_odoo_event
-from app.models import AssuranceCase
+from app.models import AssuranceCase, Camera, Store
 from app.operations.assurance import (
     assess_coverage, create_alert_quality_cases, create_lone_worker_cases, risk_band,
     score_operational_event, store_is_open,
@@ -96,3 +98,64 @@ def test_assurance_agents_resolve_cases_when_conditions_clear():
         assert lone_worker.resolved_at is not None
         assert alert_quality.status == "resolved"
         assert alert_quality.resolved_at is not None
+
+
+def test_missed_event_rejects_camera_from_another_store():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        first = Store(name="First", country="Kenya")
+        second = Store(name="Second", country="Kenya")
+        db.add_all([first, second])
+        db.flush()
+        camera = Camera(
+            name="Second Channel 1", site="Second", brand="dahua",
+            connection_type="nvr_dahua", host="127.0.0.1",
+            store_id=second.id,
+        )
+        db.add(camera)
+        db.commit()
+
+        body = MissedEventIn(
+            source_ref="manual-test-1", store_id=first.id,
+            camera_id=camera.id,
+            occurred_at=datetime.now(timezone.utc),
+            report_text="A person entered the protected stockroom.",
+            label="intrusion",
+        )
+        with pytest.raises(HTTPException, match="does not belong") as exc:
+            report_missed_event(
+                body, db=db,
+                user=SimpleNamespace(id=1, email="reviewer@example.test"),
+            )
+
+        assert exc.value.status_code == 422
+        assert db.query(AssuranceCase).count() == 0
+
+
+def test_missed_event_without_identified_camera_stays_pending_investigation():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        store = Store(name="Unmapped Incident Store", country="Kenya")
+        db.add(store)
+        db.commit()
+
+        result = report_missed_event(
+            MissedEventIn(
+                source_ref="manual-test-unmapped", store_id=store.id,
+                occurred_at=datetime.now(timezone.utc),
+                report_text="A stockroom incident had no corresponding alert.",
+                label="stockroom_access",
+            ),
+            db=db,
+            user=SimpleNamespace(id=1, email="reviewer@example.test"),
+        )
+
+        assert result["root_cause"] == "camera_unconfirmed"
+        assert result["training_status"] == (
+            "blocked_pending_camera_identification"
+        )
+        case = db.get(AssuranceCase, result["case_id"])
+        assert case.camera_id is None
+        assert case.root_cause == "camera_unconfirmed"
