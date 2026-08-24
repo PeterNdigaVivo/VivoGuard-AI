@@ -1,7 +1,11 @@
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.ai.env_config import configure_cpu_thread_budget
+from app.ai.env_config import (
+    _configure_onnxruntime_sessions,
+    configure_cpu_thread_budget,
+)
 
 
 def test_cpu_thread_budget_configures_loaded_runtimes(monkeypatch):
@@ -19,6 +23,33 @@ def test_cpu_thread_budget_configures_loaded_runtimes(monkeypatch):
 
 def test_gpu_thread_budget_keeps_framework_defaults():
     assert configure_cpu_thread_budget("cuda") == 0
+
+
+def test_onnxruntime_sessions_receive_bounded_options():
+    original = Mock(return_value="session")
+    original._vivoguard_thread_bounded = False
+    options = Mock()
+    ort = ModuleType("onnxruntime")
+    ort.InferenceSession = original
+    ort.SessionOptions = Mock(return_value=options)
+    ort.ExecutionMode = SimpleNamespace(ORT_SEQUENTIAL="sequential")
+
+    with patch.dict("sys.modules", {"onnxruntime": ort}):
+        assert _configure_onnxruntime_sessions(1)
+        assert ort.InferenceSession("model.onnx", providers=["CPU"]) == "session"
+
+    assert options.intra_op_num_threads == 1
+    assert options.inter_op_num_threads == 1
+    assert options.execution_mode == "sequential"
+    options.add_session_config_entry.assert_any_call(
+        "session.intra_op.allow_spinning", "0"
+    )
+    options.add_session_config_entry.assert_any_call(
+        "session.inter_op.allow_spinning", "0"
+    )
+    original.assert_called_once_with(
+        "model.onnx", providers=["CPU"], sess_options=options
+    )
 
 
 def test_compose_caps_every_native_inference_pool():

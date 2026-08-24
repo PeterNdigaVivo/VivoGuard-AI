@@ -64,8 +64,50 @@ def configure_cpu_thread_budget(backend: str) -> int:
     except Exception as exc:
         log.debug("unable to set PyTorch thread budget: %s", exc)
 
+    _configure_onnxruntime_sessions(threads)
+
     log.info("CPU inference native thread budget=%d per worker process", threads)
     return threads
+
+
+def _configure_onnxruntime_sessions(threads: int) -> bool:
+    """Supply bounded SessionOptions to Ultralytics' ONNX sessions.
+
+    Ultralytics currently creates ``InferenceSession`` without session
+    options, which makes ONNX Runtime allocate a host-sized pool in every
+    Celery child. There is no public Ultralytics predictor setting for these
+    options, so this process-local adapter supplies them only when the caller
+    omitted them. Explicit options from any other caller always win.
+    """
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        log.debug("ONNX Runtime unavailable for thread budgeting: %s", exc)
+        return False
+
+    current = ort.InferenceSession
+    if getattr(current, "_vivoguard_thread_bounded", False):
+        return True
+
+    def bounded_session(*args, **kwargs):
+        if len(args) < 2 and "sess_options" not in kwargs:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = threads
+            options.inter_op_num_threads = 1
+            options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            options.add_session_config_entry(
+                "session.intra_op.allow_spinning", "0"
+            )
+            options.add_session_config_entry(
+                "session.inter_op.allow_spinning", "0"
+            )
+            kwargs["sess_options"] = options
+        return current(*args, **kwargs)
+
+    bounded_session._vivoguard_thread_bounded = True
+    ort.InferenceSession = bounded_session
+    log.info("ONNX Runtime session thread budget=%d; spinning disabled", threads)
+    return True
 
 
 # backend → Ultralytics export `format=` string. rocm has no export
