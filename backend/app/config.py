@@ -309,6 +309,15 @@ class Settings(BaseSettings):
     # immediately; LOCK_TTL tracks this value + 60s purely as a
     # crashed-worker safety net. Env: INFERENCE_RUN_SECONDS.
     inference_run_seconds: int = 120
+    # CPU fast lane for cameras protecting entrances, shutters, restricted
+    # areas and life-safety risks. These cameras use short, high-priority
+    # slices so a full mixed fleet rotation cannot hide a critical view for
+    # many minutes. The separate gap SLA is measured from actual task starts.
+    inference_critical_slice_seconds: int = Field(default=15, ge=5, le=60)
+    inference_critical_gap_sla_seconds: int = Field(default=300, ge=60, le=900)
+    inference_critical_watchdog_grace_seconds: int = Field(
+        default=60, ge=30, le=600,
+    )
     # Deterministic distribution for multi-worker / multi-host inference.
     # One shard preserves the existing ``inference`` queue. With N > 1 the
     # supervisor routes camera K to ``inference.{K % N}``; every configured

@@ -1,4 +1,6 @@
 """Regression tests for restart-safe, backlog-safe inference reservations."""
+from types import SimpleNamespace
+
 from app.tasks import inference
 
 
@@ -71,6 +73,23 @@ class FakeReservationRedis:
     def llen(self, queue: str):
         assert queue == "inference"
         return self.queue_depth
+
+
+class FakeLastRunRedis:
+    def __init__(self, values: dict[int, str | None]):
+        self.values = values
+        self.keys: list[str] = []
+
+    def pipeline(self, *, transaction: bool):
+        assert transaction is False
+        return self
+
+    def get(self, key: str):
+        self.keys.append(key)
+        return self
+
+    def execute(self):
+        return [self.values.get(int(key.rsplit(":", 1)[-1])) for key in self.keys]
 
 
 def test_only_reserved_task_can_claim_and_claim_shortens_active_lease():
@@ -159,4 +178,51 @@ def test_reservation_health_distinguishes_active_from_waiting_tasks():
             },
         },
         "estimated_full_rotation_seconds": 3 * inference.RUN_SECONDS,
+    }
+
+
+def test_latency_critical_camera_gets_short_priority_slice():
+    camera = SimpleNamespace(
+        detection_configs=[SimpleNamespace(
+            enabled=True, detection_type="intrusion",
+        )],
+        zones=[],
+    )
+    ordinary = SimpleNamespace(
+        detection_configs=[SimpleNamespace(
+            enabled=True, detection_type="dwell",
+        )],
+        zones=[],
+    )
+
+    assert inference._task_profile(camera) == (
+        inference.CRITICAL_RUN_SECONDS, 0,
+    )
+    assert inference._task_profile(ordinary) == (inference.RUN_SECONDS, 9)
+
+
+def test_unsuppressed_critical_zone_enters_fast_lane():
+    camera = SimpleNamespace(
+        detection_configs=[],
+        zones=[SimpleNamespace(
+            suppressed=False,
+            detection_types_json=["person", "entry_exit"],
+        )],
+    )
+
+    assert inference._camera_is_latency_critical(camera)
+
+
+def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
+    r = FakeLastRunRedis({1: "900", 2: "600", 3: None})
+
+    health = inference._critical_gap_health(r, [1, 2, 3], now=1000)
+
+    assert health == {
+        "critical_cameras_total": 3,
+        "critical_cameras_overdue": 2,
+        "critical_camera_ids_overdue": [2, 3],
+        "critical_cameras_never_started": 1,
+        "critical_max_gap_seconds": 400.0,
+        "critical_gap_sla_seconds": inference.CRITICAL_GAP_SLA_SECONDS,
     }

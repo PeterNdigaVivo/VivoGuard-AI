@@ -67,6 +67,14 @@ celery_app = Celery(
 celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Redis implements priorities using separate physical lists. Explicit
+    # 0..9 steps let the latency-critical list pass the ordinary list as soon
+    # as a worker is free. Keep the default round-robin strategy across named
+    # queues so alert/Beat traffic cannot starve each other.
+    task_queue_max_priority=9,
+    broker_transport_options={
+        "priority_steps": list(range(10)),
+    },
     task_default_queue="default",
     # Auto-declare any queue referenced from a task route or an
     # `options={"queue": ...}` enqueue. Avoids having to enumerate

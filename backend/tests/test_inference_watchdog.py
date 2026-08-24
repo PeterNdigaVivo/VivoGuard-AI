@@ -39,6 +39,31 @@ def test_watchdog_does_not_require_disabled_shadow():
     ) == []
 
 
+def test_watchdog_reports_critical_camera_gap_without_gpu_shadow():
+    problems = inference_health_problems(
+        {
+            "inference_shards": {},
+            "critical_cameras_overdue": 2,
+            "critical_camera_ids_overdue": [17, 23],
+            "critical_max_gap_seconds": 421.0,
+            "critical_gap_sla_seconds": 300,
+        },
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+    )
+
+    assert problems == [{
+        "code": "critical_camera_gap_sla",
+        "overdue_cameras": 2,
+        "camera_ids": [17, 23],
+        "max_gap_seconds": 421.0,
+        "sla_seconds": 300,
+    }]
+
+
 def test_watchdog_reports_expected_missing_or_unsafe_shadow():
     assert inference_health_problems(
         {"inference_shards": {}},

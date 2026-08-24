@@ -39,6 +39,8 @@ log = logging.getLogger(__name__)
 # Each per-camera task runs this long then exits. Keep it well under the
 # supervisor lock TTL so we don't end up with double-coverage.
 RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridable
+CRITICAL_RUN_SECONDS = settings.inference_critical_slice_seconds
+CRITICAL_GAP_SLA_SECONDS = settings.inference_critical_gap_sla_seconds
 # Tightened from RUN_SECONDS+60 to RUN_SECONDS+30. A lock that outlives
 # its task by >30s is stale by definition; the self-healing sweep clears
 # it before TTL expiry anyway, this just bounds the worst case when
@@ -56,8 +58,19 @@ PENDING_LOCK_TTL = max(3600, RUN_SECONDS * 32)
 HB_TTL         = LOCK_TTL + 30                     # 180s
 LOCK_KEY_FMT   = "vg:inference-lock:{camera_id}"
 HB_KEY_FMT     = "vg:inference-hb:{camera_id}"     # set once at task start
+LAST_RUN_KEY_FMT = "vg:inference:last-run:{camera_id}"
 HEALTH_KEY     = "vg:inference:health"             # supervisor breadcrumb
 LOCK_KEY_PREFIX = "vg:inference-lock:"
+
+# These risks need prompt observation even while the CPU host is rotating
+# through slower dwell, analytics and merchandising work. ``person`` is
+# intentionally absent: including it would classify almost the whole fleet as
+# critical and defeat the fast lane.
+CRITICAL_DETECTION_TYPES = frozenset({
+    "entry_exit", "shutter", "intrusion", "trespass", "tripwire",
+    "tailgating", "fall", "fight", "weapon", "weapon_brandished",
+    "fire", "smoke", "staff_zone", "stockroom_access",
+})
 
 _CLAIM_LUA = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -148,6 +161,93 @@ def _camera_ids_with_fresh_frames(
             "AI-enabled cameras: %s", exc,
         )
         return set(camera_ids)
+
+
+def _camera_is_latency_critical(camera) -> bool:
+    """Return whether a camera protects a time-critical retail risk."""
+    if any(
+        bool(config.enabled)
+        and str(config.detection_type) in CRITICAL_DETECTION_TYPES
+        for config in (camera.detection_configs or [])
+    ):
+        return True
+    return any(
+        not bool(zone.suppressed)
+        and bool(
+            CRITICAL_DETECTION_TYPES.intersection(
+                str(value) for value in (zone.detection_types_json or [])
+            )
+        )
+        for zone in (camera.zones or [])
+    )
+
+
+def _task_profile(camera) -> tuple[int, int]:
+    """Return ``(slice_seconds, priority)`` for one camera reservation."""
+    if _camera_is_latency_critical(camera):
+        # Kombu's Redis transport checks the priority-0 list before priority-9
+        # (RabbitMQ uses the inverse convention). This service uses Redis.
+        return int(CRITICAL_RUN_SECONDS), 0
+    return int(RUN_SECONDS), 9
+
+
+def _critical_gap_health(
+    r: redis.Redis,
+    camera_ids: list[int],
+    *,
+    now: float | None = None,
+) -> dict:
+    """Measure critical-camera scheduling gaps from actual task starts."""
+    now = time.time() if now is None else float(now)
+    if not camera_ids:
+        return {
+            "critical_cameras_total": 0,
+            "critical_cameras_overdue": 0,
+            "critical_camera_ids_overdue": [],
+            "critical_cameras_never_started": 0,
+            "critical_max_gap_seconds": 0,
+            "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+        }
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+        values = pipe.execute()
+        ages: dict[int, float | None] = {}
+        for camera_id, value in zip(camera_ids, values):
+            if isinstance(value, bytes):
+                value = value.decode()
+            try:
+                ages[camera_id] = max(0.0, now - float(value)) if value else None
+            except (TypeError, ValueError):
+                ages[camera_id] = None
+        overdue = sorted(
+            camera_id for camera_id, age in ages.items()
+            if age is None or age > CRITICAL_GAP_SLA_SECONDS
+        )
+        measured = [age for age in ages.values() if age is not None]
+        return {
+            "critical_cameras_total": len(camera_ids),
+            "critical_cameras_overdue": len(overdue),
+            "critical_camera_ids_overdue": overdue,
+            "critical_cameras_never_started": sum(
+                age is None for age in ages.values()
+            ),
+            "critical_max_gap_seconds": (
+                round(max(measured), 1) if measured else None
+            ),
+            "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+        }
+    except Exception as exc:
+        log.warning("supervise_all: critical-gap telemetry failed: %s", exc)
+        return {
+            "critical_cameras_total": len(camera_ids),
+            "critical_cameras_overdue": None,
+            "critical_camera_ids_overdue": None,
+            "critical_cameras_never_started": None,
+            "critical_max_gap_seconds": None,
+            "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+        }
 
 
 def _claim_reserved_task(
@@ -324,15 +424,27 @@ def supervise_all() -> None:
     stale will be picked up on the same tick that clears it."""
     from app.database import SessionLocal
     from app.models import Camera
+    from sqlalchemy.orm import selectinload
 
     r = _redis()
     stale_cleared = _sweep_stale_locks(r)
     enqueued: list[int] = []
     skipped:  list[int] = []
     with SessionLocal() as db:
-        cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
+        cams = (
+            db.query(Camera)
+            .options(
+                selectinload(Camera.detection_configs),
+                selectinload(Camera.zones),
+            )
+            .filter(Camera.ai_enabled == True)  # noqa: E712
+            .all()
+        )
     fresh_ids = _camera_ids_with_fresh_frames(r, [int(cam.id) for cam in cams])
     schedulable = [cam for cam in cams if int(cam.id) in fresh_ids]
+    critical_ids = [
+        int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
+    ]
     for cam in schedulable:
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
         # SET NX with TTL — atomic acquire. Value is a placeholder until
@@ -340,10 +452,12 @@ def supervise_all() -> None:
         placeholder = f"pending:{int(time.time())}"
         if r.set(lock, placeholder, ex=PENDING_LOCK_TTL, nx=True):
             try:
+                max_seconds, priority = _task_profile(cam)
                 ar = run_camera_inference.apply_async(
                     args=[cam.id],
-                    kwargs={"max_seconds": RUN_SECONDS},
+                    kwargs={"max_seconds": max_seconds},
                     queue=_inference_queue(int(cam.id)),
+                    priority=priority,
                 )
                 # Stamp the reservation with the real task_id.  It remains a
                 # long pending lease until that exact task atomically claims
@@ -366,6 +480,7 @@ def supervise_all() -> None:
     reservation_health = _reservation_health(
         r, [int(cam.id) for cam in schedulable],
     )
+    reservation_health.update(_critical_gap_health(r, critical_ids))
     _write_health(r,
                   cameras_total=len(cams),
                   cameras_fresh=len(schedulable),
@@ -408,7 +523,15 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
                 camera_id, task_id,
             )
             return
-        run_for_camera(camera_id, max_seconds=max_seconds)
+        processed_frames = run_for_camera(camera_id, max_seconds=max_seconds)
+        # Record only completed inference work. A task that merely started but
+        # found a stale/invalid frame must not make the coverage SLA look green.
+        if processed_frames > 0:
+            r.set(
+                LAST_RUN_KEY_FMT.format(camera_id=camera_id),
+                str(int(time.time())),
+                ex=24 * 60 * 60,
+            )
     except Exception as e:
         log.exception("inference.run_camera camera=%s failed: %s", camera_id, e)
         # Don't auto-retry the whole task — the supervisor will re-enqueue

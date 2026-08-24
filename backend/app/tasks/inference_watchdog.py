@@ -55,6 +55,22 @@ def inference_health_problems(
                 "assigned_cameras": int(health.get("cameras") or 0),
             })
 
+    overdue = (authoritative or {}).get("critical_cameras_overdue")
+    if overdue is not None and int(overdue) > 0:
+        problems.append({
+            "code": "critical_camera_gap_sla",
+            "overdue_cameras": int(overdue),
+            "camera_ids": list(
+                (authoritative or {}).get("critical_camera_ids_overdue") or []
+            ),
+            "max_gap_seconds": (
+                (authoritative or {}).get("critical_max_gap_seconds")
+            ),
+            "sla_seconds": int(
+                (authoritative or {}).get("critical_gap_sla_seconds") or 0
+            ),
+        })
+
     if not shadow_expected:
         return problems
     if shadow is None:
@@ -100,6 +116,13 @@ def _problem_summary(problems: list[dict]) -> str:
             parts.append(
                 f"{problem['queue']} has {problem['queue_depth']} queued task(s) "
                 "and no active camera worker"
+            )
+        elif problem["code"] == "critical_camera_gap_sla":
+            parts.append(
+                f"{problem['overdue_cameras']} latency-critical camera(s) "
+                f"exceeded the {problem.get('sla_seconds')}-second inference "
+                f"gap SLA (maximum measured gap "
+                f"{problem.get('max_gap_seconds')} seconds)"
             )
         elif problem["code"] == "batch_shadow_missing":
             parts.append("the expected GPU batch shadow has no health telemetry")
@@ -160,7 +183,13 @@ def inference_health_watchdog() -> None:
         r.delete(SENT_KEY)
         return
     first_seen = float(state.get("first_seen_ts") or now)
-    if now - first_seen < settings.inference_watchdog_grace_seconds:
+    grace_seconds = settings.inference_watchdog_grace_seconds
+    if any(problem["code"] == "critical_camera_gap_sla" for problem in problems):
+        grace_seconds = min(
+            grace_seconds,
+            settings.inference_critical_watchdog_grace_seconds,
+        )
+    if now - first_seen < grace_seconds:
         return
     if r.get(SENT_KEY):
         return
