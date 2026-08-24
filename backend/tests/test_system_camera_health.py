@@ -55,3 +55,12 @@ def test_inference_pipeline_telemetry_decodes_only_json_objects() -> None:
     assert _decode_inference_pipeline("not-json") is None
     assert _decode_inference_pipeline("[]") is None
     assert _decode_inference_pipeline(None) is None
+
+
+def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
+    payload = _decode_inference_pipeline(
+        b'{"mode":"shadow","authoritative":false,"frames_processed":110}'
+    )
+    assert payload == {
+        "mode": "shadow", "authoritative": False, "frames_processed": 110,
+    }

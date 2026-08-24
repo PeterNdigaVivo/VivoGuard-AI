@@ -28,3 +28,23 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  worker-inference-batch-shadow:
+    image: vivoguard/worker:cuda
+    build:
+      args:
+        GPU_BACKEND: cuda
+    environment:
+      GPU_BACKEND: cuda
+      USE_GPU: "true"
+      USE_OPTIMIZED: "true"
+      INFERENCE_MAX_BATCH_SIZE: ${INFERENCE_MAX_BATCH_SIZE:-32}
+      INFERENCE_BATCH_SIZE: ${INFERENCE_BATCH_SIZE:-8}
+      INFERENCE_BATCH_REQUIRE_CUDA: "true"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

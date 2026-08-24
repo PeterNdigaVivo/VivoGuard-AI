@@ -205,6 +205,9 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     inference_pipeline = _decode_inference_pipeline(
         fb.r.get("vg:inference:health"),
     )
+    inference_batch_shadow = _decode_inference_pipeline(
+        fb.r.get("vg:inference:batch-shadow-health"),
+    )
 
     return {
         "now":            datetime.now(timezone.utc).isoformat(),
@@ -215,4 +218,5 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "gpus":           gpu_info,
         "alerts_today":   int(new_alerts_24h),
         "inference_pipeline": inference_pipeline,
+        "inference_batch_shadow": inference_batch_shadow,
     }

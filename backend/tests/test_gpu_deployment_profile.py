@@ -17,6 +17,20 @@ def test_gpu_override_is_isolated_to_inference():
     assert "worker-alerts:" not in profile
 
 
+def test_batch_shadow_is_opt_in_and_cannot_emit_authoritative_alerts():
+    base = (ROOT / "docker-compose.yml").read_text()
+    profile = (ROOT / "docker-compose.gpu.yml").read_text()
+    coordinator = (
+        ROOT / "backend" / "app" / "ai" / "batch_coordinator.py"
+    ).read_text()
+
+    assert 'profiles: ["gpu-batch-shadow"]' in base
+    assert 'INFERENCE_BATCH_SHADOW_ENABLED: "true"' in base
+    assert "worker-inference-batch-shadow:" in profile
+    assert '"authoritative": False' in coordinator
+    assert "authoritative batch mode is not implemented" in coordinator
+
+
 def test_gpu_readiness_does_not_start_production_services():
     script = (ROOT / "scripts" / "gpu-readiness.sh").read_text()
 

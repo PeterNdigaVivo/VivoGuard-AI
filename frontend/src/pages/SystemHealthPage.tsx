@@ -24,6 +24,15 @@ interface SystemHealth {
     inference_queue_depth: number | null
     estimated_full_rotation_seconds: number | null
   } | null
+  inference_batch_shadow: {
+    mode: 'shadow'; authoritative: false
+    configured_cameras: number; cameras_served: number; fresh_candidates: number
+    batch_size_limit: number; batches_processed: number
+    frames_processed: number; detections_observed_not_emitted: number
+    errors: number; p50_batch_ms: number | null; p95_batch_ms: number | null
+    p95_per_frame_ms: number | null
+    max_camera_schedule_wait_seconds: number
+  } | null
 }
 
 // Sprint 1.2 inference-latency telemetry (GET /analytics/perf).
@@ -122,6 +131,30 @@ export default function SystemHealthPage() {
           Waiting cameras have fresh video but are not actively being analysed. Rotation is a scheduling estimate, not alert-delivery latency.
         </div>
       </Card>
+
+      {data.inference_batch_shadow && (
+        <Card className="p-4 mb-4 border-violet-200 dark:bg-slate-900 dark:border-violet-900">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+              GPU Batch Validation
+            </div>
+            <Badge color={data.inference_batch_shadow.errors > 0 ? 'red' : 'slate'}>
+              Shadow only · not alerting
+            </Badge>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm">
+            <div><div className="text-xs text-slate-500">Cameras served</div><div className="text-xl font-semibold">{data.inference_batch_shadow.cameras_served} / {data.inference_batch_shadow.configured_cameras}</div></div>
+            <div><div className="text-xs text-slate-500">Batch limit</div><div className="text-xl font-semibold">{data.inference_batch_shadow.batch_size_limit}</div></div>
+            <div><div className="text-xs text-slate-500">Frames tested</div><div className="text-xl font-semibold">{data.inference_batch_shadow.frames_processed.toLocaleString()}</div></div>
+            <div><div className="text-xs text-slate-500">Per-frame p95</div><div className="text-xl font-semibold">{data.inference_batch_shadow.p95_per_frame_ms == null ? '—' : `${data.inference_batch_shadow.p95_per_frame_ms} ms`}</div></div>
+            <div><div className="text-xs text-slate-500">Max schedule wait</div><div className="text-xl font-semibold">{data.inference_batch_shadow.max_camera_schedule_wait_seconds.toFixed(1)}s</div></div>
+            <div><div className="text-xs text-slate-500">Errors</div><div className="text-xl font-semibold">{data.inference_batch_shadow.errors}</div></div>
+          </div>
+          <div className="text-xs text-slate-400 mt-3">
+            Detections are measured for capacity only and are not saved, notified or used for training. The existing inference loop remains authoritative.
+          </div>
+        </Card>
+      )}
 
       {/* Inference performance (Sprint 1.2 PerfTracker) */}
       <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">

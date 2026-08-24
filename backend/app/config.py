@@ -317,6 +317,14 @@ class Settings(BaseSettings):
     # Maximum batch compiled into an optimized TensorRT engine. Keep one on
     # existing hosts. Set explicitly before the first GEX44 engine export.
     inference_max_batch_size: int = Field(default=1, ge=1, le=64)
+    # GPU-only shadow coordinator. It exercises live multi-camera batching but
+    # never emits detections/alerts; the established per-camera loop remains
+    # authoritative until the measured canary is explicitly promoted.
+    inference_batch_shadow_enabled: bool = False
+    inference_batch_shadow_mode: bool = True
+    inference_batch_size: int = Field(default=8, ge=1, le=64)
+    inference_batch_refresh_seconds: int = Field(default=30, ge=5, le=300)
+    inference_batch_require_cuda: bool = True
 
     # --- Notifications ---
     smtp_host: str = ""

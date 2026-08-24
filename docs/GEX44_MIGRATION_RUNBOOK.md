@@ -58,6 +58,30 @@ the JSON as deployment evidence. These are safety ceilings, not the final
 service SLA; the two-hour live canary below must also pass end-to-end alert
 latency and missed-event tests.
 
+After the synthetic benchmark passes, start the live-frame shadow coordinator:
+
+```bash
+INFERENCE_MAX_BATCH_SIZE=32 INFERENCE_BATCH_SIZE=8 docker compose \
+  -f docker-compose.yml -f docker-compose.gpu.yml \
+  --profile gpu-batch-shadow up -d worker-inference-batch-shadow
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+  logs -f worker-inference-batch-shadow
+```
+
+The service writes only `vg:inference:batch-shadow-health`; it does not persist
+detections, touch tracker state or create alerts. Confirm `authoritative=false`
+in that payload. Run it for at least two hours across every fresh camera and
+retain configured/fresh camera counts, frames and batches processed, p50/p95
+batch latency, errors and maximum camera scheduling wait. Stop the profile if
+the health key expires, errors increase, the existing alert p99 regresses or
+GPU memory exceeds the synthetic-test ceiling.
+
+Shadow acceptance requires zero coordinator errors, every fresh camera served,
+no starvation in the 110-camera replay, stable authoritative alert latency and
+a scheduling wait compatible with each camera's required inference FPS. Passing
+shadow mode is evidence for a later reviewed promotion; it does not itself
+activate batched alerts.
+
 Do not equate batch size with Celery concurrency. The current per-camera path
 remains the production rollback path. Start its GPU worker conservatively and
 only increase worker concurrency while total VRAM stays below the measured

@@ -73,6 +73,13 @@ x-app-env: &app-env
   DEFAULT_MODEL: ${DEFAULT_MODEL:-yolov8n.pt}
   INFERENCE_FPS: ${INFERENCE_FPS:-3}
   INFERENCE_FPS_DEFAULT: ${INFERENCE_FPS_DEFAULT:-5}
+  INFERENCE_SHARD_COUNT: ${INFERENCE_SHARD_COUNT:-1}
+  INFERENCE_MAX_BATCH_SIZE: ${INFERENCE_MAX_BATCH_SIZE:-1}
+  INFERENCE_BATCH_SHADOW_ENABLED: ${INFERENCE_BATCH_SHADOW_ENABLED:-false}
+  INFERENCE_BATCH_SHADOW_MODE: ${INFERENCE_BATCH_SHADOW_MODE:-true}
+  INFERENCE_BATCH_SIZE: ${INFERENCE_BATCH_SIZE:-8}
+  INFERENCE_BATCH_REFRESH_SECONDS: ${INFERENCE_BATCH_REFRESH_SECONDS:-30}
+  INFERENCE_BATCH_REQUIRE_CUDA: ${INFERENCE_BATCH_REQUIRE_CUDA:-true}
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
   SMTP_USER: ${SMTP_USER:-}
@@ -231,6 +238,31 @@ services:
     # GPU passthrough — uncomment once the host has nvidia-container-toolkit
     # and you've rebuilt with `GPU_BACKEND=cuda`.
     # <<: *gpu-reservation
+
+  # GPU batch coordinator, dark-launched behind an explicit Compose profile.
+  # It performs live-frame batch inference and writes telemetry only; it cannot
+  # create events or alerts. Start only with both compose files after the CUDA
+  # readiness check passes.
+  worker-inference-batch-shadow:
+    profiles: ["gpu-batch-shadow"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args:
+        GPU_BACKEND: ${GPU_BACKEND:-cpu}
+    image: vivoguard/worker:latest
+    restart: unless-stopped
+    command: ["python", "-m", "app.ai.batch_coordinator"]
+    environment:
+      <<: *app-env
+      INFERENCE_BATCH_SHADOW_ENABLED: "true"
+      INFERENCE_BATCH_SHADOW_MODE: "true"
+    volumes:
+      - ./data/models:/data/models
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [vivoguard]
 
   # --- Alerts / bookkeeping worker. TWO processes (Aug 2026 split):
   #   beat-runner    -Q beat, 1 slot — scheduled/lightweight tasks
