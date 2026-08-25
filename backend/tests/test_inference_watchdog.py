@@ -183,6 +183,54 @@ def test_watchdog_signature_ignores_volatile_depth_and_age():
     }])
 
 
+def test_watchdog_does_not_rearm_during_same_changing_outage(monkeypatch):
+    authoritative = {
+        "inference_shards": {
+            "inference": {"cameras": 10, "active": 0, "queue_depth": 4},
+        },
+    }
+
+    class FakeRedis:
+        def __init__(self):
+            self.values = {
+                inference_watchdog.AUTHORITATIVE_KEY: json.dumps(authoritative),
+                inference_watchdog.STATE_KEY: json.dumps({
+                    "signature": "previous-problem-composition",
+                    "first_seen_ts": 123.0,
+                }),
+                inference_watchdog.SENT_KEY: "previous-alert",
+            }
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, **_kwargs):
+            self.values[key] = value
+
+        def delete(self, *keys):
+            for key in keys:
+                self.values.pop(key, None)
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(inference_watchdog.redis, "from_url", lambda *_a: fake_redis)
+
+    inference_watchdog.inference_health_watchdog.run()
+
+    state = json.loads(fake_redis.values[inference_watchdog.STATE_KEY])
+    problems = inference_health_problems(
+        authoritative,
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+    )
+    assert state["signature"] == _signature(problems)
+    assert state["first_seen_ts"] == 123.0
+    assert state["last_change_ts"] >= 123.0
+    assert fake_redis.values[inference_watchdog.SENT_KEY] == "previous-alert"
+
+
 def test_watchdog_checks_notification_policy_before_session_detaches(monkeypatch):
     authoritative = {
         "inference_shards": {

@@ -231,11 +231,19 @@ def inference_health_watchdog() -> None:
 
     signature = _signature(problems)
     state = _decode(r.get(STATE_KEY)) or {}
-    if state.get("signature") != signature:
+    if not state:
         state = {"signature": signature, "first_seen_ts": now}
         r.set(STATE_KEY, json.dumps(state), ex=24 * 60 * 60)
-        r.delete(SENT_KEY)
         return
+    if state.get("signature") != signature:
+        # A single outage can change shape as queues recover or a camera-gap
+        # warning joins/leaves the evidence. Keep the original outage clock
+        # and sent marker until *all* problems clear; otherwise every change
+        # in problem composition creates a new fleet-wide incident.
+        state["signature"] = signature
+        state["last_change_ts"] = now
+        state.setdefault("first_seen_ts", now)
+        r.set(STATE_KEY, json.dumps(state), ex=24 * 60 * 60)
     first_seen = float(state.get("first_seen_ts") or now)
     grace_seconds = settings.inference_watchdog_grace_seconds
     if any(problem["code"] in {
