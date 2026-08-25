@@ -16,7 +16,8 @@ def test_deploy_gate_checks_public_proxy_path():
     root = Path(__file__).resolve().parents[2]
     deploy = (root / "scripts" / "deploy.sh").read_text()
 
-    assert "http://localhost/api/healthz" in deploy
+    assert "http://127.0.0.1/api/healthz" in deploy
+    assert "wget --no-check-certificate" in deploy
     assert "nginx cannot reach the healthy API" in deploy
 
 

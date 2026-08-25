@@ -83,7 +83,13 @@ done
 
 echo "→ verifying nginx-to-API routing"
 for i in $(seq 1 20); do
-  if docker compose exec -T nginx wget -qO- http://localhost/api/healthz \
+  # Use the loopback IPv4 address because BusyBox may resolve localhost to
+  # ::1 while nginx only listens on IPv4.  The TLS profile redirects port 80
+  # to its self-signed loopback hostname, so certificate verification must be
+  # disabled for this container-internal probe.  The public certificate is
+  # verified separately by the external production check.
+  if docker compose exec -T nginx wget --no-check-certificate -qO- \
+       http://127.0.0.1/api/healthz \
        | grep -q '"status":"ok"'; then
     break
   fi
