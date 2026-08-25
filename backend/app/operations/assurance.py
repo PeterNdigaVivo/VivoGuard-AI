@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -20,6 +21,65 @@ from app.risk.scoring import risk_band, score_operational_event
 OPEN_STATUSES = ("open", "investigating", "pending_human_review")
 POS_EVENT_TYPES = {"refund", "void", "discount", "no_sale", "high_value_transaction"}
 DELIVERY_EVENT_TYPES = {"delivery_expected", "delivery_received", "stock_move", "stock_exit"}
+ACTIONABLE_SHOP_RULES = {
+    "shop_not_opened", "shop_opened_before_hours", "shop_opened_late",
+}
+ACTIONABLE_SALES_FLOOR_RULES = {
+    "low_engagement", "unattended_floor", "detection_offline",
+}
+
+
+def _requires_operator_action(event: DetectionEvent) -> bool:
+    """Exclude routine updates from acknowledgement/evidence SLAs.
+
+    The alert feed intentionally retains positive and informational records,
+    but those records are not incidents awaiting control-room disposition.
+    Rule-specific detectors override their legacy priority stamp because
+    older sales-floor alerts labelled every rule as ``info``.
+    """
+    extra = event.extra or {}
+    detection_type = str(event.detection_type or "")
+    rule = str(extra.get("rule") or extra.get("cls") or "").lower()
+    if detection_type in {"store_intelligence", "positive_operational"}:
+        return False
+    if detection_type == "shop_open_close":
+        return rule in ACTIONABLE_SHOP_RULES
+    if detection_type == "sales_floor_insight":
+        return rule in ACTIONABLE_SALES_FLOOR_RULES
+    if detection_type == "live_activity":
+        return rule != "activity_presence"
+    priority = str(extra.get("priority") or "").lower()
+    return priority not in {"info", "positive"}
+
+
+def _actionable_event_filter():
+    """SQL equivalent of :func:`_requires_operator_action` for backlog counts."""
+    priority = func.lower(func.coalesce(
+        DetectionEvent.extra["priority"].as_string(), "",
+    ))
+    rule = func.lower(func.coalesce(
+        DetectionEvent.extra["rule"].as_string(),
+        DetectionEvent.extra["cls"].as_string(),
+        "",
+    ))
+    detection_type = DetectionEvent.detection_type
+    return and_(
+        detection_type.notin_(("store_intelligence", "positive_operational")),
+        or_(
+            and_(detection_type == "shop_open_close",
+                 rule.in_(ACTIONABLE_SHOP_RULES)),
+            and_(detection_type == "sales_floor_insight",
+                 rule.in_(ACTIONABLE_SALES_FLOOR_RULES)),
+            and_(detection_type == "live_activity",
+                 rule != "activity_presence"),
+            and_(
+                detection_type.notin_((
+                    "shop_open_close", "sales_floor_insight", "live_activity",
+                )),
+                priority.notin_(("info", "positive")),
+            ),
+        ),
+    )
 
 
 def utc_now() -> datetime:
@@ -201,6 +261,8 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
     active_case_keys: set[str] = set()
     assessed_alert_ids = {int(alert.id) for alert, _event, _camera in rows}
     for alert, event, camera in rows:
+        if not _requires_operator_action(event):
+            continue
         age = (now - ensure_aware(alert.created_at)).total_seconds()
         sla = 300 if event.detection_type in critical_types else 1800
         latency = (ensure_aware(alert.created_at) - ensure_aware(event.timestamp)).total_seconds()
@@ -211,7 +273,8 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
                 issues.append("quality_controlled_review_sla_breached")
         if latency > 120:
             issues.append("delivery_latency_over_120s")
-        if not _alert_has_retrievable_evidence(alert, event):
+        if (event.detection_type not in {"system_health", "camera_offline"}
+                and not _alert_has_retrievable_evidence(alert, event)):
             issues.append("evidence_missing")
         if issues:
             key = f"alert-quality:{alert.id}:{','.join(sorted(issues))}"
@@ -238,7 +301,7 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
             Alert.status.in_(("new", "escalated")),
             Alert.resolved_at.is_(None),
             Alert.created_at < review_cutoff,
-            DetectionEvent.detection_type != "store_intelligence",
+            _actionable_event_filter(),
         ).count())
     historical_key = "alert-quality:historical-backlog"
     if historical_count:

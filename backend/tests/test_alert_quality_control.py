@@ -331,6 +331,54 @@ def test_overdue_review_only_critical_alert_opens_accountable_case(db):
     assert db.query(AssuranceCase).count() == 1
 
 
+def test_routine_info_update_has_no_incident_sla_case(db):
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=120)
+    event.detection_type = "shop_open_close"
+    event.extra = {"rule": "shop_daily_summary", "priority": "info"}
+    db.commit()
+
+    assert create_alert_quality_cases(
+        db, now=datetime.now(timezone.utc),
+    ) == 0
+    assert db.query(AssuranceCase).count() == 0
+    assert alert.status == "new"
+
+
+def test_infrastructure_fault_needs_ack_but_not_cctv_evidence(db):
+    cam = _camera(db)
+    _alert_row, event = _alert(db, cam, age_minutes=31)
+    event.detection_type = "system_health"
+    event.extra = {"cls": "inference_capacity_fault", "priority": "high"}
+    db.commit()
+
+    assert create_alert_quality_cases(
+        db, now=datetime.now(timezone.utc),
+    ) == 1
+    case = db.query(AssuranceCase).one()
+    assert case.evidence["issues"] == ["acknowledgement_sla_breached"]
+
+
+def test_historical_backlog_counts_only_actionable_alerts(db):
+    cam = _camera(db)
+    routine_alert, routine_event = _alert(db, cam, age_minutes=8 * 24 * 60)
+    routine_event.detection_type = "sales_floor_insight"
+    routine_event.extra = {"rule": "baseline", "priority": "info"}
+    actionable_alert, actionable_event = _alert(
+        db, cam, age_minutes=8 * 24 * 60,
+    )
+    actionable_event.extra = {"priority": "high"}
+    db.commit()
+
+    assert create_alert_quality_cases(
+        db, now=datetime.now(timezone.utc),
+    ) == 1
+    backlog = db.query(AssuranceCase).one()
+    assert backlog.dedup_key == "alert-quality:historical-backlog"
+    assert backlog.evidence["unresolved_actionable_alerts"] == 1
+    assert routine_alert.status == actionable_alert.status == "new"
+
+
 def test_recorder_clip_clears_false_missing_evidence_case(db, tmp_path):
     cam = _camera(db)
     alert, event = _alert(db, cam, age_minutes=1)
