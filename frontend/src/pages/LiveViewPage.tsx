@@ -20,7 +20,7 @@ import { Badge, Button, Card, PageHeader, Select, useToast } from '@/components/
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
 import { alerts as alertsApi } from '@/api/alerts'
-import { api, wsUrl } from '@/api/client'
+import { api, authenticatedWebSocket } from '@/api/client'
 
 type LiveViewMode = 'cameras' | 'activity'
 const ACTIVITY_REFRESH_MS = 30_000     // spec: 30 s minimum
@@ -470,7 +470,7 @@ function Tile({ cameraId, overlays, dets }: {
 
     function connect() {
       if (aborted) return
-      ws = new WebSocket(wsUrl(`/ws/stream/${cameraId}`))
+      ws = authenticatedWebSocket(`/ws/stream/${cameraId}`)
       ws.binaryType = 'blob'
       ws.onmessage = (e) => {
         if (aborted) return

@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Badge, Card, PageHeader } from '@/components/ui/Primitives'
 import { training, type TrainingJob } from '@/api/training'
-import { wsUrl } from '@/api/client'
+import { authenticatedWebSocket } from '@/api/client'
 
 interface MetricPoint { epoch: number; mAP50?: number; loss?: number }
 
@@ -34,7 +34,7 @@ export default function TrainingDashboardPage() {
 
   // WebSocket for the live training log.
   useEffect(() => {
-    const ws = new WebSocket(wsUrl(`/ws/training/${id}`))
+    const ws = authenticatedWebSocket(`/ws/training/${id}`)
     wsRef.current = ws
     ws.onmessage = (e) => {
       try {

@@ -114,3 +114,15 @@ export function wsUrl(path: string): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}${path}`
 }
+
+// Browser WebSockets cannot set an Authorization header. Send the access JWT
+// as a secondary WebSocket subprotocol instead of putting it in the URL, where
+// it would leak into proxy logs and browser history. The server selects only
+// the fixed marker protocol and validates the accompanying token before it
+// accepts the connection.
+export function authenticatedWebSocket(path: string): WebSocket {
+  const token = getToken()
+  return token
+    ? new WebSocket(wsUrl(path), ['vg-token', token])
+    : new WebSocket(wsUrl(path), ['vg-token'])
+}

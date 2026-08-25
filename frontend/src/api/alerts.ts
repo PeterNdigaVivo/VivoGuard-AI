@@ -1,5 +1,5 @@
 // /alerts/* wrappers.
-import { api, wsUrl } from './client'
+import { api, authenticatedWebSocket } from './client'
 
 export interface Alert {
   id: number; event_id: number; status: string
@@ -117,7 +117,7 @@ export const alerts = {
 
   // Live alerts WebSocket
   subscribe: (onEvent: (data: any) => void) => {
-    const ws = new WebSocket(wsUrl('/ws/alerts'))
+    const ws = authenticatedWebSocket('/ws/alerts')
     ws.onmessage = e => { try { onEvent(JSON.parse(e.data)) } catch {} }
     return () => ws.close()
   },
