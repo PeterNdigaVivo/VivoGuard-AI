@@ -1,3 +1,6 @@
+import json
+
+from app.tasks import inference_watchdog
 from app.tasks.inference_watchdog import _signature, inference_health_problems
 
 
@@ -131,3 +134,95 @@ def test_watchdog_signature_ignores_volatile_depth_and_age():
     }]) == _signature([{
         "code": "batch_shadow_stale", "age_seconds": 190,
     }])
+
+
+def test_watchdog_checks_notification_policy_before_session_detaches(monkeypatch):
+    authoritative = {
+        "inference_shards": {
+            "inference": {"cameras": 10, "active": 0, "queue_depth": 4},
+        },
+    }
+    problems = inference_health_problems(
+        authoritative,
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+    )
+
+    class FakeRedis:
+        def __init__(self):
+            self.values = {
+                inference_watchdog.AUTHORITATIVE_KEY: json.dumps(authoritative),
+                inference_watchdog.STATE_KEY: json.dumps({
+                    "signature": _signature(problems),
+                    "first_seen_ts": 1,
+                }),
+            }
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, **_kwargs):
+            self.values[key] = value
+
+        def delete(self, *keys):
+            for key in keys:
+                self.values.pop(key, None)
+
+    class Event:
+        attached = True
+
+        @property
+        def extra(self):
+            if not self.attached:
+                raise RuntimeError("detached event accessed")
+            return {}
+
+    event = Event()
+
+    class Query:
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return (1,)
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            event.attached = False
+
+        def query(self, *_args):
+            return Query()
+
+        def commit(self):
+            return None
+
+    fake_redis = FakeRedis()
+    sent = []
+    monkeypatch.setattr(inference_watchdog.redis, "from_url", lambda *_a: fake_redis)
+
+    import app.database
+    import app.tasks.alerting
+
+    monkeypatch.setattr(app.database, "SessionLocal", Session)
+    monkeypatch.setattr(
+        app.tasks.alerting, "_create_info_alert", lambda *_a, **_kw: event,
+    )
+    monkeypatch.setattr(app.tasks.alerting, "_dashboard_recipients", lambda: ["ops"])
+    monkeypatch.setattr(
+        app.tasks.alerting, "_send_whatsapp",
+        lambda recipients, body: sent.append((recipients, body)),
+    )
+
+    inference_watchdog.inference_health_watchdog.run()
+
+    assert sent and sent[0][0] == ["ops"]
+    assert fake_redis.values[inference_watchdog.SENT_KEY] == _signature(problems)

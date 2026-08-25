@@ -233,6 +233,7 @@ def inference_health_watchdog() -> None:
         )
 
         created_event = None
+        notification_allowed = False
         with SessionLocal() as db:
             row = (
                 db.query(Camera.id)
@@ -262,11 +263,17 @@ def inference_health_watchdog() -> None:
                         ],
                     },
                 )
+                # Read persisted quality-control state while the ORM object is
+                # still attached. SQLAlchemy expires attributes on commit;
+                # consulting event.extra after this context closes raises a
+                # DetachedInstanceError and previously prevented both the
+                # notification and the watchdog dedup marker from being set.
+                notification_allowed = _info_notification_allowed(created_event)
                 db.commit()
         if not created_event:
             log.error("inference watchdog has no AI-enabled camera alert anchor")
             return
-        if _info_notification_allowed(created_event):
+        if notification_allowed:
             recipients = _dashboard_recipients()
             if recipients:
                 _send_whatsapp(recipients, f"🚨 {body}")
