@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings, validate_production_security
 from app.database import SessionLocal
+from app.startup import upgrade_database
 from app.utils.logging import configure_logging
 
 
@@ -25,23 +26,10 @@ async def lifespan(app: FastAPI):
     validate_production_security(settings)
     configure_logging("DEBUG" if settings.app_debug else "INFO")
 
-    # Auto-run alembic migrations. Hand-running 'alembic upgrade head'
-    # in PowerShell has caused repeated drift where the alembic_version
-    # table is at head but the actual DDL never executed. Letting the
-    # API container do it on every boot makes drift self-heal.
-    try:
-        from alembic.config import Config
-        from alembic import command
-        import os as _os
-        # alembic.ini lives at /app/alembic.ini in the container image.
-        cfg_path = "/app/alembic.ini" if _os.path.exists("/app/alembic.ini") else "alembic.ini"
-        cfg = Config(cfg_path)
-        command.upgrade(cfg, "head")
-        import logging
-        logging.getLogger(__name__).info("alembic upgrade head: complete")
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("alembic upgrade skipped: %s", e)
+    # Auto-run alembic migrations. Production fails closed on schema errors;
+    # serving a new image against an old schema can silently corrupt incident,
+    # evidence and review workflows.
+    upgrade_database(settings)
 
     # Bootstrap admin (no-op once a user exists).
     from app.auth.routes import ensure_bootstrap_admin
