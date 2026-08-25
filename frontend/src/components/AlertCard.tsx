@@ -95,6 +95,59 @@ function useClip(alertId: number, url: string | null, enabled: boolean) {
   return { src, loading, failed }
 }
 
+// Clip extraction happens asynchronously after an alert is first delivered.
+// The alert feed itself is event-driven, so a quiet period may leave an old
+// list item saying "pending" even though the recorder has finished. Resolve
+// the single alert when the modal opens and poll only while it is genuinely
+// pending. This keeps background traffic bounded and makes incident evidence
+// appear without requiring the operator to reload the whole page.
+function useLatestClipMetadata(alertId: number, initialUrl: string | null,
+                               initialStatus: Alert['clip_status'], enabled: boolean) {
+  const [url, setUrl] = useState(initialUrl)
+  const [status, setStatus] = useState(initialStatus)
+
+  useEffect(() => {
+    setUrl(initialUrl)
+    setStatus(initialStatus)
+  }, [alertId, initialUrl, initialStatus])
+
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+
+    const refresh = async () => {
+      attempts += 1
+      try {
+        const latest = await alertsApi.get(alertId)
+        if (cancelled) return
+        setUrl(latest.clip_url)
+        setStatus(latest.clip_status)
+        // The API changes pending to unavailable after three minutes. The
+        // additional attempt bound prevents an unexpected backend response
+        // from leaving an unbounded browser poll behind.
+        if (latest.clip_status === 'pending' && attempts < 36) {
+          timer = setTimeout(refresh, 5_000)
+        }
+      } catch {
+        // Preserve the list snapshot on a transient detail-request failure.
+        // Retry twice before leaving the snapshot/live-view fallback in place;
+        // reopening the modal starts a fresh bounded attempt sequence.
+        if (!cancelled && attempts < 3) timer = setTimeout(refresh, 5_000)
+      }
+    }
+
+    void refresh()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [alertId, enabled])
+
+  return { url, status }
+}
+
 
 // Filmstrip images. The /alerts/{id}/snapshot/{idx} endpoint requires the JWT
 // bearer header, so a bare <img src> (which can't send it) 401s and shows
@@ -460,9 +513,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
   const { src: snapUrl, failed: snapAuthFailed } = useSnapshot(alert.id, alert.snapshot_url)
+  const { url: latestClipUrl, status: latestClipStatus } = useLatestClipMetadata(
+    alert.id, alert.clip_url, alert.clip_status, clipModal,
+  )
   // Lazily loads the authenticated clip blob only while the modal is open.
   const { src: clipSrc, loading: clipLoading, failed: clipFailed } =
-    useClip(alert.id, alert.clip_url, clipModal)
+    useClip(alert.id, latestClipUrl, clipModal)
   // Playback error (e.g. codec the browser can't decode), distinct from a
   // load/auth failure. Reset whenever a new clip blob is loaded.
   const [clipPlayError, setClipPlayError] = useState(false)
@@ -756,9 +812,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
       {clipModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-6"
              onClick={() => setClipModal(false)}>
-          <div className={'bg-white rounded p-4 w-full ' + (alert.clip_url ? 'max-w-2xl' : 'max-w-md')}
+          <div className={'bg-white rounded p-4 w-full ' + (latestClipUrl ? 'max-w-2xl' : 'max-w-md')}
                onClick={e => e.stopPropagation()}>
-            {alert.clip_url ? (
+            {latestClipUrl ? (
               <>
                 <div className="text-sm font-semibold mb-2 flex items-center justify-between">
                   <span>📹 Recorded clip{alert.camera_name ? ` — ${alert.camera_name}` : ''}</span>
@@ -791,7 +847,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                   </video>
                 )}
               </>
-            ) : alert.clip_status === 'pending' ? (
+            ) : latestClipStatus === 'pending' ? (
               <>
                 <div className="text-lg font-semibold mb-2">Clip is being prepared</div>
                 <div className="text-sm text-slate-600 mb-4">

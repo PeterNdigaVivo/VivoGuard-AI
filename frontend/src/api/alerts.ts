@@ -71,6 +71,10 @@ export const alerts = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
     return api<Alert[]>(`/alerts${q.toString() ? `?${q}` : ''}`)
   },
+  // Fetch one alert with its latest asynchronously-produced evidence state.
+  // The list item may pre-date recorder clip extraction, so incident review
+  // must not rely solely on the snapshot delivered with the original alert.
+  get: (id: number) => api<Alert>(`/alerts/${id}`),
   // Quick counts for the executive summary bar + sidebar badge.
   // Returns both the legacy 3-tier counts and the new 4-tier
   // ladder (critical/high/medium/low), plus avg-time-to-resolve
