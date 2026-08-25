@@ -67,6 +67,8 @@ CIRCUIT_MAX_FAILS = 5
 SUSPEND_SECONDS   = 3600
 FAILS_TTL_SECONDS = 24 * 3600
 SIM_MAX_CAMERAS   = 30
+LLM_TRANSIENT_COOLDOWN_SECONDS = 5 * 60
+LLM_PERMANENT_COOLDOWN_SECONDS = 6 * 60 * 60
 
 # ── AI reasoning layer ───────────────────────────────────────────────────
 # The role each agent adopts when it reasons with Claude. Every domain agent
@@ -132,6 +134,22 @@ def _redis():
 def _hb_key(name: str) -> str:        return f"vg:agent:hb:{name}"
 def _fails_key(name: str) -> str:     return f"vg:agent:fails:{name}"
 def _suspended_key(name: str) -> str: return f"vg:agent:suspended:{name}"
+def _llm_cooldown_key(provider: str) -> str:
+    return f"vg:agent:llm-cooldown:{provider}"
+
+
+def _llm_failure_cooldown_seconds(exc: Exception) -> int:
+    """Use a long cooldown for failures that require account intervention."""
+    message = str(exc).lower()
+    permanent_markers = (
+        "credit balance is too low", "insufficient_quota", "billing",
+        "invalid api key", "invalid_api_key", "authentication", "unauthorized",
+        "status code: 401", "status code: 403", "error code: 401",
+        "error code: 403",
+    )
+    if any(marker in message for marker in permanent_markers):
+        return LLM_PERMANENT_COOLDOWN_SECONDS
+    return LLM_TRANSIENT_COOLDOWN_SECONDS
 
 
 def _heartbeat(r, name: str) -> None:
@@ -312,11 +330,23 @@ def _ai_reason(name: str, role: str, telemetry: dict,
     user = ("Telemetry JSON for this run:\n"
             + json.dumps(telemetry, default=str)[:12000])
     from app.ai.llm_provider import LLMProviderError, complete_text
+    try:
+        bookkeeping = _redis()
+    except Exception:
+        bookkeeping = None
     for provider in _agent_providers():
         api_key = (getattr(settings, "openai_api_key", "") if provider == "openai"
                    else getattr(settings, "anthropic_api_key", "")) or ""
         if not api_key:
             continue
+        if bookkeeping is not None:
+            try:
+                if bookkeeping.get(_llm_cooldown_key(provider)) is not None:
+                    continue
+            except Exception:
+                # Redis availability must never decide whether deterministic
+                # monitoring runs. Fail open to the configured provider.
+                pass
         selected_model = model or _agent_model(name, provider)
         try:
             text = complete_text(
@@ -326,12 +356,25 @@ def _ai_reason(name: str, role: str, telemetry: dict,
             )
             verdict = _extract_json(text)
             if verdict is not None:
+                if bookkeeping is not None:
+                    try:
+                        bookkeeping.delete(_llm_cooldown_key(provider))
+                    except Exception:
+                        pass
                 verdict["_provider"] = provider
                 verdict["_model"] = selected_model
                 return verdict
             log.warning("agent %s %s response was not a JSON object",
                         name, provider)
         except LLMProviderError as exc:
+            if bookkeeping is not None:
+                try:
+                    bookkeeping.set(
+                        _llm_cooldown_key(provider), "unavailable",
+                        ex=_llm_failure_cooldown_seconds(exc),
+                    )
+                except Exception:
+                    pass
             log.warning("agent %s LLM reasoning failed (provider=%s, model=%s): %s",
                         name, provider, selected_model, exc)
     return None
