@@ -224,6 +224,21 @@ def test_critical_camera_cooldown_prevents_normal_work_starvation():
     assert inference._critical_due_from_timestamp(None, now=now)
 
 
+def test_critical_requeue_budget_preserves_non_preemptive_sla_headroom():
+    assert inference._critical_gap_budget_seconds() == (
+        inference.CRITICAL_REQUEUE_SECONDS
+        + inference.SUPERVISOR_INTERVAL_SECONDS
+        + inference.RUN_SECONDS
+        + inference.CRITICAL_RUN_SECONDS
+    )
+    assert inference._critical_gap_headroom_seconds() >= (
+        inference.CRITICAL_GAP_HEADROOM_SECONDS
+    )
+    assert inference._critical_gap_budget_seconds() < (
+        inference.CRITICAL_GAP_SLA_SECONDS
+    )
+
+
 def test_supervisor_publishes_critical_cameras_before_ordinary_cameras():
     def camera(camera_id: int, detection_type: str):
         return SimpleNamespace(
@@ -307,6 +322,11 @@ def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
         "critical_cameras_never_started": 1,
         "critical_max_gap_seconds": 400.0,
         "critical_gap_sla_seconds": inference.CRITICAL_GAP_SLA_SECONDS,
+        "critical_requeue_seconds": inference.CRITICAL_REQUEUE_SECONDS,
+        "critical_gap_budget_seconds": inference._critical_gap_budget_seconds(),
+        "critical_gap_headroom_seconds": (
+            inference._critical_gap_headroom_seconds()
+        ),
     }
 
 

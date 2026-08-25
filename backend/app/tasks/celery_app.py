@@ -191,7 +191,7 @@ celery_app.conf.update(
     beat_schedule={
         "supervise-inference-every-30s": {
             "task": "inference.supervise_all",
-            "schedule": 30.0,
+            "schedule": float(settings.inference_supervisor_interval_seconds),
         },
         "refresh-ddns-every-5min": {
             "task": "maintenance.refresh_ddns",

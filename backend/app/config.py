@@ -320,8 +320,9 @@ class Settings(BaseSettings):
     # areas and life-safety risks. These cameras use short, high-priority
     # slices so a full mixed fleet rotation cannot hide a critical view for
     # many minutes. The separate gap SLA is measured from actual task starts.
+    inference_supervisor_interval_seconds: int = Field(default=30, ge=10, le=120)
     inference_critical_slice_seconds: int = Field(default=15, ge=5, le=60)
-    inference_critical_requeue_seconds: int = Field(default=180, ge=30, le=600)
+    inference_critical_requeue_seconds: int = Field(default=120, ge=30, le=600)
     inference_critical_gap_sla_seconds: int = Field(default=300, ge=60, le=900)
     inference_standard_gap_sla_seconds: int = Field(
         default=900, ge=300, le=3600,

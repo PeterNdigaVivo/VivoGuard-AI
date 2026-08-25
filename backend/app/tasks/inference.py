@@ -42,9 +42,23 @@ RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridabl
 CRITICAL_RUN_SECONDS = settings.inference_critical_slice_seconds
 CRITICAL_GAP_SLA_SECONDS = settings.inference_critical_gap_sla_seconds
 STANDARD_GAP_SLA_SECONDS = settings.inference_standard_gap_sla_seconds
+# A due critical camera can wait for the next supervisor tick and for one
+# already-running ordinary task (Celery cannot pre-empt it), then still needs
+# its own slice to complete. Keep explicit headroom for broker/decoder jitter.
+SUPERVISOR_INTERVAL_SECONDS = settings.inference_supervisor_interval_seconds
+CRITICAL_GAP_HEADROOM_SECONDS = 15
+_CRITICAL_REQUEUE_BUDGET = max(
+    30,
+    CRITICAL_GAP_SLA_SECONDS
+    - RUN_SECONDS
+    - SUPERVISOR_INTERVAL_SECONDS
+    - CRITICAL_RUN_SECONDS
+    - CRITICAL_GAP_HEADROOM_SECONDS,
+)
 CRITICAL_REQUEUE_SECONDS = min(
     settings.inference_critical_requeue_seconds,
     CRITICAL_GAP_SLA_SECONDS,
+    _CRITICAL_REQUEUE_BUDGET,
 )
 # Tightened from RUN_SECONDS+60 to RUN_SECONDS+30. A lock that outlives
 # its task by >30s is stale by definition; the self-healing sweep clears
@@ -267,6 +281,20 @@ def _schedule_order(
     return sorted(cameras, key=priority)
 
 
+def _critical_gap_budget_seconds() -> int:
+    """Conservative completion-to-completion gap under CPU saturation."""
+    return int(
+        CRITICAL_REQUEUE_SECONDS
+        + SUPERVISOR_INTERVAL_SECONDS
+        + RUN_SECONDS
+        + CRITICAL_RUN_SECONDS
+    )
+
+
+def _critical_gap_headroom_seconds() -> int:
+    return int(CRITICAL_GAP_SLA_SECONDS - _critical_gap_budget_seconds())
+
+
 def _critical_gap_health(
     r: redis.Redis,
     camera_ids: list[int],
@@ -283,6 +311,9 @@ def _critical_gap_health(
             "critical_cameras_never_started": 0,
             "critical_max_gap_seconds": 0,
             "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+            "critical_requeue_seconds": int(CRITICAL_REQUEUE_SECONDS),
+            "critical_gap_budget_seconds": _critical_gap_budget_seconds(),
+            "critical_gap_headroom_seconds": _critical_gap_headroom_seconds(),
         }
     try:
         pipe = r.pipeline(transaction=False)
@@ -313,6 +344,9 @@ def _critical_gap_health(
                 round(max(measured), 1) if measured else None
             ),
             "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+            "critical_requeue_seconds": int(CRITICAL_REQUEUE_SECONDS),
+            "critical_gap_budget_seconds": _critical_gap_budget_seconds(),
+            "critical_gap_headroom_seconds": _critical_gap_headroom_seconds(),
         }
     except Exception as exc:
         log.warning("supervise_all: critical-gap telemetry failed: %s", exc)
@@ -323,6 +357,9 @@ def _critical_gap_health(
             "critical_cameras_never_started": None,
             "critical_max_gap_seconds": None,
             "critical_gap_sla_seconds": int(CRITICAL_GAP_SLA_SECONDS),
+            "critical_requeue_seconds": int(CRITICAL_REQUEUE_SECONDS),
+            "critical_gap_budget_seconds": _critical_gap_budget_seconds(),
+            "critical_gap_headroom_seconds": _critical_gap_headroom_seconds(),
         }
 
 
