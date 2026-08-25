@@ -1,6 +1,20 @@
 from streamer.streamer import main as streamer_main
 
 
+def test_snapshot_url_keeps_credentials_out_of_httpx_request_url():
+    url = streamer_main._snapshot_url_for(
+        "camera.example.invalid",
+        8080,
+        3,
+        None,
+    )
+
+    assert url == (
+        "http://camera.example.invalid:8080/cgi-bin/snapshot.cgi?channel=3"
+    )
+    assert "@" not in url
+
+
 def test_effective_fps_caps_gpu_tuned_camera_on_cpu(monkeypatch) -> None:
     monkeypatch.setattr(streamer_main, "STREAMER_MAX_FPS", 3)
 

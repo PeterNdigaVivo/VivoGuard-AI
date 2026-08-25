@@ -22,6 +22,12 @@ def redact_stream_credentials(value: str | None) -> str:
     return _QUERY_CREDENTIAL.sub(r"\g<prefix>****", text)
 
 
+def strip_stream_userinfo(value: str | None) -> str:
+    """Remove URL userinfo when authentication is supplied separately."""
+    text = "" if value is None else str(value)
+    return _URL_USERINFO.sub(r"\g<scheme>", text)
+
+
 def redact_stream_structure(value: Any) -> Any:
     """Recursively redact diagnostic structures before they become observable."""
     if isinstance(value, str):

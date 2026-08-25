@@ -227,21 +227,19 @@ _CAMERA_COLUMNS = [
 
 
 def _snapshot_url_for(host: str, http_port: int, channel: int | None,
-                      username: str, password: str,
                       override: str | None) -> str:
     """Compose the HTTP-snapshot URL for a camera.
 
     Override beats everything; otherwise build the Dahua default:
-       http://USER:PASS@HOST:HTTP_PORT/cgi-bin/snapshot.cgi?channel=N
+       http://HOST:HTTP_PORT/cgi-bin/snapshot.cgi?channel=N
+
+    Authentication is supplied separately to HttpSnapshotWorker. Keeping it
+    out of the URL prevents httpx's request logger from exposing credentials.
     """
     if override:
         return override
-    from urllib.parse import quote
-    user = quote(username or "", safe="")
-    pw   = quote(password or "", safe="")
-    auth = f"{user}:{pw}@" if user else ""
     ch   = channel or 1
-    return f"http://{auth}{host}:{http_port}/cgi-bin/snapshot.cgi?channel={ch}"
+    return f"http://{host}:{http_port}/cgi-bin/snapshot.cgi?channel={ch}"
 
 
 def _query_active_cameras(db) -> list[dict]:
@@ -389,7 +387,6 @@ def desired_specs() -> list[CameraSpec]:
                 snap_url = _snapshot_url_for(
                     r.get("host"), r.get("http_port") or 80,
                     r.get("channel_number"),
-                    r.get("username") or "", pw,
                     r.get("snapshot_url_override"),
                 )
             out.append(CameraSpec(

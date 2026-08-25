@@ -27,7 +27,10 @@ import httpx
 
 from app.stream.frame_buffer import FrameBuffer
 from app.stream.reconnect import Backoff
-from app.utils.stream_secrets import redact_stream_credentials
+from app.utils.stream_secrets import (
+    redact_stream_credentials,
+    strip_stream_userinfo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +43,9 @@ class HttpSnapshotWorker(threading.Thread):
                  buffer: FrameBuffer | None = None):
         super().__init__(daemon=True, name=f"http-{camera_id}")
         self.camera_id = camera_id
-        self.snapshot_url = snapshot_url
+        # httpx emits request URLs at INFO. Keep credentials in its auth
+        # object only so third-party logging can never print URL userinfo.
+        self.snapshot_url = strip_stream_userinfo(snapshot_url)
         self.username = username or ""
         self.password = password or ""
         # Cap at 5 — HTTP polling at higher rates burns NVR CPU + bandwidth

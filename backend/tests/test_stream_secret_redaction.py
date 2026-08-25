@@ -17,6 +17,7 @@ from app.schemas.camera import (
 from app.utils.stream_secrets import (
     redact_stream_credentials,
     redact_stream_structure,
+    strip_stream_userinfo,
 )
 
 
@@ -50,9 +51,12 @@ def test_stream_manager_hides_both_camera_username_and_password():
 def test_http_snapshot_worker_hides_credentials_from_url():
     worker = HttpSnapshotWorker(1, RAW_URL)
 
-    assert worker._redacted_url() == (
-        "rtsp://****:****@example.test:554/live"
-    )
+    assert worker.snapshot_url == "rtsp://example.test:554/live"
+    assert worker._redacted_url() == "rtsp://example.test:554/live"
+
+
+def test_strip_stream_userinfo_keeps_the_nonsecret_url_structure():
+    assert strip_stream_userinfo(RAW_URL) == "rtsp://example.test:554/live"
 
 
 def test_camera_response_schemas_never_serialize_embedded_credentials():
