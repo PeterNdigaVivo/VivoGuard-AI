@@ -137,7 +137,11 @@ export function AlertNotificationProvider({ children }: { children: ReactNode })
     } catch { return }   // poll error — retry next tick
     // Positive operational updates are intentionally silent. Keep this
     // guard even though the server creates automated positives resolved.
-    rows = rows.filter(a => a.detection_type !== 'positive_operational')
+    rows = rows.filter(a =>
+      a.detection_type !== 'positive_operational'
+      && !a.notification_suppressed
+      && !a.review_only
+    )
     const s = settingsRef.current
     const urgentNew = rows.filter(a => a.severity_label === 'URGENT')
     setUnreadUrgent(urgentNew.length)

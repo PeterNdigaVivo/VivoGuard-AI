@@ -374,6 +374,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   useEffect(() => { setLocal(incoming) }, [incoming])
   const sev = sevKey(alert.severity)
   const isPositive = alert.detection_type === 'positive_operational'
+  const isCalibration = alert.review_only || alert.notification_suppressed
   // "Resolved" covers the three terminal statuses the API can set:
   // resolved (everyday "I handled it") + confirmed (legacy alias the
   // /resolve endpoint still uses) + dismissed ("not a problem").
@@ -414,7 +415,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   async function markTrue() {
     // ✅ True Alert — the AI was right. Positive training sample via
     // /alerts/{id}/confirm → absorb_confirmed.
-    if (!window.confirm('Mark this alert as TRUE? It will be added to AI training as a positive example.')) return
+    const prompt = isCalibration
+      ? 'Mark this calibration alert as TRUE? It will remain quarantined until independent review.'
+      : 'Mark this alert as TRUE? It will be added to AI training as a positive example.'
+    if (!window.confirm(prompt)) return
     setLocal({ ...alert, status: 'confirmed',
                resolved_at: new Date().toISOString() })
     try {
@@ -431,7 +435,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   async function markFalse() {
     // ❌ False Alert — the AI was wrong. Hard-negative training
     // sample via /alerts/{id}/dismiss → absorb_dismissed.
-    if (!window.confirm('Mark this alert as FALSE? It will be added to AI training as a negative example.')) return
+    const prompt = isCalibration
+      ? 'Mark this calibration alert as FALSE? It will remain quarantined until independent review.'
+      : 'Mark this alert as FALSE? It will be added to AI training as a negative example.'
+    if (!window.confirm(prompt)) return
     setLocal({ ...alert, status: 'dismissed',
                resolved_at: new Date().toISOString() })
     try {
@@ -463,11 +470,13 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
 
   return (
     <div className={'relative bg-white rounded border overflow-hidden transition-opacity '
-                    + (isPositive ? 'border-emerald-200 ' : 'border-slate-200 ')
+                    + (isPositive ? 'border-emerald-200 '
+                      : isCalibration ? 'border-violet-200 ' : 'border-slate-200 ')
                     + (isClosed && !isPositive ? 'opacity-60' : '')}>
       {/* Severity colour bar — greyed when resolved/dismissed. */}
       <div className={'absolute left-0 top-0 bottom-0 w-1 '
-                      + (isPositive ? 'bg-emerald-500' : isClosed ? 'bg-slate-300' : SEVERITY_BAR[sev])} />
+                      + (isPositive ? 'bg-emerald-500' : isClosed ? 'bg-slate-300'
+                        : isCalibration ? 'bg-violet-500' : SEVERITY_BAR[sev])} />
 
       <div className="pl-4 pr-3 py-3 flex flex-col sm:flex-row gap-3">
         {/* Left: title + body + actions */}
@@ -476,7 +485,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             {/* When still new, show the traffic-light severity badge.
                 When resolved/dismissed, show the closure badge instead
                 so the operator sees its state at a glance. */}
-            {isPositive ? (
+            {isCalibration && !isClosed ? (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-violet-100 text-violet-800">
+                🧪 CALIBRATION — NO ESCALATION
+              </span>
+            ) : isPositive ? (
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800">
                 {LABEL_FROM_SERVER[alert.severity_label ?? ''] ?? '✅ POSITIVE'}
               </span>
@@ -531,6 +544,13 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">{alert.body}</div>
           ) : null}
 
+          {isCalibration && (
+            <div className="mt-2 rounded border border-violet-200 bg-violet-50 px-2 py-1.5 text-xs text-violet-900">
+              Review evidence only. Live notifications and automatic learning are
+              suppressed until this camera-detector pair passes independent validation.
+            </div>
+          )}
+
           {/* AI Scene Analysis (Sprint 2.1 VLM). Shows the scene
               description once the async task writes it; a transient
               "Analysing scene…" placeholder for VLM-eligible alerts
@@ -539,7 +559,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           <SceneAnalysis alert={alert} />
 
           {/* What to do — plain-English steps for non-technical staff. */}
-          {alert.what_to_do && alert.what_to_do.length > 0 && (
+          {!isCalibration && alert.what_to_do && alert.what_to_do.length > 0 && (
             <div className="mt-2 bg-slate-50 rounded p-2">
               <div className="text-xs font-semibold text-slate-700 mb-1">What to do:</div>
               <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-0.5">
@@ -581,7 +601,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               Resolved. Filled steps are dark; the active step pulses;
               future steps are pale. Hides when the alert is dismissed
               (acknowledge / resolve aren't the relevant flow). */}
-          {!isDismissed && !isPositive && (
+          {!isDismissed && !isPositive && !isCalibration && (
             <LifecyclePip
               createdAt={alert.created_at}
               acknowledgedAt={alert.acknowledged_at}
@@ -633,7 +653,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                 🎬 Incident Clip
               </FeedbackBtn>
             )}
-            {alert.status === 'new' && !alert.acknowledged_at && (
+            {alert.status === 'new' && !alert.acknowledged_at && !isCalibration && (
               <ActionBtn onClick={acknowledgeOne} tone="amber" disabled={busy}>
                 👁 I'm on it
               </ActionBtn>
@@ -770,6 +790,20 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                     Your browser can’t play this clip.
                   </video>
                 )}
+              </>
+            ) : alert.clip_status === 'pending' ? (
+              <>
+                <div className="text-lg font-semibold mb-2">Clip is being prepared</div>
+                <div className="text-sm text-slate-600 mb-4">
+                  The recorder is collecting the post-event footage and extracting the
+                  incident clip. This normally completes within two minutes.
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => { setClipModal(false); onChanged?.() }}
+                          className="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-500 text-sm">
+                    Refresh alert
+                  </button>
+                </div>
               </>
             ) : (
               <>

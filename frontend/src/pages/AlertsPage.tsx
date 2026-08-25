@@ -11,7 +11,7 @@ import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 
 // Simple quick-filter buttons non-technical staff understand.
-type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'resolved' | 'all'
+type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
 // actionable tabs (urgent / attention / resolved / all). Everything else —
@@ -22,6 +22,8 @@ const POSITIVE_TYPE = 'positive_operational'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
 const _isPositive = (a: Alert) => a.detection_type === POSITIVE_TYPE
 const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isPositive(a)
+const _isCalibration = (a: Alert) => a.review_only || a.notification_suppressed
+const _isOperational = (a: Alert) => _isActionable(a) && !_isCalibration(a)
 const _isOpen = (a: Alert) => !['resolved', 'confirmed', 'dismissed'].includes(a.status)
 const PAGE_SIZE = 100
 
@@ -66,6 +68,7 @@ export default function AlertsPage() {
     resolved_today: 0, dismissed_today: 0,
     unread_urgent: 0,
     critical_today: 0, high_today: 0, medium_today: 0, low_today: 0,
+    calibration_today: 0, operational_today_count: 0,
     avg_response_seconds: null as number | null,
     today_count: 0, yesterday_count: 0,
     trend_vs_yesterday_pct: null as number | null,
@@ -151,6 +154,7 @@ export default function AlertsPage() {
       const action: 'resolve' | 'dismiss' = detail.action === 'dismiss' ? 'dismiss' : 'resolve'
       const closed = items.find(a => a.id === id)
       if (!closed) return
+      if (_isCalibration(closed)) return
       setSummary(s => ({
         ...s,
         urgent:    closed.severity_label === 'URGENT'    ? Math.max(0, s.urgent - 1)    : s.urgent,
@@ -178,8 +182,13 @@ export default function AlertsPage() {
     } else if (quick === 'positive') {
       rows = rows.filter(_isPositive)
     } else {
-      // Actionable tabs exclude store_intelligence only.
-      rows = rows.filter(_isActionable)
+      if (quick === 'calibration') {
+        rows = rows.filter(a => _isActionable(a) && _isCalibration(a))
+      } else {
+        // Operational tabs exclude quarantined/review-only evidence. Those
+        // records remain available in the dedicated Calibration tab.
+        rows = rows.filter(_isOperational)
+      }
       if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && _isOpen(a))
       else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a))
       // 'confirmed' covers alerts the /resolve endpoint flipped (it
@@ -202,15 +211,16 @@ export default function AlertsPage() {
   // click it. Only store_intelligence is excluded from the actionable
   // buckets; it has its own Store Update tab.
   const counts = useMemo(() => {
-    const actionable = items.filter(_isActionable)
+    const operational = items.filter(_isOperational)
     return {
       // Store Update badge = unread (new) store_intelligence updates.
       store:     items.filter(a => _isStoreIntel(a) && _isOpen(a)).length,
       positive:  items.filter(_isPositive).length,
-      urgent:    actionable.filter(a => a.severity_label === 'URGENT' && _isOpen(a)).length,
-      attention: actionable.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a)).length,
-      resolved:  actionable.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
-      all:       actionable.length,
+      urgent:    operational.filter(a => a.severity_label === 'URGENT' && _isOpen(a)).length,
+      attention: operational.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a)).length,
+      calibration: items.filter(a => _isActionable(a) && _isCalibration(a)).length,
+      resolved:  operational.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status)).length,
+      all:       operational.length,
     }
   }, [items])
 
@@ -224,7 +234,7 @@ export default function AlertsPage() {
   async function resolveAll() {
     // Use whatever filter the user can see — store + date window —
     // so the bulk action mirrors the visible list, not the whole DB.
-    const newCount = items.filter(a => a.status === 'new').length
+    const newCount = items.filter(a => a.status === 'new' && _isOperational(a)).length
     if (newCount === 0) { setToast('There are no unresolved alerts to clear.'); return }
     const label = storeId
       ? stores.find(s => String(s.id) === storeId)?.name ?? 'this store'
@@ -316,6 +326,7 @@ export default function AlertsPage() {
           {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
           {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
           {' · '}<strong className="text-slate-600 dark:text-slate-300">{summary.dismissed_today} dismissed</strong>
+          {' · '}<strong className="text-violet-700">{summary.calibration_today} calibration-only</strong>
         </div>
       )}
 
@@ -335,6 +346,9 @@ export default function AlertsPage() {
         </QuickBtn>
         <QuickBtn active={quick === 'attention'} onClick={() => setQuick('attention')}>
           🟡 Needs Attention ({shownCount(counts.attention)})
+        </QuickBtn>
+        <QuickBtn active={quick === 'calibration'} onClick={() => setQuick('calibration')}>
+          🧪 Calibration ({shownCount(counts.calibration)})
         </QuickBtn>
         <QuickBtn active={quick === 'resolved'}  onClick={() => setQuick('resolved')}>
           ✅ Resolved ({shownCount(counts.resolved)})
@@ -479,6 +493,7 @@ function ExecutiveSummaryBar({ summary }: {
   summary: {
     critical_today: number; high_today: number
     medium_today:   number; low_today:  number
+    calibration_today: number
     resolved_today: number
     avg_response_seconds: number | null
     today_count: number; yesterday_count: number
@@ -520,6 +535,8 @@ function ExecutiveSummaryBar({ summary }: {
                  tone="text-yellow-700 bg-yellow-50 border-yellow-200" />
         <SevPill label="Low"      emoji="🔵" count={summary.low_today}
                  tone="text-blue-700 bg-blue-50 border-blue-200" />
+        <SevPill label="Calibration" emoji="🧪" count={summary.calibration_today}
+                 tone="text-violet-700 bg-violet-50 border-violet-200" />
         <span className="text-slate-300">|</span>
         <span className="text-emerald-700">
           ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved

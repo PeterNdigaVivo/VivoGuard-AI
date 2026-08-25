@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.api.alerts import _to_alert_out, alerts_summary, resolve_all
 from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
     DetectionEvent, RecordingClip, User,
@@ -83,6 +84,52 @@ def test_quarantined_alert_retains_evidence_but_suppresses_escalation(db):
     assert alert.notification_suppressed is True
     assert alert.training_eligible is False
     assert event.extra["quality_control"]["training_eligible"] is False
+
+    item = _to_alert_out(alert, event, cam, None, None)
+    assert item.review_only is True
+    assert item.notification_suppressed is True
+    assert item.quality_mode == "quarantined"
+    assert item.quality_reason == "poor precision"
+    assert item.clip_status == "pending"
+
+
+def test_operational_summary_separates_quarantined_evidence(db):
+    cam = _camera(db)
+    operational, _ = _alert(db, cam)
+    calibration, _ = _alert(db, cam)
+    calibration.review_only = True
+    calibration.notification_suppressed = True
+    db.flush()
+
+    summary = alerts_summary.__wrapped__(db=db, _u=None, store_id=None)
+
+    assert summary["today_count"] == 2
+    assert summary["operational_today_count"] == 1
+    assert summary["calibration_today"] == 1
+    assert summary["urgent"] == 1
+    assert summary["critical_today"] == 1
+    assert summary["unread_urgent"] == 1
+
+
+def test_resolve_all_never_closes_quarantined_review_evidence(db):
+    cam = _camera(db)
+    operational, _ = _alert(db, cam)
+    calibration, _ = _alert(db, cam)
+    calibration.review_only = True
+    calibration.notification_suppressed = True
+    user = User(email="operator@example.test", password_hash="not-used",
+                role="operator")
+    db.add(user)
+    db.commit()
+
+    result = resolve_all(db=db, user=user, store_id=None,
+                         since=None, until=None)
+
+    db.refresh(operational)
+    db.refresh(calibration)
+    assert result == {"resolved": 1}
+    assert operational.status == "confirmed"
+    assert calibration.status == "new"
 
 
 def test_release_is_evidence_gated_but_force_is_attributed(db):

@@ -3,6 +3,10 @@ import { api, wsUrl } from './client'
 
 export interface Alert {
   id: number; event_id: number; status: string
+  review_only: boolean
+  notification_suppressed: boolean
+  quality_mode: 'active' | 'review_only' | 'quarantined' | string
+  quality_reason: string | null
   acknowledged_at: string | null
   resolved_at: string | null
   notes: string | null
@@ -44,6 +48,7 @@ export interface Alert {
   // Play via <video src={clip_url}>. NULL when no clip (falls back to
   // the snapshot thumbnail/filmstrip).
   clip_url: string | null
+  clip_status: 'ready' | 'pending' | 'unavailable'
   // VLM scene description (Sprint 2.1). NULL until the async analysis
   // task writes it, or when VLM is disabled / type ineligible.
   vlm_scene: string | null
@@ -77,8 +82,10 @@ export const alerts = {
       unread_urgent: number
       critical_today: number; high_today: number
       medium_today: number;   low_today: number
+      calibration_today: number
       avg_response_seconds: number | null
-      today_count: number;    yesterday_count: number
+      today_count: number; operational_today_count: number
+      yesterday_count: number
       trend_vs_yesterday_pct: number | null
       date_label: string | null
     }>(`/alerts/summary${storeId ? `?store_id=${storeId}` : ''}`),

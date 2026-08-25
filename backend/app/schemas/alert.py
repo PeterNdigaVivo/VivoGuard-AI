@@ -14,6 +14,13 @@ class AlertOut(BaseModel):
     resolved_at: datetime | None = None
     notes: str | None = None
     feedback_used_for_training: bool
+    # Quality-controlled alerts remain available as review evidence, but are
+    # not operational escalations and must never trigger browser/external
+    # notifications or automatic learning.
+    review_only: bool = False
+    notification_suppressed: bool = False
+    quality_mode: str = "active"
+    quality_reason: str | None = None
     created_at: datetime
     event_timestamp: datetime | None = None
     delivery_delay_seconds: int | None = None
@@ -73,6 +80,9 @@ class AlertOut(BaseModel):
     # Recorded video clip for this alert, when the recorder extracted one
     # from the active window recording. Served by GET /alerts/{id}/clip.
     clip_url: str | None = None
+    # ``pending`` prevents the normal recorder post-buffer/extraction delay
+    # from being presented to operators as a permanent evidence failure.
+    clip_status: str = "unavailable"  # ready | pending | unavailable
 
     # VLM scene description (Sprint 2.1) — written async into
     # DetectionEvent.extra["vlm_scene"]. NULL until the analysis task

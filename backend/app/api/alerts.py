@@ -1086,6 +1086,12 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.what_to_do     = _what_to_do(event, store, zone)
     item.time_range     = _time_range(event, store)
     item.snapshot_url   = _snapshot_url(alert.id, event)
+    quality = extra.get("quality_control") or {}
+    item.review_only = bool(alert.review_only)
+    item.notification_suppressed = bool(alert.notification_suppressed)
+    item.quality_mode = str(
+        quality.get("mode") or ("review_only" if alert.review_only else "active"))
+    item.quality_reason = quality.get("reason")
     # Checkout-dwell timeline (NULL for every other alert type).
     # Pass the raw path list AND a count so the frontend can render
     # the filmstrip without a separate length query.
@@ -1094,8 +1100,22 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.snapshot_count  = len(sp) or None
     # Recorded clip (if the recorder extracted one for this alert). We only
     # expose the URL — the path stays server-side.
-    item.clip_url = (f"/api/alerts/{alert.id}/clip"
-                     if (event.extra or {}).get("alert_clip_path") else None)
+    has_clip = bool((event.extra or {}).get("alert_clip_path"))
+    item.clip_url = f"/api/alerts/{alert.id}/clip" if has_clip else None
+    if has_clip:
+        item.clip_status = "ready"
+    else:
+        created_at = alert.created_at
+        if created_at and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_seconds = ((datetime.now(timezone.utc) - created_at).total_seconds()
+                       if created_at else None)
+        # The recorder needs the 20-second post-event buffer and runs its
+        # extractor every minute. Allow a bounded retry window before calling
+        # this an evidence gap.
+        item.clip_status = (
+            "pending" if age_seconds is not None and age_seconds <= 180
+            else "unavailable")
     # VLM scene description lives in the event's extra JSON (written
     # async by the vlm.analyse_alert_scene task). Surface just that
     # one field — never the whole extra blob.
@@ -1166,7 +1186,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .filter(DetectionEvent.timestamp >= yest_start,
                     DetectionEvent.timestamp < today,
-                    DetectionEvent.detection_type != "positive_operational"))
+                    DetectionEvent.detection_type != "positive_operational",
+                    Alert.notification_suppressed.is_(False)))
     if store_id is not None:
         yq = yq.filter(Camera.store_id == store_id)
     yest_count = int(yq.scalar() or 0)
@@ -1177,6 +1198,7 @@ def alerts_summary(db: Session = Depends(get_db),
     # entity) instead of full Alert+DetectionEvent ORM objects.
     tq = (db.query(Alert.status, Alert.created_at, Alert.resolved_at,
                    Alert.acknowledged_at,
+                   Alert.notification_suppressed,
                    DetectionEvent.detection_type, DetectionEvent.extra,
                    DetectionEvent.zone_id, DetectionEvent.timestamp,
                    _Store)
@@ -1196,15 +1218,19 @@ def alerts_summary(db: Session = Depends(get_db),
 
     urgent = attention = resolved = dismissed = unread_urgent = 0
     critical = high = medium = low = 0
+    calibration = 0
     resolve_durations: list[float] = []
     for r in rows:
+        if r.notification_suppressed:
+            calibration += 1
+            continue
         zone = zones_by_id.get(r.zone_id) if r.zone_id else None
         # Duck-typed event shim carrying the only fields the severity
         # classifiers (and their _person_context/_is_after_hours helpers)
         # read: extra, timestamp, detection_type.
         ev = SimpleNamespace(extra=r.extra, timestamp=r.timestamp,
                              detection_type=r.detection_type)
-        store = r[8]
+        store = r[9]
         label = _severity_label(r.detection_type, ev, zone, store)
         s4    = _severity_4_label(r.detection_type, ev, zone, store)
         if r.status in ("resolved", "confirmed"):
@@ -1236,11 +1262,12 @@ def alerts_summary(db: Session = Depends(get_db),
     avg_response_seconds = (sum(resolve_durations) / len(resolve_durations)
                             if resolve_durations else None)
     today_count = len(rows)
+    operational_today_count = today_count - calibration
     trend_vs_yesterday_pct = None
     if yest_count > 0:
         trend_vs_yesterday_pct = round(
-            (today_count - yest_count) / yest_count * 100.0, 1)
-    elif today_count > 0:
+            (operational_today_count - yest_count) / yest_count * 100.0, 1)
+    elif operational_today_count > 0:
         trend_vs_yesterday_pct = 100.0
 
     # Friendly date label in the store's timezone (or EAT default).
@@ -1249,10 +1276,10 @@ def alerts_summary(db: Session = Depends(get_db),
         tz = ZoneInfo("Africa/Nairobi")
     except Exception:
         tz = timezone.utc
-    date_label = datetime.now(tz).strftime("%A %-d %B %Y") \
-        if hasattr(datetime, "strftime") else None
-    # Some platforms (Windows) reject %-d — fall back to the padded form.
-    if date_label is None or "-" in date_label:
+    try:
+        date_label = datetime.now(tz).strftime("%A %-d %B %Y")
+    except ValueError:
+        # Windows rejects the POSIX ``%-d`` modifier.
         date_label = datetime.now(tz).strftime("%A %d %B %Y")
 
     return {
@@ -1269,6 +1296,8 @@ def alerts_summary(db: Session = Depends(get_db),
         # Lifecycle stats.
         "avg_response_seconds":  avg_response_seconds,
         "today_count":           today_count,
+        "operational_today_count": operational_today_count,
+        "calibration_today":     calibration,
         "yesterday_count":       yest_count,
         "trend_vs_yesterday_pct": trend_vs_yesterday_pct,
         "date_label":            date_label,
@@ -1540,7 +1569,8 @@ def resolve_all(db: Session = Depends(get_db),
     q = (db.query(Alert)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .filter(Alert.status == "new"))
+           .filter(Alert.status == "new",
+                   Alert.notification_suppressed.is_(False)))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
     if since:
