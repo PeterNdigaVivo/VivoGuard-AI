@@ -1,8 +1,8 @@
 """RecordingClip — one row per camera per rolling recording window.
 
-Written by the recorder service (app/tasks/recorder.py). A window's clips are
-deleted at the next window transition; the row is kept with status='deleted'
-and file_path=NULL as an audit trail.
+Written by the recorder service (app/tasks/recorder.py). Completed source
+windows are retained for a bounded recovery period before deletion; the row is
+kept with status='deleted' and file_path=NULL as an audit trail.
 """
 from datetime import datetime
 
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 # recording  — ffmpeg is currently writing this file
-# completed  — the window ended and the file is finalised (pre-delete)
+# completed  — the window ended and the file is retained for delayed extraction
 # deleted    — the file has been purged; file_path is NULL
 RECORDING_CLIP_STATUSES = ("recording", "completed", "deleted")
 

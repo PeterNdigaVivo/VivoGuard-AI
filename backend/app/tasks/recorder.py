@@ -9,10 +9,12 @@ Windows (EAT), 24/7 for key/entrance cameras:
     19:00-20:00  window "<date>_1900"  ( 3600s)
     20:00-24:00  window "<date>_2000"  (14400s)
 Overnight coverage is intentional: intrusion evidence is most valuable
-outside trading hours. Only key cameras are recorded, and the previous
-bounded window is deleted at rollover, keeping storage constrained.
+outside trading hours. Only key cameras are recorded. Completed source
+windows are retained for a bounded recovery period, allowing delayed incident
+clip extraction without turning the recorder into an unbounded archive.
 
-At each transition the PREVIOUS window's directory is deleted. Recording is
+At each transition the PREVIOUS window is finalised. A separate hourly task
+deletes source windows after the configured retention period. Recording is
 substream, stream-copy (no re-encode), fragmented-mp4 so an in-progress file
 stays seekable for alert-clip extraction:
     ffmpeg -rtsp_transport tcp -i <sub_url> -t <secs> -c copy \
@@ -332,9 +334,61 @@ def _delete_window(db, window_id: str) -> None:
     log.info("Deleted recording window %s — freed %.1f GB", window_id, freed / 1024**3)
 
 
+def _close_window(db, window_id: str, *, ended_at: datetime | None = None) -> int:
+    """Finalise a source window without destroying recoverable evidence."""
+    from app.models import RecordingClip
+    ended_at = ended_at or datetime.now(timezone.utc)
+    updated = (db.query(RecordingClip)
+                 .filter(RecordingClip.window_id == window_id,
+                         RecordingClip.status == "recording")
+                 .update({"status": "completed", "ended_at": ended_at},
+                         synchronize_session=False))
+    db.commit()
+    log.info("Completed recording window %s (%d camera files retained)",
+             window_id, updated)
+    return int(updated)
+
+
+def _prune_expired_source_windows(
+    db, *, now: datetime | None = None, retention_hours: int | None = None,
+) -> int:
+    """Delete only fully completed source windows beyond retention.
+
+    The per-window safety check prevents a stale completed row from deleting a
+    directory that is still shared by an active recorder after a restart.
+    """
+    from datetime import timedelta
+    from app.models import RecordingClip
+    now = now or datetime.now(timezone.utc)
+    hours = (int(retention_hours) if retention_hours is not None else
+             int(getattr(settings, "recording_source_retention_hours", 8)))
+    cutoff = now - timedelta(hours=max(1, hours))
+    candidates = [wid for (wid,) in (
+        db.query(RecordingClip.window_id)
+          .filter(RecordingClip.status == "completed",
+                  RecordingClip.ended_at.is_not(None),
+                  RecordingClip.ended_at < cutoff)
+          .distinct()
+          .all()
+    )]
+    pruned = 0
+    for window_id in candidates:
+        unsafe = (db.query(RecordingClip.id)
+                    .filter(RecordingClip.window_id == window_id,
+                            or_(RecordingClip.status != "completed",
+                                RecordingClip.ended_at.is_(None),
+                                RecordingClip.ended_at >= cutoff))
+                    .first())
+        if unsafe:
+            continue
+        _delete_window(db, window_id)
+        pruned += 1
+    return pruned
+
+
 @celery_app.task(name="recorder.tick", ignore_result=True)
 def tick() -> None:
-    """Every 60s: drive window start/stop/delete off the EAT wall clock."""
+    """Every 60s: drive window start/stop/finalise off the EAT wall clock."""
     if not bool(getattr(settings, "recording_enabled", True)):
         return
     from app.database import SessionLocal
@@ -343,12 +397,12 @@ def tick() -> None:
     win = _current_window(now_eat)
     prev = r.get(_CURRENT_WINDOW_KEY)
 
-    # A configuration gap → ensure everything is stopped + purged.
+    # A configuration gap → ensure everything is stopped + finalised.
     if win is None:
         if prev:
             _stop_all(r)
             with SessionLocal() as db:
-                _delete_window(db, prev)
+                _close_window(db, prev)
             r.delete(_CURRENT_WINDOW_KEY)
         return
 
@@ -368,11 +422,11 @@ def tick() -> None:
                 log.warning("recorder: recovered mid-window %s after restart "
                             "(%ds remaining)", window_id, remaining)
         return
-    # Transition: stop + delete previous window, start the new one.
+    # Transition: stop + retain the previous source window, start the new one.
     _stop_all(r)
     with SessionLocal() as db:
         if prev:
-            _delete_window(db, prev)
+            _close_window(db, prev)
         _start_window(db, r, window_id, seconds)
     r.set(_CURRENT_WINDOW_KEY, window_id, ex=6 * 3600)
 
@@ -449,21 +503,21 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
 
 @celery_app.task(name="recorder.extract_pending_clips", ignore_result=True)
 def extract_pending_clips() -> None:
-    """Every 60s: for recent alerts whose camera has an ACTIVE recording,
-    cut the relevant segment out of that recording. Best-effort — a failure
-    just leaves the alert with its snapshot.
+    """Every 60s: recover alert clips while their source recording exists.
 
     The recording_clips table is the single source of truth — there is NO
     clip_pending flag and no dependency on the Redis window marker: we join
-    alerts to any camera recording that is `status='recording'` and started
-    before the alert. Works for ALL detection types. Idempotent via the
-    alert_clip_path guard."""
+    alerts to active or retained completed recordings that cover the alert.
+    The lookback matches source retention, so a brief extractor outage does
+    not permanently discard incident evidence. Works for ALL detection types.
+    Idempotent via the alert_clip_path guard."""
     if not bool(getattr(settings, "recording_enabled", True)):
         return
     from datetime import timedelta
     from app.database import SessionLocal
     from app.models import Alert, DetectionEvent, RecordingClip
-    since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    recovery_hours = int(getattr(settings, "recording_source_retention_hours", 8))
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, recovery_hours))
     _alert_clips_root().mkdir(parents=True, exist_ok=True)
 
     with SessionLocal() as db:
@@ -472,11 +526,12 @@ def extract_pending_clips() -> None:
                   .join(RecordingClip,
                         RecordingClip.camera_id == DetectionEvent.camera_id)
                   .filter(Alert.created_at >= since,
-                          RecordingClip.status == "recording",
+                          RecordingClip.status.in_(("recording", "completed")),
                           DetectionEvent.timestamp >= RecordingClip.started_at,
                           or_(RecordingClip.ended_at.is_(None),
                               RecordingClip.ended_at >= DetectionEvent.timestamp))
                   .order_by(RecordingClip.started_at.desc())
+                  .limit(1000)
                   .all())
         seen: set[int] = set()
         for alert, ev, clip in rows:
@@ -544,6 +599,18 @@ def extract_pending_clips() -> None:
                     or not _recording_covers_event(clip, ev_ts)):
                 continue
             _extract_one(db, alert, ev, clip, ev_ts)
+
+
+@celery_app.task(name="recorder.prune_source_recordings", ignore_result=True)
+def prune_source_recordings() -> None:
+    """Hourly: remove expired source windows after recovery has had time."""
+    if not bool(getattr(settings, "recording_enabled", True)):
+        return
+    from app.database import SessionLocal
+    with SessionLocal() as db:
+        pruned = _prune_expired_source_windows(db)
+    if pruned:
+        log.info("recorder: pruned %d expired source windows", pruned)
 
 
 @celery_app.task(name="recorder.prune_alert_clips", ignore_result=True)

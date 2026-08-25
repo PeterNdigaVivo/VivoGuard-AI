@@ -178,6 +178,7 @@ celery_app.conf.update(
         # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
         "recorder.tick":                  {"queue": "recorder"},
         "recorder.extract_pending_clips": {"queue": "recorder"},
+        "recorder.prune_source_recordings": {"queue": "recorder"},
         "recorder.prune_alert_clips":     {"queue": "recorder"},
         "recorder.backfill_evidence_hashes": {"queue": "recorder"},
         "recorder.storage_health_check":  {"queue": "recorder"},
@@ -564,6 +565,10 @@ celery_app.conf.update(
         "recorder-extract-clips-every-60s": {
             "task": "recorder.extract_pending_clips",
             "schedule": 60.0,
+        },
+        "recorder-prune-source-recordings-hourly": {
+            "task": "recorder.prune_source_recordings",
+            "schedule": 60 * 60.0,
         },
         "recorder-prune-alert-clips-hourly": {
             "task": "recorder.prune_alert_clips",
