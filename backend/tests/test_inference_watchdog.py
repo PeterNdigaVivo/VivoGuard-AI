@@ -64,6 +64,31 @@ def test_watchdog_reports_critical_camera_gap_without_gpu_shadow():
     }]
 
 
+def test_watchdog_reports_standard_camera_gap_without_gpu_shadow():
+    problems = inference_health_problems(
+        {
+            "inference_shards": {},
+            "standard_cameras_overdue": 3,
+            "standard_camera_ids_overdue": [31, 44, 52],
+            "standard_max_gap_seconds": 1081.0,
+            "standard_gap_sla_seconds": 900,
+        },
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+    )
+
+    assert problems == [{
+        "code": "standard_camera_gap_sla",
+        "overdue_cameras": 3,
+        "camera_ids": [31, 44, 52],
+        "max_gap_seconds": 1081.0,
+        "sla_seconds": 900,
+    }]
+
+
 def test_watchdog_reports_expected_missing_or_unsafe_shadow():
     assert inference_health_problems(
         {"inference_shards": {}},

@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 RUN_SECONDS    = settings.inference_run_seconds   # default 120s, env-overridable
 CRITICAL_RUN_SECONDS = settings.inference_critical_slice_seconds
 CRITICAL_GAP_SLA_SECONDS = settings.inference_critical_gap_sla_seconds
+STANDARD_GAP_SLA_SECONDS = settings.inference_standard_gap_sla_seconds
 CRITICAL_REQUEUE_SECONDS = min(
     settings.inference_critical_requeue_seconds,
     CRITICAL_GAP_SLA_SECONDS,
@@ -325,6 +326,70 @@ def _critical_gap_health(
         }
 
 
+def _standard_gap_health(
+    r: redis.Redis,
+    camera_ids: list[int],
+    *,
+    now: float | None = None,
+) -> dict:
+    """Measure ordinary-camera coverage gaps from actual task starts.
+
+    Critical cameras have a separate, tighter SLA. Together these two
+    measurements cover every fresh, schedulable camera instead of relying on
+    an estimated rotation time that can hide starvation or queue stalls.
+    """
+    now = time.time() if now is None else float(now)
+    if not camera_ids:
+        return {
+            "standard_cameras_total": 0,
+            "standard_cameras_overdue": 0,
+            "standard_camera_ids_overdue": [],
+            "standard_cameras_never_started": 0,
+            "standard_max_gap_seconds": 0,
+            "standard_gap_sla_seconds": int(STANDARD_GAP_SLA_SECONDS),
+        }
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+        values = pipe.execute()
+        ages: dict[int, float | None] = {}
+        for camera_id, value in zip(camera_ids, values):
+            if isinstance(value, bytes):
+                value = value.decode()
+            try:
+                ages[camera_id] = max(0.0, now - float(value)) if value else None
+            except (TypeError, ValueError):
+                ages[camera_id] = None
+        overdue = sorted(
+            camera_id for camera_id, age in ages.items()
+            if age is None or age > STANDARD_GAP_SLA_SECONDS
+        )
+        measured = [age for age in ages.values() if age is not None]
+        return {
+            "standard_cameras_total": len(camera_ids),
+            "standard_cameras_overdue": len(overdue),
+            "standard_camera_ids_overdue": overdue,
+            "standard_cameras_never_started": sum(
+                age is None for age in ages.values()
+            ),
+            "standard_max_gap_seconds": (
+                round(max(measured), 1) if measured else None
+            ),
+            "standard_gap_sla_seconds": int(STANDARD_GAP_SLA_SECONDS),
+        }
+    except Exception as exc:
+        log.warning("supervise_all: standard-gap telemetry failed: %s", exc)
+        return {
+            "standard_cameras_total": len(camera_ids),
+            "standard_cameras_overdue": None,
+            "standard_camera_ids_overdue": None,
+            "standard_cameras_never_started": None,
+            "standard_max_gap_seconds": None,
+            "standard_gap_sla_seconds": int(STANDARD_GAP_SLA_SECONDS),
+        }
+
+
 def _claim_reserved_task(
     r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
 ) -> bool:
@@ -533,6 +598,10 @@ def supervise_all() -> None:
     critical_ids = [
         int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
     ]
+    standard_ids = [
+        int(cam.id) for cam in schedulable
+        if not _camera_is_latency_critical(cam)
+    ]
     # Fairness needs history for both lanes. Reading every timestamp is one
     # pipelined Redis round trip and prevents ordinary cameras with higher
     # database IDs from starving indefinitely on a saturated CPU worker.
@@ -589,6 +658,7 @@ def supervise_all() -> None:
         r, [int(cam.id) for cam in schedulable],
     )
     reservation_health.update(_critical_gap_health(r, critical_ids))
+    reservation_health.update(_standard_gap_health(r, standard_ids))
     _write_health(r,
                   cameras_total=len(cams),
                   cameras_fresh=len(schedulable),

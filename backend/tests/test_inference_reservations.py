@@ -308,3 +308,18 @@ def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
         "critical_max_gap_seconds": 400.0,
         "critical_gap_sla_seconds": inference.CRITICAL_GAP_SLA_SECONDS,
     }
+
+
+def test_standard_gap_health_uses_actual_starts_and_flags_never_started():
+    r = FakeLastRunRedis({1: "900", 2: "50", 3: None})
+
+    health = inference._standard_gap_health(r, [1, 2, 3], now=1000)
+
+    assert health == {
+        "standard_cameras_total": 3,
+        "standard_cameras_overdue": 2,
+        "standard_camera_ids_overdue": [2, 3],
+        "standard_cameras_never_started": 1,
+        "standard_max_gap_seconds": 950.0,
+        "standard_gap_sla_seconds": inference.STANDARD_GAP_SLA_SECONDS,
+    }

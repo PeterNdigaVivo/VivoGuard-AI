@@ -71,6 +71,22 @@ def inference_health_problems(
             ),
         })
 
+    standard_overdue = (authoritative or {}).get("standard_cameras_overdue")
+    if standard_overdue is not None and int(standard_overdue) > 0:
+        problems.append({
+            "code": "standard_camera_gap_sla",
+            "overdue_cameras": int(standard_overdue),
+            "camera_ids": list(
+                (authoritative or {}).get("standard_camera_ids_overdue") or []
+            ),
+            "max_gap_seconds": (
+                (authoritative or {}).get("standard_max_gap_seconds")
+            ),
+            "sla_seconds": int(
+                (authoritative or {}).get("standard_gap_sla_seconds") or 0
+            ),
+        })
+
     if not shadow_expected:
         return problems
     if shadow is None:
@@ -122,6 +138,13 @@ def _problem_summary(problems: list[dict]) -> str:
                 f"{problem['overdue_cameras']} latency-critical camera(s) "
                 f"exceeded the {problem.get('sla_seconds')}-second inference "
                 f"gap SLA (maximum measured gap "
+                f"{problem.get('max_gap_seconds')} seconds)"
+            )
+        elif problem["code"] == "standard_camera_gap_sla":
+            parts.append(
+                f"{problem['overdue_cameras']} standard camera(s) exceeded "
+                f"the {problem.get('sla_seconds')}-second inference gap SLA "
+                f"(maximum measured gap "
                 f"{problem.get('max_gap_seconds')} seconds)"
             )
         elif problem["code"] == "batch_shadow_missing":
