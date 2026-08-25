@@ -27,6 +27,7 @@ import httpx
 
 from app.stream.frame_buffer import FrameBuffer
 from app.stream.reconnect import Backoff
+from app.utils.stream_secrets import redact_stream_credentials
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class HttpSnapshotWorker(threading.Thread):
                     last_emit = now
                 self.backoff.succeed()
             except Exception as e:
-                msg = str(e)[:200]
+                msg = redact_stream_credentials(str(e))[:200]
                 log.warning("camera %s HTTP snapshot failed: %s", self.camera_id, msg)
                 self.buffer.update_health(self.camera_id, fps=0,
                                           error=f"HTTP snapshot: {msg}")
@@ -133,11 +134,4 @@ class HttpSnapshotWorker(threading.Thread):
                 return
 
     def _redacted_url(self) -> str:
-        # snapshot_url shouldn't contain creds (we use httpx auth) but
-        # belt-and-suspenders.
-        from urllib.parse import urlsplit, urlunsplit
-        u = urlsplit(self.snapshot_url)
-        netloc = (u.hostname or "") + (f":{u.port}" if u.port else "")
-        if u.username:
-            netloc = f"{u.username}:****@{netloc}"
-        return urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment))
+        return redact_stream_credentials(self.snapshot_url)

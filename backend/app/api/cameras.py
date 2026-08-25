@@ -21,6 +21,7 @@ from app.schemas.camera import (
 )
 from app.utils.crypto import encrypt
 from app.utils.network import build_rtsp_url
+from app.utils.stream_secrets import redact_stream_credentials
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 log = logging.getLogger(__name__)
@@ -560,7 +561,9 @@ def transport_diagnose(camera_id: int, fresh: bool = False,
         "rtsp_port": rtsp_port,
         "http_port": cam.http_port,
         "transport": cam.transport,
-        "snapshot_url_override": cam.snapshot_url_override,
+        "snapshot_url_override": redact_stream_credentials(
+            cam.snapshot_url_override
+        ) if cam.snapshot_url_override else None,
         "diagnostic": record,
         "explanation": _explain_diagnostic(record, host, rtsp_port),
     }
@@ -789,7 +792,7 @@ async def test_connection(payload: TestConnectionIn,
 
     return TestConnectionOut(
         ok=ok,
-        rtsp_url=rtsp,
+        rtsp_url=redact_stream_credentials(rtsp),
         snapshot_jpeg_b64=snap_b64,
         detected_channels=detected_channels,
         device_model=device_model,
@@ -817,7 +820,8 @@ def stream_url(camera_id: int, subtype: int = 0,
     if not cam:
         raise HTTPException(404, "camera not found")
     pw = decrypt(cam.password_encrypted or "")
-    return {"rtsp_url": _camera_rtsp_url(cam, subtype=subtype, password_plain=pw)}
+    rtsp = _camera_rtsp_url(cam, subtype=subtype, password_plain=pw)
+    return {"rtsp_url": redact_stream_credentials(rtsp)}
 
 
 @router.get("/{camera_id}/snapshot")
@@ -896,13 +900,8 @@ async def diagnose(camera_id: int, db: Session = Depends(get_db),
     results = []
     for sub in (1, 0):    # try substream first, then main
         rtsp = _camera_rtsp_url(cam, subtype=sub, password_plain=pw)
-        # Hide credentials in the response so we can paste safely.
-        from urllib.parse import urlsplit, urlunsplit
-        u = urlsplit(rtsp)
-        redacted_netloc = (u.hostname or "") + (f":{u.port}" if u.port else "")
-        if u.username:
-            redacted_netloc = f"{u.username}:****@{redacted_netloc}"
-        redacted = urlunsplit((u.scheme, redacted_netloc, u.path, u.query, u.fragment))
+        # Hide both username and password so diagnostics are safe to share.
+        redacted = redact_stream_credentials(rtsp)
 
         _img, err = await grab_thumbnail_verbose(rtsp, timeout=12)
         results.append({

@@ -1,7 +1,9 @@
 """Pydantic request/response schemas for cameras and NVRs."""
 from __future__ import annotations
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
+
+from app.utils.stream_secrets import redact_stream_credentials
 
 
 class CameraCreate(BaseModel):
@@ -58,6 +60,10 @@ class CameraOut(BaseModel):
     rtsp_transport: str = "tcp"
     created_at: datetime
 
+    @field_serializer("snapshot_url_override")
+    def serialize_snapshot_url_override(self, value: str | None) -> str | None:
+        return redact_stream_credentials(value) if value else value
+
 
 class CameraUpdate(BaseModel):
     name: str | None = None
@@ -98,6 +104,10 @@ class TestConnectionOut(BaseModel):
     device_model: str | None = None
     error: str | None = None
 
+    @field_serializer("rtsp_url")
+    def serialize_rtsp_url(self, value: str | None) -> str | None:
+        return redact_stream_credentials(value) if value else value
+
 
 class NVRConnectIn(BaseModel):
     name: str
@@ -116,6 +126,10 @@ class NVRChannelOut(BaseModel):
     name: str
     rtsp_main: str
     rtsp_sub: str
+
+    @field_serializer("rtsp_main", "rtsp_sub")
+    def serialize_rtsp_url(self, value: str) -> str:
+        return redact_stream_credentials(value)
 
 
 class NVRConnectOut(BaseModel):

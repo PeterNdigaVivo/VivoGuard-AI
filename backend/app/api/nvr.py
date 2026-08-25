@@ -247,7 +247,10 @@ async def add_channels(nvr_id: int, payload: AddChannelsIn, db: Session = Depend
             password_encrypted=nvr.password_encrypted,
             nvr_id=nvr.id,
             channel_number=ch.channel,
-            rtsp_url_override=ch.rtsp_main,
+            # The browser receives redacted discovery URLs. Build the actual
+            # URL from the encrypted NVR credential at stream time instead of
+            # round-tripping a secret-bearing URL through the client.
+            rtsp_url_override=None,
             network_type="lan",
             store_id=payload.store_id,
             status="online",

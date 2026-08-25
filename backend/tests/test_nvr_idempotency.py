@@ -126,3 +126,4 @@ def test_add_channels_is_idempotent_for_existing_nvr_channel() -> None:
     assert len(result) == 2
     assert result[0] is existing
     assert [camera.channel_number for camera in db.added] == [2]
+    assert db.added[0].rtsp_url_override is None
