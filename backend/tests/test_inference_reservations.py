@@ -267,6 +267,24 @@ def test_supervisor_prioritises_oldest_and_never_started_critical_cameras():
     assert [row.id for row in ordered] == [3, 4, 2, 1]
 
 
+def test_supervisor_rotates_ordinary_cameras_oldest_first():
+    def camera(camera_id: int):
+        return SimpleNamespace(
+            id=camera_id,
+            detection_configs=[SimpleNamespace(
+                enabled=True, detection_type="dwell",
+            )],
+            zones=[],
+        )
+
+    ordered = inference._schedule_order(
+        [camera(1), camera(2), camera(3)],
+        {1: 950.0, 2: None, 3: 700.0},
+    )
+
+    assert [row.id for row in ordered] == [2, 3, 1]
+
+
 def test_last_run_batch_read_normalises_invalid_values_and_fails_open():
     r = FakeLastRunRedis({1: "900", 2: "invalid", 3: None})
 

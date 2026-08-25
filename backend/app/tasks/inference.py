@@ -246,20 +246,22 @@ def _schedule_order(
     cameras: list,
     last_run_by_camera: dict[int, float | None] | None = None,
 ) -> list:
-    """Publish critical work first, oldest successful analysis first.
+    """Publish critical work first, then oldest successful analysis.
 
     Stable camera/DB ordering repeatedly favoured low IDs whenever CPU
     capacity was saturated. Ordering the critical fast lane by its actual
-    last completed run prevents that starvation pattern. Ordinary cameras
-    retain their existing stable order.
+    last completed run prevents that starvation pattern. Applying the same
+    oldest-first rule inside the ordinary lane ensures every remaining live
+    camera rotates fairly instead of repeatedly favouring low database IDs.
     """
     last_runs = last_run_by_camera or {}
 
     def priority(camera) -> tuple[int, float]:
-        if not _camera_is_latency_critical(camera):
-            return (1, 0.0)
         timestamp = last_runs.get(int(camera.id))
-        return (0, float("-inf") if timestamp is None else float(timestamp))
+        return (
+            0 if _camera_is_latency_critical(camera) else 1,
+            float("-inf") if timestamp is None else float(timestamp),
+        )
 
     return sorted(cameras, key=priority)
 
@@ -531,16 +533,22 @@ def supervise_all() -> None:
     critical_ids = [
         int(cam.id) for cam in schedulable if _camera_is_latency_critical(cam)
     ]
-    critical_last_runs = _last_run_timestamps(r, critical_ids)
+    # Fairness needs history for both lanes. Reading every timestamp is one
+    # pipelined Redis round trip and prevents ordinary cameras with higher
+    # database IDs from starving indefinitely on a saturated CPU worker.
+    last_runs = _last_run_timestamps(
+        r, [int(cam.id) for cam in schedulable],
+    )
     schedule_now = time.time()
     # Workers may be idle while this loop publishes. Priority only reorders
     # messages already in Redis, so publishing ordinary tasks first can let
     # them start before a later critical message exists. Critical-first
     # publication closes that race. Within the fast lane, the camera with the
-    # oldest completed run is published first to prevent CPU-era starvation.
-    for cam in _schedule_order(schedulable, critical_last_runs):
+    # oldest completed run is published first; ordinary work uses the same
+    # fairness rule after the fast lane.
+    for cam in _schedule_order(schedulable, last_runs):
         if _camera_is_latency_critical(cam):
-            last_run = critical_last_runs.get(int(cam.id))
+            last_run = last_runs.get(int(cam.id))
             if not _critical_due_from_timestamp(last_run, now=schedule_now):
                 cooling_down.append(int(cam.id))
                 continue
