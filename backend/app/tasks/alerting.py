@@ -1544,6 +1544,30 @@ def _entrance_cam_ids_for_store(db, store_id: int) -> list[int]:
     return sorted({z.camera_id for z in line_zones})
 
 
+def _fresh_frame_camera_ids(r, camera_ids: list[int]) -> list[int]:
+    """Return camera ids whose raw frame is currently available.
+
+    ``vg:frame`` keys have the streamer's 30-second TTL, so their presence is
+    stronger evidence than the eventually-consistent Camera.status column.
+    Failure is deliberately closed: a broken health check must not turn
+    missing telemetry into a high-severity store-opening claim.
+    """
+    if not camera_ids or r is None:
+        return []
+    try:
+        pipe = r.pipeline(transaction=False)
+        for camera_id in camera_ids:
+            pipe.exists(f"vg:frame:{camera_id}")
+        return [
+            camera_id
+            for camera_id, exists in zip(camera_ids, pipe.execute())
+            if bool(exists)
+        ]
+    except Exception as exc:
+        log.warning("shop_not_opened: entrance freshness check failed: %s", exc)
+        return []
+
+
 def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     """Single-store check called from the beat task."""
     from app.models import Camera
@@ -1609,6 +1633,19 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
         return
 
+    # No positive opening evidence exists, but absence is only actionable if
+    # at least one configured entrance sensor is actually supplying pixels.
+    # Otherwise the correct diagnosis is unavailable CCTV coverage, which the
+    # camera-health agent already reports — not "the store did not open".
+    fresh_entrance_cam_ids = _fresh_frame_camera_ids(r, entrance_cam_ids)
+    if not fresh_entrance_cam_ids:
+        log.warning(
+            "shop_not_opened: store=%s (%s) coverage unavailable across "
+            "entrance cameras %s — URGENT suppressed",
+            store.id, store.name, entrance_cam_ids,
+        )
+        return
+
     if r.get(sent_key):
         return
 
@@ -1625,10 +1662,10 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         "not_open_cutoff":   cutoff_hhmm,
         "signal":            "no_inward_crossing_by_cutoff",
     }
-    # Anchor the event on the first entrance camera so the snapshot
-    # path has a real FK to attach to.
+    # Anchor on a currently streaming entrance camera so the alert can carry
+    # evidence even when an older/stale camera record sorts first.
     created_event = _create_info_alert(
-        db, camera_id=entrance_cam_ids[0], zone_id=None, store_id=store.id,
+        db, camera_id=fresh_entrance_cam_ids[0], zone_id=None, store_id=store.id,
         detection_type="shop_open_close", cls="shop_not_opened", extra=extra)
     db.commit()
     r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
