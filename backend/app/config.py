@@ -557,6 +557,30 @@ class Settings(BaseSettings):
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
 
+def validate_production_security(candidate: Settings) -> None:
+    """Refuse to start production with development authentication defaults.
+
+    These defaults keep a fresh developer checkout usable, but silently
+    accepting them on an internet-facing CCTV service would let an attacker
+    forge access tokens or sign in with a documented bootstrap password.
+    Validation lives at application startup instead of model construction so
+    offline tooling and unit tests can still instantiate development settings.
+    """
+    if candidate.app_env.strip().lower() not in {"production", "prod"}:
+        return
+
+    errors: list[str] = []
+    if (candidate.jwt_secret == "dev-only-change-me"
+            or len(candidate.jwt_secret) < 32):
+        errors.append("JWT_SECRET must be a non-default value of at least 32 characters")
+    if candidate.bootstrap_admin_password == "change-me-now":
+        errors.append("BOOTSTRAP_ADMIN_PASSWORD must not use the documented default")
+    if candidate.app_debug:
+        errors.append("APP_DEBUG must be disabled in production")
+    if errors:
+        raise RuntimeError("insecure production configuration: " + "; ".join(errors))
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Cache the Settings object so we don't re-parse env on every import."""

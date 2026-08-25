@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
+from app.config import settings, validate_production_security
 from app.database import SessionLocal
 from app.utils.logging import configure_logging
 
@@ -19,6 +19,10 @@ from app.utils.logging import configure_logging
 async def lifespan(app: FastAPI):
     """Startup: configure logging, run pending alembic migrations,
     ensure bootstrap admin, prep stores."""
+    # Fail closed before touching the database or opening realtime feeds. A
+    # production CCTV service must never boot with the public development JWT
+    # secret, bootstrap password or permissive debug CORS configuration.
+    validate_production_security(settings)
     configure_logging("DEBUG" if settings.app_debug else "INFO")
 
     # Auto-run alembic migrations. Hand-running 'alembic upgrade head'
