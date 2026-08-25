@@ -9,7 +9,8 @@ from app.database import Base
 from app.models import Alert, Camera, DetectionEvent, RecordingClip, Store, Zone
 from app.tasks.recorder import (
     _clip_source_matches_event, _entrance_clip_for,
-    _prunable_alert_clip_rows, _recording_covers_event,
+    _pending_alert_clip_rows, _prunable_alert_clip_rows,
+    _recording_covers_event,
 )
 
 
@@ -121,6 +122,47 @@ def test_cross_camera_evidence_requires_same_store_entrance(tmp_path):
     assert _clip_source_matches_event(db, event, invalid) is False
     event.detection_type = "intrusion"
     assert _clip_source_matches_event(db, event, valid) is False
+
+
+def test_pending_clip_batch_excludes_completed_work_before_limit(tmp_path):
+    db = _session()
+    camera = Camera(
+        name="Busy Camera", brand="generic", connection_type="lan_rtsp",
+        host="127.0.0.5",
+    )
+    db.add(camera); db.flush()
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"recording")
+    db.add(RecordingClip(
+        camera_id=camera.id, window_id="busy", file_path=str(source),
+        started_at=now - timedelta(hours=1),
+        ended_at=now + timedelta(hours=1), status="completed",
+    ))
+    completed_event = DetectionEvent(
+        camera_id=camera.id, detection_type="intrusion", confidence=0.9,
+        bbox_json=[0, 0, 1, 1], timestamp=now,
+        extra={"alert_clip_path": "/clips/already-done.mp4"},
+    )
+    missing_event = DetectionEvent(
+        camera_id=camera.id, detection_type="intrusion", confidence=0.9,
+        bbox_json=[0, 0, 1, 1], timestamp=now - timedelta(minutes=10),
+        extra={},
+    )
+    db.add_all([completed_event, missing_event]); db.flush()
+    completed_alert = Alert(
+        event_id=completed_event.id, created_at=now,
+    )
+    missing_alert = Alert(
+        event_id=missing_event.id, created_at=now - timedelta(minutes=10),
+    )
+    db.add_all([completed_alert, missing_alert]); db.commit()
+
+    rows = _pending_alert_clip_rows(
+        db, now - timedelta(hours=2), limit=1,
+    )
+
+    assert [alert.id for alert, _event, _clip in rows] == [missing_alert.id]
 
 
 def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():

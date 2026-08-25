@@ -520,6 +520,40 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
     return False
 
 
+def _pending_alert_clip_rows(db, since: datetime, *, limit: int = 1000):
+    """Return bounded clip candidates without letting completed work starve it.
+
+    The extractor previously applied its row limit before discarding alerts
+    that already had ``extra.alert_clip_path``.  On a busy fleet, recent
+    completed alerts and overlapping recording windows could fill the whole
+    batch, leaving an older evidence gap untried until its source recording
+    expired.  Filter completed work in SQL and process the oldest missing
+    evidence first so every eligible alert makes forward progress.
+    """
+    from app.models import Alert, DetectionEvent, RecordingClip
+
+    return (db.query(Alert, DetectionEvent, RecordingClip)
+              .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+              .join(RecordingClip,
+                    RecordingClip.camera_id == DetectionEvent.camera_id)
+              .filter(
+                  Alert.created_at >= since,
+                  RecordingClip.status.in_(("recording", "completed")),
+                  DetectionEvent.timestamp >= RecordingClip.started_at,
+                  or_(RecordingClip.ended_at.is_(None),
+                      RecordingClip.ended_at >= DetectionEvent.timestamp),
+                  or_(
+                      DetectionEvent.extra.is_(None),
+                      DetectionEvent.extra["alert_clip_path"]
+                      .as_string().is_(None),
+                  ),
+              )
+              .order_by(Alert.created_at.asc(),
+                        RecordingClip.started_at.desc())
+              .limit(limit)
+              .all())
+
+
 @celery_app.task(name="recorder.extract_pending_clips", ignore_result=True)
 def extract_pending_clips() -> None:
     """Every 60s: recover alert clips while their source recording exists.
@@ -540,18 +574,7 @@ def extract_pending_clips() -> None:
     _alert_clips_root().mkdir(parents=True, exist_ok=True)
 
     with SessionLocal() as db:
-        rows = (db.query(Alert, DetectionEvent, RecordingClip)
-                  .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
-                  .join(RecordingClip,
-                        RecordingClip.camera_id == DetectionEvent.camera_id)
-                  .filter(Alert.created_at >= since,
-                          RecordingClip.status.in_(("recording", "completed")),
-                          DetectionEvent.timestamp >= RecordingClip.started_at,
-                          or_(RecordingClip.ended_at.is_(None),
-                              RecordingClip.ended_at >= DetectionEvent.timestamp))
-                  .order_by(RecordingClip.started_at.desc())
-                  .limit(1000)
-                  .all())
+        rows = _pending_alert_clip_rows(db, since)
         seen: set[int] = set()
         for alert, ev, clip in rows:
             if alert.id in seen:          # a camera can have >1 window row
