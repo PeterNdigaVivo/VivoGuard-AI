@@ -326,6 +326,9 @@ class Settings(BaseSettings):
     inference_standard_gap_sla_seconds: int = Field(
         default=900, ge=300, le=3600,
     )
+    inference_capacity_headroom_percent: int = Field(
+        default=80, ge=50, le=95,
+    )
     inference_critical_watchdog_grace_seconds: int = Field(
         default=60, ge=30, le=600,
     )

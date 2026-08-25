@@ -39,6 +39,7 @@ def inference_health_problems(
     now: float,
     max_shadow_age_seconds: float,
     max_schedule_wait_seconds: float,
+    capacity_headroom_percent: int = 80,
 ) -> list[dict]:
     """Describe actionable failures without creating side effects."""
     problems: list[dict] = []
@@ -86,6 +87,26 @@ def inference_health_problems(
                 (authoritative or {}).get("standard_gap_sla_seconds") or 0
             ),
         })
+    else:
+        standard_gap = (authoritative or {}).get("standard_max_gap_seconds")
+        standard_sla = int(
+            (authoritative or {}).get("standard_gap_sla_seconds") or 0
+        )
+        headroom_threshold = standard_sla * capacity_headroom_percent / 100
+        if (
+            standard_gap is not None
+            and standard_sla > 0
+            and float(standard_gap) >= headroom_threshold
+        ):
+            problems.append({
+                "code": "standard_camera_gap_headroom_low",
+                "max_gap_seconds": float(standard_gap),
+                "sla_seconds": standard_sla,
+                "headroom_percent": int(capacity_headroom_percent),
+                "remaining_seconds": round(
+                    max(0.0, standard_sla - float(standard_gap)), 1,
+                ),
+            })
 
     if not shadow_expected:
         return problems
@@ -147,6 +168,13 @@ def _problem_summary(problems: list[dict]) -> str:
                 f"(maximum measured gap "
                 f"{problem.get('max_gap_seconds')} seconds)"
             )
+        elif problem["code"] == "standard_camera_gap_headroom_low":
+            parts.append(
+                "standard-camera inference capacity is close to its gap SLA "
+                f"({problem.get('max_gap_seconds')} of "
+                f"{problem.get('sla_seconds')} seconds used; approximately "
+                f"{problem.get('remaining_seconds')} seconds headroom remains)"
+            )
         elif problem["code"] == "batch_shadow_missing":
             parts.append("the expected GPU batch shadow has no health telemetry")
         elif problem["code"] == "batch_shadow_stale":
@@ -186,6 +214,9 @@ def inference_health_watchdog() -> None:
             max_schedule_wait_seconds=(
                 settings.inference_batch_acceptance_max_wait_seconds
             ),
+            capacity_headroom_percent=(
+                settings.inference_capacity_headroom_percent
+            ),
         )
     except Exception as exc:
         log.exception("inference watchdog telemetry read failed: %s", exc)
@@ -207,7 +238,10 @@ def inference_health_watchdog() -> None:
         return
     first_seen = float(state.get("first_seen_ts") or now)
     grace_seconds = settings.inference_watchdog_grace_seconds
-    if any(problem["code"] == "critical_camera_gap_sla" for problem in problems):
+    if any(problem["code"] in {
+        "critical_camera_gap_sla",
+        "standard_camera_gap_headroom_low",
+    } for problem in problems):
         grace_seconds = min(
             grace_seconds,
             settings.inference_critical_watchdog_grace_seconds,

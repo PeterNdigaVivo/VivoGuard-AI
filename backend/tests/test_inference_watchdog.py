@@ -92,6 +92,53 @@ def test_watchdog_reports_standard_camera_gap_without_gpu_shadow():
     }]
 
 
+def test_watchdog_warns_before_standard_camera_gap_breaches_sla():
+    problems = inference_health_problems(
+        {
+            "inference_shards": {},
+            "standard_cameras_overdue": 0,
+            "standard_max_gap_seconds": 725.0,
+            "standard_gap_sla_seconds": 900,
+        },
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+        capacity_headroom_percent=80,
+    )
+
+    assert problems == [{
+        "code": "standard_camera_gap_headroom_low",
+        "max_gap_seconds": 725.0,
+        "sla_seconds": 900,
+        "headroom_percent": 80,
+        "remaining_seconds": 175.0,
+    }]
+
+
+def test_watchdog_does_not_duplicate_headroom_when_gap_is_overdue():
+    problems = inference_health_problems(
+        {
+            "inference_shards": {},
+            "standard_cameras_overdue": 1,
+            "standard_camera_ids_overdue": [31],
+            "standard_max_gap_seconds": 910.0,
+            "standard_gap_sla_seconds": 900,
+        },
+        None,
+        shadow_expected=False,
+        now=1000,
+        max_shadow_age_seconds=120,
+        max_schedule_wait_seconds=2,
+        capacity_headroom_percent=80,
+    )
+
+    assert [problem["code"] for problem in problems] == [
+        "standard_camera_gap_sla",
+    ]
+
+
 def test_watchdog_reports_expected_missing_or_unsafe_shadow():
     assert inference_health_problems(
         {"inference_shards": {}},
