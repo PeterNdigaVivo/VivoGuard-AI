@@ -317,6 +317,29 @@ def test_overdue_review_only_critical_alert_opens_accountable_case(db):
     assert db.query(AssuranceCase).count() == 1
 
 
+def test_recorder_clip_clears_false_missing_evidence_case(db, tmp_path):
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=1)
+    now = datetime.now(timezone.utc)
+
+    assert create_alert_quality_cases(db, now=now) == 1
+    case = db.query(AssuranceCase).one()
+    assert case.evidence["issues"] == ["evidence_missing"]
+    assert case.status == "open"
+
+    clip = tmp_path / "incident.mp4"
+    clip.write_bytes(b"playable evidence")
+    event.extra = {"alert_clip_path": str(clip)}
+    db.commit()
+
+    assert create_alert_quality_cases(db, now=now) == 0
+    db.flush()
+    db.refresh(case)
+    assert case.status == "resolved"
+    assert case.resolved_at is not None
+    assert alert.status == "new"
+
+
 def test_direct_task_notification_obeys_persisted_quality_decision():
     class Event:
         extra = {"quality_control": {"notification_suppressed": True}}

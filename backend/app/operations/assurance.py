@@ -6,6 +6,7 @@ disciplinary conclusions.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -27,6 +28,34 @@ def utc_now() -> datetime:
 
 def ensure_aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _alert_has_retrievable_evidence(
+    alert: Alert, event: DetectionEvent,
+) -> bool:
+    """Return whether any canonical alert evidence is still viewable.
+
+    Recorder clips were historically written to ``event.extra`` while newer
+    detectors may use ``event.clip_path``. Immediate snapshots live on the
+    event and filmstrips live on the alert. A stored path is not sufficient:
+    retention may already have removed the file, so assurance must verify the
+    filesystem before declaring evidence available.
+    """
+    candidates = [
+        event.clip_path,
+        (event.extra or {}).get("alert_clip_path"),
+        event.thumbnail_path,
+        *(alert.snapshot_paths or []),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            if Path(str(candidate)).is_file():
+                return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
 
 
 def store_is_open(store: Store, at: datetime) -> bool:
@@ -170,6 +199,7 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
     critical_types = {"weapon", "weapon_brandished", "brandished_weapon",
                       "fight", "fire", "smoke", "intrusion"}
     active_case_keys: set[str] = set()
+    assessed_alert_ids = {int(alert.id) for alert, _event, _camera in rows}
     for alert, event, camera in rows:
         age = (now - ensure_aware(alert.created_at)).total_seconds()
         sla = 300 if event.detection_type in critical_types else 1800
@@ -181,7 +211,7 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
                 issues.append("quality_controlled_review_sla_breached")
         if latency > 120:
             issues.append("delivery_latency_over_120s")
-        if not event.clip_path and not alert.snapshot_paths:
+        if not _alert_has_retrievable_evidence(alert, event):
             issues.append("evidence_missing")
         if issues:
             key = f"alert-quality:{alert.id}:{','.join(sorted(issues))}"
@@ -232,7 +262,12 @@ def create_alert_quality_cases(db: Session, now: datetime | None = None) -> int:
                           alert.resolved_at is None)
         in_active_horizon = bool(
             alert_open and alert and ensure_aware(alert.created_at) >= review_cutoff)
-        if case.dedup_key in active_case_keys or in_active_horizon:
+        if case.dedup_key in active_case_keys:
+            continue
+        # The query is deliberately bounded to 500 recent alerts. Preserve
+        # cases belonging to open alerts that were outside that assessed
+        # batch, but close a case when its assessed condition actually clears.
+        if in_active_horizon and int(alert.id) not in assessed_alert_ids:
             continue
         case.status = "resolved"
         case.resolved_at = utc_now()
