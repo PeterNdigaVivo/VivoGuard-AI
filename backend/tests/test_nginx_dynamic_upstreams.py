@@ -18,3 +18,13 @@ def test_deploy_gate_checks_public_proxy_path():
 
     assert "http://localhost/api/healthz" in deploy
     assert "nginx cannot reach the healthy API" in deploy
+
+
+def test_deploy_gate_waits_for_inference_coverage_recovery():
+    root = Path(__file__).resolve().parents[2]
+    deploy = (root / "scripts" / "deploy.sh").read_text()
+
+    assert "vg:inference:health" in deploy
+    assert 'health["critical_cameras_overdue"]' in deploy
+    assert 'health.get("cameras_actively_inferencing")' in deploy
+    assert "inference coverage failed to recover after deploy" in deploy
