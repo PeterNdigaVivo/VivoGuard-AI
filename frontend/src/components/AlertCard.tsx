@@ -863,19 +863,32 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               </>
             ) : (
               <>
-                <div className="text-lg font-semibold mb-2">Clip unavailable</div>
+                <div className="text-lg font-semibold mb-2">
+                  {(alert.snapshot_count ?? 0) > 0
+                    ? 'Video unavailable — snapshot timeline available'
+                    : 'Clip unavailable'}
+                </div>
                 <div className="text-sm text-slate-600 mb-4">
-                  No recording was captured for this alert (recording runs on key
-                  cameras during business hours). You can watch the live feed instead.
+                  {(alert.snapshot_count ?? 0) > 0
+                    ? `No continuous recording was captured, but ${alert.snapshot_count} incident `
+                      + `snapshot${alert.snapshot_count === 1 ? '' : 's'} can still be reviewed.`
+                    : 'No recording was captured for this alert (recording runs on key '
+                      + 'cameras during business hours). You can watch the live feed instead.'}
                 </div>
                 <div className="flex justify-end gap-2">
                   <button onClick={() => setClipModal(false)}
                           className="px-3 py-1.5 rounded bg-slate-100 hover:bg-slate-200 text-sm">
                     Close
                   </button>
+                  {(alert.snapshot_count ?? 0) > 0 && (
+                    <button onClick={() => { setClipModal(false); setFilmIdx(0) }}
+                            className="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-500 text-sm">
+                      View snapshot timeline →
+                    </button>
+                  )}
                   {alert.camera_id && (
                     <Link to="/live" onClick={() => setClipModal(false)}
-                          className="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-500 text-sm">
+                          className="px-3 py-1.5 rounded bg-slate-700 text-white hover:bg-slate-600 text-sm">
                       Open live view →
                     </Link>
                   )}

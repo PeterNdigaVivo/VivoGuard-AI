@@ -93,6 +93,20 @@ def test_quarantined_alert_retains_evidence_but_suppresses_escalation(db):
     assert item.clip_status == "pending"
 
 
+def test_alert_without_video_surfaces_snapshot_timeline_fallback(db):
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=10)
+    alert.snapshot_paths = ["/snapshots/one.jpg", "/snapshots/two.jpg"]
+    db.flush()
+
+    item = _to_alert_out(alert, event, cam, None, None)
+
+    assert item.clip_url is None
+    assert item.clip_status == "unavailable"
+    assert item.snapshot_count == 2
+    assert item.snapshot_paths == ["/snapshots/one.jpg", "/snapshots/two.jpg"]
+
+
 def test_operational_summary_separates_quarantined_evidence(db):
     cam = _camera(db)
     operational, _ = _alert(db, cam)
