@@ -635,19 +635,20 @@ def prune_source_recordings() -> None:
 @celery_app.task(name="recorder.prune_alert_clips", ignore_result=True)
 def prune_alert_clips() -> None:
     """Delete alert clips older than the retention window (default 48h) and
-    clear their extra path."""
+    clear their extra path.
+
+    Unresolved or escalated evidence is never pruned merely because it aged
+    past the normal window. Dismissed false alerts and explicitly resolved
+    incidents are terminal and can follow the standard retention policy.
+    """
     from datetime import timedelta
     from app.database import SessionLocal
-    from app.models import Alert, DetectionEvent
     from app.services.incident_foundations import sync_evidence_manifest
     hours = int(getattr(settings, "recording_alert_clip_retention_hours", 48))
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     cleared = 0
     with SessionLocal() as db:
-        rows = (db.query(Alert, DetectionEvent)
-                  .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
-                  .filter(Alert.created_at < cutoff)
-                  .all())
+        rows = _prunable_alert_clip_rows(db, cutoff)
         for _alert, ev in rows:
             p = (ev.extra or {}).get("alert_clip_path")
             if not p:
@@ -668,6 +669,22 @@ def prune_alert_clips() -> None:
         if cleared:
             db.commit()
             log.info("recorder: pruned %d alert clips", cleared)
+
+
+def _prunable_alert_clip_rows(db, cutoff: datetime):
+    """Return only terminal alerts whose normal evidence retention expired."""
+    from app.models import Alert, DetectionEvent
+    return (db.query(Alert, DetectionEvent)
+              .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+              .filter(
+                  Alert.created_at < cutoff,
+                  or_(
+                      Alert.status == "dismissed",
+                      Alert.status == "resolved",
+                      Alert.resolved_at.is_not(None),
+                  ),
+              )
+              .all())
 
 
 @celery_app.task(name="recorder.backfill_evidence_hashes", ignore_result=True)

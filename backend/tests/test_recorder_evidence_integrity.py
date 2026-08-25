@@ -6,9 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Camera, DetectionEvent, RecordingClip, Store, Zone
+from app.models import Alert, Camera, DetectionEvent, RecordingClip, Store, Zone
 from app.tasks.recorder import (
-    _clip_source_matches_event, _entrance_clip_for, _recording_covers_event,
+    _clip_source_matches_event, _entrance_clip_for,
+    _prunable_alert_clip_rows, _recording_covers_event,
 )
 
 
@@ -120,3 +121,45 @@ def test_cross_camera_evidence_requires_same_store_entrance(tmp_path):
     assert _clip_source_matches_event(db, event, invalid) is False
     event.detection_type = "intrusion"
     assert _clip_source_matches_event(db, event, valid) is False
+
+
+def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():
+    db = _session()
+    store = Store(name="Retention Store", country="Kenya")
+    db.add(store); db.flush()
+    camera = Camera(
+        name="Retention Camera", brand="generic", connection_type="lan_rtsp",
+        host="127.0.0.4", store_id=store.id,
+    )
+    db.add(camera); db.flush()
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    cutoff = now - timedelta(hours=48)
+    cases = [
+        ("dismissed", None, now - timedelta(hours=72), True),
+        ("confirmed", now - timedelta(hours=60), now - timedelta(hours=72), True),
+        ("resolved", now - timedelta(hours=60), now - timedelta(hours=72), True),
+        ("new", None, now - timedelta(hours=72), False),
+        ("escalated", None, now - timedelta(hours=72), False),
+        ("confirmed", None, now - timedelta(hours=72), False),
+        ("dismissed", None, now - timedelta(hours=12), False),
+    ]
+    expected: set[int] = set()
+    for status, resolved_at, created_at, prunable in cases:
+        event = DetectionEvent(
+            camera_id=camera.id, detection_type="intrusion", confidence=0.9,
+            bbox_json=[0, 0, 1, 1],
+            extra={"alert_clip_path": f"/clips/{status}-{created_at.hour}.mp4"},
+        )
+        db.add(event); db.flush()
+        alert = Alert(
+            event_id=event.id, status=status, resolved_at=resolved_at,
+            created_at=created_at,
+        )
+        db.add(alert); db.flush()
+        if prunable:
+            expected.add(alert.id)
+    db.commit()
+
+    rows = _prunable_alert_clip_rows(db, cutoff)
+
+    assert {alert.id for alert, _event in rows} == expected
