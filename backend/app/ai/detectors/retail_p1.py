@@ -29,6 +29,34 @@ from app.utils.business_hours import (
 log = logging.getLogger(__name__)
 
 
+def _insert_unique_visitor(db, **values) -> None:
+    """Persist a visitor once without racing concurrent camera tasks.
+
+    A process-local seen set is only an optimisation: retries and overlapping
+    workers can still reach the database together. Use the database's unique
+    key as the authority and make a duplicate a no-op instead of rolling back
+    other detector work in the shared session.
+    """
+    from app.models import VisitorTrack
+
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:  # pragma: no cover - deployed and test dialects are handled above
+        db.add(VisitorTrack(**values))
+        db.flush()
+        return
+
+    stmt = (insert(VisitorTrack.__table__)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=["store_id", "day", "track_signature"],
+            ))
+    db.execute(stmt)
+
+
 # ---------------------------------------------------------------------------
 # Queue
 # ---------------------------------------------------------------------------
@@ -354,8 +382,6 @@ class UniqueVisitorDetector(Detector):
             return []
 
         today = date.today()
-        from app.models import VisitorTrack
-
         for tr, det in ctx.tracks:
             if tr.cls not in COCO_PERSON:
                 continue
@@ -364,8 +390,6 @@ class UniqueVisitorDetector(Detector):
             cache_key = (ctx.store_id, today, signature)
             if cache_key in self._seen_today:
                 continue
-            self._seen_today.add(cache_key)
-
             # Sprint 2.2: stamp the cross-camera identity if the Re-ID
             # loop assigned one to this track (Track.extra carries it).
             # NULL when Re-ID is disabled — counting then falls back to
@@ -373,15 +397,16 @@ class UniqueVisitorDetector(Detector):
             global_person_id = (tr.extra or {}).get("global_person_id")
 
             try:
-                vt = VisitorTrack(
+                _insert_unique_visitor(
+                    ctx.db,
                     store_id=ctx.store_id,
                     camera_id=ctx.camera_id,
                     day=today,
                     track_signature=signature,
                     global_person_id=global_person_id,
                 )
-                ctx.db.add(vt)
                 ctx.db.flush()
+                self._seen_today.add(cache_key)
             except Exception:
                 ctx.db.rollback()
         return []
