@@ -3,6 +3,7 @@ import logging
 
 from app.connectors import rtsp
 from app.stream import auto_transport
+from app.stream.manager import StreamManager
 from app.utils.stream_secrets import (
     redact_stream_credentials,
     redact_stream_structure,
@@ -24,6 +25,16 @@ def test_redacts_url_userinfo_and_credential_query_parameters():
     assert "rtsp://****:****@example.test:554/live" in safe
     assert "username=****" in safe
     assert "password=****" in safe
+
+
+def test_stream_manager_hides_both_camera_username_and_password():
+    safe = StreamManager._redact(
+        "rtsp://camera-operator:secret@example.invalid:554/live"
+    )
+
+    assert safe == "rtsp://****:****@example.invalid:554/live"
+    assert "camera-operator" not in safe
+    assert "secret" not in safe
 
 
 def test_recursively_redacts_operator_diagnostics(monkeypatch):

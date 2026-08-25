@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from app.stream.ffmpeg_worker import FFmpegWorker
 from app.stream.frame_buffer import FrameBuffer
+from app.utils.stream_secrets import redact_stream_credentials
 
 log = logging.getLogger(__name__)
 
@@ -58,12 +59,7 @@ class StreamManager:
 
     @staticmethod
     def _redact(url: str) -> str:
-        from urllib.parse import urlsplit, urlunsplit
-        u = urlsplit(url)
-        netloc = (u.hostname or "") + (f":{u.port}" if u.port else "")
-        if u.username:
-            netloc = f"{u.username}:****@{netloc}"
-        return urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment))
+        return redact_stream_credentials(url)
 
     def _spawn_worker(self, spec: CameraSpec) -> threading.Thread:
         if spec.transport == "http_snapshot":
