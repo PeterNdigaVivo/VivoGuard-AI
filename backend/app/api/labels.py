@@ -14,7 +14,7 @@ training/feedback_loop. No duplication of the confirm/dismiss logic
 """
 from __future__ import annotations
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -37,6 +37,18 @@ router = APIRouter(prefix="/labels", tags=["labels"])
 # Per Part 5 spec: 20 alerts per session.
 DEFAULT_BATCH = 20
 MAX_BATCH     = 50
+VALIDATION_WINDOW_DAYS = 7
+
+# These cards describe system state or business summaries; they are not
+# detector decisions that a CCTV reviewer can label from image evidence.
+# Keeping them in the sprint inflated the training backlog and could turn an
+# operational acknowledgement into an invalid model label.
+NON_VALIDATION_TYPES = {
+    "positive_operational",
+    "sales_floor_insight",
+    "store_intelligence",
+    "system_health",
+}
 
 CRITICAL_REVIEW_TYPES = {
     "weapon", "weapon_brandished", "fight", "fire", "smoke", "fall",
@@ -66,7 +78,7 @@ class UndoOut(BaseModel):
 
 class TodayCountsOut(BaseModel):
     reviewed_today: int       # confirmed + dismissed today (EAT)
-    queue_total:    int       # unreviewed status='new' alerts (no filters)
+    queue_total:    int       # recent evidence-backed detector alerts
 
 
 def _dwell_from_event(ev: Optional[DetectionEvent]) -> Optional[int]:
@@ -156,10 +168,15 @@ def queue(
         description="Filter via Camera.store_id (Alert has no store column)"),
     camera_id:      Optional[int] = Query(None,
         description="Pin a validation batch to one exact camera"),
+    include_historical: bool = False,
 ):
     """Next batch of unlabelled alerts, newest-first.
 
     Unlabelled = `status='new' AND feedback_used_for_training=False`.
+    The default queue is limited to the latest governed validation window so
+    evidence from obsolete model/configuration versions cannot be presented
+    as proof of current performance. ``include_historical`` remains available
+    for deliberate regression review; it never changes or deletes old rows.
     Mirrors /alerts list endpoint's JOIN pattern so the full
     _to_alert_out payload (camera name, store, zone, snapshot URL)
     comes back, plus a top-level `dwell_seconds` field spliced from
@@ -168,8 +185,14 @@ def queue(
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
            .filter(Alert.status == "new")
-           .filter(DetectionEvent.detection_type != "positive_operational")
+           .filter(~DetectionEvent.detection_type.in_(NON_VALIDATION_TYPES))
            .filter(Alert.feedback_used_for_training == False))   # noqa: E712
+    if not include_historical:
+        q = q.filter(
+            Alert.created_at >= datetime.now(timezone.utc) - timedelta(
+                days=VALIDATION_WINDOW_DAYS,
+            ),
+        )
     if detection_type:
         q = q.filter(DetectionEvent.detection_type == detection_type)
     if store_id is not None:
@@ -201,6 +224,7 @@ def audit_queue(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     limit: int = Query(DEFAULT_BATCH, ge=1, le=MAX_BATCH),
+    include_historical: bool = False,
 ):
     """Blind second-review sample, excluding the primary reviewer."""
     reviewed_by_other = exists().where(and_(
@@ -220,15 +244,21 @@ def audit_queue(
               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
               .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
               .filter(Alert.status.in_(("confirmed", "dismissed")))
-              .filter(DetectionEvent.detection_type != "positive_operational")
+              .filter(~DetectionEvent.detection_type.in_(NON_VALIDATION_TYPES))
               .filter(or_(
                   DetectionEvent.thumbnail_path.is_not(None),
                   DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
               ))
               .filter(reviewed_by_other)
-              .filter(~reviewed_by_user)
-              .order_by(priority_rank.asc(), Alert.created_at.asc())
-              .limit(limit * 5).all())
+              .filter(~reviewed_by_user))
+    if not include_historical:
+        rows = rows.filter(
+            Alert.created_at >= datetime.now(timezone.utc) - timedelta(
+                days=VALIDATION_WINDOW_DAYS,
+            ),
+        )
+    rows = (rows.order_by(priority_rank.asc(), Alert.created_at.asc())
+                .limit(limit * 5).all())
     return _serialise_queue_rows(db, rows, blind=True, limit=limit)
 
 
@@ -319,8 +349,18 @@ def today_counts(
                   .filter(Alert.acknowledged_at >= start_utc)
                   .filter(Alert.status.in_(("confirmed", "dismissed")))
                   .scalar() or 0)
-    pending  = (db.query(func.count(Alert.id))
-                  .filter(Alert.status == "new")
-                  .filter(Alert.feedback_used_for_training == False)   # noqa: E712
-                  .scalar() or 0)
+    validation_cutoff = now - timedelta(days=VALIDATION_WINDOW_DAYS)
+    pending = (db.query(func.count(Alert.id))
+                 .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+                 .filter(Alert.status == "new")
+                 .filter(Alert.feedback_used_for_training == False)   # noqa: E712
+                 .filter(Alert.created_at >= validation_cutoff)
+                 .filter(~DetectionEvent.detection_type.in_(
+                     NON_VALIDATION_TYPES,
+                 ))
+                 .filter(or_(
+                     DetectionEvent.thumbnail_path.is_not(None),
+                     DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
+                 ))
+                 .scalar() or 0)
     return TodayCountsOut(reviewed_today=int(reviewed), queue_total=int(pending))

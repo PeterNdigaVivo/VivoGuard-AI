@@ -1,9 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.api.labels import audit_queue, queue
+from app.api.labels import audit_queue, queue, today_counts
 from app.database import Base
 from app.models import (
     Alert, AlertReviewDecision, Camera, DetectionEvent, Store, User,
@@ -76,6 +76,52 @@ def test_validation_queue_excludes_alerts_without_viewable_evidence(tmp_path):
         db=db, _user=user, limit=20, detection_type=None,
         store_id=None, camera_id=None,
     ) == []
+    db.close()
+
+
+def test_validation_queue_excludes_historical_and_informational_alerts(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    user = User(email="reviewer-window@vivo", password_hash="x", role="operator")
+    camera = Camera(
+        name="Validation Window Camera", brand="dahua",
+        connection_type="nvr_dahua", host="127.0.0.1",
+    )
+    db.add_all([user, camera])
+    db.flush()
+
+    for detection_type, created_at in (
+        ("intrusion", datetime.now(timezone.utc)),
+        ("intrusion", datetime.now(timezone.utc) - timedelta(days=8)),
+        ("system_health", datetime.now(timezone.utc)),
+    ):
+        snapshot = tmp_path / f"{detection_type}-{created_at.timestamp()}.jpg"
+        snapshot.write_bytes(b"evidence")
+        event = DetectionEvent(
+            camera_id=camera.id, detection_type=detection_type, confidence=.8,
+            bbox_json=[0, 0, 1, 1], timestamp=created_at,
+            thumbnail_path=str(snapshot),
+        )
+        db.add(event)
+        db.flush()
+        db.add(Alert(event_id=event.id, status="new", created_at=created_at))
+    db.commit()
+
+    current = queue(
+        db=db, _user=user, limit=20, detection_type=None,
+        store_id=None, camera_id=None,
+    )
+    historical = queue(
+        db=db, _user=user, limit=20, detection_type=None,
+        store_id=None, camera_id=None, include_historical=True,
+    )
+    counts = today_counts(db=db, _user=user)
+
+    assert len(current) == 1
+    assert len(historical) == 2
+    assert all(item["detection_type"] == "intrusion" for item in historical)
+    assert counts.queue_total == 1
     db.close()
 
 
