@@ -72,6 +72,12 @@ def test_proof_of_life_distinguishes_active_degraded_and_offline() -> None:
     assert _proof_of_life_state(healthy, now=now) == "active"
     assert _proof_of_life_state({**healthy, "cameras_fresh": 8}, now=now) == "degraded"
     assert _proof_of_life_state({**healthy, "cameras_waiting_for_worker": 2}, now=now) == "degraded"
+    assert _proof_of_life_state(
+        {**healthy, "critical_cameras_overdue": 1}, now=now,
+    ) == "degraded"
+    assert _proof_of_life_state(
+        {**healthy, "standard_cameras_overdue": 1}, now=now,
+    ) == "degraded"
     assert _proof_of_life_state({**healthy, "last_run_ts": 300}, now=now) == "offline"
     assert _proof_of_life_state(None, now=now) == "offline"
 

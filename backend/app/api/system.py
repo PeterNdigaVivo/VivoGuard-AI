@@ -33,7 +33,15 @@ def _proof_of_life_state(pipeline: dict | None, *, now: float) -> str:
     total = int(pipeline.get("cameras_total") or 0)
     fresh = int(pipeline.get("cameras_fresh") or 0)
     waiting = int(pipeline.get("cameras_waiting_for_worker") or 0)
-    if total == 0 or fresh < total or waiting > 0:
+    critical_overdue = int(pipeline.get("critical_cameras_overdue") or 0)
+    standard_overdue = int(pipeline.get("standard_cameras_overdue") or 0)
+    if (
+        total == 0
+        or fresh < total
+        or waiting > 0
+        or critical_overdue > 0
+        or standard_overdue > 0
+    ):
         return "degraded"
     return "active"
 

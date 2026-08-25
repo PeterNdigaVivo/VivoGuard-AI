@@ -23,6 +23,15 @@ interface SystemHealth {
     cameras_waiting_for_worker: number | null
     inference_queue_depth: number | null
     estimated_full_rotation_seconds: number | null
+    cameras_without_frames: number
+    critical_cameras_total: number
+    critical_cameras_overdue: number | null
+    critical_max_gap_seconds: number | null
+    critical_gap_sla_seconds: number
+    standard_cameras_total: number
+    standard_cameras_overdue: number | null
+    standard_max_gap_seconds: number | null
+    standard_gap_sla_seconds: number
   } | null
   inference_batch_shadow: {
     mode: 'shadow'; authoritative: false
@@ -89,6 +98,17 @@ export default function SystemHealthPage() {
   if (!data) return <div className="p-6 text-slate-500 dark:text-slate-300">Loading…</div>
 
   const usedPct = data.disk_total_gb ? Math.round(data.disk_used_gb / data.disk_total_gb * 100) : 0
+  const duration = (seconds: number | null) => {
+    if (seconds == null) return '—'
+    if (seconds < 60) return `${Math.round(seconds)}s`
+    return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
+  }
+  const inferenceDegraded = data.inference_pipeline != null && (
+    data.inference_pipeline.cameras_without_frames > 0 ||
+    (data.inference_pipeline.cameras_waiting_for_worker ?? 0) > 0 ||
+    (data.inference_pipeline.critical_cameras_overdue ?? 0) > 0 ||
+    (data.inference_pipeline.standard_cameras_overdue ?? 0) > 0
+  )
 
   return (
     <div className="p-6">
@@ -129,8 +149,8 @@ export default function SystemHealthPage() {
             Inference Coverage and Capacity
           </div>
           {data.inference_pipeline && (
-            <Badge color={(data.inference_pipeline.cameras_waiting_for_worker ?? 0) > 0 ? 'amber' : 'green'}>
-              {(data.inference_pipeline.cameras_waiting_for_worker ?? 0) > 0 ? 'Backlog' : 'Current'}
+            <Badge color={inferenceDegraded ? 'amber' : 'green'}>
+              {inferenceDegraded ? 'Degraded' : 'Current'}
             </Badge>
           )}
         </div>
@@ -147,6 +167,37 @@ export default function SystemHealthPage() {
         )}
         <div className="text-xs text-slate-400 mt-3">
           Waiting cameras have fresh video but are not actively being analysed. Rotation is a scheduling estimate, not alert-delivery latency.
+        </div>
+        {data.inference_pipeline && (
+          <div className="mt-4 grid grid-cols-1 gap-3 border-t border-slate-100 pt-3 text-sm dark:border-slate-800 md:grid-cols-2">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Critical-camera coverage age</span>
+                <Badge color={(data.inference_pipeline.critical_cameras_overdue ?? 0) > 0 ? 'red' : 'green'}>
+                  {data.inference_pipeline.critical_cameras_overdue ?? '—'} overdue
+                </Badge>
+              </div>
+              <div className="mt-1 text-lg font-semibold">
+                {duration(data.inference_pipeline.critical_max_gap_seconds)} / {duration(data.inference_pipeline.critical_gap_sla_seconds)} SLA
+              </div>
+              <div className="text-xs text-slate-400">Oldest last completed analysis across {data.inference_pipeline.critical_cameras_total} critical cameras.</div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Standard-camera coverage age</span>
+                <Badge color={(data.inference_pipeline.standard_cameras_overdue ?? 0) > 0 ? 'red' : 'green'}>
+                  {data.inference_pipeline.standard_cameras_overdue ?? '—'} overdue
+                </Badge>
+              </div>
+              <div className="mt-1 text-lg font-semibold">
+                {duration(data.inference_pipeline.standard_max_gap_seconds)} / {duration(data.inference_pipeline.standard_gap_sla_seconds)} SLA
+              </div>
+              <div className="text-xs text-slate-400">Oldest last completed analysis across {data.inference_pipeline.standard_cameras_total} standard cameras.</div>
+            </div>
+          </div>
+        )}
+        <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">
+          Fresh video does not prove continuous AI coverage. Use the measured coverage ages and overdue counts above; alert volume alone is not a health signal.
         </div>
       </Card>
 
