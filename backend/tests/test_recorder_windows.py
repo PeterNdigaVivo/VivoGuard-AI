@@ -10,6 +10,7 @@ from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_window, _current_window, _prune_expired_source_windows,
+    _recording_path,
 )
 
 
@@ -29,6 +30,18 @@ def test_after_hours_windows_are_bounded_and_date_stamped() -> None:
     evening = _current_window(_at(23, 59))
     assert midnight is not None and midnight[:2] == ("20260821_0000", 25200)
     assert evening is not None and evening[:2] == ("20260821_2000", 14400)
+
+
+def test_restart_uses_continuation_path_without_truncating_source(tmp_path) -> None:
+    original = tmp_path / "7.mp4"
+    original.write_bytes(b"pre-restart evidence")
+
+    continuation = _recording_path(tmp_path, 7)
+
+    assert continuation != original
+    assert continuation.name.startswith("7_")
+    assert continuation.suffix == ".mp4"
+    assert original.read_bytes() == b"pre-restart evidence"
 
 
 def _session():

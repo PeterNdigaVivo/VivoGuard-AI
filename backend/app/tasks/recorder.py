@@ -77,6 +77,18 @@ def _alert_clips_root() -> Path:
     return Path(settings.recordings_dir) / "alert_clips"
 
 
+def _recording_path(out_dir: Path, camera_id: int) -> Path:
+    """Return a non-destructive path for a recording segment.
+
+    A recorder restart can happen inside the same named time window. Reusing
+    camera_id.mp4 with ffmpeg -y would truncate the pre-restart evidence.
+    """
+    base = out_dir / f"{camera_id}.mp4"
+    if not base.exists():
+        return base
+    return out_dir / f"{camera_id}_{time.time_ns()}.mp4"
+
+
 def _current_window(now_eat: datetime):
     """Return (window_id, seconds, window_start_eat) for the active window, or
     None only if the window configuration has a gap."""
@@ -132,7 +144,7 @@ def _start_window(db, r, window_id: str, seconds: int) -> int:
             continue
         out_dir = _clips_root() / window_id / str(cam.store_id or 0)
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{cam.id}.mp4"
+        out_path = _recording_path(out_dir, cam.id)
         cmd = [
             "ffmpeg", "-nostdin", "-loglevel", "error",
             "-rtsp_transport", "tcp", "-i", url,
@@ -418,6 +430,13 @@ def tick() -> None:
             if remaining > 30:
                 _stop_all(r)                     # clear stale pid keys
                 with SessionLocal() as db:
+                    # Bound every stale row to the restart instant before
+                    # adding continuation rows. This prevents a stale source
+                    # from later appearing to cover post-restart incidents.
+                    _close_window(
+                        db, window_id,
+                        ended_at=datetime.now(timezone.utc),
+                    )
                     _start_window(db, r, window_id, remaining)
                 log.warning("recorder: recovered mid-window %s after restart "
                             "(%ds remaining)", window_id, remaining)
