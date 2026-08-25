@@ -12,6 +12,8 @@ import shlex
 from pathlib import Path
 import tempfile
 
+from app.utils.stream_secrets import redact_stream_credentials
+
 log = logging.getLogger(__name__)
 
 
@@ -47,9 +49,11 @@ async def probe_rtsp(url: str, timeout: float = 12.0,
     code, _, err = await _run(cmd, timeout=timeout)
     if code == 0:
         return True, None
+    safe_url = redact_stream_credentials(url)
+    safe_err = redact_stream_credentials(err).strip()[:200]
     log.info("ffprobe failed for %s (transport=%s): %s",
-             url, rtsp_transport, err.strip()[:200])
-    return False, err.strip()[:200] or f"ffprobe exit={code}"
+             safe_url, rtsp_transport, safe_err)
+    return False, safe_err or f"ffprobe exit={code}"
 
 
 async def grab_thumbnail(url: str, timeout: float = 15.0,
@@ -72,8 +76,9 @@ async def grab_thumbnail(url: str, timeout: float = 15.0,
         )
         code, _, err = await _run(cmd, timeout=timeout)
         if code != 0 or not out.exists():
+            safe_err = redact_stream_credentials(err).strip()[:300]
             log.info("grab_thumbnail failed (code=%s, transport=%s): %s",
-                     code, rtsp_transport, err.strip()[:300])
+                     code, rtsp_transport, safe_err)
             return None
         return base64.b64encode(out.read_bytes()).decode()
 
@@ -95,4 +100,4 @@ async def grab_thumbnail_verbose(url: str, timeout: float = 15.0,
         b64 = None
         if code == 0 and out.exists():
             b64 = base64.b64encode(out.read_bytes()).decode()
-        return b64, err.strip()[:4000]
+        return b64, redact_stream_credentials(err).strip()[:4000]

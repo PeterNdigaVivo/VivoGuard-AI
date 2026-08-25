@@ -28,6 +28,8 @@ from typing import Optional
 
 import httpx
 
+from app.utils.stream_secrets import redact_stream_structure
+
 log = logging.getLogger("streamer.auto_transport")
 
 
@@ -171,9 +173,10 @@ def _probe_port_all_templates(
 
 
 def _record_diagnostic(host: str, rtsp_port: int, record: dict) -> None:
-    """Stash the per-camera probe result so the API can show it."""
-    record["timestamp"] = time.time()
-    _LAST_PROBE[(host, rtsp_port)] = record
+    """Stash a credential-safe probe result for the operator-facing API."""
+    safe_record = redact_stream_structure(record)
+    safe_record["timestamp"] = time.time()
+    _LAST_PROBE[(host, rtsp_port)] = safe_record
 
 
 def negotiate(camera: dict, password_plain: str) -> Optional[dict]:

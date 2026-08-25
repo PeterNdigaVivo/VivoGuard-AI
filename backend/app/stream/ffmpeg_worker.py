@@ -28,6 +28,7 @@ import time
 
 from app.stream.frame_buffer import FrameBuffer
 from app.stream.reconnect import Backoff
+from app.utils.stream_secrets import redact_stream_credentials
 
 log = logging.getLogger(__name__)
 
@@ -266,7 +267,10 @@ class FFmpegWorker(threading.Thread):
                     self.camera_id, frames_this_run,
                 )
             wait = self.backoff.fail()
-            err_msg = err.strip()[:200] or "stream ended"
+            # FFmpeg repeats its input URL in many failures. Camera URLs carry
+            # NVR credentials, so the raw stderr must never reach logs, Redis
+            # health state, or the Live View UI.
+            err_msg = redact_stream_credentials(err).strip()[:200] or "stream ended"
             log.warning("camera %s: ffmpeg exited (err=%s) — retry in %ds",
                         self.camera_id, err_msg[:120], wait)
             self.buffer.update_health(self.camera_id, fps=0,
