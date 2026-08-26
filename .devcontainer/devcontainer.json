@@ -1,0 +1,39 @@
+{
+  "name": "VivoGuard AI",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "forwardPorts": [5173, 8000],
+  "portsAttributes": {
+    "5173": {
+      "label": "VivoGuard frontend",
+      "onAutoForward": "notify",
+      "visibility": "private"
+    },
+    "8000": {
+      "label": "VivoGuard API",
+      "onAutoForward": "notify",
+      "visibility": "private"
+    }
+  },
+  "postCreateCommand": "python -m pip install -r backend/requirements.api.txt pytest ruff && npm --prefix frontend install --no-audit --no-fund --package-lock=false",
+  "remoteEnv": {
+    "APP_ENV": "development",
+    "APP_DEBUG": "true",
+    "USE_GPU": "false",
+    "GPU_BACKEND": "cpu"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

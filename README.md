@@ -36,6 +36,7 @@ a built-in AI Training Studio for custom YOLOv8 models.
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)             | **Three deploy methods** — edge, single-server, k8s/helm |
 | [`docs/HARDWARE_SIZING.md`](docs/HARDWARE_SIZING.md)   | Cameras vs CPU / RAM / GPU / storage     |
 | [`docs/DAHUA_WAN_EXAMPLE.md`](docs/DAHUA_WAN_EXAMPLE.md)| Step-by-step remote NVR connection      |
+| [`docs/REMOTE_DEVELOPMENT.md`](docs/REMOTE_DEVELOPMENT.md)| Codespaces setup and collaboration safety |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md)                   | What was built in which commit          |
 
 ## Repository layout
