@@ -1,4 +1,4 @@
-"""Continuous learning — turn confirmed/dismissed alerts into training data.
+"""Continuous learning from operator-confirmed direct visual detections.
 
 Confirmed alert → add the event's frame to the *positive retraining pool*
                   with the same bbox/label.
@@ -12,9 +12,12 @@ Both pools are stored as Datasets named:
   feedback-negative-<detection_type>     ← hard negatives (new)
 
 Naming convention is deliberate: the trainer joins both pools into
-one dataset for fine-tuning, with negatives kept at a max of
-3 × positives (the standard hard-negative ratio that avoids
-swamping the gradient with background examples).
+one dataset for fine-tuning, with negatives capped by the trainer's
+configured ratio (default 0.4 × positives, about 29% of the combined set).
+
+Temporal and business-rule alerts remain useful operational verdicts but are
+not valid single-frame YOLO labels, so they are deliberately quarantined from
+these pools.
 """
 from __future__ import annotations
 import logging
@@ -26,6 +29,19 @@ from app.models import (
 )
 
 log = logging.getLogger(__name__)
+
+# Only direct, single-frame visual classifications are valid YOLO training
+# targets. Temporal/business-policy incidents need track/clip evaluation and
+# must never be converted into a made-up full-frame object class.
+YOLO_FEEDBACK_TYPES = {
+    "person", "vehicle", "animal", "face", "weapon", "weapon_brandished",
+    "fire", "smoke", "shelf", "custom",
+}
+
+
+def _raw_feedback_path(ev: DetectionEvent) -> str | None:
+    raw = (ev.extra or {}).get("raw_training_path")
+    return str(raw) if raw else None
 
 
 def _build_source_extra(db: Session, ev: DetectionEvent,
@@ -157,20 +173,27 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     if not a or a.feedback_used_for_training:
         return
     ev = db.get(DetectionEvent, a.event_id)
-    if not ev or not ev.thumbnail_path:
+    if not ev or ev.detection_type not in YOLO_FEEDBACK_TYPES:
+        log.info("feedback: alert %s type=%s retained as an operational "
+                 "verdict (not a YOLO image target)", alert_id,
+                 getattr(ev, "detection_type", None))
+        return
+    raw_path = _raw_feedback_path(ev)
+    if not raw_path:
         return
     cls = ev.detection_type
+    class_label = str((ev.extra or {}).get("cls") or cls)
     # Legacy name without the `-positive-` infix is kept so feedback
     # absorbed by earlier deploys lands in the same Dataset.
     ds  = _ensure_dataset(
         db, f"feedback-{cls}",
-        [cls],
+        [class_label],
         description="auto: confirmed alerts (positive feedback pool)",
     )
     img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=ev.thumbnail_path,
+        file_path=raw_path,
         labeled=True,
         source_extra=_build_source_extra(db, ev, a, "correct"),
         source_alert_id=a.id,           # for revert_verdict
@@ -182,7 +205,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     cy = (y1 + y2) / 2
     w  = max(0.0, x2 - x1)
     h  = max(0.0, y2 - y1)
-    db.add(Annotation(image_id=img.id, class_label=cls,
+    db.add(Annotation(image_id=img.id, class_label=class_label,
                        bbox_json=[cx, cy, w, h], verified=True))
     a.feedback_used_for_training = True
     db.commit()
@@ -207,45 +230,31 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     if not a or a.feedback_used_for_training:
         return
     ev = db.get(DetectionEvent, a.event_id)
-    if not ev or not ev.thumbnail_path:
+    if not ev or ev.detection_type not in YOLO_FEEDBACK_TYPES:
+        log.info("feedback: dismissed alert %s type=%s retained as an "
+                 "operational verdict (not a YOLO background image)",
+                 alert_id, getattr(ev, "detection_type", None))
+        return
+    if not ev.thumbnail_path:
         # Stamp the alert anyway — we don't want to keep retrying
         # an alert whose snapshot was never saved.
         a.feedback_used_for_training = True
         db.commit()
         return
     cls = ev.detection_type
-    # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
-    # frame (boxes burned in) — feeding it to YOLO would teach the model
-    # to detect boxes, not people. Harvest the RAW sibling the sentinel
-    # saved instead, into feedback-negative-person: the false positive is
-    # the PERSON class (usually a mannequin). NOTE: YOLO negatives are
-    # annotation-free by definition, so "mannequin" is recorded as a
-    # source_extra hint for curators/future classifiers, NOT as an
-    # Annotation class (that would make it a mannequin POSITIVE).
-    import os as _os
-    file_path = ev.thumbnail_path
+    # Never use the operator-facing red-box/caption image for learning.
+    file_path = _raw_feedback_path(ev)
+    if not file_path:
+        log.warning("feedback: dismissed alert %s has no raw training "
+                    "snapshot; skipping unsafe annotated image", alert_id)
+        return
     ds_name = f"feedback-negative-{cls}"
-    label_hint: str | None = None
-    if cls == "live_activity":
-        raw = (ev.extra or {}).get("raw_snapshot_path")
-        if not raw or not _os.path.exists(raw):
-            a.feedback_used_for_training = True
-            db.commit()
-            log.info("feedback: dismissed live_activity %s has no raw "
-                     "snapshot — skipped (annotated frame is unusable "
-                     "for training)", alert_id)
-            return
-        file_path = raw
-        ds_name = "feedback-negative-person"
-        label_hint = "mannequin"
     ds  = _ensure_dataset(
         db, ds_name,
         [],     # no classes — pure background
         description="auto: dismissed alerts (hard-negative pool)",
     )
     _src = _build_source_extra(db, ev, a, "false")
-    if label_hint:
-        _src["label_hint"] = label_hint
     neg_img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,

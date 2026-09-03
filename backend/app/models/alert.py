@@ -9,8 +9,9 @@ from app.database import Base
 # new       — just emitted, not yet seen
 # confirmed — operator marked as true positive (feeds back to training)
 # dismissed — operator marked as false positive (ditto)
+# resolved  — operationally handled; deliberately not an ML verdict
 # escalated — sent to higher tier / external system
-ALERT_STATUSES = ("new", "confirmed", "dismissed", "escalated")
+ALERT_STATUSES = ("new", "confirmed", "dismissed", "resolved", "escalated")
 
 
 class Alert(Base):

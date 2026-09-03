@@ -229,11 +229,19 @@ def run_job(job_id: int) -> None:
                           val=float(cfg.get("split_val", 0.2)),
                           test=float(cfg.get("split_test", 0.0)))
             extra_neg_ids = cfg.get("extra_negative_dataset_ids") or []
+            # Secondary positive/negative pools need the same held-out split.
+            # Leaving split=NULL sent every hard negative to train and left
+            # validation unable to measure the false-positive problem.
+            for extra_id in {int(i) for i in extra_neg_ids}:
+                split_dataset(db, extra_id,
+                              train=float(cfg.get("split_train", 0.8)),
+                              val=float(cfg.get("split_val", 0.2)),
+                              test=float(cfg.get("split_test", 0.0)))
             _mix_id = cfg.get("base_mix_dataset_id")
             yaml_path = write_yolo_dataset_yaml(
                 db, ds.id,
                 extra_dataset_ids=[int(i) for i in extra_neg_ids] or None,
-                max_neg_ratio=float(cfg.get("max_neg_ratio", 3.0)),
+                max_neg_ratio=float(cfg.get("max_neg_ratio", 0.4)),
                 mix_dataset_id=int(_mix_id) if _mix_id is not None else None,
                 mix_fraction=float(getattr(settings, "base_mix_fraction", 0.18)),
             )
@@ -502,14 +510,15 @@ def run_job(job_id: int) -> None:
                              "CROSS_STORE_AUTO_DEPLOY=true or promote manually)",
                              _m50, float(_auto))
 
-            # Aggressive-feedback auto-deploy (Aug 2026): a feedback-driven
-            # run that beats its baseline map50 by >= the configured margin
-            # deploys at the REGISTRY level once the model gate passes.
+            # Optional feedback auto-deploy: an explicitly enabled
+            # feedback-driven run that beats its baseline map50 by the
+            # configured margin deploys after the model gate passes.
             # (Live inference still follows use_deployed_model_for_inference
             # and per-camera ai_model_id — see config.py.)
             _origin = cfg.get("origin")
             if (_origin in ("weekly_orchestrator", "feedback_full_retrain",
                             "shop_opening_specialist")
+                    and bool(getattr(settings, "feedback_auto_deploy", False))
                     and final_metrics.get("map50") is not None):
                 from app.config import settings as _s2
                 _margin = float(getattr(_s2, "feedback_auto_promote_margin",
@@ -553,7 +562,8 @@ def run_job(job_id: int) -> None:
             # model — the only path that changes LIVE inference. Gate-
             # checked so a broken model can never take over a store.
             _assign_sid = cfg.get("assign_store_id")
-            if _assign_sid:
+            if (_assign_sid and bool(getattr(
+                    settings, "store_specialist_auto_deploy", False))):
                 from app.ai.model_gating import validate_model_before_deploy
                 if validate_model_before_deploy(
                         str(best), list(ai_model.classes_json or [])):

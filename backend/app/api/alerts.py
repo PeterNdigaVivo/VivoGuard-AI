@@ -1501,7 +1501,9 @@ def resolve(alert_id: int, db: Session = Depends(get_db),
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
-    a.status = "confirmed"     # reuse the bucket — frontend treats as resolved
+    # Keep operational closure distinct from the ML ground-truth verdict.
+    # Model metrics count only explicit /confirm actions as true positives.
+    a.status = "resolved"
     a.assigned_to = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
     a.resolved_at = datetime.now(timezone.utc)
@@ -1531,7 +1533,7 @@ def resolve_all(db: Session = Depends(get_db),
     now = datetime.now(timezone.utc)
     n = 0
     for a in q.all():
-        a.status = "confirmed"   # same bucket the per-alert /resolve uses
+        a.status = "resolved"
         a.assigned_to = user.id
         a.acknowledged_at = now
         a.resolved_at = now

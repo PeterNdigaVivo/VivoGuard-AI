@@ -98,7 +98,8 @@ class CheckoutDwellDetector(Detector):
 
     def _publish_open(self, r, cam: int, zone: int, track: int,
                        entry_ts: float, store_id: int | None,
-                       *, min_alert_seconds: int = 0) -> None:
+                       *, min_alert_seconds: int = 0,
+                       last_seen_ts: float | None = None) -> None:
         if r is None:
             return
         try:
@@ -110,6 +111,10 @@ class CheckoutDwellDetector(Detector):
                     "camera_id":         cam,
                     "zone_id":           zone,
                     "track_id":          track,
+                    # Heartbeat consumed by the alerting task. An entry-only
+                    # key can outlive a crashed inference worker and falsely
+                    # look like a customer who is still waiting.
+                    "last_seen_ts":      float(last_seen_ts or entry_ts),
                     # Floor used by alerting.checkout_long_session_check
                     # to override the global threshold for sessions where
                     # the participant looks like medium-confidence staff
@@ -343,10 +348,12 @@ class CheckoutDwellDetector(Detector):
                                   ctx.camera_id, z["id"], track_id)
                     continue   # not in active_keys → close logic skipped
 
-                # MEDIUM-staff sessions get a 5-min floor on the
-                # alert threshold so a staff member serving a tricky
-                # customer doesn't trigger the 8-min default.
-                min_alert = 5 * 60 if level == "medium" else 0
+                # MEDIUM-staff sessions get a configurable 12-minute floor
+                # so it actually exceeds the global 8-minute default.
+                from app.config import settings as _settings
+                min_alert = (int(getattr(
+                    _settings, "checkout_medium_staff_alert_minutes", 12)) * 60
+                    if level == "medium" else 0)
 
                 sess = self._sessions.get(key)
                 if sess is None:
@@ -363,6 +370,7 @@ class CheckoutDwellDetector(Detector):
                             "store_id": ctx.store_id,
                             "min_alert_seconds": min_alert,
                             "staff_level": level,
+                            "last_redis_refresh_ts": 0.0,
                             # Last 60s-snapshot timestamp (Q1 spec —
                             # gated on SESSION time, not inference fps).
                             # Sentinel `-INTERVAL` so the FIRST evaluate()
@@ -377,7 +385,9 @@ class CheckoutDwellDetector(Detector):
                     self._sessions[key] = sess
                     self._publish_open(r, ctx.camera_id, int(z["id"]),
                                         int(track_id), now, ctx.store_id,
-                                        min_alert_seconds=min_alert)
+                                        min_alert_seconds=min_alert,
+                                        last_seen_ts=now)
+                    sess["last_redis_refresh_ts"] = now
                     log.debug("checkout: open cam=%s zone=%s track=%s "
                               "level=%s", ctx.camera_id, z["id"],
                               track_id, level)
@@ -393,7 +403,16 @@ class CheckoutDwellDetector(Detector):
                         self._publish_open(
                             r, ctx.camera_id, int(z["id"]),
                             int(track_id), sess["entry_ts"], ctx.store_id,
-                            min_alert_seconds=min_alert)
+                            min_alert_seconds=min_alert,
+                            last_seen_ts=now)
+                        sess["last_redis_refresh_ts"] = now
+                    elif now - float(sess.get("last_redis_refresh_ts", 0.0)) >= 5.0:
+                        self._publish_open(
+                            r, ctx.camera_id, int(z["id"]), int(track_id),
+                            sess["entry_ts"], ctx.store_id,
+                            min_alert_seconds=int(sess.get("min_alert_seconds", 0)),
+                            last_seen_ts=now)
+                        sess["last_redis_refresh_ts"] = now
 
                 # Per-spec Q1: one snapshot every 60 SESSION seconds
                 # (not every inference cycle — at 2 fps the cycle is

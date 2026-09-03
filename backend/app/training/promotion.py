@@ -54,7 +54,7 @@ def _aggregate_metrics(db: Session, model_id: int,
         "fp_count":     fp,
         "alerts_total": total,
         "precision":    (tp / triaged) if triaged else None,
-        "fp_rate":      (fp / total)   if total   else None,
+        "fp_rate":      (fp / triaged) if triaged else None,
     }
 
 

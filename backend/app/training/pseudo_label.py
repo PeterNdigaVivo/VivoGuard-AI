@@ -2,9 +2,9 @@
 
 Runs the deployed production YOLO model against unlabelled
 TrainingImage rows and writes its high-confidence detections as
-Annotations (`auto_suggested=True`). Low-confidence frames are
-left for human review; only detections above PSEUDO_LABEL_CONF are
-marked `verified=True` and become trainer-eligible immediately.
+Annotations (`auto_suggested=True`). Suggestions remain unverified until
+an operator reviews them, preventing the deployed model from certifying and
+retraining on its own mistakes.
 
 Standard FixMatch-style threshold: 0.75 catches most genuine hits
 while keeping noisy class confusion out of the training set. The
@@ -97,7 +97,7 @@ def pseudo_label_image(db: Session, image_id: int, *,
             class_label=h["class_label"],
             bbox_json=h["bbox_json"],
             auto_suggested=True,
-            verified=True,           # high-conf → trusted into training
+            verified=False,          # human review required; avoid self-reinforcement
         ))
     img.labeled = True
     db.commit()

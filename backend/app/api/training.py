@@ -456,7 +456,7 @@ def ai_learning_dashboard(
             "detection_type": det_type,
             "day":            day.isoformat(),
             "precision":      (tp / triaged) if triaged else None,
-            "fp_rate":        (fp / total)   if total   else None,
+            "fp_rate":        (fp / triaged) if triaged else None,
             "alerts_total":   total,
         })
 
@@ -588,7 +588,7 @@ def start_finetune_job(
     batch:  int          = 16,
     imgsz:  int          = 640,
     lr0:    float        = 0.0005,
-    max_neg_ratio: float = 3.0,
+    max_neg_ratio: float = 0.4,
     db: Session = Depends(get_db),
     _u=Depends(require_role("admin", "operator")),
 ):

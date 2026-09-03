@@ -70,7 +70,9 @@ def compute_metrics_for_day(db: Session, day_eat: date) -> int:
         total  = sum(counts.values())
         triaged = tp + fp
         precision = (tp / triaged) if triaged else None
-        fp_rate   = (fp / total)   if total   else None
+        # This is the false share among reviewed alerts. Using all alerts as
+        # the denominator made an unreviewed backlog artificially improve it.
+        fp_rate   = (fp / triaged) if triaged else None
 
         # Upsert via lookup-then-update — simpler and DB-agnostic
         # than ON CONFLICT, and the (model_id, detection_type, day)

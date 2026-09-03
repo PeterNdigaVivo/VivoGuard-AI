@@ -4,7 +4,7 @@ Populated by the `training.compute_model_metrics_daily` Celery task
 from operator-marked alerts. One row per (model_id, detection_type, day).
 
 precision = TP / (TP + FP)
-fp_rate   = FP / alerts_total
+fp_rate   = FP / (TP + FP) for operator-triaged alerts
 recall    = reserved for shadow-eval (Phase 3); operator marks don't
             give us a count of missed detections.
 """

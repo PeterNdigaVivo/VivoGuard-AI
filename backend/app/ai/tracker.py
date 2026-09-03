@@ -310,6 +310,10 @@ class VivoGuardTracker:
             tr.extra["rolling_conf"] = self.confidence_buffer.get_avg(tid)
             tr.extra["frames_seen"]  = self.confidence_buffer.frames_seen(tid)
             tr.extra["stable"]       = self.confidence_buffer.is_confident(tid)
+            # Surface smoothing on the original dict so stateless detectors
+            # can consume it without a second tracker lookup.
+            det["rolling_conf"] = tr.extra["rolling_conf"]
+            det["frames_seen"] = tr.extra["frames_seen"]
             out.append((tr, det))
 
         self._evict(active_ids, now)

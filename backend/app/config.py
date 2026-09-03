@@ -143,11 +143,19 @@ class Settings(BaseSettings):
     # registry/promotion chain, not live inference — cameras follow their
     # explicit ai_model_id assignment.
     feedback_auto_promote_margin: float = 0.02
+    # mAP on a freshly-built validation set is not sufficient evidence for
+    # production rollout. Keep candidates staged until shadow/canary review.
+    feedback_auto_deploy: bool = False
+    store_specialist_auto_deploy: bool = False
     # Temporal alert gate: minimum consecutive tracked frames before an
     # alert fires (event rows always persist). Applies only to detectors
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
     # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
     temporal_gate_min_frames: int = 10
+    # Shared pre-insert incident dedup. Unlike notifier dedup, this keeps
+    # duplicate frame-level alerts out of Postgres and the live UI feed.
+    alert_incident_dedup_seconds: int = 30
+    alert_incident_dedup_high_seconds: int = 5
     # Retention for the metric_snapshots time-series table (days). The
     # dashboards' largest window is 30 days; 90 keeps triple margin.
     # 0 disables pruning entirely.
@@ -403,6 +411,7 @@ class Settings(BaseSettings):
     checkout_min_dwell_seconds: int = 30
     checkout_max_dwell_seconds: int = 900
     checkout_alert_minutes:     int = 8
+    checkout_medium_staff_alert_minutes: int = 12
 
     # --- After-hours intrusion snapshot filmstrip ---
     # One intrusion alert per closed store with a person present; up to

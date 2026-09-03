@@ -21,6 +21,10 @@ SNAPSHOT_TYPES: set[str] = {
     "uniform_compliance", "intrusion", "shutter", "fight", "crowd",
     "trespass", "shrinkage", "fall", "abandoned_object", "weapon",
     "weapon_brandished", "staff_present", "staff_zone",
+    # Direct visual classes need an immutable raw sibling when an operator
+    # supplies True/False feedback.
+    "person", "vehicle", "animal", "face", "fire", "smoke", "shelf",
+    "custom",
 }
 
 # Plain-English titles, mirrored on the frontend. Kept here so the
@@ -45,6 +49,31 @@ def _snapshot_root() -> Path:
     p = Path(settings.recordings_dir) / "snapshots" / datetime.now().strftime("%Y-%m-%d")
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def capture_raw_training_snapshot(frame_bgr, camera_id: int) -> str | None:
+    """Save an overlay-free sibling for feedback and model training.
+
+    The operator snapshot intentionally contains boxes and captions. Reusing
+    that image as training input teaches the model those UI artifacts, so the
+    raw pixels are persisted separately and never displayed by default.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+    if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
+        return None
+    try:
+        ts = datetime.now().strftime("%H%M%S_%f")
+        target = _snapshot_root() / f"{camera_id}_{ts}_raw.jpg"
+        if not cv2.imwrite(str(target), frame_bgr):
+            return None
+        return str(target)
+    except Exception as exc:
+        log.warning("raw training snapshot failed camera=%s: %s",
+                    camera_id, exc)
+        return None
 
 
 # BGR colours for the per-person snapshot boxes.

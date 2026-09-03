@@ -337,6 +337,13 @@ def checkout_long_session_check() -> None:
                 continue
             entry_ts = float(payload.get("entry_ts") or 0.0)
             age = now_ts - entry_ts
+            last_seen_ts = float(payload.get("last_seen_ts") or entry_ts)
+            # Do not turn an abandoned Redis key from a dead inference worker
+            # into a live checkout incident. Old-format keys retain the
+            # previous behavior until they naturally expire.
+            if payload.get("last_seen_ts") is not None and now_ts - last_seen_ts > 90:
+                r.delete(key)
+                continue
             # Per-session floor stamped by CheckoutDwellDetector for
             # medium-confidence-staff sessions — they get more grace
             # than the global threshold so a staff member serving a

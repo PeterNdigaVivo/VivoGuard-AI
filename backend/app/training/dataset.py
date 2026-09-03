@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -57,14 +58,31 @@ def split_dataset(db: Session, dataset_id: int, *,
     if min(train, val, test) < 0 or train + val + test <= 0:
         raise ValueError("split fractions must be non-negative and sum to > 0")
 
-    # A source_alert_id ties the original feedback frame to any ±1 second
-    # temporal siblings.  Prefix keys so an alert id can never collide with an
-    # ordinary TrainingImage id.
-    grouped: dict[tuple[str, int], list[TrainingImage]] = {}
+    # Group by camera-day where provenance is available. Repeated alerts from
+    # a fixed camera scene are strongly correlated; splitting them across
+    # train and validation makes mAP look excellent while field precision
+    # remains poor. Temporal siblings naturally remain in the same group.
+    grouped: dict[tuple, list[TrainingImage]] = {}
     for img in images:
-        key = (("alert", int(img.source_alert_id))
-               if img.source_alert_id is not None
-               else ("image", int(img.id)))
+        day = None
+        source_extra = getattr(img, "source_extra", None)
+        source = source_extra if isinstance(source_extra, dict) else {}
+        raw_ts = source.get("timestamp_iso")
+        if raw_ts:
+            try:
+                day = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).date().isoformat()
+            except ValueError:
+                day = None
+        captured = getattr(img, "captured_at", None)
+        if day is None and captured is not None:
+            day = captured.date().isoformat()
+        camera_id = getattr(img, "camera_id", None)
+        if camera_id is not None and day is not None:
+            key = ("camera_day", int(camera_id), day)
+        elif img.source_alert_id is not None:
+            key = ("alert", int(img.source_alert_id))
+        else:
+            key = ("image", int(img.id))
         grouped.setdefault(key, []).append(img)
 
     groups = list(grouped.values())
@@ -93,7 +111,7 @@ def split_dataset(db: Session, dataset_id: int, *,
 
 def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
                             extra_dataset_ids: list[int] | None = None,
-                            max_neg_ratio: float = 3.0,
+                            max_neg_ratio: float = 0.4,
                             mix_dataset_id: int | None = None,
                             mix_fraction: float = 0.18,
                             mix_seed: int = 1337) -> Path:
@@ -110,8 +128,8 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     .txt file is EMPTY as "this frame contains no objects of interest,
     suppress false detections here." Background images are capped at
     `max_neg_ratio × positive_count` per split so a flood of dismissed
-    alerts can't swamp the gradient with negatives (YOLO best
-    practice: ≤ 30% background).
+    alerts can't swamp the gradient. The 0.4 default is about 29% of the
+    combined set; the previous 3.0 default was 75% despite claiming ≤30%.
 
     `extra_dataset_ids` lets a fine-tune job pull negatives from a
     SECOND dataset (typically `feedback-negative-<type>`) without

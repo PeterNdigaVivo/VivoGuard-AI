@@ -290,7 +290,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
                            TrainingImage.review_state == "approved").count()
                  if neg_ids else 0)
     _mix_frac = float(getattr(_settings, "base_mix_fraction", 0.18))
-    projected = (pos_count + min(neg_count, int(3.0 * pos_count))
+    projected = (pos_count + min(neg_count, int(0.4 * pos_count))
                  + (int(pos_count * _mix_frac) if base_mix_dataset_id else 0))
     if projected < _min_total:
         log.warning(
@@ -311,7 +311,7 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
         "resume_from_model_id":       parent.id,
         "extra_negative_dataset_ids": extra_ids,
         "base_mix_dataset_id":        base_mix_dataset_id,
-        "max_neg_ratio":              3.0,
+        "max_neg_ratio":              0.4,
         # epochs intentionally omitted — the trainer sizes it to the dataset
         # (Part 2 #2): <50 img -> 20, <200 -> 15, else 10.
         "batch":                      16,
@@ -382,7 +382,7 @@ def enqueue_full_retrain(db: Session, detection_type: str) -> dict:
         "incremental_finetune":       False,
         "detection_type":             detection_type,
         "extra_negative_dataset_ids": ([neg_ds.id] if neg_ds else []),
-        "max_neg_ratio":              3.0,
+        "max_neg_ratio":              0.4,
         "batch":                      16,
         "imgsz":                      640,
         "augment":                    True,

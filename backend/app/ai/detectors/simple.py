@@ -10,6 +10,7 @@ from app.ai.detectors.base import (
     Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.zone_logic import bbox_in_zone
+from app.ai.calibration import effective_threshold
 
 
 class _ClassFilterDetector(Detector):
@@ -25,7 +26,6 @@ class _ClassFilterDetector(Detector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
-        thr = float(cfg.get("confidence_threshold", 0.6))
         out: list[DetectionEvent] = []
         # Constrain to relevant zones (if any zones list this detection type).
         relevant_zones = [z for z in ctx.zones
@@ -33,8 +33,6 @@ class _ClassFilterDetector(Detector):
                           and not z.get("suppressed")]
         for det in ctx.raw_detections:
             if det["cls"] not in self.class_set:
-                continue
-            if det["conf"] < thr:
                 continue
             zone_id = None
             if relevant_zones:
@@ -46,10 +44,19 @@ class _ClassFilterDetector(Detector):
                         break
                 if not in_any:
                     continue
+            thr = effective_threshold(cfg, zone_id=zone_id, default=0.6)
+            score = float(det.get("rolling_conf", det["conf"]))
+            if score < thr:
+                continue
             out.append(DetectionEvent(
                 detection_type=self.detection_type,
-                cls=det["cls"], confidence=det["conf"],
+                cls=det["cls"], confidence=score,
                 bbox_norm=det["bbox_norm"], zone_id=zone_id,
+                # The inference worker's temporal gate is track-based.  The
+                # tracker attaches this id to the original detection dict;
+                # dropping it here allowed a one-frame classifier glitch to
+                # create an operator alert immediately.
+                track_id=det.get("track_id"),
                 extra=self.extra_from_det(det),
             ))
         return out
@@ -117,17 +124,18 @@ class CustomDetector(_ClassFilterDetector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
-        thr = float(cfg.get("confidence_threshold", 0.5))
         wanted = set((cfg.get("extra") or {}).get("classes") or [])
         out: list[DetectionEvent] = []
         for det in ctx.raw_detections:
-            if det["conf"] < thr:
+            score = float(det.get("rolling_conf", det["conf"]))
+            if score < effective_threshold(cfg, default=0.5):
                 continue
             if wanted and det["cls"] not in wanted:
                 continue
             out.append(DetectionEvent(
                 detection_type=self.detection_type,
-                cls=det["cls"], confidence=det["conf"],
+                cls=det["cls"], confidence=score,
                 bbox_norm=det["bbox_norm"],
+                track_id=det.get("track_id"),
             ))
         return out

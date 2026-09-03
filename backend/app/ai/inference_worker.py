@@ -37,10 +37,10 @@ from app.stream.frame_buffer import FrameBuffer
 log = logging.getLogger(__name__)
 
 
-def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list[dict], dict, str]:
+def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list[dict], dict, str, int | None]:
     cam = db.get(Camera, camera_id)
     if not cam or not cam.ai_enabled:
-        return None, [], {}, settings.default_model
+        return None, [], {}, settings.default_model, None
 
     zones: list[dict] = []
     for z in db.query(Zone).filter(Zone.camera_id == camera_id):
@@ -124,32 +124,33 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     #      individually re-pointed at it;
     #   3. otherwise the base model (settings.default_model, yolov8n.pt).
     weights: str | None = None
+    active_model_id: int | None = None
     if cam.ai_model_id:
         m = db.get(AIModel, cam.ai_model_id)
         if m and m.weights_path and os.path.exists(m.weights_path):
             weights = m.weights_path
+            active_model_id = m.id
     # The chain-wide deployed-model fallback is OFF by default: the deployed
     # retail model (v25) is a specialist whose classes are NOT COCO "person",
     # so routing the GENERAL inference pass through it makes every person-based
     # detector see 0 persons (chain-wide outage). Only used when explicitly
     # enabled AND the deployed model is a COCO-person detector.
     if weights is None and getattr(settings, "use_deployed_model_for_inference", False):
-        weights = _deployed_weights(db)
+        weights, active_model_id = _deployed_weights(db)
     if weights is None:
         weights = settings.default_model
-    return cam, zones, cfg, weights
+    return cam, zones, cfg, weights, active_model_id
 
 
-def _deployed_weights(db: Session) -> str | None:
-    """Latest chain-wide deployed model's weights, when the file exists on
-    disk. Returns None so callers fall back to the base model."""
+def _deployed_weights(db: Session) -> tuple[str | None, int | None]:
+    """Latest usable chain-wide deployment and its database identity."""
     m = (db.query(AIModel)
            .filter(AIModel.deployed.is_(True))
            .order_by(AIModel.id.desc())
            .first())
     if m and m.weights_path and os.path.exists(m.weights_path):
-        return m.weights_path
-    return None
+        return m.weights_path, m.id
+    return None, None
 
 
 # Detector types that emit DetectionEvents but should NOT create an
@@ -191,6 +192,101 @@ _STATIC_PERSON_FILTER_TYPES: set[str] = {
 }
 
 
+def _schedule_active(schedule: dict | None, tz_name: str,
+                     now_utc: datetime | None = None) -> bool:
+    """Evaluate DetectionConfig/Zone schedules in store-local time.
+
+    Supported windows are ``"08:00-18:00"`` and ``["08:00", "18:00"]``.
+    Invalid configurations fail open (and should be surfaced by config QA),
+    while an explicitly empty weekday is inactive.
+    """
+    if not schedule:
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+        now = now_utc or datetime.now(timezone.utc)
+        local = now.astimezone(ZoneInfo(tz_name or "Africa/Nairobi"))
+    except Exception:
+        # A bad/missing store timezone must not silently reinterpret a local
+        # schedule as UTC.  Nairobi is the product-wide fallback timezone.
+        try:
+            from zoneinfo import ZoneInfo
+            local = (now_utc or datetime.now(timezone.utc)).astimezone(
+                ZoneInfo("Africa/Nairobi"))
+        except Exception:
+            # Last-resort only for a runtime with no timezone database.
+            local = (now_utc or datetime.now(timezone.utc)).astimezone(
+                timezone.utc)
+    if local.date().isoformat() in set(schedule.get("holidays") or []):
+        return False
+    key = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[local.weekday()]
+    if key not in schedule:
+        return False
+    windows = schedule.get(key) or []
+    if not windows:
+        return False
+    parsed_any = False
+    minute = local.hour * 60 + local.minute
+    for window in windows:
+        try:
+            if isinstance(window, str):
+                start, end = window.split("-", 1)
+            else:
+                start, end = window
+            sh, sm = (int(x.strip()) for x in str(start).split(":"))
+            eh, em = (int(x.strip()) for x in str(end).split(":"))
+            a, b = sh * 60 + sm, eh * 60 + em
+            parsed_any = True
+            in_window = ((a <= minute < b) if a <= b
+                         else (minute >= a or minute < b))
+            if in_window:
+                return True
+        except Exception:
+            continue
+    return True if not parsed_any else False
+
+
+def _large_enough(det: dict, min_area_px: int) -> bool:
+    if min_area_px <= 0:
+        return True
+    box = det.get("bbox_px") or []
+    if len(box) != 4:
+        return False
+    return max(0.0, float(box[2]) - float(box[0])) * \
+        max(0.0, float(box[3]) - float(box[1])) >= min_area_px
+
+
+def _alert_dedup_key(camera_id: int, ev) -> str:
+    """Stable shared incident key used before an Alert row is inserted."""
+    zone = ev.zone_id if ev.zone_id is not None else "none"
+    if ev.track_id is not None:
+        subject = f"track:{int(ev.track_id)}"
+    else:
+        # Untracked detections still get a coarse spatial identity. This
+        # collapses frame-to-frame jitter without merging distant objects.
+        box = tuple(round(float(v), 1) for v in (ev.bbox_norm or []))
+        subject = "box:" + ",".join(str(v) for v in box)
+    return f"vg:alert:incident:{camera_id}:{ev.detection_type}:{zone}:{subject}"
+
+
+def _claim_alert_slot(camera_id: int, ev) -> bool:
+    """Atomically claim the right to create an operator-facing alert.
+
+    Redis makes this work across worker replicas. Cache failure deliberately
+    fails open so safety incidents are not silenced by infrastructure trouble.
+    """
+    try:
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        priority = (ev.extra or {}).get("priority") or "normal"
+        ttl = (int(getattr(settings, "alert_incident_dedup_high_seconds", 5))
+               if priority == "high" else
+               int(getattr(settings, "alert_incident_dedup_seconds", 30)))
+        return bool(r.set(_alert_dedup_key(camera_id, ev), "1",
+                          ex=max(1, ttl), nx=True))
+    except Exception:
+        return True
+
+
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None, store_id: int | None = None,
@@ -200,11 +296,20 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     NEVER gate the underlying detection_event persistence (Vivo
     regression Jun 2026 traced to a path where a suppress-check
     exception silently dropped every person event for the frame)."""
+    # Claim a shared incident slot BEFORE saving an overlay or inserting an
+    # Alert. DetectionEvent persistence remains unconditional for analytics.
+    if (not suppress_alert and ev.detection_type not in _SKIP_ALERT_TYPES
+            and not _claim_alert_slot(camera_id, ev)):
+        suppress_alert = True
+
     # Capture an annotated snapshot for the alert-worthy detector types
     # so the Alerts page can show the picture, not just the label.
     thumb_path = None
+    raw_training_path = None
     if ev.detection_type in SNAPSHOT_TYPES and frame_bgr is not None and not suppress_alert:
-        from app.ai.snapshot import capture_alert_snapshot
+        from app.ai.snapshot import (capture_alert_snapshot,
+                                     capture_raw_training_snapshot)
+        raw_training_path = capture_raw_training_snapshot(frame_bgr, camera_id)
         # Keep the stamped caption in sync with the card title —
         # before-hours intrusion reads "Before", not "After".
         _cap = None
@@ -223,6 +328,10 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
+    if ev.track_id is not None and "track_id" not in extra:
+        extra["track_id"] = int(ev.track_id)
+    if raw_training_path:
+        extra["raw_training_path"] = raw_training_path
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=ev.zone_id,
@@ -411,7 +520,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             break
 
         with SessionLocal() as db:
-            cam, zones, cfg, weights = _load_camera_state(db, camera_id)
+            cam, zones, cfg, weights, active_model_id = _load_camera_state(db, camera_id)
             if not cam:
                 log.info("camera %s gone or disabled", camera_id)
                 break
@@ -676,13 +785,35 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
 
             for det in registry.detectors_for(camera_id):
                 # Per-frame skip honouring detection_every_n_frames.
-                step = int((cfg.get(det.detection_type) or {}).get("detection_every_n_frames", 1) or 1)
+                det_cfg = cfg.get(det.detection_type) or {}
+                step = int(det_cfg.get("detection_every_n_frames", 1) or 1)
                 if frame_idx % max(1, step) != 0:
                     continue
+                if not _schedule_active(det_cfg.get("schedule_json"), store_tz):
+                    continue
                 try:
-                    eval_ctx = (static_filtered_ctx
+                    base_ctx = (static_filtered_ctx
                                 if det.detection_type in _STATIC_PERSON_FILTER_TYPES
                                 else ctx)
+                    active_zones = [
+                        z for z in base_ctx.zones
+                        if not z.get("suppressed") and _schedule_active(
+                            z.get("active_schedule_json"), store_tz)
+                    ]
+                    min_area = max(0, int(det_cfg.get("min_object_size") or 0))
+                    eval_ctx = DetectorContext(
+                        camera_id=base_ctx.camera_id,
+                        timestamp=base_ctx.timestamp,
+                        raw_detections=[d for d in base_ctx.raw_detections
+                                        if _large_enough(d, min_area)],
+                        tracks=[pair for pair in base_ctx.tracks
+                                if _large_enough(pair[1], min_area)],
+                        zones=active_zones, config=base_ctx.config,
+                        db=base_ctx.db, store_id=base_ctx.store_id,
+                        business_hours=base_ctx.business_hours,
+                        store_timezone=base_ctx.store_timezone,
+                        frame_bgr=base_ctx.frame_bgr,
+                    )
                     for ev in det.evaluate(eval_ctx):
                         sig = (
                             ev.detection_type, getattr(ev, "cls", None),
@@ -701,6 +832,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         # transaction and drop every event queued for
                         # this frame (Vivo regression, Jun 2026).
                         suppress = False
+                        mark_person_alert = False
                         if ev.detection_type == "person":
                             try:
                                 if not _person_alert_warranted(ev, zones, store):
@@ -708,7 +840,10 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                 elif _person_alert_recently_fired(camera_id):
                                     suppress = True
                                 else:
-                                    _mark_person_alert_fired(camera_id)
+                                    # Do not start the long person-alert
+                                    # cooldown yet: this track may still be
+                                    # rejected by the temporal gate below.
+                                    mark_person_alert = True
                             except Exception as _sup_exc:
                                 # Fail safe: persist the event, skip the
                                 # after-hours alert. Better to miss a
@@ -736,10 +871,15 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                     ev.detection_type, camera_id,
                                     ev.track_id, _fs, _need)
                         eid, alert_id = _persist_event(
-                                             db, camera_id, ev, cam.ai_model_id,
+                                             db, camera_id, ev, active_model_id,
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name, store_id=store_id,
                                              suppress_alert=suppress)
+                        if mark_person_alert and alert_id is not None:
+                            # Start the longer person cooldown only after an
+                            # Alert row actually survives temporal + shared
+                            # incident deduplication.
+                            _mark_person_alert_fired(camera_id)
                         if suppress or alert_id is None:
                             continue  # not an operator-facing event
                         events_emitted.append({
