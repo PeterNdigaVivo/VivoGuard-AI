@@ -88,6 +88,12 @@ def split_dataset(db: Session, dataset_id: int, *,
             img.split = split
         counts[split] += len(group)
     db.commit()
+    # Stage log — eligible=0 here is the earliest visible symptom of a
+    # quarantined/emptied dataset (provenance gate or interrupted
+    # cross-store rebuild).
+    log.info("split_dataset ds=%s: eligible=%d in %d groups -> "
+             "train=%d val=%d test=%d", dataset_id, n, len(groups),
+             counts["train"], counts["val"], counts["test"])
     return counts
 
 
@@ -141,22 +147,36 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     # paired hard-negative pool). Dedup is unnecessary because each
     # TrainingImage row has a single dataset_id FK.
     dataset_ids = [dataset_id, *(extra_dataset_ids or [])]
+    # Stage 1 — DB selection. Count the labeled universe FIRST so the
+    # provenance quarantine (eligible_for_training / review_state,
+    # migrations 0038/0042) is visible as its own stage instead of
+    # silently zeroing the manifest.
+    selected_all = (db.query(TrainingImage)
+                      .filter(TrainingImage.dataset_id.in_(dataset_ids),
+                              TrainingImage.labeled == True)      # noqa: E712
+                      .count())
     images = (db.query(TrainingImage)
                 .filter(TrainingImage.dataset_id.in_(dataset_ids),
                         TrainingImage.labeled == True,            # noqa: E712
                         TrainingImage.eligible_for_training.is_(True),
                         TrainingImage.review_state == "approved")
                 .all())
+    quarantined = selected_all - len(images)
+    log.info("write_yolo_dataset_yaml ds=%s: db-selected=%d, "
+             "provenance-eligible=%d (quarantined=%d) from datasets %s",
+             dataset_id, selected_all, len(images), quarantined, dataset_ids)
 
     # Pass 1 — bucket per split into (positives, negatives) so we can
     # apply the per-split negative cap fairly.
     by_split: dict[str, dict[str, list]] = {}
+    pending_ann = 0
     for img in images:
         all_anns = db.query(Annotation).filter(Annotation.image_id == img.id).all()
         anns = [ann for ann in all_anns if ann.verified]
         # An object-labelled image with only pending annotations is neither a
         # positive nor a background negative. Quarantine it until review.
         if all_anns and not anns:
+            pending_ann += 1
             continue
         split = img.split or "train"
         bucket = by_split.setdefault(split, {"pos": [], "neg": []})
@@ -164,6 +184,12 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
             bucket["pos"].append((img, anns))
         else:
             bucket["neg"].append(img)
+    log.info("write_yolo_dataset_yaml ds=%s: has-label buckets "
+             "(pos/neg per split): %s; pending-annotation quarantine=%d",
+             dataset_id,
+             {s: f"{len(b['pos'])}/{len(b['neg'])}" for s, b in by_split.items()}
+             or "EMPTY", pending_ann)
+    stage_failures = 0
 
     train_list, val_list, test_list = [], [], []
     out_lists = {"train": train_list, "val": val_list, "test": test_list}
@@ -200,6 +226,7 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
         for img, anns in bucket["pos"]:
             staged = _stage_image(img)
             if staged is None:
+                stage_failures += 1
                 continue
             label_path = root / "labels" / f"{img.id}.txt"
             with label_path.open("w") as f:
@@ -221,6 +248,7 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
         for img in bucket["neg"][:neg_cap]:
             staged = _stage_image(img)
             if staged is None:
+                stage_failures += 1
                 continue
             (root / "labels" / f"{img.id}.txt").write_text("")   # background
             target.append(staged)
@@ -277,12 +305,33 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
     # otherwise (belt-and-braces behind the orchestrator's 30-image floor).
     MIN_VAL_IMAGES = 5
     if len(val_list) < MIN_VAL_IMAGES:
+        # Name the stage that zeroed out so the error is diagnosable
+        # from the job row alone.
+        if selected_all == 0:
+            hint = (" Stage: DB selection — the dataset has no labeled "
+                    "rows at all (e.g. an interrupted cross-store "
+                    "rebuild); re-run the dataset build.")
+        elif not images:
+            hint = (f" Stage: provenance — ALL {selected_all} labeled rows "
+                    "are quarantined (eligible_for_training=false / "
+                    "review_state!=approved, migrations 0038/0042). Run "
+                    "migration 0045 or approve the rows; see "
+                    "training_require_dual_review.")
+        elif pending_ann and pending_ann >= len(images) - stage_failures:
+            hint = (f" Stage: annotations — {pending_ann} images carry only "
+                    "unverified annotations and are quarantined.")
+        elif stage_failures:
+            hint = (f" Stage: staging — {stage_failures}/{len(images)} "
+                    "source files missing/unreadable on disk.")
+        else:
+            hint = " Stage: split — too few images landed in val."
         raise ValueError(
             f"insufficient validation images: {len(val_list)} < {MIN_VAL_IMAGES} "
-            f"(train={len(train_list)}, test={len(test_list)}). Refusing to "
-            f"train: a val set this small yields meaningless mAP and the "
-            f"previous train-set fallback corrupted metrics. Add more labelled "
-            f"images, or lower split_val so more land in the val split."
+            f"(train={len(train_list)}, test={len(test_list)}); "
+            f"db-selected={selected_all}, provenance-eligible={len(images)}, "
+            f"pending-annotations={pending_ann}, stage-failures={stage_failures}."
+            f"{hint} Refusing to train: a val set this small yields "
+            f"meaningless mAP."
         )
 
     train_txt = _write("train", train_list)
@@ -297,10 +346,10 @@ def write_yolo_dataset_yaml(db: Session, dataset_id: int, *,
 
     sample = (train_list[:1] or ["-"])[0]
     label_ok = _yolo_label_path(sample).exists() if sample != "-" else False
-    log.info("write_yolo_dataset_yaml ds=%s: train.txt=%d val.txt=%d test.txt=%d "
-             "images; sample img=%s label_exists=%s",
+    log.info("write_yolo_dataset_yaml ds=%s: splits train=%d val=%d test=%d "
+             "(stage_failures=%d); sample img=%s label_exists=%s",
              dataset_id, len(train_list), len(val_list), len(test_list),
-             sample, label_ok)
+             stage_failures, sample, label_ok)
 
     yaml_path = root / "data.yaml"
     yaml_path.write_text(

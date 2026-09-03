@@ -132,6 +132,15 @@ class Settings(BaseSettings):
     # trainer aborts with InsufficientDataError; the orchestrator projects
     # the same number before enqueueing so doomed jobs never queue.
     min_training_images: int = 50
+    # Dual-review training gate (codex data-integrity work). When True,
+    # operator feedback is quarantined (eligible_for_training=false,
+    # review_state=pending) until two independent reviewers agree —
+    # migration 0042's policy. Vivo runs a SINGLE-operator review
+    # workflow today, so the default is False: confirmed/dismissed
+    # clicks are trainable immediately (pre-codex behaviour). Flip to
+    # True once a second-reviewer workflow actually exists; migration
+    # 0045 honours this env var when un-quarantining.
+    training_require_dual_review: bool = False
     # Anti-catastrophic-forgetting replay: fraction of the parent model's
     # original dataset sampled into every fine-tune (train split only).
     # 0.18 sits inside the standard 15-20% replay band.

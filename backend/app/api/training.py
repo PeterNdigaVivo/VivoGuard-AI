@@ -2116,7 +2116,17 @@ def cross_store_start(db: Session = Depends(get_db),
     import traceback
     try:
         from app.config import settings
-        from app.training.orchestrator import build_cross_store_dataset, CROSS_STORE_DATASET
+        from app.training.orchestrator import (
+            CROSS_STORE_DATASET, build_cross_store_dataset, has_open_job,
+        )
+        # The rebuild deletes + re-adds every dataset row. Doing that
+        # underneath a job that is mid-prep zeroes ITS selection — so
+        # refuse while a cross_store job is queued/running.
+        if has_open_job(db, "cross_store"):
+            raise HTTPException(
+                409, "a cross-store training job is already queued or "
+                     "running — wait for it to finish before rebuilding "
+                     "the dataset")
         res = build_cross_store_dataset(db)
         if not res.get("dataset_id") or int(res.get("total_images", 0)) == 0:
             raise HTTPException(400, res.get("reason", "no cross-store images available"))

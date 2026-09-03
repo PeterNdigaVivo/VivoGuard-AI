@@ -488,11 +488,20 @@ def build_cross_store_dataset(db: Session) -> dict:
     classes = sorted({ev.detection_type for (_ti, ev, _s) in use if ev.detection_type})
     ds = _ensure_dataset(db, CROSS_STORE_DATASET, classes,
                          description="auto: cross-store generalist (top-3 stores)")
-    # Rebuild fresh each run so counts reflect the current confirmed pool.
+    # Rebuild fresh each run so counts reflect the current confirmed
+    # pool. ATOMIC (Aug 2026): delete + re-add commit TOGETHER — the
+    # old commit-right-after-delete left the dataset permanently EMPTY
+    # whenever the re-add was interrupted, and every queued job then
+    # failed at prep with "insufficient validation images: 0 < 5".
     db.query(TrainingImage).filter(TrainingImage.dataset_id == ds.id).delete()
-    db.commit()
 
     from app.models import Annotation
+    from app.training.feedback_loop import _training_provenance
+    # Clones derive from operator-CONFIRMED alerts; stamp provenance
+    # explicitly (honours training_require_dual_review) instead of
+    # relying on column defaults — migration 0042 quarantined the
+    # default-stamped clones (source_alert_id IS NULL) wholesale.
+    prov = _training_provenance("correct")
     store_counts: dict[str, int] = {}
     for (ti, ev, sname) in use:
         # The training image is ALREADY a clean person crop (the alert
@@ -504,13 +513,14 @@ def build_cross_store_dataset(db: Session) -> dict:
             source_extra={"source": "cross_store", "origin_store": sname,
                           "origin_image_id": ti.id,
                           "detection_type": ev.detection_type},
+            **prov,
         )
         db.add(new); db.flush()
         if ev.detection_type:
             db.add(Annotation(image_id=new.id, class_label=ev.detection_type,
                               bbox_json=[0.5, 0.5, 1.0, 1.0], verified=True))
         store_counts[sname] = store_counts.get(sname, 0) + 1
-    db.commit()
+    db.commit()   # single commit — delete + re-add are all-or-nothing
 
     split_dataset(db, ds.id, train=0.8, val=0.2, test=0.0)
     total = sum(store_counts.values())

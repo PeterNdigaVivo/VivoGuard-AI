@@ -29,23 +29,28 @@ log = logging.getLogger(__name__)
 
 
 def _training_provenance(verdict: str) -> dict:
-    """Return the fail-closed provenance state for operator feedback.
+    """Provenance state for operator feedback.
 
-    A single dismissal is useful evidence, but it is not independently
-    verified ground truth.  Keep it available to curators without allowing a
-    noisy camera or one mistaken click to trigger model training.
+    Policy switch (Aug 2026): the codex data-integrity work quarantined
+    ALL single-reviewer feedback (eligible_for_training=False,
+    review_state=pending) until two independent reviewers agree — but
+    Vivo runs a single-operator review workflow, so that gate starved
+    training to zero (jobs 807/808/809; pseudo-labeler labelled=0).
+    settings.training_require_dual_review (default False) now decides:
+      False → clicks are trainable immediately (pre-codex behaviour);
+      True  → the codex quarantine applies unchanged.
+    source_kind always records the truth either way.
     """
-    if verdict == "false":
-        return {
-            "source_kind": "operator_dismissed",
-            "eligible_for_training": False,
-            "review_state": "pending",
-        }
-    return {
-        "source_kind": "operator_confirmed",
-        "eligible_for_training": False,
-        "review_state": "pending",
-    }
+    from app.config import settings
+    kind = ("operator_dismissed" if verdict == "false"
+            else "operator_confirmed")
+    if bool(getattr(settings, "training_require_dual_review", False)):
+        return {"source_kind": kind,
+                "eligible_for_training": False,
+                "review_state": "pending"}
+    return {"source_kind": kind,
+            "eligible_for_training": True,
+            "review_state": "approved"}
 
 
 def _build_source_extra(db: Session, ev: DetectionEvent,
