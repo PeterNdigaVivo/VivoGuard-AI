@@ -42,7 +42,7 @@ def test_gpu_readiness_does_not_start_production_services():
 
 
 def test_migration_runbook_has_safety_and_rollback_gates():
-    runbook = (ROOT / "docs" / "GEX44_MIGRATION_RUNBOOK.md").read_text()
+    runbook = (ROOT / "docs" / "GEX45_MIGRATION_RUNBOOK.md").read_text()
 
     for required in (
         "action-time approval",

@@ -1,12 +1,17 @@
-# RTX 6000 Ada production migration runbook
+# GEX45 RTX PRO 4000 Blackwell production migration runbook
 
 ## Decision and constraints
 
-The approved target is one Hetzner Server Auction host in Falkenstein with
-Ubuntu 24.04 LTS, primary IPv4, 128 GB DDR5 ECC RAM, two 1.92 TB U.2 NVMe
-datacentre SSDs and one NVIDIA RTX 6000 Ada GPU. The complete stack moves
-together so PostgreSQL, Redis, recordings and incident evidence remain on one
-trusted host.
+The target is one Hetzner GEX45-1 host in Helsinki with Ubuntu 24.04 LTS,
+primary IPv4, 64 GB RAM, two 512 GB NVMe devices in RAID 1 (about 436 GiB
+usable) and one 24 GB NVIDIA RTX PRO 4000 Blackwell SFF GPU. The complete
+stack moves together so PostgreSQL, Redis, recordings and incident evidence
+remain on one trusted host.
+
+The source currently holds about 250 GB under `data/`, so capacity is a hard
+migration gate. Record the per-directory size before rehearsal, enforce
+recording retention, and keep at least 20% filesystem headroom. Do not copy
+disposable caches merely because the source disk is larger.
 
 Do not treat the GPU purchase as proof of coverage or 99% accuracy. The
 current production loop uses long-lived per-camera Celery tasks. Controlled
@@ -27,7 +32,9 @@ separate cost and architecture decision.
 2. Create named administrator accounts, disable password SSH after verifying
    key access, enable the Hetzner firewall and retain console recovery.
 3. Install Docker Engine from Docker's signed repository.
-4. Install the supported NVIDIA driver and NVIDIA Container Toolkit. Configure
+4. Install the supported NVIDIA open-kernel driver and NVIDIA Container
+   Toolkit. The CUDA worker uses PyTorch CUDA 12.8 wheels for Blackwell.
+   Configure
    Docker using `nvidia-ctk runtime configure --runtime=docker`, then restart
    Docker.
 5. Clone the repository at the exact deployed commit and restore the production

@@ -1,7 +1,8 @@
-# NVIDIA CUDA 12.4 backend — TensorRT optimized inference.
+# NVIDIA CUDA 12.8 backend — TensorRT optimized inference.
+# CUDA 12.8 is the first CUDA 12 release with Blackwell support.
 -r requirements.worker.base.txt
---extra-index-url https://download.pytorch.org/whl/cu124
-torch>=2.4
-torchvision>=0.19
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.7
+torchvision>=0.22
 tensorrt>=10.0
 onnxruntime-gpu>=1.17
