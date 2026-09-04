@@ -7,6 +7,22 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Add GPU device reservations only for CUDA deployments. Keeping the GPU
+# reservation in an override lets the default compose file continue to work
+# on CPU-only hosts.
+COMPOSE_ARGS=(-f docker-compose.yml)
+if grep -Eq '^GPU_BACKEND=cuda([[:space:]]*(#.*)?)?$' .env 2>/dev/null; then
+  [ -f docker-compose.gpu.yml ] || {
+    echo "docker-compose.gpu.yml missing for CUDA deployment"
+    exit 1
+  }
+  COMPOSE_ARGS+=(-f docker-compose.gpu.yml)
+fi
+
+dc() {
+  docker compose "${COMPOSE_ARGS[@]}" "$@"
+}
+
 # 1. Sanity-check prerequisites.
 command -v docker >/dev/null         || { echo "docker not found"; exit 1; }
 docker compose version >/dev/null    || { echo "docker compose plugin not found"; exit 1; }
@@ -36,27 +52,29 @@ if [ ! -f .env ]; then
 fi
 
 # 3. Build images. The streamer image FROMs the api image, so build api first.
-echo "→ building api image (this is the slow one — torch + ultralytics)"
-docker compose build api
+echo "→ building api image"
+dc build api
 
-echo "→ building remaining images"
-docker compose build streamer worker frontend
+echo "→ building streamer, AI worker, and frontend images"
+# The three worker services share the same image/build definition, so one
+# worker build is sufficient for inference, alerts/training, and recording.
+dc build streamer worker-inference frontend
 
 # 4. Bring everything up.
 echo "→ starting all services"
-docker compose up -d
+dc up -d
 
 # 5. Wait for postgres health, then migrate.
 echo "→ waiting for postgres health"
 for i in $(seq 1 60); do
-  if docker compose exec -T postgres pg_isready -U "$(grep POSTGRES_USER .env | cut -d= -f2)" >/dev/null 2>&1; then
+  if dc exec -T postgres pg_isready -U "$(grep POSTGRES_USER .env | cut -d= -f2)" >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
 
 echo "→ running alembic migrations"
-docker compose exec -T api alembic upgrade head
+dc exec -T api alembic upgrade head
 
 # 6. (Optional) pre-download base YOLOv8 weights so the first inference run
 # isn't blocked on a network fetch.

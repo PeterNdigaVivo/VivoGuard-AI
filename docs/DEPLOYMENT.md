@@ -103,9 +103,13 @@ docker compose \
 ### 2.4 GPU inference
 
 ```bash
-docker compose build --build-arg GPU=true worker     # ~5 GB CUDA image
-# Uncomment the `<<: *gpu-reservation` line under `worker:` in docker-compose.yml
-docker compose up -d worker
+# .env
+GPU_BACKEND=cuda
+USE_GPU=true
+
+# The deploy script automatically applies docker-compose.gpu.yml and builds
+# the CUDA 12.8 worker image for Blackwell and earlier NVIDIA GPUs.
+./scripts/deploy.sh
 ```
 
 ### 2.5 Scaling on a single host

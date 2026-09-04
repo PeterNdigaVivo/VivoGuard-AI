@@ -1,0 +1,20 @@
+# NVIDIA GPU overlay for a single-server deployment.
+# Applied automatically by scripts/deploy.sh when GPU_BACKEND=cuda.
+services:
+  worker-inference:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  worker-alerts:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

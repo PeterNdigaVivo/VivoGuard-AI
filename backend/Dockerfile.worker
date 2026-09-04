@@ -6,7 +6,7 @@
 #
 # Build args:
 #   GPU_BACKEND=cpu    → CPU-only torch + ONNX Runtime (default, ~1.5 GB)
-#   GPU_BACKEND=cuda   → CUDA 12.4 torch + TensorRT     (~5 GB)
+#   GPU_BACKEND=cuda   → CUDA 12.8 torch + TensorRT     (~5 GB)
 #   GPU_BACKEND=rocm   → ROCm 6.2 torch (PyTorch HIP)
 #   GPU_BACKEND=mps    → torch + CoreML tools (Apple Silicon hosts)
 #   GPU_BACKEND=intel  → CPU torch + OpenVINO
