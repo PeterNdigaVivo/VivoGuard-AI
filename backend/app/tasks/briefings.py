@@ -1,4 +1,4 @@
-"""Morning WhatsApp briefings (Priority-3 of the May-2026 redesign).
+"""Legacy scheduled briefing calculations.
 
 Two scheduled tasks, both gated on a per-store wall-clock time:
 
@@ -6,10 +6,7 @@ Two scheduled tasks, both gated on a per-store wall-clock time:
                       active store, sent to stores.manager_phone.
                       Headline-numbers summary from yesterday.
 
-  weekly_briefing     07:00 store-local Monday. Chain-wide summary
-                      for head-office recipients (set via the
-                      WEEKLY_BRIEFING_TO env var, comma-separated
-                      whatsapp:+... numbers).
+  weekly_briefing     07:00 store-local Monday. Chain-wide summary.
 
 Beat ticks every 5 minutes (see app/tasks/celery_app.py). Each task
 checks "is now past the trigger time AND haven't fired today?". The
@@ -17,19 +14,14 @@ last-fire date is stored in Redis (vg:briefing:daily:{store_id}:date
 + vg:briefing:weekly:date) so duplicate firings within the tick
 window are impossible.
 
-Re-uses the existing Twilio integration (TWILIO_ACCOUNT_SID +
-TWILIO_AUTH_TOKEN + TWILIO_WHATSAPP_FROM). Silent skip when those
-env vars aren't set — dev environments just don't get briefings.
+WhatsApp delivery and its configuration have been removed. The delivery hook
+is intentionally a no-op while callers are migrated to in-app notifications.
 """
 from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config import settings
-from app.alerts.whatsapp_delivery import (
-    normalize_recipient as _format_whatsapp_recipient,
-    send_whatsapp as _send_whatsapp,
-)
 from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
@@ -51,6 +43,23 @@ def _store_tz(store):
 def _redis():
     import redis
     return redis.from_url(settings.redis_url, decode_responses=True)
+
+
+def _send_whatsapp(recipients: list[str], body: str) -> int:
+    """Compatibility no-op while legacy notification calls are retired."""
+    return 0
+
+
+def _format_whatsapp_recipient(phone: str | None) -> str | None:
+    """Normalize legacy stored numbers without enabling delivery."""
+    if not phone:
+        return None
+    value = phone.strip()
+    if value.startswith("whatsapp:"):
+        return value
+    if not value.startswith("+"):
+        value = "+254" + value[1:] if value.startswith("0") else "+" + value
+    return f"whatsapp:{value}"
 
 
 # ----- Daily store briefing ------------------------------------------
@@ -223,8 +232,7 @@ def weekly_fire_due() -> None:
 
 
 def _send_weekly_for_chain(db, stores) -> None:
-    """Chain-wide weekly summary. Recipients come from the
-    WEEKLY_BRIEFING_TO env var (comma-separated whatsapp:+... numbers)."""
+    """Build the legacy chain-wide weekly summary without external delivery."""
     from app.models import Alert, DetectionEvent, VisitorTrack
     from sqlalchemy import func
     now = datetime.now(timezone.utc)
@@ -258,15 +266,4 @@ def _send_weekly_for_chain(db, stores) -> None:
     if best:
         body += f"🏆 Best store: {best} ({best_v} visitors)\n"
 
-    raw = (getattr(settings, "weekly_briefing_to", "") or "")
-    recipients = [
-        _format_whatsapp_recipient(t.strip())
-        for t in raw.split(",")
-        if t.strip()
-    ]
-    recipients = [r for r in recipients if r]
-    if not recipients:
-        log.info("weekly briefing: no WEEKLY_BRIEFING_TO recipients configured")
-        return
-    sent = _send_whatsapp(recipients, body)
-    log.info("weekly briefing: sent to %d / %d recipients", sent, len(recipients))
+    log.debug("weekly briefing calculated; external delivery is disabled")

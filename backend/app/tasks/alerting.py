@@ -1,5 +1,4 @@
-"""Sustained-condition alerting — celery beat tasks that escalate
-queue length + camera offline events to WhatsApp.
+"""Sustained-condition monitoring for queue and camera health events.
 
 These are deliberately SEPARATE from the per-frame DetectionEvent
 pipeline because they only fire on conditions that persist over time:
@@ -7,8 +6,9 @@ pipeline because they only fire on conditions that persist over time:
   - queue_escalation_check     queue length > threshold sustained > N minutes
   - camera_health_check        camera offline > 5 minutes during business hours
 
-Both write WhatsApp to settings.dashboard_alert_to and dedup via a
-Redis marker so a single sustained incident produces one nudge.
+Redis markers deduplicate sustained incidents. External WhatsApp delivery is
+disabled; the compatibility delivery hook is retained until these legacy tasks
+are replaced by in-app alert records.
 """
 from __future__ import annotations
 import json
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 # threshold drifts.
 QUEUE_COUNT_THRESHOLD   = 5     # > 5 people
 QUEUE_DURATION_SECONDS  = 180   # for > 3 minutes
-QUEUE_DEDUP_TTL_SECONDS = 600   # one WhatsApp per zone per 10 min
+QUEUE_DEDUP_TTL_SECONDS = 600   # one escalation per zone per 10 min
 
 # Camera-health thresholds.
 CAMERA_OFFLINE_THRESHOLD_SECONDS = 5 * 60      # > 5 min
@@ -45,7 +45,7 @@ def _redis():
 def _dashboard_recipients() -> list[str]:
     """Resolve the ops escalation number from settings → twilio format.
     Returns [] when Twilio isn't configured so dev installs stay quiet."""
-    raw = settings.dashboard_alert_to or ""
+    raw = getattr(settings, "dashboard_alert_to", "") or ""
     out: list[str] = []
     for part in raw.split(","):
         norm = _format_whatsapp_recipient(part.strip())

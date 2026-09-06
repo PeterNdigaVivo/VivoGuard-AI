@@ -385,18 +385,6 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
-    # WhatsApp via Twilio Business API.
-    twilio_whatsapp_from: str = ""       # e.g. "whatsapp:+14155238886"
-    whatsapp_to: str = ""                # comma-separated "whatsapp:+254..."
-    whatsapp_priority_only: bool = True  # only high-priority alerts by default
-    # Weekly chain-briefing recipients (Monday 07:00). Comma-separated
-    # `whatsapp:+<msisdn>` numbers. Empty = no weekly briefing sent.
-    weekly_briefing_to: str = ""
-    # Dashboard escalation recipient — sustained queue + camera-health
-    # alerts go here regardless of per-store manager_phone wiring. The
-    # ops team wanted a single number that gets every high-priority
-    # nudge from the dashboard.
-    dashboard_alert_to: str = "whatsapp:+25441418586"
     # Phone numbers surfaced in the "What to do" alert steps so the
     # guidance is actionable. Blank = the card shows a generic phrase
     # ("building security", "IT support", "the store").

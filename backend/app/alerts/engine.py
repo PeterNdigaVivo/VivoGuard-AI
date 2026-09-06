@@ -22,7 +22,6 @@ import redis.asyncio as aioredis
 from app.alerts.notifiers.base import AlertPayload, Notifier
 from app.alerts.notifiers.twilio_sms import TwilioSMSNotifier
 from app.alerts.notifiers.webhook import WebhookNotifier
-from app.alerts.notifiers.whatsapp import WhatsAppNotifier
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Camera, Zone
@@ -38,7 +37,7 @@ DEDUP_SECONDS_HIGH = 5
 class AlertEngine:
     def __init__(self, notifiers: Iterable[Notifier] | None = None):
         self.notifiers = list(notifiers or (
-            TwilioSMSNotifier(), WhatsAppNotifier(), WebhookNotifier(),
+            TwilioSMSNotifier(), WebhookNotifier(),
         ))
         # Last fire timestamps for de-dup, keyed by (camera_id, detection_type, zone_id).
         self._last: dict[tuple[int, str, int | None], float] = {}
