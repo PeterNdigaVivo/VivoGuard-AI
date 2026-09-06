@@ -26,6 +26,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config import settings
+from app.alerts.whatsapp_delivery import (
+    normalize_recipient as _format_whatsapp_recipient,
+    send_whatsapp as _send_whatsapp,
+)
 from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
@@ -47,37 +51,6 @@ def _store_tz(store):
 def _redis():
     import redis
     return redis.from_url(settings.redis_url, decode_responses=True)
-
-
-def _send_whatsapp(recipients: list[str], body: str) -> int:
-    """WhatsApp delivery is disabled (Ops decision — dashboard alerts
-    only). Kept as a no-op stub so every existing caller still
-    compiles and the signature can be unwound piece-by-piece in
-    follow-up commits. Logs once per call so the ops team can see
-    that a notification WOULD have gone out."""
-    if not recipients:
-        return 0
-    log.info("WhatsApp disabled — would have sent to %d recipient(s): %s",
-             len(recipients), body[:120].replace("\n", " "))
-    return 0
-
-
-def _format_whatsapp_recipient(phone: str | None) -> str | None:
-    """Twilio expects `whatsapp:+<msisdn>`. Operators often save just
-    the digits — normalise on the way out."""
-    if not phone:
-        return None
-    p = phone.strip()
-    if p.startswith("whatsapp:"):
-        return p
-    if not p.startswith("+"):
-        # heuristic: leading 0 → Kenya country code (+254). Operators
-        # outside Kenya can save the full +<cc> form themselves.
-        if p.startswith("0"):
-            p = "+254" + p[1:]
-        else:
-            p = "+" + p
-    return f"whatsapp:{p}"
 
 
 # ----- Daily store briefing ------------------------------------------

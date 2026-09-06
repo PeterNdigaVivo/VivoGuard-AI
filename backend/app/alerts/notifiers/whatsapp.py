@@ -10,23 +10,36 @@ TWILIO_AUTH_TOKEN). New env vars:
                          Stops the manager's phone from melting.
 """
 from __future__ import annotations
+import asyncio
 import logging
 
 from app.alerts.notifiers.base import AlertPayload, Notifier
+from app.alerts.whatsapp_delivery import configured, send_whatsapp
+from app.config import settings
 
 log = logging.getLogger(__name__)
 
 
 class WhatsAppNotifier(Notifier):
-    """Disabled — Ops decision (dashboard alerts only). Kept in the
-    notifier registry as a no-op so existing dispatch code still
-    iterates cleanly; is_enabled() always returns False."""
     name = "whatsapp"
 
     def is_enabled(self) -> bool:
-        return False
+        return configured() and bool(settings.whatsapp_to.strip())
 
     async def send(self, alert: AlertPayload) -> None:
-        log.info("WhatsApp disabled — skipping notify for %s",
-                 alert.detection_type)
-        return
+        if not self.is_enabled():
+            return
+        priority = str((alert.extra or {}).get("priority") or "normal").lower()
+        if settings.whatsapp_priority_only and priority not in {"high", "urgent"}:
+            return
+
+        recipients = settings.whatsapp_to.split(",")
+        body = (
+            f"VivoGuard {priority.upper()} ALERT\n"
+            f"{alert.detection_type} — {alert.camera_name}\n"
+            f"Confidence: {alert.confidence:.0%}\n"
+            f"Time: {alert.timestamp_iso}"
+        )
+        sent = await asyncio.to_thread(send_whatsapp, recipients, body)
+        log.info("WhatsApp alert %s delivered to %d recipient(s)",
+                 alert.alert_id, sent)
