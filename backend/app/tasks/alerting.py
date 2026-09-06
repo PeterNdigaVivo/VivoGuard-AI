@@ -6,9 +6,8 @@ pipeline because they only fire on conditions that persist over time:
   - queue_escalation_check     queue length > threshold sustained > N minutes
   - camera_health_check        camera offline > 5 minutes during business hours
 
-Redis markers deduplicate sustained incidents. External WhatsApp delivery is
-disabled; the compatibility delivery hook is retained until these legacy tasks
-are replaced by in-app alert records.
+Redis markers deduplicate sustained incidents; actionable conditions are
+persisted as in-app alerts.
 """
 from __future__ import annotations
 import json
@@ -21,7 +20,6 @@ import redis
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
-from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
 from app.utils.business_hours import is_store_open
 
 log = logging.getLogger(__name__)
@@ -40,18 +38,6 @@ CAMERA_HEALTH_DEDUP_TTL_SECONDS  = 30 * 60     # one nudge per camera / 30 min
 
 def _redis():
     return redis.from_url(settings.redis_url, decode_responses=True)
-
-
-def _dashboard_recipients() -> list[str]:
-    """Resolve the ops escalation number from settings → twilio format.
-    Returns [] when Twilio isn't configured so dev installs stay quiet."""
-    raw = getattr(settings, "dashboard_alert_to", "") or ""
-    out: list[str] = []
-    for part in raw.split(","):
-        norm = _format_whatsapp_recipient(part.strip())
-        if norm:
-            out.append(norm)
-    return out
 
 
 # ---- Business-hours gate for operational alerts -----------------------
@@ -94,11 +80,11 @@ def _within_operating_hours(store) -> bool:
 def queue_escalation_check() -> None:
     """Scan the latest queue_length metric snapshots for every camera.
     When count > threshold AND has been > threshold for > duration,
-    fire one WhatsApp.
+    create one in-app alert.
 
     Sustained-state tracking is in Redis:
       vg:queue_alert:start:{store_id}:{camera_id}:{zone_id} → epoch when high count first observed
-      vg:queue_alert:sent:{store_id}:{camera_id}:{zone_id}  → set once WhatsApp went out (TTL = dedup)
+      vg:queue_alert:sent:{store_id}:{camera_id}:{zone_id}  → alert dedup marker
     """
     from app.database import SessionLocal
     from app.models import Camera, MetricSnapshot, Store, Zone
@@ -154,10 +140,18 @@ def queue_escalation_check() -> None:
             body = (f"⚠️ Long queue at {store_name} ({zone_name}) — "
                     f"{count} people waiting {minutes} minutes "
                     f"[{cam_name}]")
-            recipients = _dashboard_recipients()
-            sent = _send_whatsapp(recipients, body)
-            log.info("queue escalation: %s (%d people %dm) → %d WhatsApp sent",
-                     store_name, count, minutes, sent)
+            _create_info_alert(
+                db, camera_id=cam_id, zone_id=zone_id or None,
+                store_id=store_id or None, detection_type="queue_length",
+                cls="long_queue", extra={
+                    "priority": "warning", "title": "Long queue",
+                    "message": body, "count": count,
+                    "duration_seconds": int(duration),
+                },
+            )
+            db.commit()
+            log.info("queue escalation alert: %s (%d people %dm)",
+                     store_name, count, minutes)
             r.set(sent_key, "1", ex=QUEUE_DEDUP_TTL_SECONDS)
 
 
@@ -253,7 +247,6 @@ def inference_pipeline_health_check() -> None:
     # (matches the shop_not_opened URGENT pattern; the alert is fleet-
     # scoped but the schema needs a camera_id).
     anchor_cam_id = None
-    created_event = None
     try:
         from app.database import SessionLocal as _SL
         from app.models import Camera as _Cam
@@ -263,7 +256,7 @@ def inference_pipeline_health_check() -> None:
                      .order_by(_Cam.id.asc()).first())
             anchor_cam_id = int(row[0]) if row else None
             if anchor_cam_id:
-                created_event = _create_info_alert(
+                _create_info_alert(
                     db, camera_id=anchor_cam_id, zone_id=None, store_id=None,
                     detection_type="system_health",
                     cls="inference_pipeline_stalled", extra=extra,
@@ -272,13 +265,6 @@ def inference_pipeline_health_check() -> None:
     except Exception as e:
         log.exception("inference_pipeline_health_check: alert write failed: %s", e)
         return
-
-    try:
-        recipients = _dashboard_recipients()
-        if recipients and _info_notification_allowed(created_event):
-            _send_whatsapp(recipients, f"🚨 {body}")
-    except Exception:
-        pass
 
     # No TTL: one incident must create one operator alert, not recur every
     # 30 minutes.  The healthy branch above clears this key on recovery.
@@ -539,8 +525,8 @@ def prune_checkout_snapshots() -> None:
 @celery_app.task(name="alerting.camera_health_check", ignore_result=True)
 def camera_health_check() -> None:
     """Walk active cameras during their store's business hours. Any
-    camera whose `last_seen_at` is older than 5 minutes earns a
-    WhatsApp nudge (deduped per-camera per-30-minutes)."""
+    camera whose `last_seen_at` is older than 5 minutes creates an
+    in-app alert (deduped per-camera per-30-minutes)."""
     from app.database import SessionLocal
     from app.models import Camera, Store
     from app.utils.business_hours import is_store_open
@@ -596,24 +582,29 @@ def camera_health_check() -> None:
                 if last_seen else "never"
             body = (f"⚠️ Camera offline: {cam.name} at {store.name}. "
                     f"Last seen {last_seen_str}. 24h uptime {uptime_pct}%.")
-            recipients = _dashboard_recipients()
-            sent = _send_whatsapp(recipients, body)
-            log.info("camera health: %s (%s) offline → %d WhatsApp sent",
-                     cam.name, store.name, sent)
+            _create_info_alert(
+                db, camera_id=cam.id, zone_id=None, store_id=store.id,
+                detection_type="system_health", cls="camera_offline",
+                extra={
+                    "priority": "warning", "title": "Camera offline",
+                    "message": body, "last_seen_at": (
+                        last_seen.isoformat() if last_seen else None
+                    ), "uptime_24h_pct": uptime_pct,
+                }, capture_snapshot=False,
+            )
+            db.commit()
+            log.info("camera health alert: %s (%s) offline", cam.name, store.name)
             r.set(sent_key, "1", ex=CAMERA_HEALTH_DEDUP_TTL_SECONDS)
 
 
 # ---- Uniform-violation manager notification ---------------------------
 
-UNIFORM_DEDUP_TTL_SECONDS = 30 * 60   # one WhatsApp per store per 30 min
+UNIFORM_DEDUP_TTL_SECONDS = 30 * 60   # one alert per store per 30 min
 
 
 @celery_app.task(name="alerting.uniform_violation_check", ignore_result=True)
 def uniform_violation_check() -> None:
-    """Notify the store manager (falling back to the ops number) when a
-    uniform-compliance violation alert fired in the last ~2 minutes.
-    Runs off the inference hot path so the WhatsApp round-trip never
-    stalls a camera loop. Deduped per store per 30 min."""
+    """Deduplicate recent uniform-compliance alerts per store."""
     from app.database import SessionLocal
     from app.models import Alert, Camera, DetectionEvent, Store
 
@@ -655,17 +646,7 @@ def uniform_violation_check() -> None:
                     body = (f"🔴 Repeated uniform violations at {store_name} "
                             f"today [{cam.name}]")
 
-            # Prefer the store manager's number; fall back to ops.
-            recipients = []
-            mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-            if mgr:
-                recipients.append(mgr)
-            recipients.extend(_dashboard_recipients())
-            recipients = list(dict.fromkeys(recipients))  # dedup, keep order
-
-            sent = _send_whatsapp(recipients, body)
-            log.info("uniform violation: %s [%s] → %d WhatsApp sent",
-                     store_name, cam.name, sent)
+            log.info("uniform violation alert: %s [%s]", store_name, cam.name)
             r.set(sent_key, "1", ex=UNIFORM_DEDUP_TTL_SECONDS)
 
 
@@ -978,15 +959,6 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
         log.warning("filmstrip enqueue failed (info alert cam=%s): %s",
                     camera_id, e)
     return rec
-
-
-def _info_notification_allowed(event) -> bool:
-    """Apply the persisted pair policy to direct-task notifications."""
-    if event is None:
-        return True
-    quality = ((getattr(event, "extra", None) or {})
-               .get("quality_control") or {})
-    return not bool(quality.get("notification_suppressed"))
 
 
 def _save_alert_thumbnail(camera_id: int, detection_type: str) -> str | None:
@@ -1345,16 +1317,15 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
     return "created"
 
 
-# ---- 18:00 Daily Sales Floor WhatsApp summary ------------------------
+# ---- 18:00 Daily Sales Floor summary ---------------------------------
 
 SFI_DAILY_HOUR = 18                  # 18:00 store-local trigger
 
 
 @celery_app.task(name="alerting.sales_floor_daily_summary", ignore_result=True)
 def sales_floor_daily_summary() -> None:
-    """Per-store 18:00 EAT WhatsApp summary of today's sales-floor
-    activity. 5-min beat tick + per-store-per-day Redis dedup matches
-    the briefings pattern."""
+    """Per-store 18:00 EAT summary of today's sales-floor
+    activity with per-store-per-day Redis deduplication."""
     return  # temporarily disabled (ops, Aug 2026) — delete this line to
     #         resume the daily sales-floor summary.
     from app.database import SessionLocal
@@ -1470,17 +1441,7 @@ def _sfi_send_daily_for_store(db, store, local_now) -> None:
         body += (f"\nTip: Consider moving popular items from {winner_name} "
                  f"to the main floor during quiet periods.")
 
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if not recipients:
-        return
-    sent = _send_whatsapp(recipients, body)
-    log.info("sales-floor daily: store=%s customers=%s → %d WhatsApp sent",
-             store.id, total_customers, sent)
+    log.info("sales-floor daily: store=%s customers=%s", store.id, total_customers)
 
 
 # ---- "Store Not Opened" URGENT (line-crossing path) ------------------
@@ -1664,21 +1625,12 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     }
     # Anchor on a currently streaming entrance camera so the alert can carry
     # evidence even when an older/stale camera record sorts first.
-    created_event = _create_info_alert(
+    _create_info_alert(
         db, camera_id=fresh_entrance_cam_ids[0], zone_id=None, store_id=store.id,
         detection_type="shop_open_close", cls="shop_not_opened", extra=extra)
     db.commit()
     r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
 
-    # WhatsApp the ops list too — this is a manager-actionable URGENT.
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if recipients and _info_notification_allowed(created_event):
-        _send_whatsapp(recipients, f"🚨 {body}")
     log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
                 store.id, store.name, cutoff_hhmm)
 
@@ -1899,7 +1851,7 @@ SHOP_DAILY_HOUR = 22       # 22:00 store-local trigger
 def shop_daily_summary_check() -> None:
     """5-min dispatcher. Per-store-per-day at 22:00 EAT, builds the
     open / close summary from today's shop_open_close DetectionEvent
-    rows and creates one INFO alert + WhatsApp.
+    rows and creates one INFO alert.
 
     "Vivo Yaya opened at 08:58 AM, closed at 21:05 PM
      Open for 12 hours 7 minutes today"
@@ -2011,19 +1963,11 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
         "duration_text":      duration_text or None,
         "eat_time":           local_now.strftime("%H:%M"),
     }
-    created_event = _create_info_alert(
+    _create_info_alert(
         db, camera_id=cams[0].id, zone_id=None, store_id=store.id,
         detection_type="shop_open_close", cls="shop_daily_summary", extra=extra)
     db.commit()
 
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if recipients and _info_notification_allowed(created_event):
-        _send_whatsapp(recipients, f"📋 {summary}")
     log.info("shop_daily_summary: store=%s %s", store.id, summary)
 
 

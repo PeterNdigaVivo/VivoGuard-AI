@@ -27,8 +27,6 @@ class ScheduledReportIn(BaseModel):
     time_of_day: time_t | None = None
     # Only meaningful for cadence='weekly'. 0=Mon..6=Sun.
     day_of_week: int | None = Field(default=None, ge=0, le=6)
-    # Optional comma-separated `whatsapp:+<msisdn>` recipients.
-    whatsapp_recipients: str | None = None
 
 
 class ScheduledReportOut(ScheduledReportIn):

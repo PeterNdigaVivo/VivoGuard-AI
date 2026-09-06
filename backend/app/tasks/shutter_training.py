@@ -233,21 +233,8 @@ def _validate(weights: Path, dataset_root: Path) -> dict:
 
 
 def _email_summary(store_id: int, ai_model_name: str, report: dict) -> None:
-    """Best-effort completion email reusing the briefing WhatsApp/email
-    helpers. Silent no-op when notifications aren't configured."""
-    try:
-        acc = report.get("accuracy")
-        lines = [f"Shutter model training complete for store {store_id}.",
-                 f"Model: {ai_model_name}",
-                 f"Accuracy: {round(acc * 100, 1)}%" if acc is not None else "Accuracy: n/a"]
-        for label, pc in (report.get("per_class") or {}).items():
-            lines.append(f"  {label}: {int(pc['precision']*100)}% precision, "
-                         f"{int(pc['recall']*100)}% recall")
-        lines.append(report.get("recommendation", ""))
-        body = "\n".join(lines)
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], body)
-    except Exception:
-        pass
+    """Record shutter-training completion in worker logs."""
+    log.info(
+        "shutter training complete: store=%s model=%s accuracy=%s",
+        store_id, ai_model_name, report.get("accuracy"),
+    )

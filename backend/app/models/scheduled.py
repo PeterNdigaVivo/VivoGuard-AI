@@ -28,10 +28,6 @@ class ScheduledReport(Base):
     # 5-minute beat tick from firing the same report twice inside the
     # operator's fire window.
     last_fire_date: Mapped[date_t | None] = mapped_column(Date, nullable=True)
-    # Optional WhatsApp delivery alongside email. Comma-separated list
-    # of `whatsapp:+<msisdn>` numbers (Twilio format).
-    whatsapp_recipients: Mapped[str | None] = mapped_column(Text, nullable=True)
-
     last_run_at:Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active:  Mapped[bool]  = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

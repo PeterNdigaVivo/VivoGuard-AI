@@ -299,22 +299,10 @@ def _validate(weights: Path, dataset_root: Path, labels: tuple[str, ...]) -> dic
 
 def _notify_chain(detector_type: str, model_id: int, report: dict,
                   sample_count: int, store_count: int) -> None:
-    try:
-        acc = report.get("accuracy")
-        lines = [
-            f"Chain {detector_type} model training complete.",
-            f"Model id: {model_id}",
-            f"Samples: {sample_count} from {store_count} stores",
-            (f"Accuracy: {round(acc * 100, 1)}%"
-             if acc is not None else "Accuracy: n/a"),
-            report.get("recommendation", ""),
-        ]
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], "\n".join(lines))
-    except Exception:
-        pass
+    log.info(
+        "chain training complete: detector=%s model=%s samples=%s stores=%s accuracy=%s",
+        detector_type, model_id, sample_count, store_count, report.get("accuracy"),
+    )
 
 
 @celery_app.task(name="training.train_chain_model", bind=True, ignore_result=True)
@@ -526,14 +514,4 @@ def chain_retrain_due() -> None:
 
 
 def _notify_auto_retrain_started(detector_type: str) -> None:
-    try:
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], (
-                f"🔁 Weekly chain retrain started — {detector_type}.\n"
-                "Pooled samples from every store. You'll get another "
-                "WhatsApp when training completes with accuracy stats."
-            ))
-    except Exception:
-        pass
+    log.info("chain auto-retrain started: detector=%s", detector_type)

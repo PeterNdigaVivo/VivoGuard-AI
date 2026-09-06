@@ -71,8 +71,6 @@ def _prepare(monkeypatch, fresh_camera_ids):
                         lambda _store_id, _day: None)
     monkeypatch.setattr(alerting, "_occupancy_fallback_for_store",
                         lambda *args, **kwargs: None)
-    monkeypatch.setattr(alerting, "_dashboard_recipients", lambda: [])
-
     def create(_db, **kwargs):
         created.append(kwargs)
         return SimpleNamespace(id=1)

@@ -760,10 +760,4 @@ def _storage_alert(r, level: str, body: str) -> None:
         r.set(key, "1", ex=3600)
     except Exception:
         pass
-    try:
-        from app.tasks.alerting import _dashboard_recipients
-        from app.tasks.briefings import _send_whatsapp
-        _send_whatsapp(_dashboard_recipients(), f"[VivoGuard recorder] {level}: {body}")
-    except Exception:
-        pass
     log.warning("recorder storage %s: %s", level, body)

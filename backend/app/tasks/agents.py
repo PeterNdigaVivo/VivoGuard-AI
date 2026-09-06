@@ -35,10 +35,7 @@ Resource discipline: every DB read is COUNT/GROUP-BY or LIMIT-bounded; the
 Simulation agent processes at most 20 cameras per run via a Redis cursor and
 calls gc.collect() between cameras.
 
-Agent-level URGENT notifications (watchdog DEAD, circuit-breaker SUSPEND) go
-to the ops WhatsApp/dashboard channel rather than the camera-bound Alert
-table (DetectionEvent.camera_id is NOT NULL, so a system alert has no camera
-to attach to).
+Agent-level warnings are written to the structured report table and worker log.
 """
 from __future__ import annotations
 
@@ -93,8 +90,8 @@ AGENT_ROLES: dict[str, str] = {
 #     simulation.
 #   * SONNET (the default model) — the two daily strategic agents:
 #     retail_standards and inspection.
-# Inspection reasons INSIDE _run_inspection (so its Claude narrative can be
-# sent over WhatsApp), so it is intentionally NOT in AI_AGENTS — that keeps
+# Inspection reasons INSIDE _run_inspection, so it is intentionally NOT in
+# AI_AGENTS — that keeps
 # the generic layer from making a second LLM call.
 AI_AGENTS = {"ml_dataset", "training", "frontend", "db_admin", "simulation",
              "retail_standards"}
@@ -195,16 +192,8 @@ def _note_failure(r, name: str) -> None:
 
 
 def _ops_alert(kind: str, body: str) -> None:
-    """Best-effort ops notification. Uses the existing WhatsApp channel
-    (currently a logging no-op) + always logs. Never raises."""
-    msg = f"[VivoGuard agents] {kind}: {body}"
-    try:
-        from app.tasks.alerting import _dashboard_recipients
-        from app.tasks.briefings import _send_whatsapp
-        _send_whatsapp(_dashboard_recipients(), msg)
-    except Exception as e:
-        log.warning("ops alert delivery failed: %s", e)
-    log.warning(msg)
+    """Record an operator-visible agent warning."""
+    log.warning("[VivoGuard agents] %s: %s", kind, body)
 
 
 def _write_report(name: str, status: str, findings: dict | None = None, *,
@@ -816,9 +805,8 @@ def _run_inspection() -> dict:
     crit = sum(v.get("critical", 0) for v in f["summary_24h"].values())
     warn = sum(v.get("warning", 0) for v in f["summary_24h"].values())
 
-    # AI narrative (Sonnet) BEFORE sending, so the WhatsApp digest IS the
-    # Claude-written brief. Falls back to a deterministic one-liner if the
-    # LLM is unavailable — the digest always goes out.
+    # AI narrative (Sonnet) is stored with the inspection report. Falls back
+    # to a deterministic one-liner when the LLM is unavailable.
     status: str | None = None
     verdict = _ai_reason("inspection", AGENT_ROLES["inspection"], f)
     if verdict and verdict.get("summary"):

@@ -44,12 +44,10 @@ celery_app = Celery(
         "app.tasks.reports",
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
-        "app.tasks.briefings",
         "app.tasks.alerting",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
-        "app.tasks.queue_report",
         "app.tasks.vlm_tasks",
         "app.tasks.agents",
         "app.tasks.recorder",
@@ -98,7 +96,6 @@ celery_app.conf.update(
         "alerting.store_intelligence_update":   {"queue": "alerts"},
         "alerting.live_activity_sentinel":      {"queue": "alerts"},
         "training.mine_live_uniform_crops":     {"queue": "alerts"},
-        "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
@@ -117,8 +114,6 @@ celery_app.conf.update(
         "alerting.prune_alert_snapshots":       {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
-        "briefings.daily_fire_due":           {"queue": "beat"},
-        "briefings.weekly_fire_due":          {"queue": "beat"},
         "training.chain_retrain_due":         {"queue": "beat"},
         "training.compute_model_metrics_daily": {"queue": "beat"},
         "training.pseudo_label_pending":      {"queue": "beat"},
@@ -145,7 +140,6 @@ celery_app.conf.update(
         "maintenance.prune_alerts":           {"queue": "beat"},
         "maintenance.prune_metric_snapshots": {"queue": "beat"},
         "maintenance.cameras_status_sync":    {"queue": "beat"},
-        "queue_report.fire_due":              {"queue": "beat"},
         "staff_classifier.classify_today":    {"queue": "beat"},
         "heatmap.snapshot_all":               {"queue": "beat"},
         "heatmap.snapshot_grids_hourly":      {"queue": "beat"},
@@ -249,20 +243,7 @@ celery_app.conf.update(
             "task": "staff_classifier.classify_today",
             "schedule": 600.0,
         },
-        # Daily WhatsApp briefing per store — fires at 08:00 store-local
-        # for each active store. The dispatcher checks the local clock
-        # every 5 minutes and uses a Redis day-marker to dedup.
-        "briefings-daily-every-5min": {
-            "task": "briefings.daily_fire_due",
-            "schedule": 300.0,
-        },
-        # Weekly chain briefing — fires Monday 07:00 anchor-time.
-        # Same 5-minute beat tick + iso-week marker for dedup.
-        "briefings-weekly-every-5min": {
-            "task": "briefings.weekly_fire_due",
-            "schedule": 300.0,
-        },
-        # Sustained-queue WhatsApp escalation — every 30s the task
+        # Sustained-queue alert — every 30s the task
         # checks the latest queue_length snapshot per zone. Fires once
         # per zone when count > 5 has held for > 3 min.
         "queue-escalation-every-30s": {
@@ -298,16 +279,15 @@ celery_app.conf.update(
             "task": "alerting.prune_alert_snapshots",
             "schedule": 60 * 60.0,
         },
-        # Camera-offline WhatsApp nudge — every 60s the task scans
+        # Camera-offline alert — every 60s the task scans
         # ai_enabled cameras and fires when last_seen is > 5 min stale
         # AND the store is currently within business hours.
         "camera-health-every-60s": {
             "task": "alerting.camera_health_check",
             "schedule": 60.0,
         },
-        # Uniform-violation manager notification — every 60s scans for
-        # uniform_compliance alerts in the last ~2 min and WhatsApps the
-        # store manager. Deduped per store per 30 min.
+        # Uniform-violation deduplication — every 60s scans recent
+        # uniform_compliance alerts. Deduped per store per 30 min.
         "uniform-violation-every-60s": {
             "task": "alerting.uniform_violation_check",
             "schedule": 60.0,
@@ -324,12 +304,6 @@ celery_app.conf.update(
         "after-hours-prune-every-1h": {
             "task": "alerting.after_hours_prune",
             "schedule": 60 * 60.0,
-        },
-        # Daily Queue Intelligence report — fires once per store after
-        # 21:00 store-local. 5-min beat tick + per-store Redis dedup.
-        "queue-report-every-5min": {
-            "task": "queue_report.fire_due",
-            "schedule": 300.0,
         },
         # Weekly chain auto-retrain — 5-min beat tick. Fires Monday
         # 02:00 Africa/Nairobi when the chain dataset has grown since
@@ -430,11 +404,6 @@ celery_app.conf.update(
             "task": "training.mine_live_uniform_crops",
             "schedule": timedelta(hours=2),
         },
-        # Daily 18:00 EAT WhatsApp summary — same routing rationale.
-        "sales-floor-daily-summary-every-5min": {
-            "task": "alerting.sales_floor_daily_summary",
-            "schedule": timedelta(minutes=5),
-        },
         # 5-min dispatcher checking whether each store has had its
         # first inward line-crossing of the day before the
         # not-opened cutoff (default 09:30 EAT). Per-store-per-day
@@ -457,7 +426,7 @@ celery_app.conf.update(
         # 5-min dispatcher checking whether 22:00 EAT has passed for
         # each store; when it has, builds the daily open/close
         # summary from today's shop_open_close events and emits one
-        # INFO alert + WhatsApp.
+        # INFO alert.
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),

@@ -27,13 +27,7 @@ Window math:
   • All windows further clamped to business hours when the report is
     store-scoped — so after-hours noise doesn't make it into the PDF.
 
-Delivery:
-  • Email via SMTP notifier (existing path).
-  • WhatsApp side-channel via Twilio when whatsapp_recipients is set —
-    plain-text message naming the file + the headline number. Twilio
-    can't take a binary attachment without a public URL; we surface a
-    short summary instead so on-call managers see the headline number
-    on their phone without opening the PDF.
+Delivery is by email through SMTP.
 """
 from __future__ import annotations
 import logging
@@ -223,17 +217,6 @@ def dispatch_report(report_id: int) -> None:
             except Exception as e:
                 log.warning("dispatch_report: email failed for report id=%s: %s", rep.id, e)
 
-        # WhatsApp side-channel. Twilio can't attach binary without a
-        # public URL, so we send a short summary that gives the
-        # on-call manager the headline number on their phone.
-        wa_to = [r.strip() for r in (rep.whatsapp_recipients or "").split(",") if r.strip()]
-        if wa_to:
-            try:
-                _send_whatsapp_summary(rep, store, rollups, wa_to)
-                log.info("dispatch_report: WhatsApp sent for report id=%s to %s", rep.id, wa_to)
-            except Exception as e:
-                log.warning("dispatch_report: WhatsApp failed for report id=%s: %s", rep.id, e)
-
         # Update fire tracking. last_fire_date dedups inside today's
         # 5-minute beat window; last_run_at supports the legacy
         # rolling-hours fallback.
@@ -265,13 +248,3 @@ def _send_email(to: list[str], subject: str, body: str,
             if settings.smtp_user:
                 s.login(settings.smtp_user, settings.smtp_password)
             s.send_message(msg)
-
-
-def _send_whatsapp_summary(rep, store, rollups: list[dict],
-                            recipients: list[str]) -> None:
-    """WhatsApp delivery is disabled (Ops decision — dashboard alerts
-    only). Kept as a no-op so the dispatch loop signature stays the
-    same; email and dashboard alerts are unaffected."""
-    if recipients:
-        log.info("WhatsApp disabled — would have sent %s summary to %d",
-                 getattr(rep, "cadence", "report"), len(recipients))
