@@ -461,6 +461,25 @@ def start_job(payload: TrainingJobIn, db: Session = Depends(get_db),
     ds = db.get(Dataset, payload.dataset_id)
     if not ds:
         raise HTTPException(404, "dataset not found")
+    if not ds.classes_json:
+        raise HTTPException(
+            409,
+            "background-only feedback pools cannot be trained directly; "
+            "pair this dataset with its positive pool in a fine-tune job",
+        )
+    approved = (db.query(TrainingImage)
+                  .filter(TrainingImage.dataset_id == ds.id,
+                          TrainingImage.labeled.is_(True),
+                          TrainingImage.eligible_for_training.is_(True),
+                          TrainingImage.review_state == "approved")
+                  .count())
+    min_images = max(5, math.ceil(5 / max(float(payload.split_val), 0.01)))
+    if approved < min_images:
+        raise HTTPException(
+            409,
+            f"dataset has {approved} approved images; at least {min_images} "
+            "are required to produce five held-out validation images",
+        )
     from app.training.orchestrator import _priority_for
     job = TrainingJob(
         model_name=payload.model_name,

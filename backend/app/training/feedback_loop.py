@@ -18,6 +18,8 @@ swamping the gradient with background examples).
 """
 from __future__ import annotations
 import logging
+import shutil
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -26,6 +28,31 @@ from app.models import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _persist_feedback_image(dataset_id: int, alert_id: int,
+                            source_path: str) -> str | None:
+    """Copy alert evidence into the durable dataset volume.
+
+    Alert thumbnails are retention-managed and may be deleted before a
+    training job runs.  TrainingImage must therefore reference its own copy,
+    not the transient alert snapshot.
+    """
+    from app.training.dataset import dataset_root
+
+    source = Path(source_path)
+    if not source.is_file():
+        return None
+    suffix = source.suffix.lower() or ".jpg"
+    target = dataset_root(dataset_id) / "images" / f"alert_{alert_id}{suffix}"
+    try:
+        if not target.exists():
+            shutil.copy2(source, target)
+    except OSError as exc:
+        log.warning("feedback: could not preserve alert %s image %s: %s",
+                    alert_id, source, exc)
+        return None
+    return str(target)
 
 
 def _training_provenance(verdict: str) -> dict:
@@ -192,12 +219,19 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         [cls],
         description="auto: confirmed alerts (positive feedback pool)",
     )
+    file_path = _persist_feedback_image(ds.id, a.id, ev.thumbnail_path)
+    if not file_path:
+        log.warning("feedback: confirmed alert %s source image is unavailable",
+                    alert_id)
+        return
+    source_extra = _build_source_extra(db, ev, a, "correct")
+    source_extra["source_thumbnail_path"] = ev.thumbnail_path
     img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=ev.thumbnail_path,
+        file_path=file_path,
         labeled=True,
-        source_extra=_build_source_extra(db, ev, a, "correct"),
+        source_extra=source_extra,
         source_alert_id=a.id,           # for revert_verdict
         **_training_provenance("correct"),
     )
@@ -271,14 +305,22 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         [],     # no classes — pure background
         description="auto: dismissed alerts (hard-negative pool)",
     )
+    durable_path = _persist_feedback_image(ds.id, a.id, file_path)
+    if not durable_path:
+        a.feedback_used_for_training = True
+        db.commit()
+        log.warning("feedback: dismissed alert %s source image is unavailable",
+                    alert_id)
+        return
     _src = _build_source_extra(db, ev, a, "false")
+    _src["source_thumbnail_path"] = file_path
     _src["training_quarantined_reason"] = "single_reviewer_dismissal"
     if label_hint:
         _src["label_hint"] = label_hint
     neg_img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=file_path,
+        file_path=durable_path,
         labeled=True,           # labelled as background — no Annotation rows
         source_extra=_src,
         source_alert_id=a.id,           # for revert_verdict
