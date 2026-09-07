@@ -75,6 +75,15 @@ def test_gpu_benchmark_is_packaged_and_rejects_cpu_fallback():
     assert '"recommended_batch_size"' in benchmark
 
 
+def test_cuda_image_preinstalls_tensorrt_export_dependencies():
+    requirements = (
+        ROOT / "backend" / "requirements.worker.cuda.txt"
+    ).read_text().splitlines()
+
+    assert "onnx>=1.12.0,<2.0.0" in requirements
+    assert "onnxslim>=0.1.82" in requirements
+
+
 def test_gpu_benchmark_keeps_stdout_as_valid_json(monkeypatch, capfd):
     benchmark_path = ROOT / "backend" / "scripts" / "gpu_concurrency_benchmark.py"
     spec = importlib.util.spec_from_file_location("gpu_capacity_benchmark", benchmark_path)
