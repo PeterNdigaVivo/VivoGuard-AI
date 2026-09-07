@@ -178,6 +178,13 @@ def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
         log.warning("training enqueue failed: %s", e)
 
 
+def _enqueue_if_trainable(db: Session, detection_type: str,
+                          provenance: dict) -> None:
+    """Evaluate retraining immediately for feedback allowed by policy."""
+    if provenance.get("eligible_for_training"):
+        _maybe_enqueue_training(db, detection_type)
+
+
 def _enqueue_temporal_harvest(alert_id: int) -> None:
     """Kick the ±1s temporal-context frame extraction onto the WORKER
     (the clip lives on the shared volume and opencv only exists there).
@@ -226,6 +233,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         return
     source_extra = _build_source_extra(db, ev, a, "correct")
     source_extra["source_thumbnail_path"] = ev.thumbnail_path
+    provenance = _training_provenance("correct")
     img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
@@ -233,7 +241,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         labeled=True,
         source_extra=source_extra,
         source_alert_id=a.id,           # for revert_verdict
-        **_training_provenance("correct"),
+        **provenance,
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
@@ -253,9 +261,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     # moment bbox above must never be copied onto frames where the
     # person has moved.
     _enqueue_temporal_harvest(alert_id)
-    # A first reviewer creates evidence but cannot make it trainable alone.
-    # The independent-review workflow promotes the sample and evaluates the
-    # retraining threshold only after a second reviewer agrees.
+    _enqueue_if_trainable(db, cls, provenance)
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 
@@ -312,9 +318,11 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         log.warning("feedback: dismissed alert %s source image is unavailable",
                     alert_id)
         return
+    provenance = _training_provenance("false")
     _src = _build_source_extra(db, ev, a, "false")
     _src["source_thumbnail_path"] = file_path
-    _src["training_quarantined_reason"] = "single_reviewer_dismissal"
+    if not provenance["eligible_for_training"]:
+        _src["training_quarantined_reason"] = "single_reviewer_dismissal"
     if label_hint:
         _src["label_hint"] = label_hint
     neg_img = TrainingImage(
@@ -324,14 +332,13 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         labeled=True,           # labelled as background — no Annotation rows
         source_extra=_src,
         source_alert_id=a.id,           # for revert_verdict
-        **_training_provenance("false"),
+        **provenance,
     )
     db.add(neg_img); db.flush()
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    # Deliberately do not enqueue training.  A second, independent review must
-    # explicitly approve this hard negative before dataset export can see it.
+    _enqueue_if_trainable(db, cls, provenance)
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

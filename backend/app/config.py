@@ -166,7 +166,12 @@ class Settings(BaseSettings):
     # ---- aggressive feedback-driven retraining (Aug 2026) ----------------
     # After this many new True/False clicks on a detection type since its
     # last completed job → queue an incremental fine-tune immediately.
-    feedback_finetune_after: int = 10
+    # Evaluate the safe fine-tune gates after every accepted operator verdict.
+    # The orchestrator still requires a viable positive/negative mix and the
+    # trainer still enforces min_training_images, so this does not train a
+    # model from one click; it removes avoidable scheduling latency once the
+    # dataset is ready.
+    feedback_finetune_after: int = 1
     # After this many → queue a FULL retrain instead.
     feedback_full_retrain_after: int = 30
     # Feedback fine-tunes auto-deploy (registry-level) when the new map50
