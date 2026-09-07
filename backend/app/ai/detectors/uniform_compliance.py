@@ -2,11 +2,14 @@
 
 Two modes, model-first then rule-based fallback:
 
-1. Custom-model mode: if the assigned model emits class labels
+1. Accessory evidence: a valid uniform top with an orange lanyard and
+   white rectangular badge is always fully compliant.
+
+2. Custom-model mode: if the assigned model emits class labels
    `uniform_ok` / `uniform_violation` / `no_lanyard` / `civilian`,
    the highest-confidence detection per person wins.
 
-2. Rule-based mode (works immediately, no training): for each person
+3. Rule-based mode (works immediately, no training): for each person
    standing in a `counter` / `staff` zone, analyse the upper-body
    crop in HSV —
      • correct uniform colour: Vivo black OR burgundy/maroon top
@@ -102,10 +105,10 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
                     are uniformly dark and we want to avoid
                     counting customer denim/jeans as match)
     LANYARD ZONE (top 15-65%, centre 30-70% of width):
-      • orange: H 5..25, S ≥ 179, V ≥ 179
+      • orange: H 3..32, S ≥ 100, V ≥ 80
       • dark  : V < 128 (any H)
     NAMETAG ZONE (top 20-60%, centre 20-80% of width):
-      • white rectangle: S < 77, V > 179
+      • white rectangle: S < 100, V > 145
 
     Return dict keys:
       top_ok, top_share, top_black_share, top_maroon_share, top_is_black
@@ -186,10 +189,14 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             lhsv = cv2.cvtColor(lanyard_zone, cv2.COLOR_BGR2HSV)
             lH, lS, lV = lhsv[:, :, 0], lhsv[:, :, 1], lhsv[:, :, 2]
             lt = lH.size or 1
-            orange = (((lH >= 5) & (lH <= 25) & (lS >= 179) & (lV >= 179))
+            # Orange shifts toward brown and loses saturation in compressed
+            # overhead CCTV, so use a wider band than phone-camera training.
+            orange = (((lH >= 3) & (lH <= 32) & (lS >= 100) & (lV >= 80))
                       .sum() / lt)
             dark   = (lV < 128).sum() / lt
-            has_lanyard = bool(orange >= 0.005 or dark >= 0.08)
+            has_lanyard = bool(orange >= 0.002 or dark >= 0.08)
+        else:
+            orange = 0.0
 
         # Nametag zone — top 20..60%, centre 20..80% width. White card.
         nt_y1 = py1 + int(bh * 0.20); nt_y2 = py1 + int(bh * 0.60)
@@ -200,8 +207,24 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             nhsv = cv2.cvtColor(nametag_zone, cv2.COLOR_BGR2HSV)
             nS, nV = nhsv[:, :, 1], nhsv[:, :, 2]
             nt = nS.size or 1
-            white = ((nS < 77) & (nV > 179)).sum() / nt
-            has_nametag = bool(white >= 0.015)
+            white_mask = ((nS < 100) & (nV > 145)).astype("uint8")
+            white = white_mask.sum() / nt
+            # Cards are small at NVR resolution. Require either a useful
+            # white share or a compact rectangular component, which avoids
+            # depending on a large pixel-percentage threshold.
+            min_area = max(4, int(nt * 0.0015))
+            rectangular = any(
+                area >= min_area and 0.45 <= width / max(height, 1) <= 5.0
+                and area / max(width * height, 1) >= 0.45
+                for contour in cv2.findContours(
+                    white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )[0]
+                for x, y, width, height in [cv2.boundingRect(contour)]
+                for area in [cv2.contourArea(contour)]
+            )
+            has_nametag = bool(white >= 0.006 or rectangular)
+        else:
+            white = 0.0
 
         # Confidence — strengthened when the bottom half also reads
         # black. The dual-region signal is the strongest "this is a
@@ -220,6 +243,8 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             "dual_black":       dual_black,
             "has_lanyard":      has_lanyard,
             "has_nametag":      has_nametag,
+            "orange_share":     float(orange),
+            "white_share":      float(white),
             "confidence":       confidence,
         }
     except Exception:
@@ -418,6 +443,14 @@ class UniformComplianceDetector(Detector):
         Model-class first, then the colour rule-based fallback."""
         extra = cfg.get("extra") or {}
         thr = float(cfg.get("confidence_threshold", 0.5))
+        feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
+
+        # Clear physical evidence wins over a stale or under-trained model.
+        # This specifically protects orange Vivo lanyards with white badge
+        # cards from being classified as `no_lanyard`.
+        if (feats and feats["top_ok"] and feats["has_lanyard"]
+                and feats["has_nametag"]):
+            return FULL_COMPLIANT
         # Mode 1: custom model emitting the seven canonical classes
         # OR the legacy four. List of (state, class-name) — was a dict,
         # but dict keys silently overwrote: the three legacy aliases
@@ -450,7 +483,6 @@ class UniformComplianceDetector(Detector):
             return best_state
 
         # Mode 2: colour rule-based, six-state decision tree.
-        feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
         if feats is None or feats["confidence"] < 0.25:
             # Pixels missing or top didn't match anything cleanly — let
             # the caller skip (no alert) rather than false-alarm. The
