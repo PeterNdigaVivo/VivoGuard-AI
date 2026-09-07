@@ -323,7 +323,18 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     now_ts = now_dt.timestamp()
     fb = FrameBuffer()
     pipeline = _decode_inference_pipeline(fb.r.get("vg:inference:health"))
-    latest_detection = db.query(func.max(DetectionEvent.timestamp)).scalar()
+    latest_detection_row = (
+        db.query(DetectionEvent, Alert.id)
+        .outerjoin(Alert, Alert.event_id == DetectionEvent.id)
+        .order_by(DetectionEvent.timestamp.desc())
+        .first()
+    )
+    latest_detection = (
+        latest_detection_row[0] if latest_detection_row else None
+    )
+    latest_detection_alert_id = (
+        latest_detection_row[1] if latest_detection_row else None
+    )
     latest_alert = db.query(func.max(Alert.created_at)).scalar()
 
     def age_seconds(value: datetime | None) -> int | None:
@@ -336,8 +347,20 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     return {
         "now": now_dt.isoformat(),
         "state": _proof_of_life_state(pipeline, now=now_ts),
-        "latest_detection_at": latest_detection.isoformat() if latest_detection else None,
-        "latest_detection_age_seconds": age_seconds(latest_detection),
+        "latest_detection_at": (
+            latest_detection.timestamp.isoformat() if latest_detection else None
+        ),
+        "latest_detection_age_seconds": age_seconds(
+            latest_detection.timestamp if latest_detection else None
+        ),
+        "latest_detection_type": (
+            latest_detection.detection_type if latest_detection else None
+        ),
+        "latest_detection_is_alert": latest_detection_alert_id is not None,
+        "latest_detection_disposition": (
+            (latest_detection.extra or {}).get("alert_disposition")
+            if latest_detection else None
+        ),
         "latest_alert_at": latest_alert.isoformat() if latest_alert else None,
         "latest_alert_age_seconds": age_seconds(latest_alert),
         "pipeline_age_seconds": (

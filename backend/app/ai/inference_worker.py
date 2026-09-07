@@ -191,6 +191,15 @@ _STATIC_PERSON_FILTER_TYPES: set[str] = {
 }
 
 
+def _alert_disposition(detection_type: str, suppress_alert: bool) -> str:
+    """Explain whether a persisted detection was promoted to an alert."""
+    if detection_type in _SKIP_ALERT_TYPES:
+        return "metric_only"
+    if suppress_alert:
+        return "filtered"
+    return "alert"
+
+
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None, store_id: int | None = None,
@@ -220,6 +229,9 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # into extra so the sub-type survives persistence instead of being
     # silently dropped (the shop_open_close NULL-cls bug, Jul 2026).
     extra = dict(ev.extra or {})
+    extra["alert_disposition"] = _alert_disposition(
+        ev.detection_type, suppress_alert,
+    )
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls

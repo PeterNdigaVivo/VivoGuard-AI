@@ -31,6 +31,9 @@ interface ProofOfLife {
   now: string
   state: 'active' | 'degraded' | 'offline'
   latest_detection_age_seconds: number | null
+  latest_detection_type: string | null
+  latest_detection_is_alert: boolean
+  latest_detection_disposition: 'alert' | 'filtered' | 'metric_only' | null
   latest_alert_age_seconds: number | null
   pipeline_age_seconds: number | null
   cameras_total: number
@@ -46,6 +49,14 @@ function ageLabel(seconds: number | null): string {
   if (seconds < 60) return `${seconds}s ago`
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
   return `${Math.floor(seconds / 3600)}h ago`
+}
+
+function detectionLabel(proof: ProofOfLife): string {
+  const kind = proof.latest_detection_type?.replaceAll('_', ' ') ?? 'unknown'
+  if (proof.latest_detection_is_alert) return `${kind} · alerted`
+  if (proof.latest_detection_disposition === 'metric_only') return `${kind} · metric only`
+  if (proof.latest_detection_disposition === 'filtered') return `${kind} · filtered`
+  return `${kind} · not alerted`
 }
 
 export default function AlertsPage() {
@@ -446,14 +457,19 @@ function ProofOfLifeCard({ proof }: { proof: ProofOfLife }) {
           <div className="font-semibold">{title}</div>
           <div className="text-xs opacity-75">Pipeline heartbeat {ageLabel(proof.pipeline_age_seconds)}</div>
         </div>
-        <div><span className="text-xs opacity-70">Latest detection</span><br /><strong>{ageLabel(proof.latest_detection_age_seconds)}</strong></div>
+        <div>
+          <span className="text-xs opacity-70">Latest AI activity</span><br />
+          <strong>{ageLabel(proof.latest_detection_age_seconds)}</strong>
+          <div className="text-[11px] opacity-70">{detectionLabel(proof)}</div>
+        </div>
         <div><span className="text-xs opacity-70">Latest alert</span><br /><strong>{ageLabel(proof.latest_alert_age_seconds)}</strong></div>
         <div><span className="text-xs opacity-70">Fresh feeds</span><br /><strong>{proof.cameras_fresh}/{proof.cameras_total}</strong></div>
         <div><span className="text-xs opacity-70">Active / waiting</span><br /><strong>{proof.cameras_actively_inferencing ?? '—'} / {proof.cameras_waiting_for_worker ?? '—'}</strong></div>
         <div><span className="text-xs opacity-70">Full rotation</span><br /><strong>{proof.estimated_full_rotation_seconds == null ? '—' : `${Math.ceil(proof.estimated_full_rotation_seconds / 60)} min`}</strong></div>
       </div>
       <div className="mt-2 text-xs opacity-75">
-        A quiet alert feed is healthy only when detections and the pipeline heartbeat remain current.
+        Routine metrics and filtered detections confirm AI activity but do not create incidents.
+        Alert-worthy detections always appear in the alert feed.
       </div>
     </Card>
   )
