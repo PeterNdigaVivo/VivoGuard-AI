@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import math
+import os
 import sys
 import statistics
 import time
@@ -23,6 +24,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.ai.env_config import HardwareEnv  # noqa: E402
 from app.ai.yolov8_runner import infer_batch  # noqa: E402
+
+
+@contextlib.contextmanager
+def _redirect_process_stdout_to_stderr():
+    """Route Python and native-library stdout to stderr temporarily."""
+    sys.stdout.flush()
+    saved_stdout_fd = os.dup(1)
+    try:
+        os.dup2(2, 1)
+        with contextlib.redirect_stdout(sys.stderr):
+            yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved_stdout_fd, 1)
+        os.close(saved_stdout_fd)
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -121,10 +137,10 @@ def main() -> int:
     sizes = [int(value) for value in args.batch_sizes.split(",") if value.strip()]
     if not sizes or any(value < 1 for value in sizes):
         parser.error("--batch-sizes must contain positive integers")
-    # Ultralytics emits model-export and download progress on stdout.  Keep
-    # stdout machine-readable because the migration runbook redirects it to a
-    # retained JSON evidence file.
-    with contextlib.redirect_stdout(sys.stderr):
+    # Ultralytics and TensorRT emit progress from both Python and native code.
+    # Redirect the process stdout file descriptor so the retained stdout file
+    # contains only the final machine-readable JSON report.
+    with _redirect_process_stdout_to_stderr():
         report = benchmark(
             batch_sizes=sizes,
             iterations=max(1, args.iterations),
