@@ -94,3 +94,34 @@ def test_primary_reviewer_cannot_review_their_own_alert(review_case):
 
     with pytest.raises(Exception, match="reviewer must be independent"):
         record_independent_verdict(db, alert.id, "confirm", primary)
+
+
+def test_independent_review_uses_append_only_primary_verdict(review_case):
+    db, alert, independent = review_case
+    # The operational state can be changed by a separate workflow. It must
+    # not rewrite the primary review evidence used by the blind audit.
+    alert.status = "dismissed"
+    db.commit()
+
+    result = record_independent_verdict(
+        db, alert.id, "confirm", independent,
+    )
+
+    assert result["primary_verdict"] == "confirmed"
+    assert result["agreed"] is True
+
+
+def test_third_review_cannot_overwrite_completed_independent_review(review_case):
+    db, alert, independent = review_case
+    third = User(email="third@vivo", password_hash="x", role="operator")
+    db.add(third)
+    db.commit()
+    record_independent_verdict(db, alert.id, "dismiss", independent)
+
+    with pytest.raises(Exception, match="independent review is already complete"):
+        record_independent_verdict(db, alert.id, "confirm", third)
+
+    image = db.query(TrainingImage).filter_by(source_alert_id=alert.id).one()
+    assert image.review_state == "quarantined"
+    assert image.eligible_for_training is False
+    assert db.query(AlertReviewDecision).count() == 2
