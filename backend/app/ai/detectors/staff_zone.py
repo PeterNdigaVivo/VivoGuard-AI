@@ -18,7 +18,7 @@ based on uniform colour + lanyard + time-in-zone. Alerts:
   Correct uniform but no lanyard sustained 5 min  →  INFO
                          "Staff member missing name tag"
 
-  UNKNOWN (no uniform) in staff_zone > 2 min      →  URGENT
+  UNKNOWN/UNCERTAIN in staff_zone > 10 sec        →  URGENT
                          "Unidentified person behind counter"
 
 Suppression: business hours only, no alerts within 30 min of opening.
@@ -32,17 +32,25 @@ from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
 from app.ai.detectors import staff_identity
-from app.ai.zone_logic import bbox_in_zone
+from app.ai.zone_logic import zone_contains
 
 log = logging.getLogger(__name__)
 
 
 # Sustained-duration thresholds.
-UNAUTHORISED_SECONDS = 2 * 60     # no uniform → URGENT after 2 min
+# Must fit inside the default 15-second critical-camera inference slice.
+# A longer in-memory dwell gate is unreliable because another Celery process
+# may receive the next slice and cannot inherit the previous track timer.
+UNAUTHORISED_SECONDS = 10          # no verified uniform → URGENT
 NO_NAMETAG_SECONDS   = 5 * 60     # uniform but no lanyard → INFO after 5 min
 
 DEDUP_SECONDS = 20 * 60
 OPENING_GRACE_SECONDS = 30 * 60
+
+
+def _unauthorised_ready(level: str, elapsed: float) -> bool:
+    """Fail secure after sustained presence in an explicit staff-only zone."""
+    return level in ("unknown", "uncertain") and elapsed >= UNAUTHORISED_SECONDS
 
 
 class StaffZoneDetector(Detector):
@@ -61,7 +69,8 @@ class StaffZoneDetector(Detector):
             return []
 
         zones = [z for z in ctx.zones
-                 if "staff_zone" in (z.get("detection_types_json") or [])
+                 if ({"staff_zone", "staff_area"}
+                     & set(z.get("detection_types_json") or []))
                  and not z.get("suppressed")]
         if not zones:
             return []
@@ -77,11 +86,17 @@ class StaffZoneDetector(Detector):
                   if d["cls"] in COCO_PERSON and d["conf"] >= thr]
         now = time.time()
         out: list[DetectionEvent] = []
+        frame_wh = None
+        if ctx.frame_bgr is not None:
+            height, width = ctx.frame_bgr.shape[:2]
+            frame_wh = (width, height)
 
         for det in people:
-            in_zone = any(bbox_in_zone(det["bbox_norm"], z["polygon_coords_json"])
-                          for z in zones)
-            if not in_zone:
+            zone = next((z for z in zones if zone_contains(
+                det["bbox_norm"], z["polygon_coords_json"],
+                zone_id=z.get("id"), frame_wh=frame_wh,
+            )), None)
+            if zone is None:
                 continue
             tid = staff_identity.match_track(ctx, det)
             staff_identity.observe(ctx.camera_id, tid, "staff_zone", now)
@@ -105,25 +120,23 @@ class StaffZoneDetector(Detector):
                         and now - self._fired.get((tid, "missing_nametag"), 0) >= DEDUP_SECONDS):
                     self._fired[(tid, "missing_nametag")] = now
                     out.append(self._make_event(
-                        ctx, det, tid, "missing_nametag", elapsed, "info"))
+                        ctx, det, tid, "missing_nametag", elapsed, "info",
+                        zone_id=zone.get("id"), identity=verdict))
                 continue
 
-            # UNCERTAIN — the colour rule couldn't read the uniform
-            # cleanly (overhead angle, dim light, occlusion). Never
-            # fire the unauthorised-person alert; staff who happen to
-            # be in a hard-to-read pose must not be flagged.
-            if verdict["level"] == "uncertain":
-                continue
-
-            # UNKNOWN → potential intruder / customer in staff area.
-            # Hard 2-minute grace period — no staff_zone alert fires
-            # for anyone who's been in the zone for less than 2 min,
-            # regardless of how confident the rule is they aren't staff.
-            if elapsed >= UNAUTHORISED_SECONDS:
+            # UNKNOWN/UNCERTAIN → potential intruder in an explicitly
+            # staff-only area. Visual uncertainty gets the same sustained
+            # short confirmation window instead of suppressing security
+            # forever. No staff_zone alert fires for someone seen for less
+            # than ten seconds,
+            # which protects briefly occluded or passing staff.
+            if _unauthorised_ready(verdict["level"], elapsed):
                 rule = "unauthorised_person"
                 if now - self._fired.get((tid, rule), 0) >= DEDUP_SECONDS:
                     self._fired[(tid, rule)] = now
-                    out.append(self._make_event(ctx, det, tid, rule, elapsed, "high"))
+                    out.append(self._make_event(
+                        ctx, det, tid, rule, elapsed, "high",
+                        zone_id=zone.get("id"), identity=verdict))
 
         staff_identity.forget_stale(now)
         return out
@@ -131,16 +144,20 @@ class StaffZoneDetector(Detector):
     # ------------------------------------------------------------------
 
     def _make_event(self, ctx: DetectorContext, det: dict, tid: int,
-                    rule: str, duration: float, priority: str) -> DetectionEvent:
+                    rule: str, duration: float, priority: str, *,
+                    zone_id: int | None, identity: dict) -> DetectionEvent:
         return DetectionEvent(
             detection_type=self.detection_type, cls=rule,
             confidence=1.0, bbox_norm=det["bbox_norm"], track_id=tid,
+            zone_id=zone_id,
             extra={
                 "priority": priority,
                 "rule": rule,
                 "duration_seconds": int(duration),
                 "duration_minutes": int(duration / 60),
                 "store_id": ctx.store_id,
+                "identity_level": identity.get("level"),
+                "identity_reason": identity.get("reason"),
             },
         )
 
