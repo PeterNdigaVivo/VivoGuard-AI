@@ -434,17 +434,6 @@ class Settings(BaseSettings):
     store_intelligence_enabled:  bool = True
     store_intel_llm_model: str = "claude-haiku-4-5"
 
-    # --- ROI / Value Report tuning ---
-    # Per-incident KES values used by /analytics/roi to estimate the
-    # value VivoGuard delivered this month. Conservative defaults —
-    # head office tunes via .env for their own pricing assumptions.
-    roi_theft_per_incident_kes:        int = 30000
-    roi_unauthorised_per_incident_kes: int = 8000
-    roi_queue_per_incident_kes:        int = 2000
-    # Monthly cost of running VivoGuard, used as the denominator in
-    # the ROI multiple. Set to the contracted SaaS + infra figure.
-    roi_monthly_cost_kes:              int = 45000
-
     # --- Shutter open/close detection method ---
     # When True, ShutterDetector runs its brightness + texture
     # rule-based classifier AND requires shutter=open before the

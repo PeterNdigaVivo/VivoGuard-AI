@@ -416,13 +416,11 @@ def section_api() -> list:
                 ["GET", "/analytics/dashboard/multi",            "Chain dashboard + RAG per store"],
                 ["GET", "/analytics/chain/health-leaderboard",   "Ranked health scores"],
                 ["GET", "/analytics/heatmap/{cam}/image",        "PNG (alpha + window=hour|day|week)"],
-                ["GET", "/analytics/report.pdf",                 "Ad-hoc PDF (?store_id&amp;since&amp;until)"],
-                ["GET", "/analytics/report.csv",                 "Ad-hoc CSV"],
             ],
             col_widths=(18*mm, 72*mm, 85*mm),
         ),
 
-        Paragraph("Alerts &amp; reports", H2),
+        Paragraph("Alerts", H2),
         section_table(
             ["Method", "Path", "Purpose"],
             [
@@ -432,10 +430,6 @@ def section_api() -> list:
                 ["POST", "/alerts/{id}/dismiss",             "False positive → feeds ML training"],
                 ["POST", "/alerts/{id}/note",                "Append investigation note"],
                 ["GET",  "/alerts/{id}/snapshot",            "JPEG (event thumb → Redis fallback)"],
-                ["GET",  "/reports/scheduled",               "List schedules"],
-                ["POST", "/reports/scheduled",               "Create schedule"],
-                ["DELETE","/reports/scheduled/{id}",         "Delete"],
-                ["POST", "/reports/scheduled/{id}/run-now",  "Queue immediate dispatch"],
             ],
             col_widths=(18*mm, 60*mm, 95*mm),
         ),

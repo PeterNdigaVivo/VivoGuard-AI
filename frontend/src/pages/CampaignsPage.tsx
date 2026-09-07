@@ -1,5 +1,4 @@
-// Campaigns: create date-window markers, view before/during/after lift
-// for any metric_type, and download chain-wide reports as PDF or CSV.
+// Campaigns: create date-window markers and view before/during/after lift.
 
 import { useEffect, useState } from 'react'
 import { Badge, Button, Card, Input, PageHeader, Select } from '@/components/ui/Primitives'
@@ -29,8 +28,6 @@ export default function CampaignsPage() {
   const [form, setForm] = useState({ name: '', store_id: '', start_date: '', end_date: '', description: '' })
   const [lift, setLift] = useState<LiftReport | null>(null)
   const [metric, setMetric] = useState('passersby')
-  const [since, setSince] = useState('')
-  const [until, setUntil] = useState('')
 
   const reload = () => api<Campaign[]>('/stores/campaigns/all').then(setList).catch(console.error)
   useEffect(() => { reload(); storesApi.list().then(setStores) }, [])
@@ -55,15 +52,9 @@ export default function CampaignsPage() {
     setLift(r)
   }
 
-  function reportUrl(kind: 'pdf' | 'csv', storeId?: number): string {
-    const params = new URLSearchParams({ since, until })
-    if (storeId) params.set('store_id', String(storeId))
-    return `/api/analytics/report.${kind}?${params}`
-  }
-
   return (
     <div className="p-6">
-      <PageHeader title="Campaigns & Reports" />
+      <PageHeader title="Campaigns" />
 
       {/* --- New campaign --- */}
       <Card className="p-4 mb-6">
@@ -130,30 +121,6 @@ export default function CampaignsPage() {
         )}
       </Card>
 
-      {/* --- Reports --- */}
-      <Card className="p-4">
-        <div className="font-medium mb-3">Chain report — PDF / CSV</div>
-        <div className="flex flex-wrap gap-3 items-end">
-          <label>
-            <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Since</div>
-            <Input type="datetime-local" value={since} onChange={e => setSince(e.target.value)} />
-          </label>
-          <label>
-            <div className="text-xs text-slate-500 dark:text-slate-300 mb-1">Until</div>
-            <Input type="datetime-local" value={until} onChange={e => setUntil(e.target.value)} />
-          </label>
-          <a href={reportUrl('pdf')} target="_blank" rel="noreferrer">
-            <Button disabled={!since || !until}>Download PDF</Button>
-          </a>
-          <a href={reportUrl('csv')} target="_blank" rel="noreferrer">
-            <Button variant="ghost" disabled={!since || !until}>Download CSV</Button>
-          </a>
-        </div>
-        <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
-          PDF includes a chain summary table plus one detail page per store.
-          CSV has one row per store with all KPIs.
-        </div>
-      </Card>
     </div>
   )
 }

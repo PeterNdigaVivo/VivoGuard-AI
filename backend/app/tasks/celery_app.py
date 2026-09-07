@@ -41,7 +41,6 @@ celery_app = Celery(
         "app.tasks.inference_watchdog",
         "app.tasks.training",
         "app.tasks.maintenance",
-        "app.tasks.reports",
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
         "app.tasks.alerting",
@@ -135,7 +134,6 @@ celery_app.conf.update(
         "training.harvest_temporal_frames":   {"queue": "alerts"},
         "training.run_shop_opening_specialist": {"queue": "alerts"},
         "training.run_store_specialist":      {"queue": "alerts"},
-        "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
         "maintenance.prune_metric_snapshots": {"queue": "beat"},
@@ -215,10 +213,6 @@ celery_app.conf.update(
         "prune-alerts-daily": {
             "task": "maintenance.prune_alerts",
             "schedule": 24 * 60 * 60.0,
-        },
-        "scheduled-reports-dispatcher": {
-            "task": "reports.dispatch_due",
-            "schedule": 300.0,    # 5 min — granular enough for daily/weekly
         },
         # Daily heatmap archive at 23:55 (UTC). 30-day rolling retention
         # built into the task itself.

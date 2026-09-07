@@ -16,8 +16,6 @@ const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   { to: '/cameras',  label: 'Cameras' },
   { to: '/live',     label: 'Live View' },
   { to: '/alerts',   label: 'Alerts' },
-  { to: '/reports',  label: 'Reports' },
-  { to: '/analytics/roi', label: 'Value Report' },
   // Hidden from the sidebar (unused, zero records). Routes,
   // endpoints, and page components are intentionally left in place
   // so this is fully reversible — just uncomment when needed.

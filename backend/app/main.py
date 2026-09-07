@@ -95,7 +95,6 @@ _OPTIONAL_ROUTERS = [
     ("app.api.analytics",          ["router"]),
     ("app.api.stockroom",          ["router"]),
     ("app.api.search",             ["router"]),
-    ("app.api.scheduled_reports",  ["router"]),
     ("app.api.detector_catalog",   ["router"]),
     ("app.api.detection_config",   ["router"]),
     ("app.api.zones",              ["router", "catalog_router"]),
