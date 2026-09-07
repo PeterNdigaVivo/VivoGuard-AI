@@ -7,6 +7,7 @@ fallback from being mistaken for a successful capacity test.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import sys
@@ -120,15 +121,19 @@ def main() -> int:
     sizes = [int(value) for value in args.batch_sizes.split(",") if value.strip()]
     if not sizes or any(value < 1 for value in sizes):
         parser.error("--batch-sizes must contain positive integers")
-    report = benchmark(
-        batch_sizes=sizes,
-        iterations=max(1, args.iterations),
-        warmups=max(0, args.warmups),
-        imgsz=args.imgsz,
-        weights=args.weights,
-        max_frame_p95_ms=args.max_frame_p95_ms,
-        max_vram_fraction=args.max_vram_fraction,
-    )
+    # Ultralytics emits model-export and download progress on stdout.  Keep
+    # stdout machine-readable because the migration runbook redirects it to a
+    # retained JSON evidence file.
+    with contextlib.redirect_stdout(sys.stderr):
+        report = benchmark(
+            batch_sizes=sizes,
+            iterations=max(1, args.iterations),
+            warmups=max(0, args.warmups),
+            imgsz=args.imgsz,
+            weights=args.weights,
+            max_frame_p95_ms=args.max_frame_p95_ms,
+            max_vram_fraction=args.max_vram_fraction,
+        )
     print(json.dumps(report, indent=2))
     return 0 if report["recommended_batch_size"] is not None else 2
 

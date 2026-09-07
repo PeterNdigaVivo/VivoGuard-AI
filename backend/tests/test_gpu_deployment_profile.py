@@ -1,4 +1,7 @@
+import importlib.util
+import json
 from pathlib import Path
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,3 +72,23 @@ def test_gpu_benchmark_is_packaged_and_rejects_cpu_fallback():
     assert 'env.backend != "cuda"' in benchmark
     assert "torch.cuda.synchronize()" in benchmark
     assert '"recommended_batch_size"' in benchmark
+
+
+def test_gpu_benchmark_keeps_stdout_as_valid_json(monkeypatch, capsys):
+    benchmark_path = ROOT / "backend" / "scripts" / "gpu_concurrency_benchmark.py"
+    spec = importlib.util.spec_from_file_location("gpu_capacity_benchmark", benchmark_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def noisy_benchmark(**_kwargs):
+        print("library progress")
+        return {"recommended_batch_size": 1}
+
+    monkeypatch.setattr(module, "benchmark", noisy_benchmark)
+    monkeypatch.setattr(sys, "argv", [str(benchmark_path)])
+
+    assert module.main() == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"recommended_batch_size": 1}
+    assert "library progress" in captured.err
