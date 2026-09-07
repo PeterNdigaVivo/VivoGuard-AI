@@ -9,6 +9,7 @@ cv2 = pytest.importorskip("cv2")
 from app.ai.detectors.uniform_compliance import (
     FULL_COMPLIANT,
     UniformComplianceDetector,
+    _missing_nametag_alerts_enabled,
     uniform_features,
 )
 
@@ -70,3 +71,10 @@ def test_orange_lanyard_alone_overrides_missing_tag_prediction() -> None:
     assert features["has_lanyard"] is True
     assert features["has_nametag"] is False
     assert state == FULL_COMPLIANT
+
+
+def test_missing_nametag_alerts_require_explicit_camera_opt_in() -> None:
+    assert _missing_nametag_alerts_enabled({"extra": {}}) is False
+    assert _missing_nametag_alerts_enabled({
+        "extra": {"missing_nametag_alerts_enabled": True},
+    }) is True

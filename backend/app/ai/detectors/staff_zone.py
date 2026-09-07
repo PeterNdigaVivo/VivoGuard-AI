@@ -15,9 +15,6 @@ based on uniform colour + lanyard + time-in-zone. Alerts:
                          them too (rule 3 — "Staff opening / closing
                          store" rather than "Intrusion").
 
-  Correct uniform but no lanyard sustained 5 min  →  INFO
-                         "Staff member missing name tag"
-
   UNKNOWN/UNCERTAIN in staff_zone > 10 sec        →  URGENT
                          "Unidentified person behind counter"
 
@@ -67,6 +64,9 @@ class StaffZoneDetector(Detector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
+        nametag_alerts = bool((cfg.get("extra") or {}).get(
+            "missing_nametag_alerts_enabled", False,
+        ))
 
         zones = [z for z in ctx.zones
                  if ({"staff_zone", "staff_area"}
@@ -114,7 +114,7 @@ class StaffZoneDetector(Detector):
                 # Correct-colour staff who are missing a lanyard get
                 # the gentle "missing name tag" INFO after 5 min — same
                 # operator action, never URGENT.
-                if (verdict["top_ok"]
+                if (nametag_alerts and verdict["top_ok"]
                         and verdict["has_lanyard"] is False
                         and elapsed >= NO_NAMETAG_SECONDS
                         and now - self._fired.get((tid, "missing_nametag"), 0) >= DEDUP_SECONDS):

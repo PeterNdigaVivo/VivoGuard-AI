@@ -2,7 +2,8 @@
 from types import SimpleNamespace
 
 from app.ai.detectors.uniform_compliance import (
-    NON_COMPLIANT, UniformComplianceDetector,
+    NO_LANYARD_SECONDS, NON_COMPLIANT, PARTIAL_COMPLIANT,
+    UniformComplianceDetector,
 )
 
 
@@ -12,7 +13,7 @@ def test_violation_timer_can_run_during_staff_confirmation() -> None:
     ctx = SimpleNamespace(store_id=4)
     det = {"bbox_norm": [0.1, 0.1, 0.3, 0.8]}
 
-    event = detector._maybe_alert(ctx, det, 12, NON_COMPLIANT, 2000.0)
+    event = detector._maybe_alert(ctx, det, 12, NON_COMPLIANT, 2000.0, {})
 
     assert event is not None
     assert event.cls == NON_COMPLIANT
@@ -24,3 +25,22 @@ def test_uniform_state_change_resets_sustained_timer() -> None:
     assert detector._observe_state(7, NON_COMPLIANT, 10.0) == 0.0
     assert detector._observe_state(7, NON_COMPLIANT, 20.0) == 10.0
     assert detector._observe_state(7, "full_compliant", 21.0) == 0.0
+
+
+def test_missing_nametag_alert_is_off_without_camera_opt_in() -> None:
+    detector = UniformComplianceDetector()
+    detector._observe_state(18, PARTIAL_COMPLIANT, 100.0)
+    ctx = SimpleNamespace(store_id=4)
+    det = {"bbox_norm": [0.1, 0.1, 0.3, 0.8]}
+    now = 100.0 + NO_LANYARD_SECONDS
+
+    assert detector._maybe_alert(
+        ctx, det, 18, PARTIAL_COMPLIANT, now, {},
+    ) is None
+
+    event = detector._maybe_alert(
+        ctx, det, 18, PARTIAL_COMPLIANT, now,
+        {"extra": {"missing_nametag_alerts_enabled": True}},
+    )
+    assert event is not None
+    assert event.extra["rule"] == "no_lanyard"

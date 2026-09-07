@@ -28,7 +28,7 @@ only score staff who should be in uniform.
 Writes the `uniform_compliance_pct` metric (rolling avg, 1.0 ok /
 0.5 partial / 0.0 violation). Alerts:
   • violation sustained > 2 min  → "staff uniform violation" (warning)
-  • no lanyard sustained > 5 min → "staff missing name tag"  (info)
+  • optional name-tag enforcement (high-resolution cameras only)
   • > 3 violations in a day      → "repeated uniform violations" (warning)
 Dedup: same track + same violation, max once per 30 min.
 """
@@ -91,6 +91,13 @@ DEDUP_SECONDS = 30 * 60
 REPEAT_THRESHOLD = 3
 
 STAFF_ZONE_TAGS = {"counter", "staff", "staff_zone"}
+
+
+def _missing_nametag_alerts_enabled(cfg: dict) -> bool:
+    """Negative accessory evidence is unsafe on distant CCTV by default."""
+    return bool((cfg.get("extra") or {}).get(
+        "missing_nametag_alerts_enabled", False,
+    ))
 
 
 def uniform_features(frame_bgr, bbox_norm) -> dict | None:
@@ -390,7 +397,7 @@ class UniformComplianceDetector(Detector):
             if state == NON_COMPLIANT and elapsed_in_zone < CONFIRMED_STAFF_SECONDS:
                 continue
 
-            evt = self._maybe_alert(ctx, det, tid, state, now)
+            evt = self._maybe_alert(ctx, det, tid, state, now, cfg)
             if evt is not None:
                 # Detection-time uniform-colour stamp (Part 6) — the
                 # single source of truth read later by:
@@ -671,7 +678,7 @@ class UniformComplianceDetector(Detector):
         return now - prev[1]
 
     def _maybe_alert(self, ctx: DetectorContext, det: dict, tid: int,
-                     state: str, now: float) -> DetectionEvent | None:
+                     state: str, now: float, cfg: dict) -> DetectionEvent | None:
         elapsed = self._observe_state(tid, state, now)
 
         if state == NON_COMPLIANT and elapsed >= VIOLATION_SECONDS:
@@ -687,9 +694,13 @@ class UniformComplianceDetector(Detector):
                            "shift": _shift_label(),
                            "repeated_today": repeated},
                 )
-        # Partial compliance and "right colour but no lanyard" both get
-        # the gentle 5-minute INFO nudge — same operator action.
-        if state in (PARTIAL_COMPLIANT, COLOR_ONLY) and elapsed >= NO_LANYARD_SECONDS:
+        # Missing-name-tag alerts are opt-in. At normal overhead CCTV
+        # resolution, "not visible" is not reliable proof that a small
+        # lanyard/card is absent. Security and uniform-colour violations
+        # remain enabled independently.
+        if (_missing_nametag_alerts_enabled(cfg)
+                and state in (PARTIAL_COMPLIANT, COLOR_ONLY)
+                and elapsed >= NO_LANYARD_SECONDS):
             kind = state
             if now - self._fired.get((tid, kind), 0) >= DEDUP_SECONDS:
                 self._fired[(tid, kind)] = now
