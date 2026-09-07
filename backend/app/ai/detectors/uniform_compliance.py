@@ -2,8 +2,9 @@
 
 Two modes, model-first then rule-based fallback:
 
-1. Accessory evidence: a valid uniform top with an orange lanyard and
-   white rectangular badge is always fully compliant.
+1. Accessory evidence: a valid uniform top with an orange lanyard is
+   compliant. The attached white card strengthens the result but is not
+   required at distant CCTV resolution.
 
 2. Custom-model mode: if the assigned model emits class labels
    `uniform_ok` / `uniform_violation` / `no_lanyard` / `civilian`,
@@ -46,8 +47,8 @@ log = logging.getLogger(__name__)
 
 # Compliance state constants — also the alert `cls` strings.
 # Spec P5: six-state classifier.
-#   FULL_COMPLIANT    correct top + lanyard + nametag        → no alert
-#   PARTIAL_COMPLIANT correct top + lanyard, no nametag      → ATTENTION 5min
+#   FULL_COMPLIANT    correct top + orange lanyard, or strap + tag → no alert
+#   PARTIAL_COMPLIANT correct top without conclusive tag evidence → ATTENTION 5min
 #   COLOR_ONLY        correct top only                       → ATTENTION 5min (folded with partial)
 #   NON_COMPLIANT     wrong colour / no uniform top          → URGENT 2min
 #   CUSTOMER          not in staff zone                      → skip
@@ -446,10 +447,11 @@ class UniformComplianceDetector(Detector):
         feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
 
         # Clear physical evidence wins over a stale or under-trained model.
-        # This specifically protects orange Vivo lanyards with white badge
-        # cards from being classified as `no_lanyard`.
-        if (feats and feats["top_ok"] and feats["has_lanyard"]
-                and feats["has_nametag"]):
+        # An orange Vivo lanyard carries the staff card; the white rectangle
+        # is often only a few pixels (or hidden by the counter) in overhead
+        # CCTV, so its absence must not create a missing-tag alert.
+        if (feats and feats["top_ok"]
+                and feats.get("orange_share", 0.0) >= 0.002):
             return FULL_COMPLIANT
         # Mode 1: custom model emitting the seven canonical classes
         # OR the legacy four. List of (state, class-name) — was a dict,
@@ -499,7 +501,8 @@ class UniformComplianceDetector(Detector):
             if feats.get("top_share", 0.0) >= 0.10:
                 return UNCERTAIN
             return NON_COMPLIANT
-        if feats["has_lanyard"] and feats["has_nametag"]:
+        if (feats.get("orange_share", 0.0) >= 0.002
+                or (feats["has_lanyard"] and feats["has_nametag"])):
             return FULL_COMPLIANT
         if feats["has_lanyard"]:
             return PARTIAL_COMPLIANT
