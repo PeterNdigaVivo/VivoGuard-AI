@@ -9,6 +9,7 @@ cv2 = pytest.importorskip("cv2")
 from app.ai.detectors.uniform_compliance import (
     FULL_COMPLIANT,
     UniformComplianceDetector,
+    _clearly_inside_staff_zone,
     _missing_nametag_alerts_enabled,
     uniform_features,
 )
@@ -78,3 +79,14 @@ def test_missing_nametag_alerts_require_explicit_camera_opt_in() -> None:
     assert _missing_nametag_alerts_enabled({
         "extra": {"missing_nametag_alerts_enabled": True},
     }) is True
+
+
+def test_person_touching_counter_boundary_is_not_staff() -> None:
+    counter = [[0.2, 0.6], [0.8, 0.6], [0.8, 1.0], [0.2, 1.0]]
+    # Feet touch the counter region, but most of the customer remains outside.
+    assert _clearly_inside_staff_zone(
+        [0.4, 0.2, 0.6, 0.9], counter,
+    ) is False
+    assert _clearly_inside_staff_zone(
+        [0.4, 0.65, 0.6, 0.95], counter,
+    ) is True

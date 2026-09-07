@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
-from app.ai.zone_logic import bbox_in_zone, iou, zone_contains
+from app.ai.zone_logic import bbox_in_zone, iou, point_in_polygon
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,18 @@ def _missing_nametag_alerts_enabled(cfg: dict) -> bool:
     return bool((cfg.get("extra") or {}).get(
         "missing_nametag_alerts_enabled", False,
     ))
+
+
+def _clearly_inside_staff_zone(bbox_norm: list[float], polygon: list) -> bool:
+    """Require both body centre and feet inside before treating someone as staff."""
+    x1, y1, x2, y2 = bbox_norm
+    centre_x = (x1 + x2) / 2.0
+    centre_y = (y1 + y2) / 2.0
+    foot_y = y2 - max(0.001, (y2 - y1) * 0.02)
+    return (
+        point_in_polygon(centre_x, centre_y, polygon)
+        and point_in_polygon(centre_x, foot_y, polygon)
+    )
 
 
 def uniform_features(frame_bgr, bbox_norm) -> dict | None:
@@ -294,8 +306,11 @@ class UniformComplianceDetector(Detector):
         if not cfg or not cfg.get("enabled"):
             return []
 
-        staff_zones = [z for z in ctx.zones
-                       if STAFF_ZONE_TAGS & set(z.get("detection_types_json") or [])]
+        staff_zones = [
+            z for z in ctx.zones
+            if (STAFF_ZONE_TAGS & set(z.get("detection_types_json") or []))
+            and not z.get("suppressed")
+        ]
         # Without a staff/counter zone we have no way to tell staff from
         # customers, so we don't guess — operators must tag the counter.
         if not staff_zones:
@@ -305,12 +320,6 @@ class UniformComplianceDetector(Detector):
         out: list[DetectionEvent] = []
         scored = 0
         ok_like = 0
-        # P4: PolygonZone (foot-point) containment when a frame is available.
-        _wh = None
-        if ctx.frame_bgr is not None:
-            _h, _w = ctx.frame_bgr.shape[:2]
-            _wh = (_w, _h)
-
         # Each person currently standing in a staff zone gets scored.
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON:
@@ -318,14 +327,17 @@ class UniformComplianceDetector(Detector):
             # Which (if any) staff/counter tag this detection sits in —
             # also feeds the shared time-in-zone registry.
             zone_tag: str | None = None
+            zone_id: int | None = None
             for z in staff_zones:
-                if zone_contains(det["bbox_norm"], z["polygon_coords_json"],
-                                 zone_id=z["id"], frame_wh=_wh):
+                if _clearly_inside_staff_zone(
+                    det["bbox_norm"], z["polygon_coords_json"],
+                ):
                     tags = set(z.get("detection_types_json") or [])
                     if "staff_zone" in tags:
                         zone_tag = "staff_zone"
                     else:
                         zone_tag = "counter"
+                    zone_id = z.get("id")
                     break
             if zone_tag is None:
                 continue   # civilian / not at the counter — skip
@@ -399,6 +411,7 @@ class UniformComplianceDetector(Detector):
 
             evt = self._maybe_alert(ctx, det, tid, state, now, cfg)
             if evt is not None:
+                evt.zone_id = zone_id
                 # Detection-time uniform-colour stamp (Part 6) — the
                 # single source of truth read later by:
                 #   • capture_alert_snapshot → paints orange box on the
