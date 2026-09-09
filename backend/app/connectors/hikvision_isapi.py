@@ -46,8 +46,13 @@ class HikvisionISAPI:
         try:
             r = await self._get("/ISAPI/ContentMgmt/InputProxy/channels")
             if r.status_code == 200:
-                # Channels are listed inside <InputProxyChannelList>.
-                count = r.text.count("<InputProxyChannel")
+                # Parse element local names. A substring count also matches the
+                # <InputProxyChannelList> wrapper and overstates every NVR by 1.
+                root = ET.fromstring(r.text)
+                count = sum(
+                    1 for element in root.iter()
+                    if element.tag.rsplit("}", 1)[-1] == "InputProxyChannel"
+                )
                 if count > 0:
                     return count
         except Exception as e:
