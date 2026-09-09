@@ -12,7 +12,14 @@ class InventoryRow:
     line: int
     store_name: str
     host: str
-    port: int
+    rtsp_port: int
+    http_port: int | None = None
+    brand: str | None = None
+
+    @property
+    def port(self) -> int:
+        """Backward-compatible alias for older inventory tooling."""
+        return self.rtsp_port
 
 
 def load_inventory(path: Path) -> list[InventoryRow]:
@@ -29,6 +36,8 @@ def load_inventory(path: Path) -> list[InventoryRow]:
             store = (raw.get("store_name") or "").strip()
             host = (raw.get("public_ip") or "").strip()
             port_text = (raw.get("rtsp_port") or "").strip()
+            http_text = (raw.get("http_port") or "").strip()
+            brand = (raw.get("brand") or "").strip().casefold() or None
             if not store or not host or not port_text:
                 raise ValueError(f"line {line}: store_name, public_ip and rtsp_port are required")
             ipaddress.ip_address(host)
@@ -42,7 +51,12 @@ def load_inventory(path: Path) -> list[InventoryRow]:
                 raise ValueError(f"line {line}: duplicate host {host}")
             seen_stores.add(store_key)
             seen_hosts.add(host_key)
-            rows.append(InventoryRow(line, store, host, port))
+            http_port = int(http_text) if http_text else None
+            if http_port is not None and not 1 <= http_port <= 65535:
+                raise ValueError(f"line {line}: invalid HTTP port {http_port}")
+            if brand not in {None, "dahua", "hikvision"}:
+                raise ValueError(f"line {line}: brand must be dahua or hikvision")
+            rows.append(InventoryRow(line, store, host, port, http_port, brand))
     if not rows:
         raise ValueError("inventory is empty")
     return rows

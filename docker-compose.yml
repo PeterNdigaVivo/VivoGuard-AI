@@ -53,15 +53,6 @@ x-app-env: &app-env
   REDIS_PORT: ${REDIS_PORT:-6379}
   REDIS_DB: ${REDIS_DB:-0}
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-  S3_REGION: ${S3_REGION:-us-east-1}
-  S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-  S3_SECRET_KEY: ${S3_SECRET_KEY}
-  S3_BUCKET_CLIPS: ${S3_BUCKET_CLIPS:-clips}
-  S3_BUCKET_THUMBS: ${S3_BUCKET_THUMBS:-thumbnails}
-  S3_BUCKET_MODELS: ${S3_BUCKET_MODELS:-models}
-  S3_BUCKET_DATASETS: ${S3_BUCKET_DATASETS:-datasets}
-  S3_USE_SSL: ${S3_USE_SSL:-false}
   CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
   USE_GPU: ${USE_GPU:-false}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
@@ -147,19 +138,9 @@ x-app-env: &app-env
   DELIVERY_OUTBOX_ENABLED: ${DELIVERY_OUTBOX_ENABLED:-false}
   # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
   TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-10}
-  # Live Activity Sentinel — dark-launched; enable per rollout plan.
-  ACTIVITY_SENTINEL_ENABLED: ${ACTIVITY_SENTINEL_ENABLED:-false}
-  ACTIVITY_SURGE_PEOPLE: ${ACTIVITY_SURGE_PEOPLE:-12}
-  ACTIVITY_SURGE_SUSTAIN_SAMPLES: ${ACTIVITY_SURGE_SUSTAIN_SAMPLES:-3}
-  ACTIVITY_STORE_SURGE_PEOPLE: ${ACTIVITY_STORE_SURGE_PEOPLE:-30}
-  ACTIVITY_DEAD_SCENE_MINUTES: ${ACTIVITY_DEAD_SCENE_MINUTES:-0}
-  ACTIVITY_SENTINEL_INTERVAL_SECONDS: ${ACTIVITY_SENTINEL_INTERVAL_SECONDS:-60}
   MANNEQUIN_FILTER_ENABLED: ${MANNEQUIN_FILTER_ENABLED:-true}
   ACTIVITY_STATIC_DISPLACEMENT_PX: ${ACTIVITY_STATIC_DISPLACEMENT_PX:-5}
   ACTIVITY_STATIC_WINDOW_FRAMES: ${ACTIVITY_STATIC_WINDOW_FRAMES:-10}
-  ACTIVITY_PRESENCE_ENABLED: ${ACTIVITY_PRESENCE_ENABLED:-true}
-  ACTIVITY_PRESENCE_THRESHOLD: ${ACTIVITY_PRESENCE_THRESHOLD:-5}
-  ACTIVITY_PRESENCE_SUSTAIN_SAMPLES: ${ACTIVITY_PRESENCE_SUSTAIN_SAMPLES:-2}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation
@@ -441,26 +422,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # --- MinIO: S3-compatible object store ------------------------------
-  # OPTIONAL — opt in with `docker compose --profile object-store up -d`.
-  # Default deployments use the bind-mounted ./data/* directories below,
-  # which is enough for single-node installs and avoids ~250 MB of MinIO.
-  # For cloud / multi-node, point CREDENTIALS_FERNET_KEY-style envs at
-  # AWS S3 (set S3_ENDPOINT=https://s3.<region>.amazonaws.com) instead
-  # of running this container.
-  minio:
-    image: minio/minio:latest
-    container_name: vivoguard-minio
-    restart: unless-stopped
-    profiles: ["object-store"]
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
-    volumes:
-      - minio_data:/data
-    networks: [vivoguard]
-
   # --- Nginx: TLS termination + reverse proxy -------------------------
   nginx:
     image: nginx:alpine
@@ -498,5 +459,4 @@ networks:
 volumes:
   pg_data:
   redis_data:
-  minio_data:
   nginx_logs:

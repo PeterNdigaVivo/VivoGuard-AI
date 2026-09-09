@@ -28,25 +28,16 @@ const DetectionConfigPage  = lazy(() => import('@/pages/DetectionConfigPage'))
 const TrainingStudioPage   = lazy(() => import('@/pages/TrainingStudioPage'))
 const AnnotationPage       = lazy(() => import('@/pages/AnnotationPage'))
 const TrainingDashboardPage= lazy(() => import('@/pages/TrainingDashboardPage'))
-const AILearningPage       = lazy(() => import('@/pages/AILearningPage'))
-const AIProgressPage       = lazy(() => import('@/pages/AIProgressPage'))
-const SprintPage           = lazy(() => import('@/pages/SprintPage'))
 const ShutterTrainingPage  = lazy(() => import('@/pages/ShutterTrainingPage'))
 const UniformTrainingPage  = lazy(() => import('@/pages/UniformTrainingPage'))
 const ChainTrainingPage    = lazy(() => import('@/pages/ChainTrainingPage'))
-const ModelsPage           = lazy(() => import('@/pages/ModelsPage'))
-const SystemHealthPage     = lazy(() => import('@/pages/SystemHealthPage'))
 const MissionControlPage   = lazy(() => import('@/pages/MissionControlPage'))
 const StoresPage           = lazy(() => import('@/pages/StoresPage'))
 const StoreDashboardPage   = lazy(() => import('@/pages/StoreDashboardPage'))
 const StoreDetailPage      = lazy(() => import('@/pages/StoreDetailPage'))
 const StoreMultiCameraView = lazy(() => import('@/pages/StoreMultiCameraView'))
-const MultiStorePage       = lazy(() => import('@/pages/MultiStorePage'))
 const HeatmapPage          = lazy(() => import('@/pages/HeatmapPage'))
-const StockroomLogPage     = lazy(() => import('@/pages/StockroomLogPage'))
-const CampaignsPage        = lazy(() => import('@/pages/CampaignsPage'))
 const SearchPage           = lazy(() => import('@/pages/SearchPage'))
-const ComparePage          = lazy(() => import('@/pages/ComparePage'))
 const CameraSetupPage      = lazy(() => import('@/pages/CameraSetupPage'))
 const StoreHeatmapsPage    = lazy(() => import('@/pages/StoreHeatmapsPage'))
 const DetectorsPage        = lazy(() => import('@/pages/DetectorsPage'))
@@ -78,7 +69,7 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route element={<Protected><AlertNotificationProvider><Layout /></AlertNotificationProvider></Protected>}>
               <Route index element={<Navigate to="/cameras" replace />} />
-              <Route path="/chain"                    element={<MultiStorePage />} />
+              <Route path="/chain"                    element={<Navigate to="/stores" replace />} />
               <Route path="/stores"                   element={<StoresPage />} />
               <Route path="/stores/:id"               element={<StoreDetailPage />} />
               <Route path="/stores/:id/analytics"     element={<StoreDashboardPage />} />
@@ -92,10 +83,8 @@ export default function App() {
               <Route path="/cameras/:id/setup"        element={<CameraSetupPage />} />
               <Route path="/cameras/:id/detection"    element={<DetectionConfigPage />} />
               <Route path="/cameras/:id/heatmap"      element={<HeatmapPage />} />
-              <Route path="/stockroom"                element={<StockroomLogPage />} />
-              <Route path="/campaigns"                element={<CampaignsPage />} />
               <Route path="/search"                   element={<SearchPage />} />
-              <Route path="/compare"                  element={<ComparePage />} />
+              <Route path="/compare"                  element={<Navigate to="/stores" replace />} />
               <Route path="/live"                     element={<LiveViewPage />} />
               <Route path="/alerts"                   element={<AlertsPage />} />
               <Route path="/training"                 element={<TrainingStudioPage />} />
@@ -104,15 +93,14 @@ export default function App() {
               <Route path="/training/chain"           element={<ChainTrainingPage />} />
               <Route path="/training/datasets/:dsId"  element={<AnnotationPage />} />
               <Route path="/training/jobs/:jobId"     element={<TrainingDashboardPage />} />
-              <Route path="/ai-learning"              element={<AILearningPage />} />
-              <Route path="/ai-progress"              element={<AIProgressPage />} />
-              <Route path="/sprint"                   element={<SprintPage />} />
-              <Route path="/models"                   element={<ModelsPage />} />
-              <Route path="/system"                   element={<SystemHealthPage />} />
-              {/* Restricted mission-control dashboard — allowlist-gated
-                  in the page itself AND server-side on the API. */}
-              <Route path="/system-health"            element={<MissionControlPage />} />
-              <Route path="/odoo-assurance"           element={<OdooAssurancePage />} />
+              <Route path="/ai-learning"              element={<Navigate to="/training" replace />} />
+              <Route path="/ai-progress"              element={<Navigate to="/training" replace />} />
+              <Route path="/sprint"                   element={<Navigate to="/training" replace />} />
+              <Route path="/models"                   element={<Navigate to="/training" replace />} />
+              <Route path="/system"                   element={<MissionControlPage />} />
+              <Route path="/system-health"            element={<Navigate to="/system" replace />} />
+              <Route path="/system/odoo"              element={<OdooAssurancePage />} />
+              <Route path="/odoo-assurance"           element={<Navigate to="/system/odoo" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

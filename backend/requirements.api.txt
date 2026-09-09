@@ -13,7 +13,6 @@ psycopg[binary]>=3.1
 redis>=5.0
 celery[redis]>=5.4
 boto3>=1.34
-minio>=7.2
 # --- Password hashing ---
 # Direct bcrypt — no passlib. We previously fought passlib's
 # bcrypt.__about__ probe (broken in bcrypt 4.1+); switching to the

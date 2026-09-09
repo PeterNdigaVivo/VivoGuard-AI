@@ -27,12 +27,6 @@ def refresh_ddns() -> None:
         db.commit()
 
 
-@celery_app.task(name="maintenance.prune_clips", ignore_result=True)
-def prune_clips(retention_days: int = 30) -> None:
-    """Placeholder — operators wire this up to their storage retention policy."""
-    log.info("prune_clips retention_days=%s (stub — no-op)", retention_days)
-
-
 @celery_app.task(name="maintenance.prune_alerts", ignore_result=True)
 def prune_alerts(retention_days: int = 90) -> None:
     """Delete alerts + their detection_events (and snapshot files)
@@ -62,14 +56,6 @@ def prune_alerts(retention_days: int = 90) -> None:
         db.commit()
     log.info("prune_alerts: removed %d alerts older than %d days",
              removed, retention_days)
-
-
-@celery_app.task(name="maintenance.bootstrap_buckets", ignore_result=True)
-def bootstrap_buckets() -> None:
-    """Ensure MinIO buckets exist."""
-    from app.storage.minio_client import ensure_buckets
-    ensure_buckets()
-    log.info("bootstrap_buckets done (endpoint=%s)", settings.s3_endpoint)
 
 
 @celery_app.task(name="maintenance.cameras_status_sync", ignore_result=True)

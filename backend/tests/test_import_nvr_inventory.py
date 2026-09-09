@@ -24,6 +24,17 @@ def test_load_inventory_validates_and_normalises(tmp_path: Path) -> None:
     assert country_for(rows[1].store_name) == "Rwanda"
 
 
+def test_load_inventory_accepts_separate_http_port_and_brand(tmp_path: Path) -> None:
+    inventory = tmp_path / "nvrs.csv"
+    inventory.write_text(
+        "store_name,public_ip,rtsp_port,http_port,brand\n"
+        "Sarit,192.0.2.10,554,443,hikvision\n",
+        encoding="utf-8",
+    )
+    row = load_inventory(inventory)[0]
+    assert (row.rtsp_port, row.http_port, row.brand) == (554, 443, "hikvision")
+
+
 @pytest.mark.parametrize(
     "body",
     [

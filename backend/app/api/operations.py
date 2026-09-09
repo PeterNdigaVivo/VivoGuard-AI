@@ -31,9 +31,27 @@ from app.operations.assurance import (
     DELIVERY_EVENT_TYPES, POS_EVENT_TYPES, assess_coverage, correlate_event,
     create_alert_quality_cases, create_lone_worker_cases, upsert_case,
 )
-from app.simulation.runner import missing_feedback_fields
 
 router = APIRouter(prefix="/operations", tags=["operations-assurance"])
+
+EXPLICIT_FEEDBACK_LABELS = {
+    "true_alert", "false_alert", "missed_event", "operational_issue",
+}
+
+
+def missing_feedback_fields(inputs: dict) -> list[str]:
+    """Reject vague feedback before it can enter the training pipeline."""
+    ambiguous = {"yes", "no", "ok", "fine", "looks fine", "same", "this", "that"}
+    missing = [
+        field for field in ("store", "camera", "occurred_at", "observed", "expected")
+        if (value := inputs.get(field)) is None
+        or (isinstance(value, str) and (
+            len(value.strip()) < 3 or value.strip().lower() in ambiguous
+        ))
+    ]
+    if str(inputs.get("label") or "").strip().lower() not in EXPLICIT_FEEDBACK_LABELS:
+        missing.append("label")
+    return missing
 
 
 class RequirementIn(BaseModel):

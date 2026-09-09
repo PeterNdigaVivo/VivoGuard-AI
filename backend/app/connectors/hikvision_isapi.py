@@ -16,14 +16,59 @@ log = logging.getLogger(__name__)
 
 
 class HikvisionISAPI:
-    def __init__(self, host: str, http_port: int, username: str, password: str, *, ssl: bool = False):
-        scheme = "https" if ssl else "http"
+    def __init__(self, host: str, http_port: int, username: str, password: str,
+                 *, ssl: bool | None = None):
+        scheme = "https" if (http_port == 443 if ssl is None else ssl) else "http"
         self.base = f"{scheme}://{host}:{http_port}"
         self.auth = httpx.DigestAuth(username, password)
 
     async def _get(self, path: str, *, timeout: float = 8.0) -> httpx.Response:
-        async with httpx.AsyncClient(auth=self.auth, timeout=timeout, verify=False) as c:
+        async with httpx.AsyncClient(
+            auth=self.auth, timeout=timeout, verify=False, follow_redirects=True,
+        ) as c:
             return await c.get(self.base + path)
+
+    @staticmethod
+    def _local(element: ET.Element) -> str:
+        return element.tag.rsplit("}", 1)[-1]
+
+    @classmethod
+    def _channel_ids(cls, xml: str, item_name: str) -> list[int]:
+        root = ET.fromstring(xml)
+        ids: list[int] = []
+        for item in root.iter():
+            if cls._local(item) != item_name:
+                continue
+            value = next(
+                (child.text for child in item.iter()
+                 if cls._local(child) == "id" and child.text),
+                None,
+            )
+            if value and value.strip().isdigit():
+                ids.append(int(value.strip()))
+        return ids
+
+    async def channel_numbers(self) -> list[int]:
+        """Return physical camera channels, not main/sub-stream entries."""
+        try:
+            r = await self._get("/ISAPI/ContentMgmt/InputProxy/channels")
+            if r.status_code == 200:
+                ids = self._channel_ids(r.text, "InputProxyChannel")
+                if ids:
+                    return sorted(set(ids))
+        except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
+            log.debug("InputProxy channel discovery failed: %s", exc)
+
+        try:
+            r = await self._get("/ISAPI/Streaming/channels")
+            if r.status_code == 200:
+                stream_ids = self._channel_ids(r.text, "StreamingChannel")
+                channels = {stream_id // 100 for stream_id in stream_ids if stream_id >= 100}
+                if channels:
+                    return sorted(channels)
+        except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
+            log.debug("Streaming channel discovery failed: %s", exc)
+        return [1]
 
     async def device_info(self) -> dict:
         r = await self._get("/ISAPI/System/deviceInfo")
@@ -47,29 +92,7 @@ class HikvisionISAPI:
 
     async def channel_count(self) -> int:
         """Best-effort channel count for an NVR. Falls back to 1 (camera mode)."""
-        try:
-            r = await self._get("/ISAPI/ContentMgmt/InputProxy/channels")
-            if r.status_code == 200:
-                # Parse element local names. A substring count also matches the
-                # <InputProxyChannelList> wrapper and overstates every NVR by 1.
-                root = ET.fromstring(r.text)
-                count = sum(
-                    1 for element in root.iter()
-                    if element.tag.rsplit("}", 1)[-1] == "InputProxyChannel"
-                )
-                if count > 0:
-                    return count
-        except Exception as e:
-            log.debug("InputProxy/channels failed: %s", e)
-        # Fallback: try /ISAPI/Streaming/channels — list of stream channels.
-        try:
-            r = await self._get("/ISAPI/Streaming/channels")
-            if r.status_code == 200:
-                # Count stream channels divisible by 2 (main+sub) or take id list.
-                return max(r.text.count("<StreamingChannel "), 1)
-        except Exception:
-            pass
-        return 1
+        return len(await self.channel_numbers())
 
     async def snapshot(self, channel: int = 1) -> bytes | None:
         """Returns raw JPEG bytes or None."""

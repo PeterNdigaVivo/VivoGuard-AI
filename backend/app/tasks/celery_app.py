@@ -50,9 +50,7 @@ celery_app = Celery(
         "app.tasks.vlm_tasks",
         "app.tasks.recorder",
         "app.tasks.alert_snapshots",
-        "app.tasks.activity_sentinel",
         "app.tasks.uniform_miner",
-        "app.tasks.system_health_report",
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
         "app.tasks.odoo_sync",
@@ -90,7 +88,6 @@ celery_app.conf.update(
         # Operator-facing alerts pool.
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
-        "alerting.live_activity_sentinel":      {"queue": "alerts"},
         "training.mine_live_uniform_crops":     {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
@@ -116,12 +113,6 @@ celery_app.conf.update(
         "training.weekly_retrain_all":        {"queue": "beat"},
         "training.evaluate_pending_promotions": {"queue": "beat"},
         "training.dispatch_queued_jobs":      {"queue": "beat"},
-        # Status report rides `beat`, which now has a DEDICATED 1-slot
-        # runner process (compose: beat-runner inside worker-alerts) —
-        # training jobs filling the alerts pool starved it twice when
-        # beat shared their slots.
-        "system.daily_status_report":         {"queue": "beat"},
-        "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         # Heavy model fitting has its own worker. It must not consume alert
         # delivery capacity, and an alerts-worker restart must not kill a
         # multi-hour training process and blame the dataset.
@@ -326,15 +317,6 @@ celery_app.conf.update(
             "task": "training.dispatch_queued_jobs",
             "schedule": timedelta(minutes=5),
         },
-        # VivoGuard Status Report — the ONE daily email (11:30 EAT).
-        # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
-        # successful send, 15-min SMTP retries. Rides `beat`, which
-        # has a dedicated 1-slot runner so heavy `alerts` work can
-        # never delay it.
-        "vivoguard-status-report-every-5min": {
-            "task": "system.daily_status_report",
-            "schedule": timedelta(minutes=5),
-        },
         # Sales Floor Intelligence — 15-min timedelta tick (the
         # crontab schedule wasn't being picked up by this worker's
         # beat scheduler; switching to timedelta matches every other
@@ -355,15 +337,6 @@ celery_app.conf.update(
         "store-intelligence-every-15min": {
             "task": "alerting.store_intelligence_update",
             "schedule": timedelta(minutes=15),
-        },
-        # Live Activity Sentinel — reads the same vg:activity:* keys the
-        # Live Activity tab uses and turns occupancy patterns into alerts.
-        # Dark-launched: the task body no-ops unless
-        # ACTIVITY_SENTINEL_ENABLED=true.
-        "live-activity-sentinel": {
-            "task": "alerting.live_activity_sentinel",
-            "schedule": timedelta(seconds=int(getattr(
-                settings, "activity_sentinel_interval_seconds", 60))),
         },
         # metric_snapshots retention — nightly at 03:10 EAT (quiet hours),
         # batched deletes; see maintenance.prune_metric_snapshots.

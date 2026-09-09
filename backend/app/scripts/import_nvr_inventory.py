@@ -30,61 +30,74 @@ from app.utils.crypto import encrypt
 from app.utils.nvr_inventory import InventoryRow, country_for, load_inventory
 
 
-async def vendor_order(host: str, port: int) -> list[str]:
+HTTP_PORTS = (80, 443, 8000, 8080, 800, 7000)
+
+
+async def vendor_order(host: str, ports: list[int]) -> list[tuple[str, int]]:
     """Probe vendor-specific paths without credentials to avoid lockouts."""
     paths = {
         "dahua": "/cgi-bin/magicBox.cgi?action=getDeviceType",
         "hikvision": "/ISAPI/System/deviceInfo",
     }
-    scores = {name: 0 for name in paths}
+    scores = {(name, port): 0 for name in paths for port in ports}
     async with httpx.AsyncClient(timeout=5, verify=False, follow_redirects=True) as client:
-        for name, path in paths.items():
+        for (name, port), score in scores.items():
+            path = paths[name]
             try:
-                response = await client.get(f"http://{host}:{port}{path}")
+                scheme = "https" if port == 443 else "http"
+                response = await client.get(f"{scheme}://{host}:{port}{path}")
                 evidence = " ".join((
                     response.headers.get("server", ""),
                     response.headers.get("www-authenticate", ""),
                     response.text[:500],
                 )).casefold()
                 if response.status_code in {200, 401, 403}:
-                    scores[name] += 1
+                    scores[(name, port)] = score + 1
                 if name in evidence or (name == "dahua" and "realm=login" in evidence):
-                    scores[name] += 3
+                    scores[(name, port)] += 3
             except (httpx.HTTPError, UnicodeError):
                 continue
     # Stable fallback order keeps behaviour deterministic when probes are silent.
-    return sorted(paths, key=lambda name: (-scores[name], name != "dahua"))
+    return sorted(scores, key=lambda item: (-scores[item], item[0] != "dahua"))
 
 
 async def discover(row: InventoryRow, username: str, passwords: list[str]):
     errors: list[str] = []
-    for brand in await vendor_order(row.host, row.port):
+    ports = list(dict.fromkeys(
+        [row.http_port] if row.http_port else [row.rtsp_port, *HTTP_PORTS]
+    ))
+    candidates = await vendor_order(row.host, ports)
+    if row.brand:
+        candidates.sort(key=lambda item: item[0] != row.brand)
+    for brand, http_port in candidates:
         for slot, password in enumerate(passwords, start=1):
             try:
                 if brand == "dahua":
-                    info = await DahuaHTTP(row.host, row.port, username, password).device_info()
+                    info = await DahuaHTTP(row.host, http_port, username, password).device_info()
                     known = {key.casefold() for key in info}
                     if not known.intersection({"devicetype", "deviceclass", "serialnumber", "hardwareversion"}):
                         raise RuntimeError("Dahua device signature missing")
                     channels = await enumerate_dahua(
-                        row.host, row.port, row.port, username, password,
+                        row.host, http_port, row.rtsp_port, username, password,
                     )
                 else:
-                    info = await HikvisionISAPI(row.host, row.port, username, password).device_info()
+                    info = await HikvisionISAPI(row.host, http_port, username, password).device_info()
                     if not (info.get("model") or info.get("device_type")):
                         raise RuntimeError("Hikvision device signature missing")
                     channels = await enumerate_hikvision(
-                        row.host, row.port, row.port, username, password,
+                        row.host, http_port, row.rtsp_port, username, password,
                     )
                 if not channels:
                     raise RuntimeError("device returned no channels")
-                return brand, password, slot, channels
+                return brand, http_port, password, slot, channels
             except Exception as exc:  # endpoint/firmware failures vary by vendor
-                errors.append(f"{brand}/credential-{slot}: {type(exc).__name__}")
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                detail = f"HTTP {status}" if status else type(exc).__name__
+                errors.append(f"{brand}:{http_port}/credential-{slot}: {detail}")
     raise RuntimeError("; ".join(errors))
 
 
-def persist(row: InventoryRow, brand: str, username: str, password: str,
+def persist(row: InventoryRow, brand: str, http_port: int, username: str, password: str,
             channels, *, apply: bool) -> tuple[int, int]:
     """Return (created, existing); commit one NVR atomically when applying."""
     if not apply:
@@ -108,7 +121,6 @@ def persist(row: InventoryRow, brand: str, username: str, password: str,
             encrypted = encrypt(password)
             nvr = db.query(NVRDevice).filter(
                 NVRDevice.host == row.host,
-                NVRDevice.http_port == row.port,
             ).first()
             if nvr is None:
                 nvr = NVRDevice(
@@ -116,7 +128,7 @@ def persist(row: InventoryRow, brand: str, username: str, password: str,
                     brand=brand,
                     host=row.host,
                     rtsp_port=row.port,
-                    http_port=row.port,
+                    http_port=http_port,
                     username=username,
                     password_encrypted=encrypted,
                 )
@@ -125,7 +137,7 @@ def persist(row: InventoryRow, brand: str, username: str, password: str,
             nvr.name = f"{row.store_name} NVR"
             nvr.brand = brand
             nvr.rtsp_port = row.port
-            nvr.http_port = row.port
+            nvr.http_port = http_port
             nvr.username = username
             nvr.password_encrypted = encrypted
             nvr.total_channels = len(channels)
@@ -161,7 +173,7 @@ def persist(row: InventoryRow, brand: str, username: str, password: str,
                 camera.connection_type = connection_type
                 camera.public_ip = row.host
                 camera.rtsp_port = row.port
-                camera.http_port = row.port
+                camera.http_port = http_port
                 camera.username = username
                 camera.password_encrypted = encrypted
                 camera.network_type = "wan"
@@ -206,11 +218,11 @@ async def run(args) -> int:
             "created": 0, "existing": 0, "detail": "",
         }
         try:
-            brand, password, slot, channels = await discover(
+            brand, http_port, password, slot, channels = await discover(
                 row, args.username, passwords,
             )
             created, existing = persist(
-                row, brand, args.username, password, channels, apply=args.apply,
+                row, brand, http_port, args.username, password, channels, apply=args.apply,
             )
             result.update(
                 status="imported" if args.apply else "verified",
@@ -218,7 +230,7 @@ async def run(args) -> int:
                 channels=len(channels),
                 created=created,
                 existing=existing,
-                detail=f"credential-{slot}",
+                detail=f"http:{http_port}; credential-{slot}",
             )
             print(f"  {brand}: {len(channels)} channel(s); created={created}, existing={existing}")
         except Exception as exc:

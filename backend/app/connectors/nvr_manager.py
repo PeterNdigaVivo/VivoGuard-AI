@@ -45,10 +45,10 @@ async def enumerate_dahua(host: str, http_port: int, rtsp_port: int,
 async def enumerate_hikvision(host: str, http_port: int, rtsp_port: int,
                               username: str, password: str) -> list[DiscoveredChannel]:
     api = HikvisionISAPI(host, http_port, username, password)
-    count = await api.channel_count()
-    log.info("Hikvision %s reports %d channel(s)", host, count)
+    channel_numbers = await api.channel_numbers()
+    log.info("Hikvision %s reports channels %s", host, channel_numbers)
     out = []
-    for ch in range(1, count + 1):
+    for ch in channel_numbers:
         out.append(DiscoveredChannel(
             channel=ch,
             name=f"Channel {ch}",

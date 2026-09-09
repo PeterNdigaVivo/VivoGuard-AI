@@ -48,3 +48,20 @@ def test_channel_count_does_not_count_list_wrapper(monkeypatch) -> None:
     monkeypatch.setattr(client, "_get", fake_get)
 
     assert asyncio.run(client.channel_count()) == 2
+
+
+def test_streaming_fallback_deduplicates_main_and_sub_streams(monkeypatch) -> None:
+    input_proxy = httpx.Response(404, request=httpx.Request("GET", "http://x/input"))
+    streams = _response("""<StreamingChannelList xmlns="http://www.hikvision.com/ver20/XMLSchema">
+      <StreamingChannel><id>101</id></StreamingChannel>
+      <StreamingChannel><id>102</id></StreamingChannel>
+      <StreamingChannel><id>201</id></StreamingChannel>
+      <StreamingChannel><id>202</id></StreamingChannel>
+    </StreamingChannelList>""")
+
+    async def fake_get(path: str, *, timeout: float = 8.0):
+        return input_proxy if "InputProxy" in path else streams
+
+    client = HikvisionISAPI("192.0.2.1", 80, "admin", "secret")
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert asyncio.run(client.channel_numbers()) == [1, 2]

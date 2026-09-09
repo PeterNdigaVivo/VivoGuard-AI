@@ -101,7 +101,7 @@ export default function AlertsPage() {
     const load = () => api<ProofOfLife>('/system/proof-of-life')
       .then(setProof).catch(() => setProof(null))
     load()
-    const timer = setInterval(load, 15_000)
+    const timer = setInterval(load, 60_000)
     return () => clearInterval(timer)
   }, [])
 

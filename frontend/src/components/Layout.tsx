@@ -9,30 +9,15 @@ import { alerts as alertsApi, type Alert } from '@/api/alerts'
 import { isSystemAdmin } from '@/lib/systemAdmins'
 
 const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
-  { to: '/chain',    label: 'Chain' },
-  { to: '/compare',  label: 'Compare' },
-  { to: '/stores',   label: 'Stores' },
-  { to: '/search',   label: 'Search' },
+  { to: '/stores',   label: 'Locations' },
   { to: '/cameras',  label: 'Cameras' },
   { to: '/live',     label: 'Live View' },
   { to: '/alerts',   label: 'Alerts' },
-  // Hidden from the sidebar (unused, zero records). Routes,
-  // endpoints, and page components are intentionally left in place
-  // so this is fully reversible — just uncomment when needed.
-  // { to: '/stockroom', label: 'Stockroom Log' },
-  // { to: '/campaigns', label: 'Campaigns' },
+  { to: '/search',   label: 'Investigate' },
   { to: '/training', label: 'AI Training' },
-  // Visible ONLY to the platform operators in lib/systemAdmins.ts —
-  // hidden from everyone else, including regular admins.
-  { to: '/system-health', label: '💓 System Health', systemAdminOnly: true },
-  { to: '/odoo-assurance', label: '🔗 Odoo Assurance', systemAdminOnly: true },
-  { to: '/ai-progress', label: '📈 AI Progress' },
-  { to: '/ai-learning', label: 'AI Learning' },
-  { to: '/sprint',      label: 'Sprint' },
-  { to: '/detectors',label: 'Detectors' },
-  { to: '/models',   label: 'Models' },
-  { to: '/users',    label: 'Users' },
-  { to: '/system',   label: 'System' },
+  { to: '/detectors', label: 'Detectors', systemAdminOnly: true },
+  { to: '/users',     label: 'Users', systemAdminOnly: true },
+  { to: '/system',    label: 'System Health', systemAdminOnly: true },
 ]
 
 export default function Layout() {
@@ -56,7 +41,7 @@ export default function Layout() {
       })
       .catch(() => {})
     refresh()
-    const t = setInterval(refresh, 30_000)
+    const t = setInterval(refresh, 60_000)
     const unsub = alertsApi.subscribe(() => refresh())
     const onResolved = (e: Event) => {
       const detail = (e as CustomEvent).detail

@@ -1,7 +1,7 @@
 // Mission Control — restricted system-health dashboard at /system-health,
 // SYSTEM ADMINS ONLY (allowlist in lib/systemAdmins.ts; the API enforces
 // the same list server-side, this page just avoids a guaranteed 403).
-// Distinct from pages/SystemHealthPage.tsx, the all-users /system page.
+// Canonical system-health dashboard for platform operators.
 
 import { useCallback, useEffect, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
