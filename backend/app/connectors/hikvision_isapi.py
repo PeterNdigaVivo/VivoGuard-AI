@@ -31,7 +31,11 @@ class HikvisionISAPI:
         ns = "{http://www.hikvision.com/ver20/XMLSchema}"
         root = ET.fromstring(r.text)
         def find(tag: str) -> str:
-            el = root.find(f"{ns}{tag}") or root.find(tag)
+            # ElementTree leaf elements are falsey, so using ``a or b``
+            # discards a valid namespaced match and returns an empty value.
+            el = root.find(f"{ns}{tag}")
+            if el is None:
+                el = root.find(tag)
             return el.text if el is not None and el.text else ""
         return {
             "device_name":   find("deviceName"),
