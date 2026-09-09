@@ -300,7 +300,8 @@ class EntryExitDetector(Detector):
                     # First sighting — no crossing inferable yet.
                     hist.append({"cx": cx, "cy": cy, "side": side_now,
                                  "last_seen": now, "last_fired": 0.0,
-                                 "frames_seen": 1})
+                                 "frames_seen": 1,
+                                 "side_frames": 1 if side_now != 0 else 0})
                     continue
 
                 entry = hist[best_i]

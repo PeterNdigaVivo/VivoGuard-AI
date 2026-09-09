@@ -2,7 +2,7 @@
 
 The full end-to-end flow has three moving parts (per-frame Redis
 writes, a Celery task, an alert row) but the DECISION logic — the
-"≥ 2 person events within a 5-minute window, opened_at = earliest
+"first person event, opened_at = that event
 event in that window" rule — lives in a single pure function in
 app.tasks.alerting (`confirm_opening_from_events`). These tests
 drive that function directly so they run with no DB / no Redis / no
@@ -34,18 +34,15 @@ def _eat(h: int, m: int, s: int = 0) -> datetime:
 
 # ---- Test 1 — entrance crossing path is unaffected -----------------
 # The crossing path doesn't go through confirm_opening_from_events,
-# but the helper must NEVER fire on a single event (which is what an
-# unguarded crossing-path test could accidentally encode if the
-# threshold is reduced). Empty input + single-event input both
-# return None.
+# and the fallback deliberately opens on the first person event.
 
 def test_no_events_returns_none():
     assert confirm_opening_from_events([]) is None
 
 
-def test_single_event_does_not_open():
-    """Spec test 3 — only one person detection: stays CLOSED."""
-    assert confirm_opening_from_events([_eat(8, 7)]) is None
+def test_single_event_opens_immediately():
+    event = _eat(9, 7)
+    assert confirm_opening_from_events([event]) == event
 
 
 # ---- Test 2 — two events within 5 minutes opens ---------------------
@@ -63,14 +60,14 @@ def test_two_events_at_window_edge_still_opens():
     window (≤, not strict <)."""
     a = _eat(8, 0)
     b = a + timedelta(seconds=OPEN_CONFIRMATION_WINDOW_S)
-    assert confirm_opening_from_events([a, b]) == a
+    assert confirm_opening_from_events([a, b], threshold=2) == a
 
 
 def test_two_events_just_outside_window_does_not_open():
     """5 min 1 s apart: no opening — must wait for a closer pair."""
     a = _eat(8, 0)
     b = a + timedelta(seconds=OPEN_CONFIRMATION_WINDOW_S + 1)
-    assert confirm_opening_from_events([a, b]) is None
+    assert confirm_opening_from_events([a, b], threshold=2) is None
 
 
 # ---- Test 3 — earliest of the FIRST qualifying pair ----------------
@@ -84,7 +81,7 @@ def test_skips_isolated_then_uses_later_cluster():
     first   = _eat(8, 5)
     second  = _eat(8, 7)
     third   = _eat(8, 8)
-    assert (confirm_opening_from_events([stray, first, second, third])
+    assert (confirm_opening_from_events([stray, first, second, third], threshold=2)
             == first)
 
 
@@ -110,11 +107,9 @@ def test_same_timestamps_repeated_returns_same_answer():
 
 # ---- Test 5 — sensitivity to PERSON_OPEN_THRESHOLD setting ----------
 
-def test_threshold_constant_is_two():
-    """Sanity — the spec's PERSON_OPEN_THRESHOLD = 2 is what the
-    code ships with. A regression to 1 would mean a single passing
-    guard opens the store."""
-    assert PERSON_OPEN_THRESHOLD == 2
+def test_threshold_constant_is_one():
+    """One confirmed person is sufficient fallback opening evidence."""
+    assert PERSON_OPEN_THRESHOLD == 1
 
 
 def test_window_constant_is_five_minutes():

@@ -1452,6 +1452,7 @@ def _sfi_send_daily_for_store(db, store, local_now) -> None:
 # "Store Not Opened" alert. Per-store-per-day Redis dedupe.
 
 NOT_OPENED_DEDUP_TTL = 24 * 3600    # one URGENT per store per day
+NOT_OPENED_EVIDENCE_GRACE_MIN = 10   # allow delayed frames/events to settle
 
 
 @celery_app.task(name="alerting.shop_not_opened_check", ignore_result=True)
@@ -1552,7 +1553,13 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         return
 
     local = _store_eat_now(store)
-    if local.time() < cfg["not_open_cutoff_t"]:
+    cutoff_local = local.replace(
+        hour=cfg["not_open_cutoff_t"].hour,
+        minute=cfg["not_open_cutoff_t"].minute,
+        second=0,
+        microsecond=0,
+    ) + timedelta(minutes=NOT_OPENED_EVIDENCE_GRACE_MIN)
+    if local < cutoff_local:
         return       # cutoff hasn't passed yet
 
     day_iso = local.date().isoformat()
@@ -1659,14 +1666,13 @@ OCCUPANCY_FALLBACK_METRICS = ("occupancy", "queue_length", "passersby")
 
 def _morning_window_utc(cfg, local_now):
     """Returns (start_utc, end_utc) for today's "morning open window"
-    in the store's local clock — i.e. earliest_open → not_open_cutoff
-    in EAT, converted to UTC for the SQL filter."""
+    in the store's local clock — scheduled opening → now — converted
+    to UTC for the SQL filter."""
     from datetime import time as _time
-    earliest_t = cfg.get("earliest_open_t") or _time(7, 0)
-    cutoff_t   = cfg["not_open_cutoff_t"]
+    earliest_t = cfg.get("open_t") or _time(9, 0)
     midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_local = midnight.replace(hour=earliest_t.hour, minute=earliest_t.minute)
-    end_local   = midnight.replace(hour=cutoff_t.hour,   minute=cutoff_t.minute)
+    end_local = local_now
     return (start_local.astimezone(timezone.utc),
             end_local.astimezone(timezone.utc))
 
@@ -1702,12 +1708,8 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     occupancy evidence is found — the caller then proceeds to fire
     the URGENT as normal.
 
-    Only metric_snapshots from ENTRANCE cameras count as evidence —
-    a stockroom or back-counter camera recording occupancy at 06:00
-    must not be treated as a store-open signal. The full `cam_ids`
-    list is still accepted (for the retro-labeller, which walks
-    every shop_open_close DetectionEvent for the store regardless
-    of source camera).
+    A person on any store camera after scheduled opening proves occupancy.
+    Entrance cameras remain preferred as the evidence anchor.
     """
     from zoneinfo import ZoneInfo
     eat = ZoneInfo("Africa/Nairobi")
@@ -1716,7 +1718,7 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
         return None     # no drawn entrance line → no inference possible
 
     start_utc, end_utc = _morning_window_utc(cfg, local_now)
-    samples = _occupancy_samples_in_window(db, entrance_cam_ids,
+    samples = _occupancy_samples_in_window(db, cam_ids,
                                              start_utc, end_utc)
     if not samples:
         return None
@@ -1736,11 +1738,9 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     # cutoff]. `_morning_window_utc` already bounds the sample query to
     # that window, so this is a belt-and-braces guard that keeps the
     # alert semantically "store opened during the opening window".
-    earliest_t = cfg.get("earliest_open_t")
-    cutoff_t   = cfg.get("not_open_cutoff_t")
-    if earliest_t is not None and cutoff_t is not None:
-        ot = opened_at_eat.time()
-        if not (earliest_t <= ot <= cutoff_t):
+    earliest_t = cfg.get("open_t")
+    if earliest_t is not None:
+        if opened_at_eat.time() < earliest_t:
             return None
 
     # Find a camera that contributed (preferring an entrance cam if
@@ -1807,7 +1807,7 @@ def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
     as confirmed false positives in their `extra` JSON. Idempotent —
     rows that already carry a training_label are left alone."""
     from sqlalchemy.orm.attributes import flag_modified
-    from app.models import DetectionEvent
+    from app.models import Alert, DetectionEvent
 
     midnight_local = local_now.replace(hour=0, minute=0,
                                         second=0, microsecond=0)
@@ -1836,6 +1836,13 @@ def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
             ex["evidence_peak_occupancy"] = evidence_peak
         ev.extra = ex
         flag_modified(ev, "extra")
+        alert = db.query(Alert).filter(Alert.event_id == ev.id).first()
+        if alert is not None and alert.status not in ("dismissed", "resolved"):
+            alert.status = "resolved"
+            alert.resolved_at = local_now.astimezone(timezone.utc)
+            alert.notification_suppressed = True
+            note = "Automatically resolved: person-presence evidence proved the store was open."
+            alert.notes = f"{alert.notes}\n{note}".strip() if alert.notes else note
         touched += 1
     if touched:
         log.info("retro-labelled %d shop_not_opened false-positives "
@@ -1984,7 +1991,7 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
 # crossing path and this one share the store-level Redis marker so
 # only one of them ever fires per day per store.
 
-PERSON_OPEN_THRESHOLD       = 2          # spec
+PERSON_OPEN_THRESHOLD       = 1
 OPEN_CONFIRMATION_WINDOW_S  = 5 * 60     # 5 minutes
 
 
@@ -2016,6 +2023,68 @@ def confirm_opening_from_events(timestamps,
         if (right - left + 1) >= threshold:
             return seq[left]
     return None
+
+
+def _before_hours_person_for_store(db, store, now_eat, open_time) -> None:
+    """Alert on a recent person from any active camera before opening.
+
+    This is a database-only fallback for cameras without an intrusion config.
+    Existing intrusion events win, and a 10-minute store bucket prevents floods.
+    """
+    from sqlalchemy import desc
+    from app.models import Camera, DetectionEvent
+
+    camera_ids = [camera_id for (camera_id,) in db.query(Camera.id).filter(
+        Camera.store_id == store.id,
+        Camera.is_deleted.is_(False),
+        Camera.ai_enabled.is_(True),
+    ).all()]
+    if not camera_ids:
+        return
+
+    now_utc = now_eat.astimezone(timezone.utc)
+    recent = now_utc - timedelta(seconds=90)
+    intrusion_exists = db.query(DetectionEvent.id).filter(
+        DetectionEvent.camera_id.in_(camera_ids),
+        DetectionEvent.detection_type == "intrusion",
+        DetectionEvent.timestamp >= recent,
+    ).first()
+    if intrusion_exists is not None:
+        return
+
+    person = db.query(DetectionEvent).filter(
+        DetectionEvent.camera_id.in_(camera_ids),
+        DetectionEvent.detection_type == "person",
+        DetectionEvent.timestamp >= recent,
+    ).order_by(desc(DetectionEvent.timestamp)).first()
+    if person is None:
+        return
+
+    r = _redis()
+    bucket = int(now_eat.timestamp() // 600)
+    key = f"vg:before_hours_person:{store.id}:{bucket}"
+    if r.get(key):
+        return
+
+    body = (f"Person detected at {store.name or 'Store ' + str(store.id)} "
+            f"before working hours ({now_eat.strftime('%H:%M')}; "
+            f"opens {open_time.strftime('%H:%M')}).")
+    _create_info_alert(
+        db, camera_id=person.camera_id, zone_id=person.zone_id,
+        store_id=store.id, detection_type="intrusion", cls="person",
+        extra={
+            "priority": "high",
+            "rule": "before_hours_person",
+            "time_context": "before_hours",
+            "store_id": store.id,
+            "store_name": store.name,
+            "message": body,
+            "scheduled_open": open_time.strftime("%H:%M"),
+            "signal": "person_on_any_store_camera",
+        },
+    )
+    db.commit()
+    r.set(key, "1", ex=11 * 60)
 
 
 @celery_app.task(name="alerting.shop_open_inference_check", ignore_result=True)
@@ -2061,8 +2130,9 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
         _ensure_open_alert_exists(db, store, marker, now_eat)
         return
 
-    # OPENING-WINDOW GATE. Store-opening inference is only meaningful
-    # between earliest_open (07:00) and not_open_cutoff (09:30) EAT.
+    # Before scheduled opening, any person is a security event rather than an
+    # opening fallback. After opening, one person on any store camera is enough
+    # to suppress a false "not opened" claim.
     # Outside that window we skip entirely — without the upper bound
     # this fired "Store Opened — inferred (16:52)" on ordinary
     # afternoon traffic.
@@ -2071,10 +2141,10 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     #                crossing/occupancy paths, or genuinely not opened
     #                and handled by the URGENT not-opened check)
     cfg = shop_state._read_cfg(None)
-    earliest_t = cfg.get("earliest_open_t")
+    earliest_t = cfg.get("open_t")
     if earliest_t is None:
         from datetime import time as _time
-        earliest_t = _time(7, 0)
+        earliest_t = _time(9, 0)
     cutoff_t = cfg.get("not_open_cutoff_t")
     if cutoff_t is None:
         from datetime import time as _time
@@ -2083,8 +2153,10 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     window_start_local = today_local_00.replace(
         hour=earliest_t.hour, minute=earliest_t.minute)
     window_end_local = today_local_00.replace(
-        hour=cutoff_t.hour, minute=cutoff_t.minute)
+        hour=cutoff_t.hour, minute=cutoff_t.minute) + timedelta(
+            minutes=NOT_OPENED_EVIDENCE_GRACE_MIN)
     if now_eat < window_start_local:
+        _before_hours_person_for_store(db, store, now_eat, earliest_t)
         return       # too early
     if now_eat > window_end_local:
         return       # past the opening cutoff — don't infer all day
@@ -2097,18 +2169,17 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     now_utc          = now_eat.astimezone(timezone.utc)
     scan_end_utc     = min(now_utc, window_end_utc)
 
-    # ENTRANCE CAMERAS ONLY. A person detected in a stockroom or
-    # behind the counter must not satisfy the "store opened" rule —
-    # only crossings/detections at a drawn entrance line count.
-    # Stores with no entrance line drawn are honestly excluded from
-    # inference (the URGENT "Store Not Opened" still fires at the
-    # cutoff if no other evidence lands).
-    cam_ids = _entrance_cam_ids_for_store(db, store.id)
+    from app.models import Camera
+    cam_ids = [camera_id for (camera_id,) in db.query(Camera.id).filter(
+        Camera.store_id == store.id,
+        Camera.is_deleted.is_(False),
+        Camera.ai_enabled.is_(True),
+    ).all()]
     if not cam_ids:
         return
 
-    # Single chronological pull of person events for the entrance
-    # cameras only — one query (no N+1) backed by the existing
+    # Single chronological pull across all active store cameras — one query
+    # (no N+1) backed by the existing
     # (camera_id, timestamp) composite index.
     rows = (db.query(DetectionEvent.timestamp,
                      DetectionEvent.camera_id)
@@ -2176,7 +2247,7 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
             "confidence":        "medium",
             "opened_at_eat":     opened_at.strftime("%H:%M"),
             "opened_at_iso":     opened_at.isoformat(),
-            "signal":            "occupancy_two_in_five_min",
+            "signal":            "person_on_any_store_camera",
         }
         _create_info_alert(
             db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
@@ -2202,7 +2273,8 @@ def _ensure_open_alert_exists(db, store, marker: dict, now_eat) -> None:
     today_start_utc = (now_eat.replace(hour=0, minute=0, second=0,
                                        microsecond=0)
                        .astimezone(timezone.utc))
-    opened_rules = ("shop_opened", "shop_opened_late", "shop_opened_inferred")
+    opened_rules = ("shop_opened", "shop_opened_late", "shop_opened_inferred",
+                    "shop_opened_via_occupancy", "shop_opened_before_hours")
     exists = (db.query(DetectionEvent.id)
                 .join(Camera, Camera.id == DetectionEvent.camera_id)
                 .filter(Camera.store_id == store.id,

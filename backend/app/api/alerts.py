@@ -289,6 +289,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
                 return "Person Detected Before Hours"
             return "Person Detected After Hours"
         return "Customer in Store"
+    if dt == "intrusion" and _time_context(event, store) == "before_hours":
+        return "Person Detected Before Hours"
     if dt == "shutter":
         rule = extra.get("rule", "")
         state = extra.get("shutter_state", "")
@@ -311,6 +313,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "shop_opened_inferred":
             opened = extra.get("opened_at_eat") or eat
             return f"✅ Store Opened — inferred ({opened})"
+        if rule == "shop_opened_via_occupancy":
+            opened = extra.get("opened_at_eat") or eat
+            return f"✅ Store Opened — person detected ({opened})"
         if rule == "shop_not_opened":
             return "🚨 Store Not Opened"
         if rule == "shop_closed":
