@@ -92,7 +92,6 @@ celery_app.conf.update(
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
-        "alerting.camera_health_check":         {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -242,13 +241,6 @@ celery_app.conf.update(
         "prune-alert-snapshots-every-1h": {
             "task": "alerting.prune_alert_snapshots",
             "schedule": 60 * 60.0,
-        },
-        # Camera-offline alert — every 60s the task scans
-        # ai_enabled cameras and fires when last_seen is > 5 min stale
-        # AND the store is currently within business hours.
-        "camera-health-every-60s": {
-            "task": "alerting.camera_health_check",
-            "schedule": 60.0,
         },
         # Uniform-violation deduplication — every 60s scans recent
         # uniform_compliance alerts. Deduped per store per 30 min.

@@ -4,7 +4,6 @@ These are deliberately SEPARATE from the per-frame DetectionEvent
 pipeline because they only fire on conditions that persist over time:
 
   - queue_escalation_check     queue length > threshold sustained > N minutes
-  - camera_health_check        camera offline > 5 minutes during business hours
 
 Redis markers deduplicate sustained incidents; actionable conditions are
 persisted as in-app alerts.
@@ -30,11 +29,6 @@ log = logging.getLogger(__name__)
 QUEUE_COUNT_THRESHOLD   = 5     # > 5 people
 QUEUE_DURATION_SECONDS  = 180   # for > 3 minutes
 QUEUE_DEDUP_TTL_SECONDS = 600   # one escalation per zone per 10 min
-
-# Camera-health thresholds.
-CAMERA_OFFLINE_THRESHOLD_SECONDS = 5 * 60      # > 5 min
-CAMERA_HEALTH_DEDUP_TTL_SECONDS  = 30 * 60     # one nudge per camera / 30 min
-
 
 def _redis():
     return redis.from_url(settings.redis_url, decode_responses=True)
@@ -518,83 +512,6 @@ def prune_checkout_snapshots() -> None:
             db.commit()
         log.info("prune_checkout_snapshots: alerts=%d files=%d",
                  len(stale), n_files)
-
-
-# ---- Camera health ----------------------------------------------------
-
-@celery_app.task(name="alerting.camera_health_check", ignore_result=True)
-def camera_health_check() -> None:
-    """Walk active cameras during their store's business hours. Any
-    camera whose `last_seen_at` is older than 5 minutes creates an
-    in-app alert (deduped per-camera per-30-minutes)."""
-    from app.database import SessionLocal
-    from app.models import Camera, Store
-    from app.utils.business_hours import is_store_open
-
-    r = _redis()
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(seconds=CAMERA_OFFLINE_THRESHOLD_SECONDS)
-
-    with SessionLocal() as db:
-        cameras = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
-        for cam in cameras:
-            if cam.store_id is None:
-                continue
-            store = db.get(Store, cam.store_id)
-            if not store or not is_store_open(store, now):
-                continue   # we only nudge during operating hours
-
-            last_seen = cam.last_seen_at
-            if last_seen is not None and last_seen.tzinfo is None:
-                last_seen = last_seen.replace(tzinfo=timezone.utc)
-
-            if last_seen is not None and last_seen >= cutoff:
-                # Online — clear any latched outage marker.
-                r.delete(f"vg:cam_offline:start:{cam.id}")
-                r.delete(f"vg:cam_offline:sent:{cam.id}")
-                continue
-
-            start_key = f"vg:cam_offline:start:{cam.id}"
-            sent_key  = f"vg:cam_offline:sent:{cam.id}"
-
-            if not r.get(start_key):
-                # First detection — record start, hold off on alerting.
-                r.set(start_key, str(int(now.timestamp())),
-                      ex=24 * 3600)
-                continue
-
-            if r.get(sent_key):
-                continue
-
-            # Compute uptime over the last 24h: fraction of the last
-            # 24h where the camera was reporting frames. Approximated
-            # using the last_seen field — if last_seen < 24h ago, the
-            # camera was up until that moment, so:
-            #   uptime = (now - 24h until last_seen) / 24h
-            window_start = now - timedelta(hours=24)
-            if last_seen is None or last_seen < window_start:
-                uptime_pct = 0
-            else:
-                up_seconds = (last_seen - window_start).total_seconds()
-                uptime_pct = max(0, min(100, int(up_seconds / (24 * 3600) * 100)))
-
-            last_seen_str = last_seen.astimezone(timezone.utc).strftime("%H:%M UTC") \
-                if last_seen else "never"
-            body = (f"⚠️ Camera offline: {cam.name} at {store.name}. "
-                    f"Last seen {last_seen_str}. 24h uptime {uptime_pct}%.")
-            _create_info_alert(
-                db, camera_id=cam.id, zone_id=None, store_id=store.id,
-                detection_type="system_health", cls="camera_offline",
-                extra={
-                    "priority": "warning", "title": "Camera offline",
-                    "message": body, "last_seen_at": (
-                        last_seen.isoformat() if last_seen else None
-                    ), "uptime_24h_pct": uptime_pct,
-                }, capture_snapshot=False,
-            )
-            db.commit()
-            log.info("camera health alert: %s (%s) offline", cam.name, store.name)
-            r.set(sent_key, "1", ex=CAMERA_HEALTH_DEDUP_TTL_SECONDS)
 
 
 # ---- Uniform-violation manager notification ---------------------------

@@ -14,9 +14,8 @@ import { stores as storesApi, type Store } from '@/api/stores'
 type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
-// actionable tabs (urgent / attention / resolved / all). Everything else —
-// including the routine sales_floor_insight + system_health heartbeats —
-// flows into the actionable tabs by severity/status like any other alert.
+// actionable tabs (urgent / attention / resolved / all). Fleet-level system
+// faults remain actionable; routine camera availability lives on System Health.
 const STORE_INTEL_TYPE = 'store_intelligence'
 const POSITIVE_TYPE = 'positive_operational'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
@@ -183,9 +182,7 @@ export default function AlertsPage() {
   }, [items])
 
   // Client-side quick-filter + search over the loaded window. The
-  // actionable tabs exclude only store_intelligence (which has its own
-  // "Store Update" tab); sales_floor_insight + system_health flow into
-  // the "All" tab (and the others by severity) like normal alerts.
+  // Actionable tabs exclude store intelligence, which has its own tab.
   const filtered = useMemo(() => {
     let rows = items
     if (quick === 'store') {
@@ -219,8 +216,7 @@ export default function AlertsPage() {
 
   // Per-bucket counts derived from the loaded items, so each filter
   // button's badge equals what the user will actually see when they
-  // click it. Only store_intelligence is excluded from the actionable
-  // buckets; it has its own Store Update tab.
+  // click it. Store intelligence has its own Store Update tab.
   const counts = useMemo(() => {
     const operational = items.filter(_isOperational)
     return {

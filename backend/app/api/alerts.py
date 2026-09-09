@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from app.utils.cache import cached_store_endpoint
-from sqlalchemy import case, desc, func
+from sqlalchemy import and_, case, desc, func, not_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -24,6 +24,17 @@ from app.models import Alert, Camera, DetectionEvent, User, Zone
 from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+
+def _operator_alert_filter():
+    """Keep legacy camera-health heartbeats out of the incident feed.
+
+    Camera availability remains visible on System Health. Fleet-wide AI
+    pipeline failures use different subtypes and remain actionable alerts.
+    """
+    subtype = func.coalesce(DetectionEvent.extra["cls"].as_string(), "")
+    return not_(and_(DetectionEvent.detection_type == "system_health",
+                    subtype == "camera_offline"))
 
 
 # ---- Title / body / severity translation ---------------------------
@@ -1189,7 +1200,8 @@ def alerts_summary(db: Session = Depends(get_db),
     yq = (db.query(func.count(Alert.id))
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-            .filter(DetectionEvent.timestamp >= yest_start,
+            .filter(_operator_alert_filter(),
+                    DetectionEvent.timestamp >= yest_start,
                     DetectionEvent.timestamp < today,
                     DetectionEvent.detection_type != "positive_operational",
                     Alert.notification_suppressed.is_(False)))
@@ -1210,7 +1222,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .outerjoin(_Store, Camera.store_id == _Store.id)
-            .filter(DetectionEvent.timestamp >= today,
+            .filter(_operator_alert_filter(),
+                    DetectionEvent.timestamp >= today,
                     DetectionEvent.timestamp < tomorrow,
                     DetectionEvent.detection_type != "positive_operational"))
     if store_id is not None:
@@ -1350,7 +1363,8 @@ def export_alerts_xlsx(
     q = (db.query(Alert, DetectionEvent, Camera, _Store)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .outerjoin(_Store, Camera.store_id == _Store.id))
+           .outerjoin(_Store, Camera.store_id == _Store.id)
+           .filter(_operator_alert_filter()))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
     if detection_type:
@@ -1425,7 +1439,8 @@ def list_alerts(
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id))
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .filter(_operator_alert_filter()))
     if before_id is not None:
         cursor = db.get(Alert, before_id)
         if cursor is not None:
