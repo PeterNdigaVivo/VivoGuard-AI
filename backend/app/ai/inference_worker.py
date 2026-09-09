@@ -31,8 +31,12 @@ from app.ai.snapshot import SNAPSHOT_TYPES
 from app.ai.yolov8_runner import infer, load_model, resolve_weights
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AIModel, Camera, DetectionConfig, DetectionEvent, Store, Zone, Alert
+from app.models import (
+    AIModel, Alert, Camera, DetectionConfig, DetectionEvent,
+    DETECTION_TYPES, Store, Zone,
+)
 from app.stream.frame_buffer import FrameBuffer
+from app.zone_purposes import detector_types_for_zone_tags
 
 log = logging.getLogger(__name__)
 
@@ -72,11 +76,13 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     # never toggled "queue" in the AI Settings page. This eliminates the
     # most common "I configured it but nothing happens" failure mode.
     # ------------------------------------------------------------------
-    zone_types: set[str] = set()
+    zone_tags: set[str] = set()
     for z in zones:
         for t in (z["detection_types_json"] or []):
-            zone_types.add(t)
-    for t in zone_types:
+            zone_tags.add(t)
+    for t in detector_types_for_zone_tags(zone_tags):
+        if t not in DETECTION_TYPES:
+            continue
         if t not in cfg:
             cfg[t] = {
                 "enabled": True,

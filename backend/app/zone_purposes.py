@@ -107,6 +107,41 @@ ZONE_PURPOSES = {
 }
 
 
+# Zones store semantic area tags; detector configs store executable detector
+# names. Some coincide (``queue``), while a ``counter`` intentionally drives
+# several workflows. Centralising the translation prevents fake configs such
+# as "counter" or "restricted" from silently disabling the real detectors.
+ZONE_TAG_DETECTORS: dict[str, tuple[str, ...]] = {
+    "entry":         ("entry_exit",),
+    "entry_exit":    ("entry_exit",),
+    "glass_door":    (),
+    "changing_room": (),
+    "queue":         ("queue",),
+    "counter":       ("staff_present", "checkout_dwell", "uniform_compliance"),
+    "staff":         ("staff_zone", "uniform_compliance"),
+    "staff_area":    ("staff_zone", "uniform_compliance"),
+    "staff_zone":    ("staff_zone", "uniform_compliance"),
+    "aisle":         ("dwell",),
+    "dwell":         ("dwell",),
+    "restricted":    ("intrusion",),
+    "stockroom":     ("stockroom_access",),
+    "high_value":    ("shrinkage",),
+    "sidewalk":      ("passersby",),
+    "window":        ("window_engagement",),
+    "shutter":       ("shutter",),
+    "shelf":         ("shelf_change",),
+    "shelf_change":  ("shelf_change",),
+}
+
+
+def detector_types_for_zone_tags(tags: list[str] | set[str]) -> set[str]:
+    """Translate semantic zone tags to executable detector types."""
+    detectors: set[str] = set()
+    for tag in tags or []:
+        detectors.update(ZONE_TAG_DETECTORS.get(str(tag), (str(tag),)))
+    return detectors
+
+
 def types_for_purpose(purpose_key: str) -> list[str]:
     p = ZONE_PURPOSES.get(purpose_key)
     return list(p["types"]) if p else []

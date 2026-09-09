@@ -19,9 +19,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import require_role
-from app.models import Camera, DetectionConfig, Zone
+from app.models import Camera, DetectionConfig, DETECTION_TYPES, Zone
 from app.schemas.detection import ZoneIn, ZoneOut
-from app.zone_purposes import ZONE_PURPOSES
+from app.zone_purposes import ZONE_PURPOSES, detector_types_for_zone_tags
 
 router = APIRouter(prefix="/cameras", tags=["zones"])
 
@@ -71,7 +71,9 @@ def _autoenable_detection_types(db: Session, camera_id: int, types: list[str]) -
     """For every type in `types`, ensure a DetectionConfig row exists with
     enabled=True. Idempotent. Doesn't touch confidence/dwell knobs on
     pre-existing rows so operators can still tune them per type."""
-    for t in types or []:
+    for t in detector_types_for_zone_tags(types):
+        if t not in DETECTION_TYPES:
+            continue
         row = (db.query(DetectionConfig)
                  .filter(DetectionConfig.camera_id == camera_id,
                          DetectionConfig.detection_type == t)
