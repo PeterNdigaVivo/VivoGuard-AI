@@ -196,7 +196,7 @@ def test_dead_scene_fires_when_enabled_and_flat_zero() -> None:
 def test_dead_scene_requires_fresh_frame_and_open_store() -> None:
     cfg = {**CFG, "dead_scene_minutes": 5}
     samples = {1: _win(0, 0, 0, 0, 0, 0, 0, score=0.0)}
-    # No fresh frame → streamer agent's problem, not ours.
+    # No fresh frame → streamer health check's problem, not ours.
     out = _eval(samples, {1: 10}, cfg, store_open={10: True}, fresh=set())
     assert all(t["rule"] != "dead_scene" for t in out)
     # Store closed → dead scenes overnight are normal.

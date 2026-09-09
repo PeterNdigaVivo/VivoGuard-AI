@@ -994,14 +994,14 @@ def _store_intel_ai_insight(store, summary: dict, hb: dict, local, opened) -> st
     None when the LLM is unavailable (no key / SDK missing / error) so the
     caller keeps the deterministic body only. Never raises."""
     api_key = getattr(settings, "anthropic_api_key", "") or ""
-    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+    if not api_key or not settings.vlm_enabled:
         return None
     try:
         import anthropic
     except Exception:
         return None
     model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
-    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    timeout = float(settings.vlm_timeout_seconds)
     city = getattr(store, "city", None) or getattr(store, "country", "") or ""
     winner = summary.get("winner") or {}
     opened_at = opened.get("opened_at") if isinstance(opened, dict) else None
@@ -1597,7 +1597,7 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     # No positive opening evidence exists, but absence is only actionable if
     # at least one configured entrance sensor is actually supplying pixels.
     # Otherwise the correct diagnosis is unavailable CCTV coverage, which the
-    # camera-health agent already reports — not "the store did not open".
+    # camera-health check already reports — not "the store did not open".
     fresh_entrance_cam_ids = _fresh_frame_camera_ids(r, entrance_cam_ids)
     if not fresh_entrance_cam_ids:
         log.warning(
@@ -2533,14 +2533,14 @@ def _store_intel_ai_v2(store, city, country, period_label, telemetry):
     """Claude Haiku BI insight -> (summary, recommendation). Best-effort;
     returns (None, None) when the LLM is unavailable."""
     api_key = getattr(settings, "anthropic_api_key", "") or ""
-    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+    if not api_key or not settings.vlm_enabled:
         return None, None
     try:
         import anthropic
     except Exception:
         return None, None
     model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
-    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    timeout = float(settings.vlm_timeout_seconds)
     system = ("You are a retail business intelligence analyst for Vivo Fashion "
               "Group, a leading fashion retailer in East Africa. Analyze store "
               "telemetry and provide concise, actionable insights for store "

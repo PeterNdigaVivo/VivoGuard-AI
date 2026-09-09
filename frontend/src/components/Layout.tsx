@@ -33,7 +33,6 @@ const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   { to: '/models',   label: 'Models' },
   { to: '/users',    label: 'Users' },
   { to: '/system',   label: 'System' },
-  { to: '/agents',   label: 'Agents' },
 ]
 
 export default function Layout() {
@@ -80,7 +79,7 @@ export default function Layout() {
           🎥 VivoGuard
         </div>
         {/* min-h-0 + overflow-y-auto so a long nav scrolls instead of pushing
-            the bottom items (Users / System / Agents) under the footer. */}
+            the bottom administration items under the footer. */}
         <nav className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
           {NAV.filter(item =>
             !item.systemAdminOnly || isSystemAdmin(user?.email),

@@ -242,37 +242,7 @@ class Settings(BaseSettings):
     vlm_model: str = "claude-haiku-4-5"
     # Secret — env-only, never logged or committed.
     anthropic_api_key: str = ""
-    openai_api_key: str = ""
     vlm_timeout_seconds: int = 10
-
-    # ── Autonomous AI monitoring agents (app/tasks/agents.py) ──────────
-    # When enabled (and anthropic_api_key is set), each domain agent hands
-    # its deterministic telemetry to Claude for reasoning/diagnosis and
-    # natural-language recommendations. When disabled or the API is
-    # unreachable, agents fall back to their rule-based verdict so they
-    # never break. Shares anthropic_api_key with the VLM.
-    agents_llm_enabled: bool = True
-    # Provider order is fail-open: deterministic agent results are always
-    # retained. If the primary provider fails, the optional fallback is tried.
-    agents_llm_provider: str = "anthropic"
-    agents_llm_fallback_provider: str = "openai"
-    # Default (Sonnet) model — used by the two daily strategic agents
-    # (retail standards, inspection). The analytical agents override to
-    # claude-haiku-4-5 in agents.py.
-    agents_llm_model: str = "claude-sonnet-4-6"
-    agents_llm_openai_model: str = "gpt-5.4-mini"
-    # Emit a silent, resolved, evidence-backed in-app alert only when an
-    # autonomous agent transitions from warning/critical back to ok.
-    positive_agent_alerts_enabled: bool = True
-    positive_agent_alert_dedup_hours: int = Field(default=6, ge=1, le=168)
-    agents_llm_timeout_seconds: int = 45
-    # Persist a bounded sample of REAL camera frames examined by the live
-    # simulation probe. Evidence is quarantined and requires two-person review
-    # before it can become training data. Synthetic scenario rows are excluded.
-    simulation_evidence_enabled: bool = True
-    simulation_evidence_max_per_run: int = Field(default=10, ge=0, le=30)
-    simulation_evidence_dedupe_days: int = Field(default=7, ge=1, le=90)
-    simulation_evidence_control_fraction: float = Field(default=0.30, ge=0.0, le=1.0)
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",

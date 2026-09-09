@@ -37,7 +37,6 @@ const ChainTrainingPage    = lazy(() => import('@/pages/ChainTrainingPage'))
 const ModelsPage           = lazy(() => import('@/pages/ModelsPage'))
 const SystemHealthPage     = lazy(() => import('@/pages/SystemHealthPage'))
 const MissionControlPage   = lazy(() => import('@/pages/MissionControlPage'))
-const AgentsPage           = lazy(() => import('@/pages/AgentsPage'))
 const StoresPage           = lazy(() => import('@/pages/StoresPage'))
 const StoreDashboardPage   = lazy(() => import('@/pages/StoreDashboardPage'))
 const StoreDetailPage      = lazy(() => import('@/pages/StoreDetailPage'))
@@ -114,7 +113,6 @@ export default function App() {
                   in the page itself AND server-side on the API. */}
               <Route path="/system-health"            element={<MissionControlPage />} />
               <Route path="/odoo-assurance"           element={<OdooAssurancePage />} />
-              <Route path="/agents"                   element={<AgentsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
