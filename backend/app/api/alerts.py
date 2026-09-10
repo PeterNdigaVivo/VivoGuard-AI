@@ -335,6 +335,10 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "missing_nametag":
             return "Staff Member Missing Name Tag"
         return "Unidentified Person Behind Counter"
+    if dt == "dwell":
+        # The aisle detector's only alert is the sales-floor staffing
+        # gap; its browse-time output is metrics-only, never an alert.
+        return "Sales Floor Unattended"
     if dt == "checkout_dwell":
         # All variants today are "long session" alerts. If the schema
         # grows more rules (e.g. abandoned-basket), branch on
@@ -375,6 +379,9 @@ _WHAT_TO_DO: dict[str, list[str]] = {
     "staff_present": ["Ask nearby staff to cover the counter",
                       "Check if the staff member is on a break",
                       "Make sure the counter is always covered"],
+    "dwell": ["Send a staff member onto the sales floor",
+              "Check whether any customer is waiting for help",
+              "Mark resolved once the floor is covered"],
     "camera_offline": ["Check the camera power cable is connected",
                        "Restart the camera from the NVR",
                        "Call IT support if still offline: {it_phone}"],
@@ -714,6 +721,12 @@ def _title(event: DetectionEvent, camera: Camera | None,
         store_name = (store.name if store else None) \
                       or (extra.get("store_name")) or "Unknown store"
         return f"{icon} Checkout Taking Too Long — {store_name}"
+    if dt == "dwell":
+        n = _extract(extra, "customer_count", default=None)
+        if n:
+            return (f"{icon} Sales floor unattended — "
+                    f"{int(float(n))} customers, no staff — {cam}")
+        return f"{icon} Sales floor unattended — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -913,6 +926,15 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return ("An object has been left unattended in the store. Investigate.")
     if dt == "loitering":
         return ("A person has been lingering in one area beyond the typical browsing window.")
+    if dt == "dwell":
+        n     = _extract(extra, "customer_count", default=None)
+        mins  = _extract(extra, "unattended_minutes", default=None)
+        where = zone_name or _extract(extra, "zone_name", default=None) \
+                or "the sales floor"
+        who      = f"{int(float(n))} customers" if n else "Customers"
+        how_long = f" for {int(float(mins))} minutes" if mins else ""
+        return (f"{who} have been browsing {where}{how_long} with no staff "
+                f"member in the area. Send someone to the floor to help them.")
     if dt == "checkout_dwell":
         # `dwell_seconds` is set by the alerting task. Format as
         # "X minutes Y seconds" with the noun matched to the value

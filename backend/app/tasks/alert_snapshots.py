@@ -55,6 +55,7 @@ BUSINESS_END_HOUR   = int(getattr(settings, "business_hours_end", 20))
 FILMSTRIP_TYPES: set[str] = {
     "trespass", "intrusion", "staff_present", "staff_zone",
     "counter_unstaffed", "shop_open_close", "shrinkage", "uniform_compliance",
+    "dwell",
 }
 
 # Default timeline: 1 pre-frame (-10s), the t=0 frame, then +30/60/90/120s.
