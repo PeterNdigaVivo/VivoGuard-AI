@@ -14,8 +14,9 @@ type Quick = 'store' | 'urgent' | 'attention' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
 // actionable tabs (urgent / attention / resolved / all). Everything else —
-// including the routine sales_floor_insight + system_health heartbeats —
-// flows into the actionable tabs by severity/status like any other alert.
+// including the routine sales_floor_insight heartbeat — flows into the
+// actionable tabs by severity/status like any other alert. (system_health
+// never arrives here at all; the API drops it — see _HIDDEN_TYPES.)
 const STORE_INTEL_TYPE = 'store_intelligence'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
 const _isActionable = (a: Alert) => !_isStoreIntel(a)
@@ -132,8 +133,8 @@ export default function AlertsPage() {
 
   // Client-side quick-filter + search over the loaded window. The
   // actionable tabs exclude only store_intelligence (which has its own
-  // "Store Update" tab); sales_floor_insight + system_health flow into
-  // the "All" tab (and the others by severity) like normal alerts.
+  // "Store Update" tab); sales_floor_insight flows into the "All" tab
+  // (and the others by severity) like a normal alert.
   const filtered = useMemo(() => {
     let rows = items
     if (quick === 'store') {

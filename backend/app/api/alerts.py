@@ -65,6 +65,16 @@ _SEVERITY: dict[str, str] = {
     "store_intelligence":  "info",
 }
 
+# Detection types that never reach the operator alert feed.
+#
+# system_health is fleet infrastructure telemetry ("AI monitoring
+# offline") aimed at IT, not at store staff — it has no camera scene to
+# judge, so the True/False buttons are meaningless on it. The alert row
+# is still written and the WhatsApp page still goes to the dashboard
+# recipients; it is only hidden from the feed, its badge counts, and the
+# manager export.
+_HIDDEN_TYPES: set[str] = {"system_health"}
+
 # Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
 # (defined below) so ALL high-priority types surface — see _RANK_CRITICAL /
 # _RANK_HIGH after the _SEVERITY_4 definition.
@@ -1170,7 +1180,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .filter(DetectionEvent.timestamp >= yest_start,
-                    DetectionEvent.timestamp < today))
+                    DetectionEvent.timestamp < today,
+                    DetectionEvent.detection_type.notin_(_HIDDEN_TYPES)))
     if store_id is not None:
         yq = yq.filter(Camera.store_id == store_id)
     yest_count = int(yq.scalar() or 0)
@@ -1188,7 +1199,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .outerjoin(_Store, Camera.store_id == _Store.id)
             .filter(DetectionEvent.timestamp >= today,
-                    DetectionEvent.timestamp < tomorrow))
+                    DetectionEvent.timestamp < tomorrow,
+                    DetectionEvent.detection_type.notin_(_HIDDEN_TYPES)))
     if store_id is not None:
         tq = tq.filter(Camera.store_id == store_id)
     rows = tq.all()
@@ -1319,7 +1331,8 @@ def export_alerts_xlsx(
     q = (db.query(Alert, DetectionEvent, Camera, _Store)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .outerjoin(_Store, Camera.store_id == _Store.id))
+           .outerjoin(_Store, Camera.store_id == _Store.id)
+           .filter(DetectionEvent.detection_type.notin_(_HIDDEN_TYPES)))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
     if detection_type:
@@ -1394,7 +1407,8 @@ def list_alerts(
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id))
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .filter(DetectionEvent.detection_type.notin_(_HIDDEN_TYPES)))
     if before_id is not None:
         cursor = db.get(Alert, before_id)
         if cursor is not None:
