@@ -14,8 +14,9 @@ import { stores as storesApi, type Store } from '@/api/stores'
 type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
-// actionable tabs (urgent / attention / resolved / all). Fleet-level system
-// faults remain actionable; routine camera availability lives on System Health.
+// actionable tabs (urgent / attention / resolved / all). system_health never
+// arrives here at all — the API drops every subtype of it (see
+// _operator_alert_filter); it lives on the System Health page instead.
 const STORE_INTEL_TYPE = 'store_intelligence'
 const POSITIVE_TYPE = 'positive_operational'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
