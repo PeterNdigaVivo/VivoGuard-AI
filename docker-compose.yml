@@ -105,6 +105,7 @@ x-app-env: &app-env
   STREAMER_RETRY_UNREACHABLE: ${STREAMER_RETRY_UNREACHABLE:-30}
   STREAMER_RECHECK_REACHABLE: ${STREAMER_RECHECK_REACHABLE:-300}
   INFERENCE_CRITICAL_SLICE_SECONDS: ${INFERENCE_CRITICAL_SLICE_SECONDS:-15}
+  INFERENCE_RUN_SECONDS: ${INFERENCE_RUN_SECONDS:-120}
   INFERENCE_CRITICAL_REQUEUE_SECONDS: ${INFERENCE_CRITICAL_REQUEUE_SECONDS:-180}
   INFERENCE_CRITICAL_GAP_SLA_SECONDS: ${INFERENCE_CRITICAL_GAP_SLA_SECONDS:-300}
   INFERENCE_STANDARD_GAP_SLA_SECONDS: ${INFERENCE_STANDARD_GAP_SLA_SECONDS:-900}
@@ -202,7 +203,7 @@ services:
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --disable-prefetch --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
+      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --pool=threads --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --disable-prefetch --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
     environment:
       <<: *app-env
       # One Celery child handles one camera loop. Without explicit native
@@ -322,6 +323,7 @@ services:
   # Concurrency 2: the tick and clip-extraction tasks are light; the actual
   # recordings are detached ffmpeg processes, not celery task runtime.
   recorder:
+    profiles: ["continuous"]
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
