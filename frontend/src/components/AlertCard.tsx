@@ -528,6 +528,24 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
     }
   }
 
+  // Informational cards (store updates, positive operational notes) carry
+  // no verdict — there is no AI judgement to agree or disagree with. They
+  // still need clearing, otherwise the tab count only ever grows. /resolve
+  // closes without feeding a training sample.
+  async function closeUpdate() {
+    setLocal({ ...alert, status: 'resolved',
+               resolved_at: new Date().toISOString() })
+    try {
+      await alertsApi.resolve(alert.id)
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
+        { detail: { id: alert.id, action: 'resolve' } }))
+      onChanged?.()
+    } catch (e) {
+      setLocal(incoming)
+      window.alert('Could not close this update. ' + e)
+    }
+  }
+
   async function submitNote() {
     if (!noteText.trim()) return
     await act(() => alertsApi.addNote(alert.id, noteText.trim()))
@@ -717,9 +735,18 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               "✓ Marked True/False" chip so the choice is obvious
               and can't be double-submitted. */}
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-            {/* store_intelligence is informational — no True/False verdict. */}
-            {alert.detection_type === 'store_intelligence' || isPositive ? null
-              : alert.status === 'new' ? (
+            {/* Informational — no True/False verdict, just a way to clear it. */}
+            {alert.detection_type === 'store_intelligence' || isPositive ? (
+              alert.status === 'new' ? (
+                <FeedbackBtn onClick={closeUpdate} tone="green" disabled={busy}>
+                  ✅ Got it — close
+                </FeedbackBtn>
+              ) : (
+                <span className="px-3 py-1.5 rounded font-bold text-white bg-slate-500">
+                  ✓ Closed
+                </span>
+              )
+            ) : alert.status === 'new' ? (
               <>
                 <FeedbackBtn onClick={markTrue} tone="green" disabled={busy}>
                   ✅ True Alert

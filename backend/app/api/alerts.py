@@ -66,10 +66,13 @@ _SEVERITY: dict[str, str] = {
     "abandoned_object":  "warning",
     "tailgating":        "warning",
     # info — routine operational signals
-    "staff_present":     "info",
+    "staff_present":     "warning",
     "occupancy":         "info",
     "entry_exit":        "info",
-    "dwell":             "info",
+    # The aisle detector's only alert is sales-floor-unattended —
+    # customers on the floor with nobody serving them. Operational, not
+    # a routine signal.
+    "dwell":             "warning",
     "passersby":         "info",
     "live_activity":     "warning",
     "shop_open_close":   "info",
@@ -101,6 +104,7 @@ _SEVERITY_LABEL: dict[str, str] = {
     "staff_present": "ATTENTION", "crowd": "ATTENTION",
     "abandoned_object": "ATTENTION", "loitering": "ATTENTION",
     "tailgating": "ATTENTION", "camera_offline": "ATTENTION",
+    "dwell": "ATTENTION",               # sales floor unattended
 }
 
 # Four-tier severity ladder (spec Part 1 §1):
@@ -141,7 +145,9 @@ _SEVERITY_4: dict[str, str] = {
     "sales_floor_insight":"LOW",
     "store_intelligence": "LOW",
     "entry_exit":         "LOW",
-    "dwell":              "LOW",
+    # Sales floor unattended — same class of problem as an unstaffed
+    # counter, so it carries the same weight.
+    "dwell":              "HIGH",
     "passersby":          "LOW",
     "occupancy":          "LOW",
     "person":             "LOW",        # default; per-context override below
@@ -203,7 +209,9 @@ def _severity_4_label(detection_type: str | None,
     if dt == "shop_open_close":
         if rule == "shop_not_opened":           return "CRITICAL"
         if rule == "shop_opened_before_hours":  return "HIGH"
-        if rule == "shop_opened_late":          return "MEDIUM"
+        # Trading starting late costs sales and is a staffing failure,
+        # not a note for the end of the day.
+        if rule == "shop_opened_late":          return "HIGH"
         return "LOW"
     return _SEVERITY_4.get(dt, "LOW")
 
