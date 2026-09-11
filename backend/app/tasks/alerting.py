@@ -875,6 +875,15 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     except Exception as e:
         log.warning("filmstrip enqueue failed (info alert cam=%s): %s",
                     camera_id, e)
+    # AI verification (annotate, never hide) - beat-created alerts get
+    # the same fire-and-forget verdict as worker-created ones.
+    try:
+        if bool(getattr(settings, "verifier_enabled", False)):
+            from app.tasks.alert_verify import verify_alert
+            verify_alert.delay(alert.id)
+    except Exception as e:
+        log.warning("verifier enqueue failed (info alert cam=%s): %s",
+                    camera_id, e)
     return rec
 
 

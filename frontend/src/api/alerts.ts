@@ -7,6 +7,16 @@ export interface Alert {
   notification_suppressed: boolean
   quality_mode: 'active' | 'review_only' | 'quarantined' | string
   quality_reason: string | null
+  // AI verification (annotate-only): verdict written next to the
+  // alert; nothing is ever hidden or reclassified on its strength.
+  ai_verdict: 'true_alert' | 'false_alert' | 'uncertain' | null
+  ai_confidence: number | null
+  ai_outcome: string | null
+  ai_action: string | null
+  ai_reason: string | null
+  ai_verified_at: string | null
+  ai_model: string | null
+  ai_enabled: boolean
   acknowledged_at: string | null
   resolved_at: string | null
   notes: string | null
@@ -92,6 +102,9 @@ export const alerts = {
       yesterday_count: number
       trend_vs_yesterday_pct: number | null
       date_label: string | null
+      ai_true_today: number; ai_false_today: number
+      ai_uncertain_today: number; ai_pending_today: number
+      ai_verifier_enabled: boolean
     }>(`/alerts/summary${storeId ? `?store_id=${storeId}` : ''}`),
   confirm: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/confirm`, { method: 'POST' }),
   dismiss: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/dismiss`, { method: 'POST' }),

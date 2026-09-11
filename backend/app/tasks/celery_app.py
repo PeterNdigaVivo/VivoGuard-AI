@@ -51,6 +51,7 @@ celery_app = Celery(
         "app.tasks.recorder",
         "app.tasks.alert_snapshots",
         "app.tasks.uniform_miner",
+        "app.tasks.alert_verify",
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
         "app.tasks.odoo_sync",
@@ -86,6 +87,9 @@ celery_app.conf.update(
         # supervisor heartbeats must run on the dedicated short-task runner.
         "inference.supervise_all":            {"queue": "beat"},
         # Operator-facing alerts pool.
+        # AI alert verification (annotate-only) - short cloud call per
+        # alert, bounded by a Redis semaphore inside the task.
+        "alerts.verify":                        {"queue": "alerts"},
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
         "training.mine_live_uniform_crops":     {"queue": "alerts"},

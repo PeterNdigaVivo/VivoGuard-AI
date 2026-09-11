@@ -214,6 +214,28 @@ class Settings(BaseSettings):
     # Secret — env-only, never logged or committed.
     anthropic_api_key: str = ""
     vlm_timeout_seconds: int = 10
+    # --- AI alert verification (annotate, never hide) ---
+    # Writes a verdict next to every alert within seconds of creation.
+    # It NEVER suppresses, hides, reclassifies or delays an alert.
+    # Reuses anthropic_api_key; server flips VERIFIER_ENABLED once the
+    # key is set. NB: compose fallbacks override these defaults.
+    verifier_enabled: bool = False
+    verifier_model: str = "claude-sonnet-4-6"
+    verifier_parallel: int = 4
+    verifier_max_images: int = 3
+    # Alert types the verifier skips (no meaningful frame): verdict is
+    # written as uncertain / "non-visual alert type" with NO API call.
+    # Env VERIFIER_NON_VISUAL_TYPES takes a JSON list.
+    verifier_non_visual_types: list[str] = Field(
+        default_factory=lambda: [
+            "camera_offline", "system_health", "live_activity",
+            "store_intelligence", "sales_floor_insight", "entry_exit",
+            "occupancy", "occupancy_metrics", "unique_visitor",
+            "heatmap", "customer_journey", "demographic",
+        ],
+        validation_alias=AliasChoices("VERIFIER_NON_VISUAL_TYPES",
+                                      "verifier_non_visual_types"),
+    )
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",

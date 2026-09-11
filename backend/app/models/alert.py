@@ -1,6 +1,6 @@
 """Alerts — operator-facing surface for events that warrant attention."""
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -48,6 +48,18 @@ class Alert(Base):
     # after `created_at` by alerting.prune_checkout_snapshots.
     snapshot_paths:   Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # --- AI verification (annotate, never hide). The verifier writes a
+    # verdict NEXT TO the alert; it never suppresses, reclassifies,
+    # downgrades or delays it. Operators see every alert regardless of
+    # verdict. Index (ai_verdict, created_at desc) via migration 0047.
+    ai_verdict:     Mapped[str | None]      = mapped_column(String(16), nullable=True)
+    ai_confidence:  Mapped[float | None]    = mapped_column(Float, nullable=True)
+    ai_outcome:     Mapped[str | None]      = mapped_column(Text, nullable=True)
+    ai_action:      Mapped[str | None]      = mapped_column(Text, nullable=True)
+    ai_reason:      Mapped[str | None]      = mapped_column(Text, nullable=True)
+    ai_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ai_model:       Mapped[str | None]      = mapped_column(String(64), nullable=True)
+
     event = relationship("DetectionEvent", back_populates="alert")
 
 
@@ -64,5 +76,9 @@ class AlertReviewDecision(Base):
     verdict: Mapped[str] = mapped_column(String(16), index=True)
     classification: Mapped[str | None] = mapped_column(String(64), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Free-form context captured at decision time; today it records the
+    # AI verdict that was showing ({"ai_verdict":..., "ai_confidence":...})
+    # so verifier precision per detection_type can be measured later.
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True)

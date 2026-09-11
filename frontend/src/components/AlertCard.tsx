@@ -335,6 +335,29 @@ const SEVERITY_BAR: Record<'critical' | 'warning' | 'info' | 'default', string> 
   info:     'bg-sky-500',
   default:  'bg-slate-300',
 }
+// AI verification badge (annotate-only): renders the verdict written
+// next to the alert. It never hides or moves the alert itself.
+function AiVerdictBadge({ alert }: { alert: Alert }) {
+  const pct = alert.ai_confidence != null
+    ? ` (${Math.round(alert.ai_confidence * 100)}%)` : ''
+  if (alert.ai_verdict === 'true_alert') {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800"
+                 title={alert.ai_reason ?? undefined}>AI: real{pct}</span>
+  }
+  if (alert.ai_verdict === 'false_alert') {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-red-100 text-red-800"
+                 title={alert.ai_reason ?? undefined}>AI: likely false{pct}</span>
+  }
+  if (alert.ai_verdict === 'uncertain') {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-slate-200 text-slate-700"
+                 title={alert.ai_reason ?? undefined}>AI: uncertain</span>
+  }
+  if (!alert.ai_enabled) {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">AI: off</span>
+  }
+  return <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 animate-pulse">AI: checking...</span>
+}
+
 const SEVERITY_BADGE: Record<'critical' | 'warning' | 'info' | 'default', string> = {
   critical: 'bg-red-100 text-red-700',
   warning:  'bg-amber-100 text-amber-800',
@@ -591,8 +614,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               </button>
             )}
           </div>
-          <div className="font-semibold text-slate-800 text-base">
-            {alert.plain_title ?? alert.title ?? (alert.detection_type ?? 'Alert')}
+          <div className="font-semibold text-slate-800 text-base flex items-center gap-2 flex-wrap">
+            <span>{alert.plain_title ?? alert.title ?? (alert.detection_type ?? 'Alert')}</span>
+            <AiVerdictBadge alert={alert} />
           </div>
           {alert.detection_type === 'store_intelligence' && alert.store_intel ? (
             <StoreIntelCard si={alert.store_intel} />
@@ -614,13 +638,22 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               creation). Collapsible. */}
           <SceneAnalysis alert={alert} />
 
-          {/* What to do — plain-English steps for non-technical staff. */}
-          {!isCalibration && alert.what_to_do && alert.what_to_do.length > 0 && (
+          {/* What to do — plain-English steps for non-technical staff.
+              The AI recommended action (when present) leads the list. */}
+          {!isCalibration && (alert.ai_action || (alert.what_to_do && alert.what_to_do.length > 0)) && (
             <div className="mt-2 bg-slate-50 rounded p-2">
               <div className="text-xs font-semibold text-slate-700 mb-1">What to do:</div>
               <ol className="list-decimal ml-5 text-sm text-slate-700 space-y-0.5">
-                {alert.what_to_do.map((s, i) => <li key={i}>{s}</li>)}
+                {[...(alert.ai_action ? [alert.ai_action] : []), ...(alert.what_to_do ?? [])]
+                  .map((s, i) => <li key={i}>{s}</li>)}
               </ol>
+            </div>
+          )}
+          {/* AI verification detail lines (annotate-only). */}
+          {(alert.ai_outcome || alert.ai_reason) && (
+            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300 space-y-0.5">
+              {alert.ai_outcome && <div>Likely outcome: {alert.ai_outcome}</div>}
+              {alert.ai_reason && <div>AI reason: {alert.ai_reason}</div>}
             </div>
           )}
           {/* When-it-happened line. Server-rendered in the camera's

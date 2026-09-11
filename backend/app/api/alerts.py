@@ -1106,6 +1106,10 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.zone_id        = event.zone_id
     item.zone_name      = zone.name if zone else None
     item.thumbnail_path = event.thumbnail_path
+    # AI verification is annotate-only; ai_* fields come straight off
+    # the row via from_attributes. ai_enabled lets the card distinguish
+    # "AI: off" from "AI: checking" while ai_verified_at is NULL.
+    item.ai_enabled     = bool(getattr(settings, "verifier_enabled", False))
     item.severity       = _severity(event.detection_type)
     item.severity_label = _severity_label(event.detection_type, event, zone, store)
     # Four-tier ladder for the redesigned alerts page. severity_label
@@ -1311,6 +1315,28 @@ def alerts_summary(db: Session = Depends(get_db),
     elif operational_today_count > 0:
         trend_vs_yesterday_pct = 100.0
 
+    # AI verification counts for the selected day (annotate-only:
+    # these never change which alerts are shown). pending = not yet
+    # verified; NULL verdicts with a verified_at stamp count uncertain.
+    ai_counts = {"true_alert": 0, "false_alert": 0,
+                 "uncertain": 0, "pending": 0}
+    _pending = Alert.ai_verified_at.is_(None)
+    aq = (db.query(Alert.ai_verdict, _pending, func.count(Alert.id))
+            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+            .filter(DetectionEvent.timestamp >= today,
+                    DetectionEvent.timestamp < tomorrow))
+    if store_id is not None:
+        aq = aq.filter(Camera.store_id == store_id)
+    for verdict, is_pending, n in (
+            aq.group_by(Alert.ai_verdict, _pending).all()):
+        if is_pending:
+            ai_counts["pending"] += int(n)
+        elif verdict in ai_counts:
+            ai_counts[verdict] += int(n)
+        else:
+            ai_counts["uncertain"] += int(n)
+
     # Friendly date label in the store's timezone (or EAT default).
     from zoneinfo import ZoneInfo
     try:
@@ -1342,7 +1368,32 @@ def alerts_summary(db: Session = Depends(get_db),
         "yesterday_count":       yest_count,
         "trend_vs_yesterday_pct": trend_vs_yesterday_pct,
         "date_label":            date_label,
+        # AI verification (annotate-only) counts + the server switch.
+        "ai_true_today":        ai_counts["true_alert"],
+        "ai_false_today":       ai_counts["false_alert"],
+        "ai_uncertain_today":   ai_counts["uncertain"],
+        "ai_pending_today":     ai_counts["pending"],
+        "ai_verifier_enabled":  bool(getattr(settings, "verifier_enabled",
+                                             False)),
     }
+
+
+# ---- AI verification re-run (admin) ------------------------------
+
+@router.post("/{alert_id}/verify")
+def rerun_ai_verification(alert_id: int, db: Session = Depends(get_db),
+                          _u: User = Depends(require_role("admin"))):
+    """Re-run AI verification for one alert on demand. Annotate-only:
+    the verdict is written next to the alert; nothing is hidden,
+    reclassified or delayed. force=True bypasses the verifier_enabled
+    gate so admins can test before flipping the switch."""
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    from app.tasks.alert_verify import verify_alert
+    res = verify_alert.delay(alert_id, True)
+    return {"queued": True, "alert_id": alert_id,
+            "task_id": getattr(res, "id", None)}
 
 
 # ---- Acknowledge endpoint ----------------------------------------
@@ -1443,6 +1494,12 @@ def list_alerts(
     detection_type: Optional[str] = Query(None),
     zone_id: Optional[int]     = Query(None),
     status: Optional[str]      = Query(None),
+    ai_verdict: Optional[str]  = Query(
+        None,
+        description="Filter by AI verification verdict: true_alert | "
+                    "false_alert | uncertain | pending (pending = not "
+                    "yet verified). Annotate-only: with no filter the "
+                    "feed always contains every alert."),
     since: Optional[datetime]  = Query(None),
     until: Optional[datetime]  = Query(None),
     limit: int                 = Query(100, le=500),
@@ -1472,6 +1529,11 @@ def list_alerts(
                          < tuple_(cursor.created_at, cursor.id))
     if status:
         q = q.filter(Alert.status == status)
+    if ai_verdict:
+        if ai_verdict == "pending":
+            q = q.filter(Alert.ai_verified_at.is_(None))
+        else:
+            q = q.filter(Alert.ai_verdict == ai_verdict)
     if camera_id:
         q = q.filter(DetectionEvent.camera_id == camera_id)
     if store_id is not None:

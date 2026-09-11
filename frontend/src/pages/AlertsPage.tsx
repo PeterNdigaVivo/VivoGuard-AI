@@ -64,6 +64,8 @@ export default function AlertsPage() {
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
   const [quick, setQuick] = useState<Quick>('all')
   const [storeId, setStoreId] = useState<string>('')
+  // AI verdict filter (annotate-only): '' = All, never hides by default.
+  const [aiVerdict, setAiVerdict] = useState<string>('')
   const [search, setSearch] = useState('')
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(true)
@@ -80,6 +82,9 @@ export default function AlertsPage() {
     unread_urgent: 0,
     critical_today: 0, high_today: 0, medium_today: 0, low_today: 0,
     calibration_today: 0, operational_today_count: 0,
+    ai_true_today: 0, ai_false_today: 0,
+    ai_uncertain_today: 0, ai_pending_today: 0,
+    ai_verifier_enabled: false,
     avg_response_seconds: null as number | null,
     today_count: 0, yesterday_count: 0,
     trend_vs_yesterday_pct: null as number | null,
@@ -116,6 +121,7 @@ export default function AlertsPage() {
     try {
       const page = await alertsApi.list({
         store_id: storeId || undefined,
+        ai_verdict: aiVerdict || undefined,
         since: range.since,
         until: range.until,
         limit: PAGE_SIZE,
@@ -137,7 +143,7 @@ export default function AlertsPage() {
         setLoadingMore(false)
       }
     }
-  }, [storeId, range.since, range.until])
+  }, [storeId, aiVerdict, range.since, range.until])
 
   const reload = useCallback(() => { void loadPage(false) }, [loadPage])
 
@@ -371,6 +377,16 @@ export default function AlertsPage() {
           {stores.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
         </select>
 
+        <select className="border rounded px-2 py-1 text-sm"
+                title="AI verification filter (annotate-only; All shows every alert)"
+                value={aiVerdict} onChange={e => setAiVerdict(e.target.value)}>
+          <option value="">AI: All</option>
+          <option value="true_alert">AI: Real</option>
+          <option value="false_alert">AI: Likely false</option>
+          <option value="uncertain">AI: Uncertain</option>
+          <option value="pending">AI: Pending</option>
+        </select>
+
         <input value={search} onChange={e => setSearch(e.target.value)}
                placeholder="Search alerts…"
                className="border rounded px-2 py-1 text-sm flex-1 min-w-[160px]" />
@@ -508,6 +524,8 @@ function ExecutiveSummaryBar({ summary }: {
     medium_today:   number; low_today:  number
     calibration_today: number
     resolved_today: number
+    ai_true_today?: number; ai_false_today?: number
+    ai_uncertain_today?: number; ai_pending_today?: number
     avg_response_seconds: number | null
     today_count: number; yesterday_count: number
     trend_vs_yesterday_pct: number | null
@@ -550,6 +568,10 @@ function ExecutiveSummaryBar({ summary }: {
                  tone="text-blue-700 bg-blue-50 border-blue-200" />
         <SevPill label="Calibration" emoji="🧪" count={summary.calibration_today}
                  tone="text-violet-700 bg-violet-50 border-violet-200" />
+        <span className="text-xs text-slate-500 dark:text-slate-300 ml-2"
+              title="AI verification counts (annotate-only)">
+          AI: {summary.ai_true_today ?? 0} real / {summary.ai_false_today ?? 0} likely false / {summary.ai_uncertain_today ?? 0} uncertain / {summary.ai_pending_today ?? 0} pending
+        </span>
         <span className="text-slate-300">|</span>
         <span className="text-emerald-700">
           ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved

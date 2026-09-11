@@ -112,6 +112,13 @@ x-app-env: &app-env
   REID_ENABLED: ${REID_ENABLED:-false}
   VLM_ENABLED: ${VLM_ENABLED:-false}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # AI alert verification (annotate-only). Server enables after the
+  # Anthropic key is set. NB: these fallbacks override Python defaults.
+  VERIFIER_ENABLED: ${VERIFIER_ENABLED:-false}
+  VERIFIER_MODEL: ${VERIFIER_MODEL:-claude-sonnet-4-6}
+  VERIFIER_PARALLEL: ${VERIFIER_PARALLEL:-4}
+  VERIFIER_MAX_IMAGES: ${VERIFIER_MAX_IMAGES:-3}
+  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic"]}
   CELERYD_CONCURRENCY: ${CELERYD_CONCURRENCY:-10}
   CELERYD_MAX_TASKS_PER_CHILD: ${CELERYD_MAX_TASKS_PER_CHILD:-500}
   FRAME_BUFFER_SIZE: ${FRAME_BUFFER_SIZE:-5}

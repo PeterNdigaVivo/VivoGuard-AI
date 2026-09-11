@@ -322,6 +322,16 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                     datetime.now(timezone.utc).timestamp())
         except Exception as e:
             log.warning("filmstrip enqueue failed cam=%s: %s", camera_id, e)
+        # AI verification (annotate, never hide) - fire-and-forget for
+        # EVERY alert, including review_only ones. The verdict is
+        # written next to the alert; nothing is suppressed, hidden or
+        # delayed on its strength. .delay() is microseconds here.
+        try:
+            if bool(getattr(settings, "verifier_enabled", False)):
+                from app.tasks.alert_verify import verify_alert
+                verify_alert.delay(alert_id)
+        except Exception as e:
+            log.warning("verifier enqueue failed cam=%s: %s", camera_id, e)
         # VLM scene analysis — fire-and-forget on the alerts queue so
         # the 10s cloud call never blocks this inference loop. Guarded
         # by detection_type + a stored thumbnail; the task itself
