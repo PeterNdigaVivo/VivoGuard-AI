@@ -355,6 +355,14 @@ class Settings(BaseSettings):
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30
 
+    # --- Alert quality control (the per camera+detector circuit breaker) ---
+    # When on, a pair whose reviewed false-alert rate crosses the threshold is
+    # quarantined: its alerts still persist but are flagged review_only and
+    # never pushed to the dashboard. Set false to let every detection reach
+    # the feed unfiltered — use it to measure raw detector precision, then
+    # turn it back on. Existing quarantines are ignored while off, not erased.
+    alert_quality_control_enabled: bool = True
+
     # --- Sales-floor insight debugging ---
     # When True, sales_floor_insights_check skips the 15-min Redis
     # dedupe AND the closed-hours gate AND the "store needs an aisle
