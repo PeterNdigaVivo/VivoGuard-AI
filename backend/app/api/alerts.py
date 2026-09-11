@@ -44,79 +44,28 @@ def _operator_alert_filter():
 # Same logic feeds the per-store dashboard feed AND the chain /alerts
 # page so labels are consistent.
 
-# Severity bucket per detection_type. Front-end pulls from this for
-# the colour (red / amber / blue dots).
-_SEVERITY: dict[str, str] = {
-    # critical — security / safety incidents
-    "fight":             "critical",
-    "intrusion":         "critical",
-    "weapon":            "critical",
-    "weapon_brandished": "critical",
-    "fall":              "critical",
-    "fire":              "critical",
-    "smoke":             "critical",
-    "shrinkage":         "critical",
-    # warning — operational risks
-    "queue":             "warning",
-    "queue_length":      "warning",
-    "crowd":             "warning",
-    "trespass":          "warning",
-    "loitering":         "warning",
-    "shutter":           "warning",
-    "abandoned_object":  "warning",
-    "tailgating":        "warning",
-    # info — routine operational signals
-    "staff_present":     "warning",
-    "occupancy":         "info",
-    "entry_exit":        "info",
-    # The aisle detector's only alert is sales-floor-unattended —
-    # customers on the floor with nobody serving them. Operational, not
-    # a routine signal.
-    "dwell":             "warning",
-    "passersby":         "info",
-    "live_activity":     "warning",
-    "shop_open_close":   "info",
-    "sales_floor_insight": "info",
-    "store_intelligence":  "info",
-    "positive_operational": "info",
+# _SEVERITY_4 is the ONE ranking; the colour bucket and traffic-light
+# label are derived from it below, so a detector can never be ranked on
+# one scale and missing from another — which is how "Sales Floor
+# Unattended" rendered as a blue INFO card while sitting at HIGH.
+#
+# Two tiers, not four. Operations rejected MEDIUM / LOW: anything worth
+# putting in front of a store manager is worth acting on, and the lower
+# tiers were read as "ignore". At ~19 alerts an hour across 26 stores
+# there is no volume argument for a backlog tier.
+#
+#   CRITICAL — safety and security. Act now.
+#   HIGH     — everything else that is an incident. Act today.
+#
+# The INFORMATIONAL types below are deliberately NOT incidents: they are
+# the Store Update feed, which has its own tab and a "close" action. They
+# keep LOW so they stay out of the actionable tabs.
+_INFORMATIONAL_TYPES = {
+    "store_intelligence", "sales_floor_insight", "positive_operational",
 }
 
-# Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
-# (defined below) so ALL high-priority types surface — see _RANK_CRITICAL /
-# _RANK_HIGH after the _SEVERITY_4 definition.
-
-
-def _severity(detection_type: str | None) -> str:
-    return _SEVERITY.get(detection_type or "", "info")
-
-
-# Non-technical traffic-light labels. Spec Part 3 mapping:
-#   URGENT (red)    — act now
-#   ATTENTION (amber) — act within ~15 min
-#   INFO (blue)     — for the record
-_SEVERITY_LABEL: dict[str, str] = {
-    "fight": "URGENT", "intrusion": "URGENT", "weapon": "URGENT",
-    "weapon_brandished": "URGENT", "fall": "URGENT", "trespass": "URGENT",
-    "fire": "URGENT", "smoke": "URGENT", "shrinkage": "URGENT",
-    "staff_zone":         "URGENT",     # default; per-rule override below
-    "uniform_compliance": "ATTENTION", "shutter": "ATTENTION",
-    "queue": "ATTENTION", "queue_length": "ATTENTION",
-    "staff_present": "ATTENTION", "crowd": "ATTENTION",
-    "abandoned_object": "ATTENTION", "loitering": "ATTENTION",
-    "tailgating": "ATTENTION", "camera_offline": "ATTENTION",
-    "dwell": "ATTENTION",               # sales floor unattended
-}
-
-# Four-tier severity ladder (spec Part 1 §1):
-#   CRITICAL — immediate action required (theft, fight, weapon, fire,
-#              fall, smoke, shrinkage, after-hours intrusion).
-#   HIGH     — act within 5 minutes (suspicious behaviour, restricted
-#              area, counter unstaffed, person after-hours).
-#   MEDIUM   — review within 30 minutes (queue, loitering, uniform,
-#              tailgating, crowd, sales-floor unattended).
-#   LOW      — review end of day (routine heartbeats, on-time shop
-#              open / close, sales-floor insight).
 _SEVERITY_4: dict[str, str] = {
+    # Safety / security — immediate.
     "fight":              "CRITICAL",
     "weapon":             "CRITICAL",
     "weapon_brandished":  "CRITICAL",
@@ -125,43 +74,80 @@ _SEVERITY_4: dict[str, str] = {
     "fall":               "CRITICAL",
     "shrinkage":          "CRITICAL",
     "intrusion":          "CRITICAL",
+    "trespass":           "CRITICAL",
+    "stockroom_access":   "CRITICAL",
+    "tripwire":           "CRITICAL",
 
-    "trespass":           "HIGH",
+    # Trading conditions, compliance and equipment — act today.
     "staff_present":      "HIGH",       # counter unstaffed
-    "staff_zone":         "HIGH",       # default; per-rule override below
+    "dwell":              "HIGH",       # sales floor unattended
+    "checkout_dwell":     "HIGH",       # checkout taking too long
+    "staff_zone":         "HIGH",
     "abandoned_object":   "HIGH",
     "camera_offline":     "HIGH",
+    "queue":              "HIGH",
+    "queue_length":       "HIGH",
+    "crowd":              "HIGH",
+    "loitering":          "HIGH",
+    "tailgating":         "HIGH",
+    "uniform_compliance": "HIGH",
+    "shutter":            "HIGH",
+    "shelf_change":       "HIGH",
+    "shelf":              "HIGH",
+    "live_activity":      "HIGH",
+    "shop_open_close":    "HIGH",       # per-rule override below
+    "entry_exit":         "HIGH",
+    "passersby":          "HIGH",
+    "occupancy":          "HIGH",
+    "lpr":                "HIGH",
+    "custom":             "HIGH",
+    "vehicle":            "HIGH",
+    "animal":             "HIGH",
+    "person":             "HIGH",       # per-context override below
 
-    "queue":              "MEDIUM",
-    "queue_length":       "MEDIUM",
-    "crowd":              "MEDIUM",
-    "loitering":          "MEDIUM",
-    "tailgating":         "MEDIUM",
-    "uniform_compliance": "MEDIUM",
-    "shutter":            "MEDIUM",
-
-    "live_activity":      "MEDIUM",
-    "shop_open_close":    "LOW",
+    # Informational — the Store Update feed, not an incident.
     "sales_floor_insight":"LOW",
     "store_intelligence": "LOW",
-    "entry_exit":         "LOW",
-    # Sales floor unattended — same class of problem as an unstaffed
-    # counter, so it carries the same weight.
-    "dwell":              "HIGH",
-    "passersby":          "LOW",
-    "occupancy":          "LOW",
-    "person":             "LOW",        # default; per-context override below
+    "positive_operational": "LOW",
 }
 
 _SEVERITY_4_COLOR: dict[str, str] = {
     "CRITICAL": "#dc2626",      # red-600
     "HIGH":     "#ea580c",      # orange-600
-    "MEDIUM":   "#ca8a04",      # yellow-600
+    "MEDIUM":   "#ca8a04",      # yellow-600 (retained for old rows)
     "LOW":      "#2563eb",      # blue-600
 }
 _SEVERITY_4_EMOJI: dict[str, str] = {
     "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵",
 }
+
+# ---- Derived views of the ladder ------------------------------------
+# Traffic-light label the operator reads, and the colour bucket the card
+# renders. Both come from the tier so they cannot drift apart. MEDIUM is
+# still mapped because alerts written before the two-tier change keep
+# their stored label.
+_LABEL_FOR_TIER: dict[str, str] = {
+    "CRITICAL": "URGENT", "HIGH": "ATTENTION",
+    "MEDIUM":   "ATTENTION", "LOW": "INFO",
+}
+_TONE_FOR_TIER: dict[str, str] = {
+    "CRITICAL": "critical", "HIGH": "warning",
+    "MEDIUM":   "warning", "LOW": "info",
+}
+
+# Static per-type label. system_health imports this to build the set of
+# URGENT detection types, so it must stay a plain dict.
+_SEVERITY_LABEL: dict[str, str] = {
+    dt: _LABEL_FOR_TIER[tier] for dt, tier in _SEVERITY_4.items()
+}
+
+
+def _severity(detection_type: str | None) -> str:
+    """Colour bucket (critical / warning / info) for the card's edge bar."""
+    dt = detection_type or ""
+    if dt in _INFORMATIONAL_TYPES:
+        return "info"
+    return _TONE_FOR_TIER.get(_SEVERITY_4.get(dt, "HIGH"), "warning")
 
 # Feed-ordering rank buckets — derived from the 4-tier ladder so EVERY
 # critical/high detection type surfaces to the top of the alerts feed.
@@ -175,45 +161,43 @@ _RANK_HIGH     = [dt for dt, s in _SEVERITY_4.items() if s == "HIGH"]
 def _severity_4_label(detection_type: str | None,
                       event: DetectionEvent | None = None,
                       zone: Zone | None = None, store=None) -> str:
-    """4-tier severity ladder. Per-rule overrides for the detectors
-    whose level depends on the event context."""
+    """CRITICAL or HIGH for every incident; LOW only for the Store Update
+    feed. Per-rule overrides promote the context that carries a security
+    implication up to CRITICAL."""
     dt = detection_type or ""
     extra = (event.extra or {}) if event is not None else {}
     rule = extra.get("rule", "")
-    # Person: customer = LOW; after-hours / restricted = HIGH.
+    # Person: someone in the store outside trading hours, or in a
+    # staff-only area, is a security event. A customer on the shop floor
+    # during trading is not — the worker doesn't raise an alert for one.
     if dt == "person":
         if event is not None:
             ctxt = _person_context(event, zone, store)
-            return "LOW" if ctxt == "customer" else "HIGH"
-        return "HIGH"
-    # Uniform compliance: no-lanyard is gentle; wrong colour is louder.
-    if dt == "uniform_compliance":
-        return "LOW" if rule == "no_lanyard" else "MEDIUM"
-    # Staff zone: customer/intruder behind counter is HIGH; missing
-    # nametag is just LOW.
+            return "HIGH" if ctxt == "customer" else "CRITICAL"
+        return "CRITICAL"
+    # An unidentified person behind the counter is a security event; a
+    # staffer who forgot their name tag is a compliance one.
     if dt == "staff_zone":
-        return "LOW" if rule == "missing_nametag" else "HIGH"
-    # Sales-floor insight: low engagement / unattended floor = MEDIUM;
-    # everything else (quiet/good/baseline) is the LOW heartbeat.
+        return "HIGH" if rule == "missing_nametag" else "CRITICAL"
+    # Sales-floor insight stays in the Store Update feed.
     if dt == "sales_floor_insight":
-        return "MEDIUM" if rule in ("low_engagement", "unattended_floor") else "LOW"
-    # Shop open/close: not-opened-by-cutoff is CRITICAL; before-hours
-    # Live Activity Sentinel: severity rides on the rule.
-    if dt == "live_activity":
-        return {"after_hours_activity": "HIGH",
-                "occupancy_surge":      "MEDIUM",
-                "store_surge":          "MEDIUM",
-                "dead_scene":           "MEDIUM",
-                "activity_presence":    "LOW"}.get(rule, "MEDIUM")
-    # / late-opening are HIGH/MEDIUM; routine open + close are LOW.
-    if dt == "shop_open_close":
-        if rule == "shop_not_opened":           return "CRITICAL"
-        if rule == "shop_opened_before_hours":  return "HIGH"
-        # Trading starting late costs sales and is a staffing failure,
-        # not a note for the end of the day.
-        if rule == "shop_opened_late":          return "HIGH"
         return "LOW"
-    return _SEVERITY_4.get(dt, "LOW")
+    if dt == "live_activity":
+        return "CRITICAL" if rule == "after_hours_activity" else "HIGH"
+    # A store that never opened, or that opened before hours, is a
+    # security question. Late opening and routine open/close are trading
+    # conditions.
+    if dt == "shop_open_close":
+        if rule in ("shop_not_opened", "shop_opened_before_hours"):
+            return "CRITICAL"
+        return "HIGH"
+    # Default HIGH, not LOW. A detector nobody added to the table is an
+    # incident nobody has triaged — it belongs in front of an operator,
+    # not silently at the bottom of the feed. `dwell` sat at LOW for
+    # exactly this reason and "Sales Floor Unattended" went unseen.
+    if dt in _INFORMATIONAL_TYPES:
+        return "LOW"
+    return _SEVERITY_4.get(dt, "HIGH")
 
 
 def _severity_4_color(label: str) -> str:
@@ -223,52 +207,15 @@ def _severity_4_color(label: str) -> str:
 def _severity_label(detection_type: str | None,
                     event: DetectionEvent | None = None,
                     zone: Zone | None = None, store=None) -> str:
+    """Traffic-light label, derived from the ladder so the two can never
+    disagree. Keeping a second hand-maintained table is what let `dwell`
+    be HIGH on one ladder and absent from the other, rendering a blue
+    INFO card for an unattended sales floor."""
     if detection_type == "positive_operational":
         return str((event.extra or {}).get("positive_label")
                    if event is not None else "POSITIVE – AUTOMATED")
-    # Person detection is context-aware: customer = INFO, after-hours
-    # or restricted-zone = URGENT. When called without context (e.g.
-    # the summary count), a persisted person ALERT is always URGENT —
-    # the worker only creates one when after-hours or restricted.
-    if detection_type == "person":
-        if event is not None:
-            ctxt = _person_context(event, zone, store)
-            return "INFO" if ctxt == "customer" else "URGENT"
-        return "URGENT"
-    # Uniform compliance: a missing name tag is just INFO (gentle
-    # nudge); a person at the counter with no uniform at all is
-    # ATTENTION (could be an unidentified person).
-    if detection_type == "uniform_compliance" and event is not None:
-        return "INFO" if (event.extra or {}).get("rule") == "no_lanyard" else "ATTENTION"
-    # Staff-only zone: missing name tag is INFO, anything else
-    # (unauthorised / customer in staff area) is URGENT.
-    if detection_type == "staff_zone" and event is not None:
-        return "INFO" if (event.extra or {}).get("rule") == "missing_nametag" else "URGENT"
-    # Shop open / close: routine open + close are INFO; before-hours
-    # is URGENT (security implication); late-opening is ATTENTION
-    # (staffing issue, not an emergency).
-    if detection_type == "live_activity":
-        rule = (event.extra or {}).get("rule", "") if event is not None else ""
-        if rule == "after_hours_activity":
-            return "URGENT"
-        return "INFO" if rule == "activity_presence" else "ATTENTION"
-    if detection_type == "shop_open_close" and event is not None:
-        rule = (event.extra or {}).get("rule", "")
-        if rule in ("shop_opened_before_hours", "shop_not_opened"):
-            return "URGENT"
-        if rule == "shop_opened_late":
-            return "ATTENTION"
-        return "INFO"      # shop_opened, shop_closed
-    # Sales-floor insight: heartbeat is INFO; low engagement and
-    # unattended floor are ATTENTION (a manager-actionable nudge);
-    # detection_offline is ATTENTION too — it's an ops / IT issue,
-    # not a customer-flow signal.
-    if detection_type == "sales_floor_insight" and event is not None:
-        rule = (event.extra or {}).get("rule", "")
-        if rule in ("low_engagement", "unattended_floor", "detection_offline"):
-            return "ATTENTION"
-        return "INFO"
-    return _SEVERITY_LABEL.get(detection_type or "", "INFO")
+    return _LABEL_FOR_TIER.get(
+        _severity_4_label(detection_type, event, zone, store), "ATTENTION")
 
 
 # Plain-English card heading (no camera suffix) — the big title a
