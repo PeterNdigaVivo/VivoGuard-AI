@@ -10,6 +10,9 @@ else, and it never blocks or removes anything from the feed.
 
 verify() never raises: any failure records verdict=uncertain with the
 error in ai_reason so the operator can see WHY verification failed.
+
+Providers: settings.verifier_provider picks anthropic (SDK), openai or
+ollama (both plain httpx). ai_model records "<provider>:<model>".
 """
 from __future__ import annotations
 
@@ -326,10 +329,55 @@ def _is_network_error(exc: Exception) -> bool:
             return True
     except Exception:
         pass
+    try:
+        import httpx
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                            httpx.ReadTimeout, httpx.RemoteProtocolError)):
+            return True
+    except Exception:
+        pass
     return isinstance(exc, (ConnectionError, TimeoutError))
 
 
-def _call_model(system: str, images_b64: list[str]) -> str:
+_MAX_TOKENS = 300
+
+
+def _provider() -> str:
+    p = str(getattr(settings, "verifier_provider", "anthropic")
+            or "anthropic").strip().lower()
+    return p if p in ("anthropic", "openai", "ollama") else "anthropic"
+
+
+def _provider_model(provider: str) -> str:
+    if provider == "openai":
+        return str(getattr(settings, "verifier_openai_model", "gpt-4o-mini"))
+    if provider == "ollama":
+        return str(getattr(settings, "verifier_ollama_model",
+                           "qwen2.5vl:7b"))
+    return str(getattr(settings, "verifier_model", "claude-sonnet-4-6"))
+
+
+def _user_text(images_b64: list[str]) -> str:
+    return (("Frames are in chronological order."
+             if images_b64 else
+             "No frames are available for this alert; judge from the "
+             "context alone and lower your confidence accordingly.")
+            + " Reply with the JSON only.")
+
+
+def _post_json(url: str, *, headers: dict, payload: dict,
+               timeout: float = 30.0) -> dict:
+    """Single HTTP seam for the openai/ollama providers - tests fake
+    the transport by monkeypatching this function."""
+    import httpx
+    with httpx.Client(timeout=timeout) as c:
+        r = c.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+def _call_anthropic(system_prompt: str, images_b64: list[str],
+                    max_tokens: int) -> str:
     import anthropic
     api_key = str(getattr(settings, "anthropic_api_key", "") or "")
     if not api_key:
@@ -341,21 +389,67 @@ def _call_model(system: str, images_b64: list[str]) -> str:
                     "data": b64}}
         for b64 in images_b64
     ]
-    content.append({
-        "type": "text",
-        "text": ("Frames are in chronological order."
-                 if images_b64 else
-                 "No frames are available for this alert; judge from the "
-                 "context alone and lower your confidence accordingly.")
-                + " Reply with the JSON only.",
-    })
+    content.append({"type": "text", "text": _user_text(images_b64)})
     msg = client.messages.create(
-        model=str(getattr(settings, "verifier_model", "claude-sonnet-4-6")),
-        max_tokens=300,
-        system=system,
+        model=_provider_model("anthropic"),
+        max_tokens=max_tokens,
+        system=system_prompt,
         messages=[{"role": "user", "content": content}],
     )
     return "".join(getattr(b, "text", "") or "" for b in (msg.content or []))
+
+
+def _call_openai(system_prompt: str, images_b64: list[str],
+                 max_tokens: int) -> str:
+    api_key = str(getattr(settings, "openai_api_key", "") or "")
+    if not api_key:
+        raise RuntimeError("openai_api_key not configured")
+    content: list[dict] = [
+        {"type": "image_url",
+         "image_url": {"url": "data:image/jpeg;base64," + b64}}
+        for b64 in images_b64
+    ]
+    content.append({"type": "text", "text": _user_text(images_b64)})
+    data = _post_json(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": "Bearer " + api_key},
+        payload={
+            "model": _provider_model("openai"),
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+        })
+    try:
+        return str(data["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError("unexpected openai response shape: %r" % (e,))
+
+
+def _call_ollama(system_prompt: str, images_b64: list[str],
+                 max_tokens: int) -> str:
+    base = str(getattr(settings, "verifier_ollama_url",
+                       "http://host.docker.internal:11434")).rstrip("/")
+    data = _post_json(
+        base + "/api/chat",
+        headers={},
+        payload={
+            "model": _provider_model("ollama"),
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _user_text(images_b64),
+                 "images": images_b64},
+            ],
+        },
+        timeout=60.0)   # local models are slower than cloud APIs
+    return str((data.get("message") or {}).get("content") or "")
+
+
+_CALLERS = {"anthropic": _call_anthropic, "openai": _call_openai,
+            "ollama": _call_ollama}
 
 
 def verify(alert_id: int) -> None:
@@ -365,7 +459,10 @@ def verify(alert_id: int) -> None:
     from app.database import SessionLocal
     from app.models import Alert, Camera, DetectionEvent, Store
 
-    model_name = str(getattr(settings, "verifier_model", "claude-sonnet-4-6"))
+    provider = _provider()
+    # ai_model records "<provider>:<model>" so operators can see which
+    # engine produced each verdict.
+    model_name = provider + ":" + _provider_model(provider)
     try:
         with SessionLocal() as db:
             alert = db.get(Alert, alert_id)
@@ -413,15 +510,16 @@ def verify(alert_id: int) -> None:
             )
             images = _collect_images(alert, event)
 
+            caller = _CALLERS[provider]
             try:
-                text = _call_model(system, images)
+                text = caller(system, images, _MAX_TOKENS)
             except Exception as first_err:
                 if not _is_network_error(first_err):
                     raise
                 log.warning("verifier: network error for alert %s, "
                             "retrying in 5s: %s", alert_id, first_err)
                 time.sleep(5)
-                text = _call_model(system, images)
+                text = caller(system, images, _MAX_TOKENS)
 
             data = _extract_json(text)
             try:

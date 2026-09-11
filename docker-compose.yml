@@ -119,6 +119,12 @@ x-app-env: &app-env
   VERIFIER_PARALLEL: ${VERIFIER_PARALLEL:-4}
   VERIFIER_MAX_IMAGES: ${VERIFIER_MAX_IMAGES:-3}
   VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic"]}
+  # Verifier provider: anthropic | openai | ollama.
+  VERIFIER_PROVIDER: ${VERIFIER_PROVIDER:-anthropic}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  VERIFIER_OPENAI_MODEL: ${VERIFIER_OPENAI_MODEL:-gpt-4o-mini}
+  VERIFIER_OLLAMA_URL: ${VERIFIER_OLLAMA_URL:-http://host.docker.internal:11434}
+  VERIFIER_OLLAMA_MODEL: ${VERIFIER_OLLAMA_MODEL:-qwen2.5vl:7b}
   CELERYD_CONCURRENCY: ${CELERYD_CONCURRENCY:-10}
   CELERYD_MAX_TASKS_PER_CHILD: ${CELERYD_MAX_TASKS_PER_CHILD:-500}
   FRAME_BUFFER_SIZE: ${FRAME_BUFFER_SIZE:-5}
@@ -169,6 +175,10 @@ services:
       dockerfile: Dockerfile.api
     image: vivoguard/api:latest
     restart: unless-stopped
+    # Lets the container reach an Ollama server on the HOST when
+    # VERIFIER_PROVIDER=ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings
@@ -277,6 +287,10 @@ services:
         GPU_BACKEND: ${GPU_BACKEND:-cpu}
     image: vivoguard/worker:latest
     restart: unless-stopped
+    # Lets the container reach an Ollama server on the HOST when
+    # VERIFIER_PROVIDER=ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - sh
       - -c

@@ -147,6 +147,64 @@ def test_verdict_never_mutates_operational_fields(db):
     assert row_b.notification_suppressed is False
 
 
+def test_openai_provider_fake_transport(db, monkeypatch):
+    s, fake, tmp_path = db
+    from app.config import settings
+    monkeypatch.setattr(settings, "verifier_provider", "openai")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    a = _seed_alert(s, tmp_path)
+    seen = {}
+
+    def fake_post(url, *, headers, payload, timeout=30.0):
+        seen["url"] = url
+        seen["payload"] = payload
+        seen["auth"] = headers.get("Authorization", "")
+        return {"choices": [{"message": {"content":
+            '{"verdict": "true_alert", "confidence": 0.92, '
+            '"likely_outcome": "o", "recommended_action": "r", '
+            '"reason": "frames show a person"}'}}]}
+
+    monkeypatch.setattr("app.services.alert_verifier._post_json", fake_post)
+    from app.services.alert_verifier import verify
+    verify(a.id)
+    s.expire_all()
+    row = s.get(Alert, a.id)
+    assert row.ai_verdict == "true_alert"
+    assert row.ai_model == "openai:gpt-4o-mini"
+    assert seen["url"].endswith("/chat/completions")
+    assert seen["auth"] == "Bearer sk-test"
+    user = seen["payload"]["messages"][1]["content"]
+    assert user[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_ollama_provider_fake_transport(db, monkeypatch):
+    s, fake, tmp_path = db
+    from app.config import settings
+    monkeypatch.setattr(settings, "verifier_provider", "ollama")
+    a = _seed_alert(s, tmp_path)
+    seen = {}
+
+    def fake_post(url, *, headers, payload, timeout=30.0):
+        seen["url"] = url
+        seen["payload"] = payload
+        return {"message": {"content":
+            '{"verdict": "false_alert", "confidence": 0.8, '
+            '"likely_outcome": "o", "recommended_action": "r", '
+            '"reason": "mannequin"}'}}
+
+    monkeypatch.setattr("app.services.alert_verifier._post_json", fake_post)
+    from app.services.alert_verifier import verify
+    verify(a.id)
+    s.expire_all()
+    row = s.get(Alert, a.id)
+    assert row.ai_verdict == "false_alert"
+    assert row.ai_model == "ollama:qwen2.5vl:7b"
+    assert seen["url"] == "http://host.docker.internal:11434/api/chat"
+    assert seen["payload"]["stream"] is False
+    assert isinstance(seen["payload"]["messages"][1]["images"], list)
+    assert len(seen["payload"]["messages"][1]["images"]) >= 1
+
+
 def test_non_visual_types_skip_the_api_entirely(db):
     s, fake, tmp_path = db
     a = _seed_alert(s, tmp_path, detection_type="store_intelligence")

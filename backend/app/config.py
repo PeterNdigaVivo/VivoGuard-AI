@@ -236,6 +236,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("VERIFIER_NON_VISUAL_TYPES",
                                       "verifier_non_visual_types"),
     )
+    # Verifier provider: anthropic | openai | ollama. OpenAI and Ollama
+    # go through httpx (already a dependency) - no extra SDKs. Ollama
+    # reaches the HOST via host.docker.internal (compose adds the
+    # host-gateway mapping on api + worker-alerts).
+    verifier_provider: str = "anthropic"
+    openai_api_key: str = ""              # secret - env-only
+    verifier_openai_model: str = "gpt-4o-mini"
+    verifier_ollama_url: str = "http://host.docker.internal:11434"
+    verifier_ollama_model: str = "qwen2.5vl:7b"
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",
