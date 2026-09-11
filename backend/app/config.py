@@ -341,11 +341,15 @@ class Settings(BaseSettings):
     webhook_auth_header: str = ""
 
     # --- After-hours person alert tuning ---
-    # Pre-opening grace: staff arriving up to N minutes before opening
-    # don't trigger an URGENT "Person Detected After Hours" alert.
-    person_afterhours_grace_before_min: int = 60
-    # Symmetric post-closing grace for end-of-day staff egress.
-    person_afterhours_grace_after_min: int = 60
+    # Two distinct windows. TRADING is 09:30-20:00 (the fleet default in
+    # utils/business_hours) and gates operational alerts such as counter
+    # unattended. OCCUPANCY is 06:00-23:00 — staff legitimately open up
+    # early and close down late, so a person seen then is not an
+    # intruder. The graces below express occupancy as an offset from
+    # trading: 09:30 - 210min = 06:00, 20:00 + 180min = 23:00. Outside
+    # that, presence is a genuine after-hours intrusion.
+    person_afterhours_grace_before_min: int = 210
+    person_afterhours_grace_after_min: int = 180
     # A confirmed shop_closed event can occur later than the scheduled
     # close. Allow routine staff egress for 30 minutes after that observed
     # closure before escalating a person as an after-hours intrusion.

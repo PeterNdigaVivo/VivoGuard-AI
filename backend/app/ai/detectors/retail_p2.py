@@ -235,6 +235,8 @@ class StaffPresenceDetector(Detector):
                 log.debug("business-hours check failed — treating store "
                           "as open", exc_info=True)
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
+        # Store-wide, not per-zone — evaluate once and reuse below.
+        store_closed = self._store_closed_now(ctx)
         # P4: PolygonZone (foot-point) containment when a frame is available.
         _wh = None
         if ctx.frame_bgr is not None:
@@ -363,6 +365,15 @@ class StaffPresenceDetector(Detector):
             if attended:
                 state["last_attended_at"] = now
                 state["below_40_since"]   = None
+            elif store_closed:
+                # Nobody is expected at the counter while the store is
+                # shut, so the unattended countdown must not accumulate
+                # across the closed period. Without this the first
+                # evaluate after opening sees a run that began the
+                # previous evening and fires "unattended for 675
+                # minutes". last_attended_at is left alone so the alert
+                # body still reports the genuine last activity.
+                state["below_40_since"] = None
             else:
                 # Mark below-40 transition exactly once.
                 if score < self.SCORE_UNATTENDED and state["below_40_since"] is None:
@@ -388,7 +399,7 @@ class StaffPresenceDetector(Detector):
             # store opens or after it closes — staff aren't expected. The
             # grace check above only covers the ±minutes around open/close;
             # this suppresses the whole closed period (e.g. 07:37 EAT).
-            if self._store_closed_now(ctx):
+            if store_closed:
                 continue
             below_since = state.get("below_40_since")
             if below_since is None:
@@ -480,25 +491,26 @@ class StaffPresenceDetector(Detector):
             return False, False
 
     def _store_closed_now(self, ctx: DetectorContext) -> bool:
-        """True when the store is currently CLOSED, so a counter-unstaffed
-        alert (expected overnight / before opening) is suppressed.
+        """True when the store is outside TRADING hours, so a
+        counter-unstaffed alert (nobody is due at the till yet) is
+        suppressed.
 
         Unlike `_opening_closing_grace`, which only covers the ±minutes
-        around open/close, this covers the ENTIRE closed period. Uses the
-        store's configured business hours when available, else a default
-        08:00-21:00 EAT window. If the timezone can't be resolved it
-        treats the store as open (returns False) so a config error never
-        silently silences alerts."""
+        around open/close, this covers the ENTIRE closed period. Delegates
+        to is_open_with_default so an unconfigured store follows the fleet
+        trading schedule (09:30-20:00, Sun 10:00-19:00) rather than a
+        second, wider window defined here — the old local 08:00-21:00
+        fallback let "Counter Left Unattended" fire at 08:01, ninety
+        minutes before trading starts. If the timezone can't be resolved
+        it treats the store as open so a config error never silently
+        silences alerts."""
         tz = ctx.store_timezone or "Africa/Nairobi"
         try:
-            from app.utils.business_hours import is_open, localised_now
+            from app.utils.business_hours import is_open_with_default, localised_now
             now_local = localised_now(tz)
         except Exception:
             return False
-        if ctx.business_hours:
-            return not is_open(ctx.business_hours, now_local)
-        # No configured hours → default EAT operating window.
-        return not (8 <= now_local.hour < 21)
+        return not is_open_with_default(ctx.business_hours, now_local)
 
 
 # ---------------------------------------------------------------------------
