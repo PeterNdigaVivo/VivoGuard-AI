@@ -65,11 +65,6 @@ Pulled from the Secret + values.
 - { name: SMTP_FROM,     value: {{ .from | quote }} }
 - { name: SMTP_USE_TLS,  value: {{ .tls | quote }} }
 {{- end }}
-{{- with .Values.notifications.twilio }}
-- { name: TWILIO_ACCOUNT_SID, value: {{ .sid | quote }} }
-- { name: TWILIO_AUTH_TOKEN,  valueFrom: { secretKeyRef: { name: vivoguard-secrets, key: twilio-token, optional: true } } }
-- { name: TWILIO_FROM_NUMBER, value: {{ .fromNumber | quote }} }
-{{- end }}
 {{- with .Values.notifications.webhook }}
 - { name: WEBHOOK_URL,         value: {{ .url | quote }} }
 - { name: WEBHOOK_AUTH_HEADER, value: {{ .authHeader | quote }} }

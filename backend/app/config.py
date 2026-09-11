@@ -328,9 +328,6 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "alerts@vivoguard.local"
     smtp_use_tls: bool = True
-    twilio_account_sid: str = ""
-    twilio_auth_token: str = ""
-    twilio_from_number: str = ""
     # Phone numbers surfaced in the "What to do" alert steps so the
     # guidance is actionable. Blank = the card shows a generic phrase
     # ("building security", "IT support", "the store").

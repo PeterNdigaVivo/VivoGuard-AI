@@ -34,7 +34,7 @@
                                                                     ▼
                                                           ┌────────────────────┐
                                                           │ Alert engine       │
-                                                          │ • SMTP / Twilio /  │
+                                                          │ • Dashboard /      │
                                                           │   Webhook          │
                                                           └────────────────────┘
 
@@ -60,7 +60,7 @@ RTSP source ──▶ FFmpeg decode ──▶ Redis frame buffer (latest-N ring)
                                                 Alert engine
                                                        │
                                                        ▼
-                                       SMTP / Twilio / Webhook
+                                       Webhook
                                        + WebSocket push to UI
 ```
 

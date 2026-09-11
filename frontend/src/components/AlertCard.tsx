@@ -567,7 +567,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             )}
             <span className="text-xs text-slate-500">{formatTime(alert.created_at)}</span>
             <span className="text-[11px] text-slate-500 font-mono select-all"
-                  title="Alert reference for WhatsApp and investigation notes">
+                  title="Alert reference for investigation notes">
               Alert #{alert.id}
             </span>
             {(alert.delivery_delay_seconds ?? 0) >= 120 && (

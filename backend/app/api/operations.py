@@ -214,7 +214,7 @@ def intake_feedback(body: FeedbackIntakeIn, db: Session = Depends(get_db),
            {"missing_fields": missing, "message_id": body.message_id})
     db.commit()
     return {"case_id": case.id, "clarification_required": bool(missing),
-            "question_to_send_on_whatsapp": question,
+            "clarification_question": question,
             "training_eligible": False, "deadline": evidence["clarification_due_at"]}
 
 

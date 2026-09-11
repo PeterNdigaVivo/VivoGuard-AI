@@ -642,8 +642,8 @@ class IntrusionDetector(Detector):
                         continue
                     if level in ("high", "medium"):
                         # Staff outside the grace window — downgrade so
-                        # the manager sees it without being WhatsApped
-                        # in the middle of the night.
+                        # the manager sees it without it escalating in
+                        # the middle of the night.
                         staff_identity.mark_staff_track(
                             ctx, tid, source="afterhours_present")
                         priority = "attention"

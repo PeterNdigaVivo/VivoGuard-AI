@@ -33,8 +33,7 @@ def _operator_alert_filter():
     availability, and not the fleet-wide AI pipeline stall either. These
     describe the platform, not a scene on a camera, so an operator has
     nothing to confirm or dismiss on them. They stay visible on System
-    Health, still page the dashboard recipients over WhatsApp, and the
-    rows remain in the database for IT.
+    Health and the rows remain in the database for IT.
     """
     return DetectionEvent.detection_type != "system_health"
 

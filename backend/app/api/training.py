@@ -1458,7 +1458,7 @@ def uniform_deploy(model_id: int, camera_ids: list[int],
 # ====================================================================
 # Image upload — uniform + shutter (Vivo P5)
 # ====================================================================
-# Operators upload phone photos / screenshots / WhatsApp images from
+# Operators upload phone photos / screenshots from
 # their devices. Each upload is per-label (the form picks the label
 # before the file lands so the operator can drag a folder of
 # OK-uniform photos in one shot, then switch label and drop another
