@@ -184,10 +184,15 @@ def _extract_recording_frame(camera_id: int, target_dt: datetime) -> bytes | Non
 @celery_app.task(name="alerting.capture_filmstrip_frame", ignore_result=True)
 def capture_filmstrip_frame(alert_id: int, camera_id: int, store_id: int,
                             epoch_ts: int) -> None:
-    """Capture ONE filmstrip frame from the current Redis frame and append it
-    to the alert. Used for the +30/+60/+90/+120s snapshots (scheduled with a
-    countdown). Best-effort."""
-    jpeg = _redis_frame(camera_id)
+    """Capture ONE filmstrip frame at `epoch_ts` and append it to the alert.
+    Used for the +30/+60/+90/+120s snapshots (scheduled with a countdown).
+
+    Prefer the recording at the intended timestamp over the live Redis frame:
+    the countdown only fires punctually when the alerts queue is clear, and a
+    late task would otherwise file a much later frame under epoch_ts.
+    Best-effort."""
+    target = datetime.fromtimestamp(epoch_ts, tz=timezone.utc)
+    jpeg = _extract_recording_frame(camera_id, target) or _redis_frame(camera_id)
     if not jpeg:
         return
     path = _save_jpeg(jpeg, store_id=store_id, alert_id=alert_id, epoch_ts=epoch_ts)
@@ -228,8 +233,13 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
             if p:
                 _append_path(alert_id, p)
 
-    # t=0 frame — the alert moment (most-recent Redis frame).
-    now_jpeg = _redis_frame(camera_id)
+    # t=0 frame — the alert moment itself. Extract from the recording at the
+    # alert timestamp rather than taking the live Redis frame: this task runs
+    # asynchronously on the alerts queue, so by the time it executes the live
+    # frame has moved on and the operator gets a picture of the aftermath
+    # instead of the incident. Falls back to the live frame when nothing is
+    # recording.
+    now_jpeg = _extract_recording_frame(camera_id, alert_dt) or _redis_frame(camera_id)
     if now_jpeg:
         p = _save_jpeg(now_jpeg, store_id=store_id, alert_id=alert_id,
                        epoch_ts=int(alert_dt.timestamp()))
