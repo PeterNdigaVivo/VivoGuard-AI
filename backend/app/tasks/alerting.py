@@ -1775,16 +1775,43 @@ def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
                  "for store=%s (%s)", touched, store.id, day_iso)
 
 
-# ---- Daily open/close summary (22:00 EAT) ----------------------------
+# ---- Daily open/close summary ----------------------------------------
+#
+# Fires as soon as the doors are observed closed. SHOP_DAILY_HOUR is only
+# the backstop for days when no close is ever detected (camera down, no
+# outward crossing seen) — those still need a summary saying so.
 
-SHOP_DAILY_HOUR = 22       # 22:00 store-local trigger
+SHOP_DAILY_HOUR = 22       # 22:00 store-local backstop
+
+
+def _closed_today(db, store, local_now) -> bool:
+    """Whether today's shop_closed event has landed for this store.
+
+    Nothing is gained by waiting after it does: the close time is fixed by
+    the FIRST outward crossing after 20:15 (see detectors/shop_state), so
+    the summary is already complete the moment that event is written.
+    """
+    from app.models import Camera, DetectionEvent
+    start_utc = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                          .astimezone(timezone.utc))
+    return (db.query(DetectionEvent.id)
+              .join(Camera, Camera.id == DetectionEvent.camera_id)
+              .filter(Camera.store_id == store.id,
+                      DetectionEvent.detection_type == "shop_open_close",
+                      DetectionEvent.timestamp >= start_utc,
+                      DetectionEvent.extra["rule"].as_string() == "shop_closed")
+              .first() is not None)
 
 
 @celery_app.task(name="alerting.shop_daily_summary_check", ignore_result=True)
 def shop_daily_summary_check() -> None:
-    """5-min dispatcher. Per-store-per-day at 22:00 EAT, builds the
-    open / close summary from today's shop_open_close DetectionEvent
-    rows and creates one INFO alert.
+    """5-min dispatcher. Builds the open / close summary from today's
+    shop_open_close DetectionEvent rows and creates one INFO alert,
+    once per store per day.
+
+    Fires as soon as the store is observed closed rather than holding
+    the card until 22:00 — a store closing at 20:02 was leaving the
+    manager a two-hour gap before being told anything.
 
     "Vivo Yaya opened at 08:58 AM, closed at 21:05 PM
      Open for 12 hours 7 minutes today"
@@ -1798,11 +1825,15 @@ def shop_daily_summary_check() -> None:
         for store in stores:
             try:
                 local = _store_eat_now(store)
-                if local.hour < SHOP_DAILY_HOUR:
-                    continue
                 day_iso = local.date().isoformat()
                 key = f"vg:shop_daily_summary:{store.id}:{day_iso}"
                 if r.get(key):
+                    continue
+                # Doors observed closed → summarise now. Otherwise wait for
+                # the backstop hour, which is the "closing time not recorded"
+                # case worth telling someone about.
+                if (local.hour < SHOP_DAILY_HOUR
+                        and not _closed_today(db, store, local)):
                     continue
                 _shop_daily_summary_for_store(db, store, local)
                 r.set(key, "1", ex=2 * 24 * 3600)
