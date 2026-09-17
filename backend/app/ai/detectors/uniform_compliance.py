@@ -80,11 +80,14 @@ _METRIC = {
 # Sustained-duration thresholds (seconds) before an alert fires.
 VIOLATION_SECONDS  = 2 * 60       # NON_COMPLIANT sustained
 NO_LANYARD_SECONDS = 5 * 60       # PARTIAL/COLOR sustained
+# Was 5 minutes, which defeated the point: an unauthorised person at a
+# till is there for seconds, so the detector never assessed the case it
+# exists to catch. 90s still excludes a customer leaning over the counter.
 # Time in the staff/counter zone before we'll trust that someone really
 # works there. NON_COMPLIANT alerts only fire after this dwell — a
 # customer who briefly enters a staff zone in street clothes must not
 # trigger a uniform-violation alert.
-CONFIRMED_STAFF_SECONDS = 5 * 60
+CONFIRMED_STAFF_SECONDS = 90
 # Per (track, kind) dedup window.
 DEDUP_SECONDS = 30 * 60
 # Repeated-violations-today threshold.

@@ -173,7 +173,12 @@ class Settings(BaseSettings):
     # alert fires (event rows always persist). Applies only to detectors
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
     # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
-    temporal_gate_min_frames: int = 10
+    # 10 discarded 17,507 detections in a week — every one of 100
+    # intrusion detections and 84% of staff_zone, because a person
+    # crossing a zone is not tracked for 10 straight frames at 1-2 fps.
+    # 4 is the value this comment has claimed ops runs since it was
+    # written; nothing ever set it.
+    temporal_gate_min_frames: int = 4
     # Retention for the metric_snapshots time-series table (days). The
     # dashboards' largest window is 30 days; 90 keeps triple margin.
     # 0 disables pruning entirely.

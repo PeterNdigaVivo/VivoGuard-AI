@@ -118,7 +118,10 @@ x-app-env: &app-env
   VERIFIER_MODEL: ${VERIFIER_MODEL:-claude-sonnet-4-6}
   VERIFIER_PARALLEL: ${VERIFIER_PARALLEL:-4}
   VERIFIER_MAX_IMAGES: ${VERIFIER_MAX_IMAGES:-3}
-  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic"]}
+  # shop_open_close belongs here: the daily summary is built from database
+  # rows, has no frames, and the verifier was scoring it "likely false"
+  # because it could not find any to look at.
+  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic","shop_open_close"]}
   # Verifier provider: anthropic | openai | ollama.
   VERIFIER_PROVIDER: ${VERIFIER_PROVIDER:-anthropic}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -149,7 +152,7 @@ x-app-env: &app-env
   INCIDENT_FOUNDATIONS_ENABLED: ${INCIDENT_FOUNDATIONS_ENABLED:-false}
   DELIVERY_OUTBOX_ENABLED: ${DELIVERY_OUTBOX_ENABLED:-false}
   # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
-  TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-10}
+  TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-4}
   MANNEQUIN_FILTER_ENABLED: ${MANNEQUIN_FILTER_ENABLED:-true}
   ACTIVITY_STATIC_DISPLACEMENT_PX: ${ACTIVITY_STATIC_DISPLACEMENT_PX:-5}
   ACTIVITY_STATIC_WINDOW_FRAMES: ${ACTIVITY_STATIC_WINDOW_FRAMES:-10}

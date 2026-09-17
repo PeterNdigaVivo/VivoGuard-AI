@@ -564,8 +564,12 @@ class AisleDwellDetector(Detector):
     # ─ Sustained-duration knobs ────────────────────────────────────
     # Quick pass-throughs are filtered out — only browses ≥3 s count.
     MIN_BROWSE_SECONDS  = 3.0
-    UNATTENDED_CUSTOMERS = 8         # ≥N customers + no staff = alert
-    UNATTENDED_MIN_CUSTOMERS = 5     # below this, never alert
+    # ≥N customers in the zone with no staff = alert. Was 8, which no
+    # Vivo aisle ever reaches — the detector was armed on 59 cameras and
+    # produced 14 alerts in a week. Override per camera with
+    # detection_configs.extra.unattended_customers.
+    UNATTENDED_CUSTOMERS = 3
+    UNATTENDED_MIN_CUSTOMERS = 2     # absolute floor, whatever the override
     UNATTENDED_SECONDS   = 3 * 60    # sustained gap before alert
     UNATTENDED_DEDUP_SECONDS = 10 * 60
     STAFF_LEFT_GRACE_SECONDS = 2 * 60   # staff just left → don't alert
@@ -729,10 +733,15 @@ class AisleDwellDetector(Detector):
                 staff_recently = (
                     now - self._last_staff_seen.get(gap_key, 0.0)
                     < self.STAFF_LEFT_GRACE_SECONDS)
-                qualifies = (len(customers) >= self.UNATTENDED_CUSTOMERS
+                # Per-camera override: a busy Junction aisle and a quiet
+                # Eldoret one should not share one number.
+                need = max(self.UNATTENDED_MIN_CUSTOMERS,
+                           int((cfg.get("extra") or {}).get(
+                               "unattended_customers",
+                               self.UNATTENDED_CUSTOMERS)))
+                qualifies = (len(customers) >= need
                              and not staff
-                             and not staff_recently
-                             and len(customers) >= self.UNATTENDED_MIN_CUSTOMERS)
+                             and not staff_recently)
                 if qualifies:
                     self._unattended_since.setdefault(gap_key, now)
                 else:
