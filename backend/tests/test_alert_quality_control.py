@@ -86,16 +86,22 @@ def test_review_only_escalates_to_quarantine_but_never_auto_recovers(db):
         _alert(db, cam, "dismissed", age_minutes=30 + index)
     state = refresh_pair_control(db, cam.id, "intrusion")
     assert state.mode == "quarantined"
-    assert state.last_sample_size == 20
-    assert state.last_false_rate == pytest.approx(.5)
+    # The quality control is based on the rolling sample, not only the newest
+    # batch: one earlier dismissal plus twenty new dismissals across forty
+    # reviewed alerts yields a 52.5% false-alert rate.
+    assert state.last_sample_size == 40
+    assert state.last_false_rate == pytest.approx(.525)
 
     # A later good sample does not silently re-enable notifications.
     _alert(db, cam, "confirmed")
     state = refresh_pair_control(db, cam.id, "intrusion")
     assert state.mode == "quarantined"
 
-    for index in range(50):
-        _alert(db, cam, "confirmed", age_minutes=60 + index)
+    # Add a full rolling window of genuinely newer confirmations.  Using a
+    # positive age here would backdate them behind the dismissed alerts and
+    # would not exercise the non-recovery rule against a clean latest window.
+    for _ in range(50):
+        _alert(db, cam, "confirmed")
     state = refresh_pair_control(db, cam.id, "intrusion")
     assert state.mode == "quarantined"
     assert state.last_false_rate == pytest.approx(0)
