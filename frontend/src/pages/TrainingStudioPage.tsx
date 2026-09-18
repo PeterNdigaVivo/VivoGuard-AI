@@ -5,6 +5,11 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge, Button, Card, Input, PageHeader } from '@/components/ui/Primitives'
 import { training, type Dataset } from '@/api/training'
+import RecallSamplingPanel from '@/components/RecallSamplingPanel'
+import MissedEventForm from '@/components/MissedEventForm'
+import DisagreementAdjudicationPanel from '@/components/DisagreementAdjudicationPanel'
+
+type EvidenceWorkflow = 'recall' | 'missed-event' | 'adjudication' | null
 
 export default function TrainingStudioPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([])
@@ -12,6 +17,7 @@ export default function TrainingStudioPage() {
   const [classes, setClasses] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [evidenceWorkflow, setEvidenceWorkflow] = useState<EvidenceWorkflow>(null)
 
   const load = () => training.listDatasets()
     .then(setDatasets)
@@ -39,6 +45,39 @@ export default function TrainingStudioPage() {
           <Link to="/training/shutter"><Button variant="ghost">Shutter training →</Button></Link>
           <Link to="/training/uniform"><Button variant="ghost">Uniform training →</Button></Link>
         </div>} />
+
+      <Card className="p-4 mb-6 border-emerald-200 dark:border-emerald-900">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="font-medium">Accuracy evidence and assurance</div>
+            <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 max-w-3xl">
+              Build independently reviewed precision and recall evidence before approving a model.
+              These workflows never treat unreviewed alerts as proof of accuracy.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => setEvidenceWorkflow('recall')}>
+              Blind recall review
+            </Button>
+            <Button variant="ghost" onClick={() => setEvidenceWorkflow('missed-event')}>
+              Report missed event
+            </Button>
+            <Button variant="ghost" onClick={() => setEvidenceWorkflow('adjudication')}>
+              Resolve disagreements
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {evidenceWorkflow === 'recall' && (
+        <RecallSamplingPanel onClose={() => setEvidenceWorkflow(null)} />
+      )}
+      {evidenceWorkflow === 'missed-event' && (
+        <MissedEventForm onClose={() => setEvidenceWorkflow(null)} />
+      )}
+      {evidenceWorkflow === 'adjudication' && (
+        <DisagreementAdjudicationPanel onClose={() => setEvidenceWorkflow(null)} />
+      )}
 
       {/* New dataset form */}
       <Card className="p-4 mb-6">
