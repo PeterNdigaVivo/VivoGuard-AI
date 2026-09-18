@@ -164,7 +164,7 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     assert coordinator.redis.set_calls == 2
 
 
-def test_shadow_wait_excludes_camera_that_is_no_longer_fresh():
+def test_shadow_wait_uses_frame_arrival_not_last_service_interval():
     coordinator = BatchShadowCoordinator(hardware=SimpleNamespace(
         backend="cuda", device="cuda", gpu_name="Test GPU",
         gpu_memory_mb=24_576, export_format="engine", framework_ok=True,
@@ -173,6 +173,7 @@ def test_shadow_wait_excludes_camera_that_is_no_longer_fresh():
     coordinator.specs = {1: ("model.pt", 1), 2: ("model.pt", 1)}
     coordinator.last_processed_ts = {1: 99.0, 2: 50.0}
     coordinator.scheduler.last_served = {1: 99.0, 2: 50.0}
+    coordinator.schedule_wait_seconds.extend([0.25, 0.4])
 
     coordinator.write_health(
         now=100.0,
@@ -186,7 +187,7 @@ def test_shadow_wait_excludes_camera_that_is_no_longer_fresh():
     assert payload["fresh_camera_ids"] == [1]
     assert payload["cameras_served"] == 1
     assert payload["served_camera_ids"] == [1]
-    assert payload["max_camera_schedule_wait_seconds"] == 1.0
+    assert payload["max_camera_schedule_wait_seconds"] == 0.4
 
 
 def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):

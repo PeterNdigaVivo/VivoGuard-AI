@@ -145,6 +145,7 @@ class BatchShadowCoordinator:
         self.detections = 0
         self.latencies_ms: deque[float] = deque(maxlen=500)
         self.per_frame_latencies_ms: deque[float] = deque(maxlen=500)
+        self.schedule_wait_seconds: deque[float] = deque(maxlen=2_000)
         self.last_health_write = 0.0
 
     def refresh_specs(self, *, now: float) -> None:
@@ -242,6 +243,11 @@ class BatchShadowCoordinator:
             batch_size=settings.inference_batch_size,
             now=now,
         )
+        self.schedule_wait_seconds.extend(
+            max(0.0, now - candidate.frame_ts)
+            for candidate in selected
+            if candidate.camera_id in fresh_camera_ids
+        )
         selected = self.decode_selected(selected)
         if not selected:
             self.write_health(
@@ -323,7 +329,7 @@ class BatchShadowCoordinator:
                 if per_frame_latencies else None
             ),
             "max_camera_schedule_wait_seconds": round(
-                self.scheduler.max_wait_seconds(fresh, now=now), 2,
+                max(self.schedule_wait_seconds, default=0.0), 2,
             ),
             "hardware": {
                 "backend": self.hardware.backend,
