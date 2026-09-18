@@ -3,8 +3,10 @@ import { operations, type AssuranceCase, type QualityScorecard } from '@/api/ope
 import { Button, Card, Input, useToast } from '@/components/ui/Primitives'
 
 const EVENT_LABELS = [
-  'intrusion', 'trespass', 'staff_zone', 'stockroom_access', 'loitering',
-  'crowd', 'fall', 'fight', 'weapon', 'fire', 'smoke', 'shop_open_close',
+  'staff_present', 'staff_zone', 'shop_open_close', 'store_intelligence',
+  'abandoned_object', 'checkout_dwell', 'dwell', 'queue', 'intrusion',
+  'trespass', 'stockroom_access', 'loitering', 'crowd', 'fall', 'fight',
+  'weapon', 'fire', 'smoke', 'vehicle', 'animal', 'lpr', 'custom',
 ]
 
 function useAuthenticatedClip(caseId: number | null) {
