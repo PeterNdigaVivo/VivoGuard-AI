@@ -78,7 +78,13 @@ class ShelfChangeDetector(Detector):
                     state["count"] = 1
                 else:
                     n = state["count"] + 1
-                    state["hist"] = [(a * (n - 1) + b) / n for a, b in zip(state["hist"], hist)]
+                    # ``hist`` contains NumPy float32 scalars.  Keep the
+                    # long-lived baseline in plain Python types so an event
+                    # built from it is safe for SQLAlchemy's JSON encoder.
+                    state["hist"] = [
+                        float((a * (n - 1) + b) / n)
+                        for a, b in zip(state["hist"], hist)
+                    ]
                     state["count"] = n
                 if now - state["since"] >= baseline_seconds:
                     state["locked"] = True
@@ -86,8 +92,8 @@ class ShelfChangeDetector(Detector):
 
             # Compare current hist vs locked baseline with chi-square.
             base = state["hist"]
-            chi = sum(((bi - hi) ** 2) / (bi + hi + 1e-9)
-                      for bi, hi in zip(base, hist.tolist())) * 0.5
+            chi = float(sum(((bi - hi) ** 2) / (bi + hi + 1e-9)
+                            for bi, hi in zip(base, hist.tolist())) * 0.5)
             if chi >= thr and now - state["fired_at"] > 60:
                 state["fired_at"] = now
                 out.append(DetectionEvent(
