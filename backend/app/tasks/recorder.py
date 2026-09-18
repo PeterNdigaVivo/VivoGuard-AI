@@ -58,6 +58,8 @@ _WINDOWS = [
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
+_RECOVERY_ATTEMPT_KEY_FMT = "vg:recording:retry:{window}:{cam}"
+_MAX_RECOVERY_ATTEMPTS = 3
 
 
 def _redis():
@@ -146,7 +148,8 @@ def _substream_url(cam) -> str | None:
         return None
 
 
-def _start_window(db, r, window_id: str, seconds: int) -> int:
+def _start_window(db, r, window_id: str, seconds: int, *,
+                  camera_ids: set[int] | None = None) -> int:
     """Spawn one stream-copy ffmpeg per key camera. Returns count started."""
     from app.models import RecordingClip
     if not _storage_allows_new_window():
@@ -160,7 +163,10 @@ def _start_window(db, r, window_id: str, seconds: int) -> int:
                   window_id, free_gb)
         return 0
     started = 0
-    for cam in _key_cameras(db):
+    cameras = _key_cameras(db)
+    if camera_ids is not None:
+        cameras = [cam for cam in cameras if int(cam.id) in camera_ids]
+    for cam in cameras:
         url = _substream_url(cam)
         if not url:
             continue
@@ -323,6 +329,84 @@ def _any_recording_alive(r) -> bool:
         if pid and _pid_is_ffmpeg(pid):
             return True
     return False
+
+
+def _finalise_dead_recorder_row(db, item: dict, *,
+                                ended_at: datetime | None = None) -> str | None:
+    """Close the exact row owned by a dead tracked process.
+
+    A partial, non-empty file remains useful evidence and is marked completed.
+    A missing/empty output is marked deleted so it cannot masquerade as
+    coverage in recall or incident queries.
+    """
+    from app.models import RecordingClip
+    try:
+        camera_id = int(item.get("camera_id") or 0)
+        window_id = str(item.get("window_id") or "")
+        file_path = str(item.get("path") or "")
+    except Exception:
+        return None
+    if not camera_id or not window_id or not file_path:
+        return None
+    row = (db.query(RecordingClip)
+            .filter(RecordingClip.camera_id == camera_id,
+                    RecordingClip.window_id == window_id,
+                    RecordingClip.file_path == file_path,
+                    RecordingClip.status == "recording")
+            .order_by(RecordingClip.id.desc()).first())
+    if row is None:
+        return None
+    target = Path(file_path)
+    row.ended_at = ended_at or datetime.now(timezone.utc)
+    if target.is_file() and target.stat().st_size > 0:
+        row.status = "completed"
+        row.file_size_mb = target.stat().st_size / 1024**2
+    else:
+        row.status = "deleted"
+        row.file_path = None
+        row.file_size_mb = None
+    return row.status
+
+
+def _recover_dead_recorders(db, r, window_id: str, remaining: int) -> int:
+    """Retry failed cameras independently without disturbing healthy streams.
+
+    Retries are bounded per camera/window to prevent an unreachable camera
+    from producing an endless process/row loop every minute.
+    """
+    retry_ids: set[int] = set()
+    for key in r.scan_iter(match="vg:recording:pid:*", count=200):
+        try:
+            raw = json.loads(r.get(key) or "{}")
+            camera_id = int(str(key).rsplit(":", 1)[-1])
+            pid = int(raw.get("pid") or 0)
+        except Exception:
+            r.delete(key)
+            continue
+        if str(raw.get("window_id") or "") != window_id:
+            continue
+        if pid and _pid_is_ffmpeg(pid):
+            continue
+        r.delete(key)
+        raw["camera_id"] = camera_id
+        _finalise_dead_recorder_row(db, raw)
+        attempt_key = _RECOVERY_ATTEMPT_KEY_FMT.format(
+            window=window_id, cam=camera_id)
+        attempt = int(r.incr(attempt_key))
+        r.expire(attempt_key, 6 * 3600)
+        if attempt <= _MAX_RECOVERY_ATTEMPTS and remaining > 30:
+            retry_ids.add(camera_id)
+        else:
+            log.error("recorder: cam=%s exhausted %s retries for window %s",
+                      camera_id, _MAX_RECOVERY_ATTEMPTS, window_id)
+    db.commit()
+    if not retry_ids:
+        return 0
+    started = _start_window(
+        db, r, window_id, remaining, camera_ids=retry_ids)
+    log.warning("recorder: retried %d/%d failed streams for window %s",
+                started, len(retry_ids), window_id)
+    return started
 
 
 def _stop_all(r) -> None:
@@ -488,8 +572,11 @@ def tick() -> None:
         # persists while all ffmpeg children died with the old container.
         # Detect that (no live ffmpeg) and respawn for the REMAINING window
         # time, instead of silently recording nothing until 14:00/19:00.
+        remaining = int((wstart.timestamp() + seconds) - now_eat.timestamp())
+        if remaining > 30:
+            with SessionLocal() as db:
+                _recover_dead_recorders(db, r, window_id, remaining)
         if not _any_recording_alive(r):
-            remaining = int((wstart.timestamp() + seconds) - now_eat.timestamp())
             if remaining > 30:
                 _stop_all(r)                     # clear stale pid keys
                 with SessionLocal() as db:

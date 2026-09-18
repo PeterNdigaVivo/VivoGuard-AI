@@ -10,8 +10,8 @@ from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_window, _current_window, _prune_expired_source_windows,
-    _reconcile_orphaned_recordings, _recording_path,
-    _storage_allows_new_window,
+    _finalise_dead_recorder_row, _reconcile_orphaned_recordings,
+    _recording_path, _storage_allows_new_window,
 )
 
 
@@ -83,6 +83,37 @@ def test_reconcile_orphaned_rows_keeps_files_and_rejects_missing(
     assert rows[1].file_path == str(present)
     assert rows[2].status == "deleted"
     assert rows[2].file_path is None
+
+
+def test_dead_camera_row_preserves_partial_file_and_rejects_empty(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    db = _session()
+    partial = tmp_path / "partial.mp4"
+    partial.write_bytes(b"recoverable fragment")
+    empty = tmp_path / "empty.mp4"
+    empty.touch()
+    db.add_all([
+        RecordingClip(camera_id=7, window_id="current",
+                      file_path=str(partial), status="recording"),
+        RecordingClip(camera_id=8, window_id="current",
+                      file_path=str(empty), status="recording"),
+    ])
+    db.commit()
+
+    assert _finalise_dead_recorder_row(db, {
+        "camera_id": 7, "window_id": "current", "path": str(partial),
+    }) == "completed"
+    assert _finalise_dead_recorder_row(db, {
+        "camera_id": 8, "window_id": "current", "path": str(empty),
+    }) == "deleted"
+    db.commit()
+
+    rows = {row.camera_id: row for row in db.query(RecordingClip).all()}
+    assert rows[7].file_path == str(partial)
+    assert rows[7].file_size_mb > 0
+    assert rows[8].file_path is None
 
 
 def test_close_window_retains_source_for_delayed_extraction(tmp_path, monkeypatch) -> None:
