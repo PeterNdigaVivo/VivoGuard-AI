@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 HEALTH_KEY = "vg:inference:batch-shadow-health"
 EXPECTED_KEY = "vg:inference:batch-shadow-expected"
+FRAME_FRESH_SECONDS = 10.0
 
 _CRITICAL_TYPES = {
     "weapon", "weapon_brandished", "fire", "smoke", "fall",
@@ -187,6 +188,24 @@ class BatchShadowCoordinator:
             ))
         return candidates
 
+    def fresh_camera_ids(self, *, now: float) -> set[int]:
+        """Return cameras whose streamer has produced a recent real frame.
+
+        Capacity acceptance is defined against the authoritative fresh-camera
+        set.  A camera that goes offline after being served must not make its
+        scheduling wait grow forever and masquerade as GPU starvation.
+        """
+        fresh = set()
+        for camera_id in self.specs:
+            health = self.buffer.health(camera_id) or {}
+            try:
+                frame_ts = float(health.get("last_frame_at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if frame_ts > 0 and 0 <= now - frame_ts < FRAME_FRESH_SECONDS:
+                fresh.add(camera_id)
+        return fresh
+
     def decode_selected(
         self, selected: list[BatchCandidate],
     ) -> list[BatchCandidate]:
@@ -217,6 +236,7 @@ class BatchShadowCoordinator:
         now = time.time() if now is None else now
         self.refresh_specs(now=now)
         candidates = self.candidates()
+        fresh_camera_ids = self.fresh_camera_ids(now=now)
         selected = self.scheduler.select(
             candidates,
             batch_size=settings.inference_batch_size,
@@ -224,7 +244,10 @@ class BatchShadowCoordinator:
         )
         selected = self.decode_selected(selected)
         if not selected:
-            self.write_health(now=now, candidates=0, detections=0)
+            self.write_health(
+                now=now, candidates=0, detections=0,
+                fresh_camera_ids=fresh_camera_ids,
+            )
             return 0
         started = time.perf_counter()
         try:
@@ -239,7 +262,10 @@ class BatchShadowCoordinator:
                 "batch shadow inference failed cameras=%s",
                 [candidate.camera_id for candidate in selected],
             )
-            self.write_health(now=now, candidates=len(candidates), detections=0)
+            self.write_health(
+                now=now, candidates=len(candidates), detections=0,
+                fresh_camera_ids=fresh_camera_ids,
+            )
             return 0
         latency_ms = (time.perf_counter() - started) * 1000.0
         self.latencies_ms.append(latency_ms)
@@ -252,15 +278,19 @@ class BatchShadowCoordinator:
         self.detections += detections
         self.write_health(
             now=now, candidates=len(candidates), detections=detections,
+            fresh_camera_ids=fresh_camera_ids,
         )
         return len(selected)
 
     def write_health(self, *, now: float, candidates: int,
-                     detections: int) -> None:
+                     detections: int,
+                     fresh_camera_ids: set[int] | None = None) -> None:
         if now - self.last_health_write < 1.0:
             return
         self.last_health_write = now
         active = set(self.specs)
+        fresh = set(fresh_camera_ids or ())
+        served_fresh = set(self.last_processed_ts) & fresh
         latencies = list(self.latencies_ms)
         per_frame_latencies = list(self.per_frame_latencies_ms)
         payload = {
@@ -269,8 +299,10 @@ class BatchShadowCoordinator:
             "last_run_ts": now,
             "uptime_seconds": round(max(0.0, now - self.started), 1),
             "configured_cameras": len(active),
-            "cameras_served": len(set(self.last_processed_ts) & active),
-            "served_camera_ids": sorted(set(self.last_processed_ts) & active),
+            "fresh_cameras": len(fresh),
+            "fresh_camera_ids": sorted(fresh),
+            "cameras_served": len(served_fresh),
+            "served_camera_ids": sorted(served_fresh),
             "fresh_candidates": candidates,
             "batch_size_limit": int(settings.inference_batch_size),
             "batches_processed": self.batches,
@@ -291,7 +323,7 @@ class BatchShadowCoordinator:
                 if per_frame_latencies else None
             ),
             "max_camera_schedule_wait_seconds": round(
-                self.scheduler.max_wait_seconds(active, now=now), 2,
+                self.scheduler.max_wait_seconds(fresh, now=now), 2,
             ),
             "hardware": {
                 "backend": self.hardware.backend,

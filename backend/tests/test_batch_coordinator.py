@@ -128,6 +128,9 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     coordinator.last_refresh = 100.0
     candidates = [_candidate(1, priority=3), _candidate(2)]
     monkeypatch.setattr(coordinator, "candidates", lambda: candidates)
+    monkeypatch.setattr(
+        coordinator, "fresh_camera_ids", lambda *, now: {1, 2},
+    )
     monkeypatch.setattr(coordinator, "decode_selected", lambda selected: selected)
     calls = []
 
@@ -161,12 +164,40 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     assert coordinator.redis.set_calls == 2
 
 
+def test_shadow_wait_excludes_camera_that_is_no_longer_fresh():
+    coordinator = BatchShadowCoordinator(hardware=SimpleNamespace(
+        backend="cuda", device="cuda", gpu_name="Test GPU",
+        gpu_memory_mb=24_576, export_format="engine", framework_ok=True,
+    ))
+    coordinator.redis = _Redis()
+    coordinator.specs = {1: ("model.pt", 1), 2: ("model.pt", 1)}
+    coordinator.last_processed_ts = {1: 99.0, 2: 50.0}
+    coordinator.scheduler.last_served = {1: 99.0, 2: 50.0}
+
+    coordinator.write_health(
+        now=100.0,
+        candidates=1,
+        detections=0,
+        fresh_camera_ids={1},
+    )
+
+    payload, _ttl = coordinator.redis.values[coordinator_module.HEALTH_KEY]
+    assert payload["fresh_cameras"] == 1
+    assert payload["fresh_camera_ids"] == [1]
+    assert payload["cameras_served"] == 1
+    assert payload["served_camera_ids"] == [1]
+    assert payload["max_camera_schedule_wait_seconds"] == 1.0
+
+
 def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
     coordinator = BatchShadowCoordinator()
     coordinator.redis = _Redis()
     coordinator.specs = {1: ("model.pt", 1)}
     coordinator.last_refresh = 100.0
     monkeypatch.setattr(coordinator, "candidates", lambda: [_candidate(1)])
+    monkeypatch.setattr(
+        coordinator, "fresh_camera_ids", lambda *, now: {1},
+    )
     monkeypatch.setattr(coordinator, "decode_selected", lambda selected: selected)
 
     def fail(*_args, **_kwargs):
