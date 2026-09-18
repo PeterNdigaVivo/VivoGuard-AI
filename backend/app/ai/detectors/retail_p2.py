@@ -23,6 +23,18 @@ from app.ai.zone_logic import bbox_in_zone, bbox_overlaps_zone, zone_contains
 log = logging.getLogger(__name__)
 
 
+def _config_extra(cfg: dict) -> dict:
+    """Return detector extras only when the legacy value is a mapping.
+
+    Some production detector rows predate the current JSON shape and store
+    ``extra`` as a list.  Treating those rows as having no overrides preserves
+    the documented defaults and prevents one malformed optional field from
+    aborting every detector evaluation for the camera.
+    """
+    extra = cfg.get("extra")
+    return extra if isinstance(extra, dict) else {}
+
+
 # ---------------------------------------------------------------------------
 # Staff availability at a counter
 # ---------------------------------------------------------------------------
@@ -611,6 +623,7 @@ class AisleDwellDetector(Detector):
         cfg = ctx.config.get(self.detection_type)
         if not cfg or not cfg.get("enabled"):
             return []
+        extra = _config_extra(cfg)
         # 'aisle' is the canonical tag; 'dwell' is the legacy alias —
         # accept both so older zone configs keep feeding metrics.
         zones = [z for z in ctx.zones
@@ -744,7 +757,7 @@ class AisleDwellDetector(Detector):
                 # Per-camera override: a busy Junction aisle and a quiet
                 # Eldoret one should not share one number.
                 need = max(self.UNATTENDED_MIN_CUSTOMERS,
-                           int((cfg.get("extra") or {}).get(
+                           int(extra.get(
                                "unattended_customers",
                                self.UNATTENDED_CUSTOMERS)))
                 qualifies = (len(customers) >= need
@@ -950,7 +963,7 @@ class ShutterDetector(Detector):
         """Best-guess state for THIS frame: OPEN / CLOSED / PARTIAL.
         Caller debounces via _commit_state(). Returns None only when
         no signal is available at all (no model class, no pixels)."""
-        extra = cfg.get("extra") or {}
+        extra = _config_extra(cfg)
         # Mode 1: custom-class detections at/above the threshold win.
         cls_open    = extra.get("class_open",    "shutter_open")
         cls_closed  = extra.get("class_closed",  "shutter_closed")
