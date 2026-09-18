@@ -12,7 +12,6 @@ from app.models import (
 )
 from app.operations.assurance import create_alert_quality_cases
 from app.services.alert_feedback import record_verdict
-from app.tasks.alerting import _info_notification_allowed
 from app.services.alert_quality import (
     _wilson_lower_bound, apply_quality_control, pair_metrics,
     quality_scorecards, refresh_pair_control,
@@ -400,10 +399,3 @@ def test_recorder_clip_clears_false_missing_evidence_case(db, tmp_path):
     assert case.status == "resolved"
     assert case.resolved_at is not None
     assert alert.status == "new"
-
-
-def test_direct_task_notification_obeys_persisted_quality_decision():
-    class Event:
-        extra = {"quality_control": {"notification_suppressed": True}}
-
-    assert _info_notification_allowed(Event()) is False

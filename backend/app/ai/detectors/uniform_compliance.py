@@ -698,7 +698,8 @@ class UniformComplianceDetector(Detector):
         elapsed = self._observe_state(tid, state, now)
 
         if state == NON_COMPLIANT and elapsed >= VIOLATION_SECONDS:
-            if now - self._fired.get((tid, NON_COMPLIANT), 0) >= DEDUP_SECONDS:
+            last_fired = self._fired.get((tid, NON_COMPLIANT))
+            if last_fired is None or now - last_fired >= DEDUP_SECONDS:
                 self._fired[(tid, NON_COMPLIANT)] = now
                 self._bump_violation_count(ctx, now)
                 repeated = self._violation_count_today(ctx) > REPEAT_THRESHOLD
@@ -718,7 +719,8 @@ class UniformComplianceDetector(Detector):
                 and state in (PARTIAL_COMPLIANT, COLOR_ONLY)
                 and elapsed >= NO_LANYARD_SECONDS):
             kind = state
-            if now - self._fired.get((tid, kind), 0) >= DEDUP_SECONDS:
+            last_fired = self._fired.get((tid, kind))
+            if last_fired is None or now - last_fired >= DEDUP_SECONDS:
                 self._fired[(tid, kind)] = now
                 rule = "no_lanyard" if state == PARTIAL_COMPLIANT else "color_only"
                 return DetectionEvent(

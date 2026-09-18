@@ -43,6 +43,36 @@ interface Snapshot {
     bytetrack_active: boolean; supervision_active: boolean
     mannequin_filter_active: boolean
   }
+  inference_capacity?: {
+    authoritative: null | {
+      last_run_ts?: number
+      cameras_total?: number
+      cameras_fresh?: number
+      cameras_actively_inferencing?: number | null
+      cameras_waiting_for_worker?: number | null
+      inference_queue_depth?: number | null
+      estimated_full_rotation_seconds?: number | null
+    }
+    batch_shadow: null | {
+      last_run_ts?: number
+      mode?: string
+      configured_cameras?: number
+      cameras_served?: number
+      frames_processed?: number
+      errors?: number
+      p95_per_frame_ms?: number | null
+      max_camera_schedule_wait_seconds?: number | null
+      hardware?: {
+        backend?: string
+        device?: string
+        gpu_name?: string | null
+        gpu_memory_mb?: number | null
+        export_format?: string | null
+        framework_ok?: boolean
+      }
+    }
+    batch_shadow_expected: boolean
+  }
   collection_errors?: string[]
 }
 
@@ -206,6 +236,59 @@ export default function MissionControlPage() {
               {Object.entries(data.detection.events_last_30min_by_type)
                 .sort((a, b) => b[1] - a[1])
                 .map(([k, v]) => `${k} ${v}`).join(' · ') || 'no events'}
+            </div>
+          </Card>
+
+          {/* Capacity + hardware evidence. The batch service writes this from
+              inside the worker that can actually see CUDA, unlike the API
+              container. */}
+          <Card className="p-4">
+            <div className="font-semibold mb-2">⚙️ Inference capacity</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+              <div>
+                <div className="font-medium">Authoritative pipeline</div>
+                {data.inference_capacity?.authoritative ? (
+                  <div className="text-slate-600 dark:text-slate-300 mt-1 space-y-1">
+                    <div>
+                      {data.inference_capacity.authoritative.cameras_actively_inferencing ?? '—'} active ·{' '}
+                      {data.inference_capacity.authoritative.cameras_waiting_for_worker ?? '—'} waiting ·{' '}
+                      queue {data.inference_capacity.authoritative.inference_queue_depth ?? '—'}
+                    </div>
+                    <div>
+                      {data.inference_capacity.authoritative.cameras_fresh ?? '—'} /{' '}
+                      {data.inference_capacity.authoritative.cameras_total ?? '—'} fresh · full rotation{' '}
+                      {data.inference_capacity.authoritative.estimated_full_rotation_seconds ?? '—'}s
+                    </div>
+                  </div>
+                ) : <div className="text-red-600 mt-1">No pipeline telemetry</div>}
+              </div>
+              <div>
+                <div className="font-medium">GPU batch shadow</div>
+                {data.inference_capacity?.batch_shadow ? (
+                  <div className="text-slate-600 dark:text-slate-300 mt-1 space-y-1">
+                    <div>
+                      {data.inference_capacity.batch_shadow.hardware?.backend ?? 'unknown backend'} ·{' '}
+                      {data.inference_capacity.batch_shadow.hardware?.gpu_name ?? 'GPU name unavailable'}
+                    </div>
+                    <div>
+                      {data.inference_capacity.batch_shadow.cameras_served ?? '—'} /{' '}
+                      {data.inference_capacity.batch_shadow.configured_cameras ?? '—'} cameras served ·{' '}
+                      {data.inference_capacity.batch_shadow.errors ?? '—'} errors
+                    </div>
+                    <div>
+                      p95/frame {num(data.inference_capacity.batch_shadow.p95_per_frame_ms, 1)} ms · max wait{' '}
+                      {num(data.inference_capacity.batch_shadow.max_camera_schedule_wait_seconds, 1)}s
+                    </div>
+                  </div>
+                ) : (
+                  <div className={data.inference_capacity?.batch_shadow_expected
+                    ? 'text-red-600 mt-1' : 'text-slate-500 mt-1'}>
+                    {data.inference_capacity?.batch_shadow_expected
+                      ? 'Expected, but no GPU telemetry is available'
+                      : 'Not enabled'}
+                  </div>
+                )}
+              </div>
             </div>
           </Card>
 

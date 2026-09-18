@@ -129,9 +129,10 @@ class WeightedFairBatchScheduler:
 
 
 class BatchShadowCoordinator:
-    def __init__(self):
+    def __init__(self, *, hardware: HardwareEnv | None = None):
         self.buffer = FrameBuffer()
         self.redis = redis.from_url(settings.redis_url)
+        self.hardware = hardware or HardwareEnv.detect()
         self.scheduler = WeightedFairBatchScheduler()
         self.specs: dict[int, tuple[str, int]] = {}
         self.last_processed_ts: dict[int, float] = {}
@@ -292,6 +293,14 @@ class BatchShadowCoordinator:
             "max_camera_schedule_wait_seconds": round(
                 self.scheduler.max_wait_seconds(active, now=now), 2,
             ),
+            "hardware": {
+                "backend": self.hardware.backend,
+                "device": self.hardware.device,
+                "gpu_name": self.hardware.gpu_name or None,
+                "gpu_memory_mb": self.hardware.gpu_memory_mb or None,
+                "export_format": self.hardware.export_format,
+                "framework_ok": self.hardware.framework_ok,
+            },
         }
         self.redis.set(
             HEALTH_KEY,
@@ -324,7 +333,7 @@ def run() -> None:
         "batch shadow starting backend=%s gpu=%s batch_size=%d",
         env.backend, env.gpu_name or "none", settings.inference_batch_size,
     )
-    coordinator = BatchShadowCoordinator()
+    coordinator = BatchShadowCoordinator(hardware=env)
     while True:
         processed = coordinator.process_once()
         if not processed:

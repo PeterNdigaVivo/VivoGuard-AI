@@ -18,6 +18,7 @@ from stdlib shutil.disk_usage + `du`.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -44,6 +45,28 @@ _PROC_START = time.time()
 # fallback if that import ever fails.
 _URGENT_FALLBACK = {"intrusion", "weapon", "weapon_brandished", "fire",
                     "smoke", "fight", "fall", "trespass"}
+
+
+def _active_inference_count(*, legacy_active: int, pipeline: dict | None,
+                            enabled_cameras: int, now: float) -> int:
+    """Prefer the supervisor's fleet-wide proof of life when it is fresh.
+
+    Per-camera ``vg:inference-hb`` keys only exist while a legacy camera task
+    owns the feed.  Coordinated/batched inference can therefore be healthy
+    while those keys read zero.  The supervisor snapshot is the source used by
+    the Alerts proof-of-life banner, so using it here keeps both dashboards
+    consistent.  A stale or malformed snapshot falls back to the legacy count.
+    """
+    if not pipeline:
+        return legacy_active
+    try:
+        age = now - float(pipeline.get("last_run_ts") or 0)
+        active = int(pipeline["cameras_actively_inferencing"])
+    except (KeyError, TypeError, ValueError):
+        return legacy_active
+    if age < 0 or age > 120:
+        return legacy_active
+    return min(max(0, active), max(0, enabled_cameras))
 
 
 def _fmt_uptime(seconds: float | None) -> str | None:
@@ -178,6 +201,8 @@ _DEFAULTS: dict[str, dict] = {
     "alerts": {"urgent_today": 0, "resolved_today": 0, "pending_today": 0},
     "integrations": {"bytetrack_active": False, "supervision_active": False,
                      "mannequin_filter_active": False},
+    "inference_capacity": {"authoritative": None, "batch_shadow": None,
+                           "batch_shadow_expected": False},
 }
 
 
@@ -242,8 +267,24 @@ def collect_system_health(db: Session) -> dict:
                 streaming += 1
             else:
                 offline.append(c.name or f"camera {c.id}")
-        ai_active = sum(1 for c in cams
-                        if c.ai_enabled and (now - hb_map.get(c.id, 0)) < 60)
+        legacy_active = sum(1 for c in cams
+                            if c.ai_enabled
+                            and (now - hb_map.get(c.id, 0)) < 60)
+        pipeline = None
+        if r is not None:
+            try:
+                raw = r.get("vg:inference:health")
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                pipeline = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                pipeline = None
+        ai_active = _active_inference_count(
+            legacy_active=legacy_active,
+            pipeline=pipeline,
+            enabled_cameras=sum(bool(c.ai_enabled) for c in cams),
+            now=now,
+        )
         return {"total": len(cams), "streaming": streaming,
                 "offline": len(cams) - streaming,
                 "offline_names": offline[:25],
@@ -391,6 +432,25 @@ def collect_system_health(db: Session) -> dict:
                 getattr(settings, "mannequin_filter_enabled", True)),
         }
 
+    # ---- inference capacity -----------------------------------------------
+    def _inference_capacity() -> dict:
+        def read_json(key: str) -> dict | None:
+            if r is None:
+                return None
+            raw = r.get(key)
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            value = json.loads(raw) if raw else None
+            return value if isinstance(value, dict) else None
+
+        return {
+            "authoritative": read_json("vg:inference:health"),
+            "batch_shadow": read_json("vg:inference:batch-shadow-health"),
+            "batch_shadow_expected": bool(
+                r is not None and r.get("vg:inference:batch-shadow-expected")
+            ),
+        }
+
     snap = {
         "generated_at": now_utc.isoformat(),
         "containers": guard("containers", lambda: _containers(r),
@@ -405,6 +465,10 @@ def collect_system_health(db: Session) -> dict:
         "alerts": guard("alerts", _alerts, _DEFAULTS["alerts"]),
         "integrations": guard("integrations", _integrations,
                               _DEFAULTS["integrations"]),
+        "inference_capacity": guard(
+            "inference_capacity", _inference_capacity,
+            _DEFAULTS["inference_capacity"],
+        ),
         "collection_errors": errors,
     }
     return snap

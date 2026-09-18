@@ -563,7 +563,7 @@ def uniform_violation_check() -> None:
                     body = (f"🔴 Repeated uniform violations at {store_name} "
                             f"today [{cam.name}]")
 
-            log.info("uniform violation alert: %s [%s]", store_name, cam.name)
+            log.info("uniform violation alert: %s", body)
             r.set(sent_key, "1", ex=UNIFORM_DEDUP_TTL_SECONDS)
 
 

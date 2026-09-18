@@ -1,6 +1,7 @@
 import io
 import json
 import statistics
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -118,7 +119,10 @@ def test_coordinator_decodes_only_the_selected_bounded_batch():
 
 
 def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
-    coordinator = BatchShadowCoordinator()
+    coordinator = BatchShadowCoordinator(hardware=SimpleNamespace(
+        backend="cuda", device="cuda", gpu_name="Test GPU",
+        gpu_memory_mb=24_576, export_format="engine", framework_ok=True,
+    ))
     coordinator.redis = _Redis()
     coordinator.specs = {1: ("model.pt", 3), 2: ("model.pt", 1)}
     coordinator.last_refresh = 100.0
@@ -143,6 +147,14 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     assert payload["served_camera_ids"] == [1, 2]
     assert payload["detections_observed_not_emitted"] == 1
     assert payload["p95_per_frame_ms"] is not None
+    assert payload["hardware"] == {
+        "backend": "cuda",
+        "device": "cuda",
+        "gpu_name": "Test GPU",
+        "gpu_memory_mb": 24_576,
+        "export_format": "engine",
+        "framework_ok": True,
+    }
     assert ttl == 240
     assert coordinator.redis.values[coordinator_module.EXPECTED_KEY] == (1, 21600)
     coordinator.write_health(now=100.5, candidates=0, detections=0)
