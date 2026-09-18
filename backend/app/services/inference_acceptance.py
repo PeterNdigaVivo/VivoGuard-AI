@@ -167,7 +167,21 @@ def evaluate_capacity_acceptance(
 
     passed = bool(checks) and all(check["passed"] for check in checks)
     has_telemetry = authoritative is not None and shadow is not None
-    status = "capacity_ready" if passed else ("failed" if has_telemetry else "pending")
+    # Uptime and sample volume are accrual gates: before they mature the canary
+    # is still in progress, not failed. Any substantive failed check (stale
+    # telemetry, errors, starvation, latency, or scheduling delay) remains a
+    # real failure even during the soak period.
+    accrual_checks = {"two_hour_canary", "minimum_shadow_frames"}
+    substantive_failures = [
+        check for check in checks
+        if not check["passed"] and check["name"] not in accrual_checks
+    ]
+    if passed:
+        status = "capacity_ready"
+    elif not has_telemetry or not substantive_failures:
+        status = "pending"
+    else:
+        status = "failed"
     return {
         "status": status,
         "capacity_gate_passed": passed,

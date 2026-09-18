@@ -107,3 +107,36 @@ def test_capacity_is_pending_without_shadow_telemetry():
 
     assert result["status"] == "pending"
     assert result["capacity_gate_passed"] is False
+
+
+def test_capacity_is_pending_while_soak_time_accrues():
+    shadow = _shadow()
+    shadow["uptime_seconds"] = 3600
+
+    result = evaluate_capacity_acceptance(
+        _authoritative(),
+        shadow,
+        now=NOW,
+        baseline={"cameras_reporting": 58, "frames": 10000},
+        thresholds=THRESHOLDS,
+    )
+
+    assert result["status"] == "pending"
+    assert result["capacity_gate_passed"] is False
+
+
+def test_capacity_reports_real_failure_during_soak():
+    shadow = _shadow()
+    shadow["uptime_seconds"] = 3600
+    shadow["errors"] = 1
+
+    result = evaluate_capacity_acceptance(
+        _authoritative(),
+        shadow,
+        now=NOW,
+        baseline={"cameras_reporting": 58, "frames": 10000},
+        thresholds=THRESHOLDS,
+    )
+
+    assert result["status"] == "failed"
+    assert result["capacity_gate_passed"] is False
