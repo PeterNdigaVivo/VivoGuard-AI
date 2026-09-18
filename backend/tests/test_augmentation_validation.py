@@ -6,6 +6,8 @@ the production path derives the set from DEFAULT_CFG_DICT.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 pytest.importorskip("sqlalchemy")            # trainer's module-level deps
@@ -14,7 +16,7 @@ pytest.importorskip("pydantic_settings")
 
 from app.training.trainer import (           # noqa: E402
     CELERY_DATALOADER_WORKERS, DEFAULT_AUGMENTATION,
-    validate_augmentation_config,
+    run_job, validate_augmentation_config,
 )
 
 VALID = {"degrees", "translate", "scale", "fliplr", "mosaic",
@@ -50,3 +52,9 @@ def test_empty_config_passes() -> None:
 
 def test_celery_training_does_not_spawn_dataloader_children() -> None:
     assert CELERY_DATALOADER_WORKERS == 0
+
+
+def test_training_audit_record_does_not_read_detached_job() -> None:
+    source = inspect.getsource(run_job)
+    assert "dataset_id = int(job.dataset_id)" in source
+    assert "dataset_id=job.dataset_id" not in source

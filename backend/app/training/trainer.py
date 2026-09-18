@@ -182,6 +182,11 @@ def run_job(job_id: int) -> None:
         ds  = db.get(Dataset, job.dataset_id)
         if not ds:
             raise RuntimeError("dataset missing")
+        # Keep primitive identifiers for the experiment audit record. ORM
+        # rows expire on commit and become detached when this session exits;
+        # reading job.dataset_id after training therefore raises
+        # DetachedInstanceError even though the model completed successfully.
+        dataset_id = int(job.dataset_id)
 
         # Business-logic guard behind the Celery task's outer guard. This
         # also protects synchronous maintenance/debug callers that invoke
@@ -613,7 +618,7 @@ def run_job(job_id: int) -> None:
         try:
             log_training_run(
                 runs_dir, job_id=job_id, status="done",
-                dataset_id=job.dataset_id, dataset_hash=dataset_hash,
+                dataset_id=dataset_id, dataset_hash=dataset_hash,
                 parent_model_id=parent_model_id, model_id=new_model_id,
                 hyperparameters={k: str(v) if isinstance(v, Path) else v
                                  for k, v in train_kwargs.items()},
@@ -640,7 +645,7 @@ def run_job(job_id: int) -> None:
         try:
             log_training_run(
                 runs_dir, job_id=job_id, status="failed",
-                dataset_id=job.dataset_id, dataset_hash=dataset_hash,
+                dataset_id=dataset_id, dataset_hash=dataset_hash,
                 parent_model_id=parent_model_id,
                 sanitize_report=sanitize_report, error=str(e))
         except Exception as e2:
