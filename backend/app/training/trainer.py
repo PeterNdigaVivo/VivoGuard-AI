@@ -35,6 +35,12 @@ DEFAULT_AUGMENTATION: dict[str, float] = {
     "mosaic": 0.5, "hsv_h": 0.015, "hsv_s": 0.7, "hsv_v": 0.4,
 }
 
+# Celery prefork task processes are daemonic. PyTorch DataLoader workers try
+# to create child processes, which fails immediately with
+# "daemonic processes are not allowed to have children". Training already
+# runs in its own dedicated Celery worker, so keep data loading in-process.
+CELERY_DATALOADER_WORKERS = 0
+
 
 def _ultralytics_cfg_keys() -> set[str]:
     """Authoritative set of train-config keys for the INSTALLED ultralytics.
@@ -405,6 +411,7 @@ def run_job(job_id: int) -> None:
             exist_ok=True,
             device=("0" if settings.use_gpu else "cpu"),
             augment=augment,
+            workers=CELERY_DATALOADER_WORKERS,
         )
         # Augmentation kwargs (defaults merged with any per-job override),
         # validated against the INSTALLED ultralytics' config schema so an

@@ -13,7 +13,8 @@ pytest.importorskip("redis")
 pytest.importorskip("pydantic_settings")
 
 from app.training.trainer import (           # noqa: E402
-    DEFAULT_AUGMENTATION, validate_augmentation_config,
+    CELERY_DATALOADER_WORKERS, DEFAULT_AUGMENTATION,
+    validate_augmentation_config,
 )
 
 VALID = {"degrees", "translate", "scale", "fliplr", "mosaic",
@@ -45,3 +46,7 @@ def test_bool_value_rejected() -> None:
 
 def test_empty_config_passes() -> None:
     validate_augmentation_config({}, valid_keys=VALID)
+
+
+def test_celery_training_does_not_spawn_dataloader_children() -> None:
+    assert CELERY_DATALOADER_WORKERS == 0
