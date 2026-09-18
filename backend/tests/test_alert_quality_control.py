@@ -59,6 +59,33 @@ def test_false_rate_opens_quarantine_and_does_not_auto_recover(db):
                age_minutes=index)
     state = refresh_pair_control(db, cam.id, "intrusion")
     assert state.mode == "quarantined"
+
+
+def test_below_target_precision_becomes_review_only(db):
+    cam = _camera(db)
+    for index in range(20):
+        _alert(db, cam, "dismissed" if index == 0 else "confirmed",
+               age_minutes=index)
+
+    state = refresh_pair_control(db, cam.id, "intrusion")
+
+    assert state.mode == "review_only"
+    assert state.last_sample_size == 20
+    assert state.last_false_rate == pytest.approx(.05)
+
+
+def test_review_only_escalates_to_quarantine_but_never_auto_recovers(db):
+    cam = _camera(db)
+    for index in range(20):
+        _alert(db, cam, "dismissed" if index == 0 else "confirmed",
+               age_minutes=index)
+    state = refresh_pair_control(db, cam.id, "intrusion")
+    assert state.mode == "review_only"
+
+    for index in range(20):
+        _alert(db, cam, "dismissed", age_minutes=30 + index)
+    state = refresh_pair_control(db, cam.id, "intrusion")
+    assert state.mode == "quarantined"
     assert state.last_sample_size == 20
     assert state.last_false_rate == pytest.approx(.5)
 
@@ -66,6 +93,12 @@ def test_false_rate_opens_quarantine_and_does_not_auto_recover(db):
     _alert(db, cam, "confirmed")
     state = refresh_pair_control(db, cam.id, "intrusion")
     assert state.mode == "quarantined"
+
+    for index in range(50):
+        _alert(db, cam, "confirmed", age_minutes=60 + index)
+    state = refresh_pair_control(db, cam.id, "intrusion")
+    assert state.mode == "quarantined"
+    assert state.last_false_rate == pytest.approx(0)
 
 
 def test_quarantined_alert_retains_evidence_but_suppresses_escalation(db):

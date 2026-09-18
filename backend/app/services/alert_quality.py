@@ -16,6 +16,7 @@ from app.models import (
 
 MIN_REVIEWED_SAMPLES = 20
 ROLLING_SAMPLE_SIZE = 50
+REVIEW_ONLY_FALSE_RATE = 0.01
 QUARANTINE_FALSE_RATE = 0.50
 RECOVERY_FALSE_RATE = 0.20
 RECOVERY_SAMPLES = 20
@@ -105,22 +106,35 @@ def refresh_pair_control(db: Session, camera_id: int,
     if state:
         state.last_sample_size = metrics["sample_size"]
         state.last_false_rate = metrics["false_rate"]
+    desired_mode = None
     if (metrics["sample_size"] >= MIN_REVIEWED_SAMPLES
-            and metrics["false_rate"] is not None
-            and metrics["false_rate"] >= QUARANTINE_FALSE_RATE
-            and (state is None or state.mode == "active")):
+            and metrics["false_rate"] is not None):
+        if metrics["false_rate"] >= QUARANTINE_FALSE_RATE:
+            desired_mode = "quarantined"
+        elif metrics["false_rate"] > REVIEW_ONLY_FALSE_RATE:
+            desired_mode = "review_only"
+    can_tighten = (
+        state is None
+        or state.mode == "active"
+        or (state.mode == "review_only" and desired_mode == "quarantined")
+    )
+    if desired_mode is not None and can_tighten:
         if state is None:
             state = AlertQualityControl(camera_id=camera_id,
                                         detection_type=detection_type)
             db.add(state)
-        state.mode = "quarantined"
+        state.mode = desired_mode
         state.source = "automatic"
-        state.reason = (f"rolling false-alert rate {metrics['false_rate']:.1%} "
-                        f"across {metrics['sample_size']} reviewed alerts")
+        state.reason = (
+            f"rolling false-alert rate {metrics['false_rate']:.1%} across "
+            f"{metrics['sample_size']} reviewed alerts exceeds the "
+            f"{REVIEW_ONLY_FALSE_RATE:.0%} operational target"
+        )
         state.changed_by = "system:alert-quality"
         state.changed_at = datetime.now(timezone.utc)
-        state.quarantined_at = state.changed_at
-        state.reviewed_count_at_quarantine = metrics["sample_size"]
+        if desired_mode == "quarantined":
+            state.quarantined_at = state.changed_at
+            state.reviewed_count_at_quarantine = metrics["sample_size"]
         state.last_sample_size = metrics["sample_size"]
         state.last_false_rate = metrics["false_rate"]
     return state
