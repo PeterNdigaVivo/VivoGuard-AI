@@ -89,6 +89,18 @@ def _recording_path(out_dir: Path, camera_id: int) -> Path:
     return out_dir / f"{camera_id}_{time.time_ns()}.mp4"
 
 
+def _recording_free_gb() -> float:
+    root = Path(settings.recordings_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return shutil.disk_usage(root).free / 1024**3
+
+
+def _storage_allows_new_window() -> bool:
+    critical = int(getattr(settings,
+                           "recording_min_free_gb_critical", 40))
+    return _recording_free_gb() >= critical
+
+
 def _current_window(now_eat: datetime):
     """Return (window_id, seconds, window_start_eat) for the active window, or
     None only if the window configuration has a gap."""
@@ -137,6 +149,16 @@ def _substream_url(cam) -> str | None:
 def _start_window(db, r, window_id: str, seconds: int) -> int:
     """Spawn one stream-copy ffmpeg per key camera. Returns count started."""
     from app.models import RecordingClip
+    if not _storage_allows_new_window():
+        free_gb = _recording_free_gb()
+        _storage_alert(
+            r, "URGENT",
+            f"Recording start blocked: {free_gb:.0f} GB free is below the "
+            "critical filesystem reserve",
+        )
+        log.error("recorder: refusing window %s with %.1f GB free",
+                  window_id, free_gb)
+        return 0
     started = 0
     for cam in _key_cameras(db):
         url = _substream_url(cam)
@@ -361,6 +383,39 @@ def _close_window(db, window_id: str, *, ended_at: datetime | None = None) -> in
     return int(updated)
 
 
+def _reconcile_orphaned_recordings(db, *,
+                                   ended_at: datetime | None = None) -> dict:
+    """Close rows left as recording when no recorder process is tracked.
+
+    Existing files remain recoverable as completed evidence. Missing files
+    become deleted audit rows so recall and incident queries cannot select a
+    stale source that does not exist.
+    """
+    from app.models import RecordingClip
+    ended_at = ended_at or datetime.now(timezone.utc)
+    completed = deleted = 0
+    rows = db.query(RecordingClip).filter(
+        RecordingClip.status == "recording").all()
+    for row in rows:
+        path = Path(row.file_path) if row.file_path else None
+        row.ended_at = ended_at
+        if path is not None and path.is_file():
+            row.status = "completed"
+            row.file_size_mb = path.stat().st_size / 1024**2
+            completed += 1
+        else:
+            row.status = "deleted"
+            row.file_path = None
+            row.file_size_mb = None
+            deleted += 1
+    db.commit()
+    if rows:
+        log.warning("recorder: reconciled %d orphaned rows "
+                    "(completed=%d deleted=%d)",
+                    len(rows), completed, deleted)
+    return {"completed": completed, "deleted": deleted}
+
+
 def _prune_expired_source_windows(
     db, *, now: datetime | None = None, retention_hours: int | None = None,
 ) -> int:
@@ -408,6 +463,14 @@ def tick() -> None:
     now_eat = _eat_now()
     win = _current_window(now_eat)
     prev = r.get(_CURRENT_WINDOW_KEY)
+
+    # First start after an outage: Redis has no live process ownership, but
+    # the database may still claim old windows are recording. Reconcile them
+    # before creating current rows so evidence queries never select a missing
+    # stale source.
+    if not prev and not _any_recording_alive(r):
+        with SessionLocal() as db:
+            _reconcile_orphaned_recordings(db)
 
     # A configuration gap → ensure everything is stopped + finalised.
     if win is None:
@@ -742,13 +805,19 @@ def storage_health_check() -> None:
     used_gb += _dir_size_bytes(_alert_clips_root()) / 1024**3
     warn = int(getattr(settings, "recording_max_used_gb_warning", 550))
     crit = int(getattr(settings, "recording_max_used_gb_critical", 580))
+    free_gb = _recording_free_gb()
+    free_warn = int(getattr(settings, "recording_min_free_gb_warning", 80))
+    free_crit = int(getattr(settings, "recording_min_free_gb_critical", 40))
     r = _redis()
-    if used_gb >= crit:
-        _storage_alert(r, "URGENT", f"Recording storage critical: {used_gb:.0f} GB used (>{crit} GB)")
-    elif used_gb >= warn:
-        _storage_alert(r, "WARNING", f"Recording storage high: {used_gb:.0f} GB used (>{warn} GB)")
+    if used_gb >= crit or free_gb <= free_crit:
+        _storage_alert(r, "URGENT", f"Recording storage critical: "
+                       f"{used_gb:.0f} GB recordings, {free_gb:.0f} GB free")
+    elif used_gb >= warn or free_gb <= free_warn:
+        _storage_alert(r, "WARNING", f"Recording storage high: "
+                       f"{used_gb:.0f} GB recordings, {free_gb:.0f} GB free")
     else:
-        log.info("recorder: storage healthy — %.0f GB used", used_gb)
+        log.info("recorder: storage healthy — %.0f GB recordings, %.0f GB free",
+                 used_gb, free_gb)
 
 
 def _storage_alert(r, level: str, body: str) -> None:

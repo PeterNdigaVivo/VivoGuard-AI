@@ -503,6 +503,8 @@ class Settings(BaseSettings):
     recording_business_end_eat: int = 20     # 20:00 EAT
     recording_max_used_gb_warning: int = 550
     recording_max_used_gb_critical: int = 580
+    recording_min_free_gb_warning: int = 80
+    recording_min_free_gb_critical: int = 40
     recording_source_retention_hours: int = 8
     recording_alert_clip_retention_hours: int = 48
 

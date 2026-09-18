@@ -10,7 +10,8 @@ from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_window, _current_window, _prune_expired_source_windows,
-    _recording_path,
+    _reconcile_orphaned_recordings, _recording_path,
+    _storage_allows_new_window,
 )
 
 
@@ -44,10 +45,44 @@ def test_restart_uses_continuation_path_without_truncating_source(tmp_path) -> N
     assert original.read_bytes() == b"pre-restart evidence"
 
 
+def test_storage_guard_blocks_below_critical_reserve(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "recording_min_free_gb_critical", 40)
+    usage = type("Usage", (), {"free": 39 * 1024**3})()
+    monkeypatch.setattr("app.tasks.recorder.shutil.disk_usage", lambda _p: usage)
+    assert _storage_allows_new_window() is False
+
+
 def _session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)()
+
+
+def test_reconcile_orphaned_rows_keeps_files_and_rejects_missing(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    db = _session()
+    present = tmp_path / "present.mp4"
+    present.write_bytes(b"recoverable")
+    db.add_all([
+        RecordingClip(camera_id=1, window_id="old", file_path=str(present),
+                      status="recording"),
+        RecordingClip(camera_id=2, window_id="old",
+                      file_path=str(tmp_path / "missing.mp4"),
+                      status="recording"),
+    ])
+    db.commit()
+
+    assert _reconcile_orphaned_recordings(db) == {
+        "completed": 1, "deleted": 1,
+    }
+    rows = {row.camera_id: row for row in db.query(RecordingClip).all()}
+    assert rows[1].status == "completed"
+    assert rows[1].file_path == str(present)
+    assert rows[2].status == "deleted"
+    assert rows[2].file_path is None
 
 
 def test_close_window_retains_source_for_delayed_extraction(tmp_path, monkeypatch) -> None:
