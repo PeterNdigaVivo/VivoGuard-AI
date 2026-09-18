@@ -299,6 +299,10 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         # the severity colour + body carry the rule-specific tone.
         store_name = extra.get("store_name") or (store.name if store else "Store")
         return f"Status Update — {store_name}"
+    # staff_present covers two opposite conditions — see _body.
+    if dt == "staff_present" and (extra.get("rule")
+                                  or extra.get("cls")) == "long_service":
+        return "Slow Service at Counter"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -416,6 +420,12 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Confirm whether they are a staff member",
                      "Ask them to leave the counter if unauthorised"]
+    elif dt == "staff_present" and (
+            (event.extra or {}).get("rule")
+            or (event.extra or {}).get("cls")) == "long_service":
+        steps = ["Check whether the customer needed help",
+                 "Open a second till if a queue is building",
+                 "Mark resolved"]
     elif dt == "staff_zone":
         rule = (event.extra or {}).get("rule", "")
         if rule == "customer_in_staff_zone":
@@ -797,8 +807,23 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 f"immediately.").strip()
 
     if dt == "staff_present":
-        mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
         zone = extra.get("zone_name") or "service"
+        # Two opposite conditions share this detection_type. long_service
+        # means someone was at the counter too LONG; reading it with the
+        # unattended copy told operators "no person detected" about an
+        # event that means the exact reverse.
+        if (extra.get("rule") or extra.get("cls")) == "long_service":
+            secs = _extract(extra, "service_seconds", default=None)
+            mins = _extract(extra, "service_minutes", default=None)
+            if mins:
+                took = f"{int(float(mins))} minutes"
+            elif secs:
+                took = f"{int(float(secs))} seconds"
+            else:
+                took = "an unusually long time"
+            return (f"One customer spent {took} at the {zone} counter. "
+                    f"Check whether they needed help or the till is slow.")
+        mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
         last = extra.get("last_activity_eat")
         if mins is not None:
             base = (f"No person detected at the {zone} counter for the past "

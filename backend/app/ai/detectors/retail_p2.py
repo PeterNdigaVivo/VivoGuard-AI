@@ -294,7 +294,15 @@ class StaffPresenceDetector(Detector):
                 recorder.record(ctx.db, "service_time", float(duration),
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=zone_id, aggregator="avg")
-            if duration >= self.SERVICE_TIME_ALERT_SECONDS:
+            # Trading-hours gate. A long counter session is a service
+            # problem, and there is no service to be slow about when the
+            # store is shut — this path had no gate at all, so a track
+            # lingering at a till overnight fired "counter" alerts at
+            # 22:19 and 06:55. The service_time METRIC above is
+            # deliberately still recorded either way.
+            if (duration >= self.SERVICE_TIME_ALERT_SECONDS
+                    and not store_closed
+                    and not in_opening_grace and not in_closing_grace):
                 out.append(DetectionEvent(
                     detection_type=self.detection_type, cls="long_service",
                     confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=zone_id,
