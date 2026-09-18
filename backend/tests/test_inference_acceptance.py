@@ -28,6 +28,8 @@ def _shadow():
         "authoritative": False,
         "uptime_seconds": 7201,
         "errors": 0,
+        "fresh_cameras": 58,
+        "fresh_camera_ids": list(range(1, 59)),
         "cameras_served": 58,
         "served_camera_ids": list(range(1, 59)),
         "frames_processed": 5800,
@@ -70,6 +72,28 @@ def test_capacity_fails_when_one_fresh_camera_is_starved():
         if item["name"] == "all_fresh_cameras_served"
     )
     assert check["passed"] is False
+
+
+def test_capacity_uses_same_timestamp_shadow_fresh_set():
+    authoritative = _authoritative()
+    authoritative["cameras_fresh"] = 60
+    authoritative["fresh_camera_ids"] = list(range(1, 61))
+
+    result = evaluate_capacity_acceptance(
+        authoritative,
+        _shadow(),
+        now=NOW,
+        baseline={"cameras_reporting": 58, "frames": 10000},
+        thresholds=THRESHOLDS,
+    )
+
+    check = next(
+        item for item in result["checks"]
+        if item["name"] == "all_fresh_cameras_served"
+    )
+    assert check["passed"] is True
+    assert check["actual"]["fresh"] == 58
+    assert check["actual"]["missing_camera_ids"] == []
 
 
 def test_capacity_is_pending_without_shadow_telemetry():

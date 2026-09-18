@@ -95,9 +95,13 @@ def evaluate_capacity_acceptance(
     errors = _number((shadow or {}).get("errors"))
     add("zero_shadow_errors", errors == 0, errors, "0")
 
-    fresh_cameras = _number((authoritative or {}).get("cameras_fresh"))
+    # Compare the shadow's fresh and served sets from the same health sample.
+    # The authoritative supervisor refreshes on a different cadence, so using
+    # its camera IDs against the shadow's served IDs can report false starvation
+    # whenever a flaky feed crosses the freshness boundary between snapshots.
+    fresh_cameras = _number((shadow or {}).get("fresh_cameras"))
     served_cameras = _number((shadow or {}).get("cameras_served"))
-    fresh_ids = _id_set((authoritative or {}).get("fresh_camera_ids"))
+    fresh_ids = _id_set((shadow or {}).get("fresh_camera_ids"))
     served_ids = _id_set((shadow or {}).get("served_camera_ids"))
     missing_ids = sorted(fresh_ids - served_ids)
     all_fresh_served = (
