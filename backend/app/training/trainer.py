@@ -595,9 +595,14 @@ def run_job(job_id: int) -> None:
             # checked so a broken model can never take over a store.
             _assign_sid = cfg.get("assign_store_id")
             if _assign_sid:
-                from app.ai.model_gating import validate_model_before_deploy
-                if validate_model_before_deploy(
-                        str(best), list(ai_model.classes_json or [])):
+                from app.ai.model_gating import (
+                    supports_general_person_inference,
+                    validate_model_before_deploy,
+                )
+                if (supports_general_person_inference(
+                        list(ai_model.classes_json or []))
+                        and validate_model_before_deploy(
+                            str(best), list(ai_model.classes_json or []))):
                     from app.models import Camera as _Cam
                     n_cams = (db.query(_Cam)
                                 .filter(_Cam.store_id == int(_assign_sid))
@@ -610,7 +615,8 @@ def run_job(job_id: int) -> None:
                              n_cams, _assign_sid)
                 else:
                     log.error("store specialist: model gate REJECTED model "
-                              "%s — store %s cameras left unchanged",
+                              "%s (a general camera model must include a "
+                              "person class) — store %s cameras left unchanged",
                               ai_model.id, _assign_sid)
         # Experiment record — the JSON audit trail for this run. A write
         # failure is logged at ERROR (surfaced, never silent) but does not

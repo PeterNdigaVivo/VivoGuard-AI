@@ -961,6 +961,13 @@ def deploy_model(model_id: int, payload: DeployModelIn,
     m = db.get(AIModel, model_id)
     if not m:
         raise HTTPException(404, "model not found")
+    from app.ai.model_gating import supports_general_person_inference
+    if not supports_general_person_inference(list(m.classes_json or [])):
+        raise HTTPException(
+            409,
+            "model cannot drive general camera inference: class map must "
+            "include person, people, or human",
+        )
     affected: list[int] = []
     for cid in payload.camera_ids:
         cam = db.get(Camera, cid)

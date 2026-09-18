@@ -147,6 +147,39 @@ IMMEDIATE_RETRAIN_TYPES = {
     "staff_present", "trespass", "intrusion", "person",
 }
 
+# Direct YOLO feedback is valid only when the alert verdict answers the same
+# question as the object label. Most VivoGuard alerts are semantic decisions
+# built on top of person detections (zone membership, dwell, uniform, opening
+# hours, staff identity, and so on). A dismissed ``staff_present`` alert can
+# still contain a perfectly real person; treating that whole frame as YOLO
+# background teaches the detector to suppress people. Likewise, training a
+# class literally named ``staff_present`` produces weights the live inference
+# path cannot use because it requires a ``person`` class.
+#
+# ``live_activity`` is the legacy UI name for a raw person detection and its
+# negative path already preserves the unpainted source frame. It is therefore
+# safe to route to the canonical person pool. New raw detector aliases must be
+# added explicitly after proving that their verdict is object-level.
+DIRECT_YOLO_FEEDBACK_LABELS: dict[str, str] = {
+    "person": "person",
+    "live_activity": "person",
+}
+
+
+def direct_yolo_feedback_label(detection_type: str) -> str | None:
+    """Canonical object class, or None for semantic/non-object alerts."""
+    return DIRECT_YOLO_FEEDBACK_LABELS.get(str(detection_type).lower())
+
+
+def _mark_semantic_feedback_consumed(db: Session, alert: Alert,
+                                     detection_type: str) -> None:
+    """Acknowledge feedback without poisoning a generic YOLO dataset."""
+    alert.feedback_used_for_training = True
+    db.commit()
+    log.info("feedback: %s alert %s retained for quality/rule review; "
+             "direct YOLO training skipped (semantic verdict)",
+             detection_type, alert.id)
+
 
 def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
     """Aggressive feedback-driven scheduling (Aug 2026): every click
@@ -219,11 +252,15 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     if not ev or not ev.thumbnail_path:
         return
     cls = ev.detection_type
+    training_cls = direct_yolo_feedback_label(cls)
+    if training_cls is None:
+        _mark_semantic_feedback_consumed(db, a, cls)
+        return
     # Legacy name without the `-positive-` infix is kept so feedback
     # absorbed by earlier deploys lands in the same Dataset.
     ds  = _ensure_dataset(
-        db, f"feedback-{cls}",
-        [cls],
+        db, f"feedback-{training_cls}",
+        [training_cls],
         description="auto: confirmed alerts (positive feedback pool)",
     )
     file_path = _persist_feedback_image(ds.id, a.id, ev.thumbnail_path)
@@ -250,7 +287,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     cy = (y1 + y2) / 2
     w  = max(0.0, x2 - x1)
     h  = max(0.0, y2 - y1)
-    db.add(Annotation(image_id=img.id, class_label=cls,
+    db.add(Annotation(image_id=img.id, class_label=training_cls,
                        bbox_json=[cx, cy, w, h], verified=True))
     a.feedback_used_for_training = True
     db.commit()
@@ -261,7 +298,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     # moment bbox above must never be copied onto frames where the
     # person has moved.
     _enqueue_temporal_harvest(alert_id)
-    _enqueue_if_trainable(db, cls, provenance)
+    _enqueue_if_trainable(db, training_cls, provenance)
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 
@@ -282,6 +319,10 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         db.commit()
         return
     cls = ev.detection_type
+    training_cls = direct_yolo_feedback_label(cls)
+    if training_cls is None:
+        _mark_semantic_feedback_consumed(db, a, cls)
+        return
     # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
     # frame (boxes burned in) — feeding it to YOLO would teach the model
     # to detect boxes, not people. Harvest the RAW sibling the sentinel
@@ -292,7 +333,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     # Annotation class (that would make it a mannequin POSITIVE).
     import os as _os
     file_path = ev.thumbnail_path
-    ds_name = f"feedback-negative-{cls}"
+    ds_name = f"feedback-negative-{training_cls}"
     label_hint: str | None = None
     if cls == "live_activity":
         raw = (ev.extra or {}).get("raw_snapshot_path")
@@ -338,7 +379,7 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    _enqueue_if_trainable(db, cls, provenance)
+    _enqueue_if_trainable(db, training_cls, provenance)
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

@@ -14,7 +14,8 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from app.ai.model_gating import (        # noqa: E402
-    check_metric_regression, validate_model_before_deploy,
+    check_metric_regression, supports_general_person_inference,
+    validate_model_before_deploy,
 )
 
 
@@ -76,6 +77,13 @@ def test_reject_when_inference_crashes_and_never_raises() -> None:
 def test_list_style_names_accepted() -> None:
     FakeYOLO.names = ["person", "vehicle"]          # older ultralytics style
     assert validate_model_before_deploy("w.pt", ["person", "vehicle"]) is True
+
+
+def test_general_camera_model_requires_person_compatible_class() -> None:
+    assert supports_general_person_inference(["person"]) is True
+    assert supports_general_person_inference(["vehicle", "Human"]) is True
+    assert supports_general_person_inference(["staff_present"]) is False
+    assert supports_general_person_inference([]) is False
 
 
 # ── check_metric_regression ────────────────────────────────────────────────

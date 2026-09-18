@@ -25,6 +25,18 @@ import logging
 log = logging.getLogger(__name__)
 
 DUMMY_IMAGE_SIZE: int = 640
+PERSON_CLASS_NAMES: frozenset[str] = frozenset({"person", "people", "human"})
+
+
+def supports_general_person_inference(classes: list[str] | None) -> bool:
+    """Whether a model can safely replace the camera's general detector.
+
+    Per-camera ``ai_model_id`` weights feed every person-based detector, so a
+    specialist-only class map such as ``staff_present`` would silently make
+    the rest of the chain see zero people.
+    """
+    return any(str(name).strip().lower() in PERSON_CLASS_NAMES
+               for name in (classes or []))
 
 
 def _model_class_names(model: object) -> list[str]:
