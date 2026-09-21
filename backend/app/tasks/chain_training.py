@@ -252,6 +252,8 @@ def _train_yolo(root: Path, detector_type: str, ts: str) -> tuple[Path, dict]:
         data=str(root), epochs=50, imgsz=224, batch=16,
         project=str(out_dir), name="run", exist_ok=True,
         device=("0" if settings.use_gpu else "cpu"),
+        # 0 under Celery's prefork pool — see config comment.
+        workers=settings.training_dataloader_workers,
         # Per-spec augmentation (P5 chain trainer):
         flipud=0.0, fliplr=0.5,
         hsv_h=0.1, hsv_s=0.3, hsv_v=0.3,

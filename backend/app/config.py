@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     # trainer aborts with InsufficientDataError; the orchestrator projects
     # the same number before enqueueing so doomed jobs never queue.
     min_training_images: int = 50
+    # Ultralytics DataLoader worker processes. MUST stay 0 while the
+    # training worker runs Celery's prefork pool: prefork children are
+    # daemons, and Python forbids a daemon from having children, so any
+    # value above 0 kills the job instantly with "daemonic processes are
+    # not allowed to have children". Loading in-process is slower per
+    # epoch but these are small classifier datasets. Only raise this if
+    # the training worker moves to a non-daemonic pool — and note that
+    # solo/threads pools cannot be revoked, which the stall watchdog
+    # depends on. Env: TRAINING_DATALOADER_WORKERS.
+    training_dataloader_workers: int = Field(default=0, ge=0, le=16)
     # Dual-review training gate (codex data-integrity work). When True,
     # operator feedback is quarantined (eligible_for_training=false,
     # review_state=pending) until two independent reviewers agree —

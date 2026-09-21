@@ -109,6 +109,8 @@ def train_uniform_model(self, store_id: int, camera_id: int | None = None) -> No
             data=str(root), epochs=50, imgsz=224, batch=16,
             project=str(out_dir), name="run", exist_ok=True,
             device=("0" if settings.use_gpu else "cpu"),
+            # 0 under Celery's prefork pool — see config comment.
+            workers=settings.training_dataloader_workers,
             # Staff face either direction → horizontal flip is fine.
             # Wider brightness + slight rotation for lighting/angle variety.
             fliplr=0.5, flipud=0.0, degrees=10, hsv_v=0.3, scale=0.1,

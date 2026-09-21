@@ -132,6 +132,8 @@ def train_shutter_model(self, store_id: int, camera_id: int | None = None) -> No
             name="run",
             exist_ok=True,
             device=("0" if settings.use_gpu else "cpu"),
+            # 0 under Celery's prefork pool — see config comment.
+            workers=settings.training_dataloader_workers,
             # Shutter orientation is meaningful — never horizontal-flip.
             # Mild brightness / blur / noise simulate dirty lenses + dusk.
             fliplr=0.0, flipud=0.0,

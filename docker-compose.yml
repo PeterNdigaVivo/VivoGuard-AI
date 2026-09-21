@@ -148,6 +148,9 @@ x-app-env: &app-env
   # Training-pipeline hardening (ML audit): combined-dataset floor,
   # anti-forgetting replay fraction, blur-exclusion threshold.
   MIN_TRAINING_IMAGES: ${MIN_TRAINING_IMAGES:-50}
+  # Must stay 0 while worker-training uses Celery's prefork pool — its
+  # children are daemons and cannot spawn DataLoader workers.
+  TRAINING_DATALOADER_WORKERS: ${TRAINING_DATALOADER_WORKERS:-0}
   BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
   MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
