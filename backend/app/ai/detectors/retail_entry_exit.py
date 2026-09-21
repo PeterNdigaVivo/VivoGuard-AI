@@ -121,6 +121,26 @@ class EntryExitDetector(Detector):
     # time so a config change picks up without restarting the worker).
     GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT = 1
 
+    # ---- crossing proximity -----------------------------------------
+    # A crossing must happen AT the doorway. `_side()` tests the
+    # INFINITE line, so without this anyone whose foot point flips
+    # across its extension counts as entering — including people on the
+    # far side of a glass door who never came near it. Normalised
+    # distance to the line SEGMENT, so it is framing-independent.
+    # Generous by default: a person clears a door in one frame at 1-2
+    # fps, and too tight a radius silently stops counting real entries.
+    # Env: ENTRY_EXIT_CROSSING_RADIUS.
+    CROSSING_RADIUS_DEFAULT = 0.25
+
+    @classmethod
+    def _crossing_radius(cls) -> float:
+        try:
+            from app.config import settings
+            return float(getattr(settings, "entry_exit_crossing_radius",
+                                 cls.CROSSING_RADIUS_DEFAULT))
+        except Exception:
+            return cls.CROSSING_RADIUS_DEFAULT
+
     @classmethod
     def _glass_door_min_frames(cls) -> int:
         try:
@@ -235,6 +255,7 @@ class EntryExitDetector(Detector):
                          ctx.camera_id, len(good_lines), len(persons))
 
         inward_sign = float(((cfg.get("extra") or {}).get("inward_sign")) or 1.0)
+        crossing_radius = self._crossing_radius()
         out: list[DetectionEvent] = []
 
         for z in good_lines:
@@ -279,11 +300,18 @@ class EntryExitDetector(Detector):
                              "idx=%d dist=%.3f", ctx.camera_id, z["id"],
                              det_idx, dist_to_line)
 
-                # Side with a deadband near the line so sub-pixel
-                # jitter on a foot point sitting right on the line
-                # doesn't generate phantom crossings.
-                side_now = 0 if dist_to_line < self.SIDE_DEADBAND \
-                              else _side((fx, fy), a, b)
+                # Side, with two bands that both mean "no usable side":
+                #   • inside SIDE_DEADBAND — sub-pixel jitter on a foot
+                #     point sitting on the line would flip the sign.
+                #   • beyond the crossing radius — too far from the
+                #     doorway for this to be an entry at all.
+                # A crossing needs a real side on consecutive readings,
+                # so both bands make distant movement uncountable.
+                side_now = (
+                    0 if (dist_to_line < self.SIDE_DEADBAND
+                          or dist_to_line > crossing_radius)
+                    else _side((fx, fy), a, b)
+                )
 
                 # Match to nearest pseudo-track within MATCH_RADIUS,
                 # skipping ones already claimed by another detection

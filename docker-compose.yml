@@ -138,6 +138,9 @@ x-app-env: &app-env
   TRESPASS_MIN_FRAMES: ${TRESPASS_MIN_FRAMES:-5}
   COUNTER_MIN_EMPTY_FRAMES: ${COUNTER_MIN_EMPTY_FRAMES:-10}
   ENTRY_EXIT_MIN_FRAMES_PER_SIDE: ${ENTRY_EXIT_MIN_FRAMES_PER_SIDE:-1}
+  # Crossings must happen at the doorway, not anywhere along the line's
+  # infinite extension — stops people beyond a glass door counting as entries.
+  ENTRY_EXIT_CROSSING_RADIUS: ${ENTRY_EXIT_CROSSING_RADIUS:-0.25}
   # Store Intelligence 45-min BI update — re-enabled Aug 2026 (the
   # Jul pause emptied the Store Update tab for a month). NB: this
   # compose fallback overrides the Python default — keep both in sync.

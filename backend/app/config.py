@@ -464,6 +464,13 @@ class Settings(BaseSettings):
     # above ~2 fps where a real person reliably appears in multiple
     # consecutive frames. Env: GLASS_DOOR_MIN_FRAMES.
     glass_door_min_frames: int = 1
+    # How close a foot point must be to the entrance line SEGMENT for a
+    # side-flip to count as a crossing (normalised frame units). Without
+    # it the side test uses the infinite line, so people beyond a glass
+    # door register as entries and falsely open the store. Raise toward
+    # 0.4 if real crossings are missed; lower it if distant movement
+    # still counts. Env: ENTRY_EXIT_CROSSING_RADIUS.
+    entry_exit_crossing_radius: float = Field(default=0.25, ge=0.05, le=1.0)
 
     # --- Checkout dwell time ---
     # A single customer transaction at a counter zone. Sessions shorter
