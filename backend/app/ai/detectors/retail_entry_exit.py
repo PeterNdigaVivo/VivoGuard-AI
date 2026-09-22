@@ -273,6 +273,12 @@ class EntryExitDetector(Detector):
             # pre-filtered `persons` list and fire on the first clean
             # side-flip as before.
             is_glass_door = "glass_door" in (z.get("detection_types_json") or [])
+            # A fitting-room threshold is not the shop door. Its crossings
+            # are still emitted — tasks/fitting_room and odoo_assurance read
+            # them — but they must not count as store footfall or open/close
+            # the store: the first customer into a fitting room would
+            # otherwise claim the day's "Store Opened" marker.
+            is_changing_room = "changing_room" in (z.get("detection_types_json") or [])
             zone_persons = (
                 [d for d in persons if d.get("conf", 0.0) >= self.GLASS_DOOR_MIN_CONF]
                 if is_glass_door else persons
@@ -388,10 +394,11 @@ class EntryExitDetector(Detector):
                                  ctx.camera_id, direction, z["id"],
                                  "strict" if strict_ok else "occlusion",
                                  pend["new_frames"], frame_gap)
-                        # Visitor counting is unconditional — the trading-window
-                        # gate lives in shop_state and only suppresses the
-                        # operator-facing Store Opened/Closed alert, not metrics.
-                        if ctx.db is not None:
+                        # Visitor counting is unconditional at the shop door — the
+                        # trading-window gate lives in shop_state and only
+                        # suppresses the Store Opened/Closed alert, not metrics.
+                        # Fitting-room trips are not store visits.
+                        if ctx.db is not None and not is_changing_room:
                             from app.analytics import recorder
                             recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,
                                             camera_id=ctx.camera_id, store_id=ctx.store_id,
@@ -407,19 +414,22 @@ class EntryExitDetector(Detector):
                             extra={"direction": direction, "store_id": ctx.store_id},
                         ))
                         entry["last_fired"] = now
-                        from app.ai.detectors import shop_state
-                        if direction == "in":
-                            shop_alert = shop_state.maybe_emit_open_alert(
-                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                                via_glass_door=is_glass_door)
-                        else:
-                            shop_alert = shop_state.maybe_emit_close_alert(
-                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                                via_glass_door=is_glass_door)
-                        if shop_alert is not None:
-                            log.info("EntryExit camera=%s shop alert raised: rule=%s",
-                                     ctx.camera_id, (shop_alert.extra or {}).get("rule"))
-                            out.append(shop_alert)
+                        # Not `continue`: the position update below must still
+                        # run for this detection, or its pseudo-track goes stale.
+                        if not is_changing_room:
+                            from app.ai.detectors import shop_state
+                            if direction == "in":
+                                shop_alert = shop_state.maybe_emit_open_alert(
+                                    ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                    via_glass_door=is_glass_door)
+                            else:
+                                shop_alert = shop_state.maybe_emit_close_alert(
+                                    ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                    via_glass_door=is_glass_door)
+                            if shop_alert is not None:
+                                log.info("EntryExit camera=%s shop alert raised: rule=%s",
+                                         ctx.camera_id, (shop_alert.extra or {}).get("rule"))
+                                out.append(shop_alert)
 
                 # Always update position + last_seen. Only commit the
                 # side when it's NOT in the deadband — otherwise we'd
