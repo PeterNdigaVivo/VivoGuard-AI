@@ -409,6 +409,15 @@ class Settings(BaseSettings):
     # turn it back on. Existing quarantines are ignored while off, not erased.
     alert_quality_control_enabled: bool = True
 
+    # --- Fitting rooms (tasks/fitting_room.py) ---
+    # Occupancy is replayed from changing-room line crossings. Keep
+    # max_stay above overstay, or entries age out before they can alert.
+    fitting_room_alerts_enabled: bool = True
+    fitting_room_overstay_seconds: int = Field(default=600, ge=60, le=3600)
+    fitting_room_congestion_occupancy: int = Field(default=3, ge=2, le=20)
+    fitting_room_max_stay_seconds: int = Field(default=1800, ge=300, le=7200)
+    fitting_room_dedup_seconds: int = Field(default=900, ge=60, le=7200)
+
     # --- Sales-floor insight debugging ---
     # When True, sales_floor_insights_check skips the 15-min Redis
     # dedupe AND the closed-hours gate AND the "store needs an aisle

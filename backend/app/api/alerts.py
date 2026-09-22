@@ -104,6 +104,7 @@ _SEVERITY_4: dict[str, str] = {
     "vehicle":            "HIGH",
     "animal":             "HIGH",
     "person":             "HIGH",       # per-context override below
+    "fitting_room":       "HIGH",       # service prompt, not a security event
 
     # Informational — the Store Update feed, not an incident.
     "sales_floor_insight":"LOW",
@@ -303,6 +304,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
     if dt == "staff_present" and (extra.get("rule")
                                   or extra.get("cls")) == "long_service":
         return "Slow Service at Counter"
+    if dt == "fitting_room":
+        return ("Fitting Rooms Busy" if extra.get("rule") == "fitting_room_congestion"
+                else "Fitting Room Check Recommended")
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -426,6 +430,15 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         steps = ["Check whether the customer needed help",
                  "Open a second till if a queue is building",
                  "Mark resolved"]
+    elif dt == "fitting_room":
+        if (event.extra or {}).get("rule") == "fitting_room_congestion":
+            steps = ["Send a staff member to the fitting rooms",
+                     "Help customers waiting for a room",
+                     "Mark resolved once it has cleared"]
+        else:
+            steps = ["Offer help with sizes or styles",
+                     "Check the customer has what they need",
+                     "Mark resolved once checked"]
     elif dt == "staff_zone":
         rule = (event.extra or {}).get("rule", "")
         if rule == "customer_in_staff_zone":
@@ -530,6 +543,7 @@ _TITLE_ICONS: dict[str, str] = {
     "abandoned_object":  "🧳",
     "tailgating":        "⚠️",
     "staff_present":     "👤",
+    "fitting_room":      "👗",
     "occupancy":         "📊",
 }
 
@@ -719,6 +733,11 @@ def _title(event: DetectionEvent, camera: Camera | None,
             return (f"{icon} Sales floor unattended — "
                     f"{int(float(n))} customers, no staff — {cam}")
         return f"{icon} Sales floor unattended — {cam}"
+    if dt == "fitting_room":
+        store_name = (store.name if store else None) or "store"
+        if extra.get("rule") == "fitting_room_congestion":
+            return f"{icon} Fitting rooms busy — {store_name}"
+        return f"{icon} Fitting room check — {store_name}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -806,6 +825,16 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 f"service counter at {store_name} {when}. Please check "
                 f"immediately.").strip()
 
+    if dt == "fitting_room":
+        n = extra.get("occupancy")
+        if extra.get("rule") == "fitting_room_congestion":
+            who = f"{int(n)} customers are" if n else "Several customers are"
+            return (f"{who} in the fitting rooms at once. "
+                    f"Send someone to help them.")
+        mins = extra.get("stay_minutes")
+        took = f"over {int(mins)} minutes" if mins else "an extended time"
+        return (f"A customer has been in the fitting rooms for {took}. "
+                f"A customer service check is recommended.")
     if dt == "staff_present":
         zone = extra.get("zone_name") or "service"
         # Two opposite conditions share this detection_type. long_service

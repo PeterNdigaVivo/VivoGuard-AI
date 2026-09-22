@@ -44,6 +44,7 @@ celery_app = Celery(
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
         "app.tasks.alerting",
+        "app.tasks.fitting_room",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
@@ -96,6 +97,7 @@ celery_app.conf.update(
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
+        "fitting_room.check":                   {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -372,6 +374,11 @@ celery_app.conf.update(
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),
+        },
+        # Replays changing-room crossings; see tasks/fitting_room.py.
+        "fitting-room-every-1min": {
+            "task": "fitting_room.check",
+            "schedule": timedelta(minutes=1),
         },
 
         "operations-coverage-every-5min": {
