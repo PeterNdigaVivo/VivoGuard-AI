@@ -28,8 +28,14 @@ type Tiles = Record<string, Tile | undefined>
 //   20  uniform compliance                (uniform_compliance_pct_today)
 //   20  low incident rate                 (status_light fallback)
 //   15  opened on time                    (shop_opened_today)
-// When a signal isn't available we give full credit rather than punish
-// stores for not having that camera type configured.
+//
+// An unavailable signal scores NEITHER full nor zero credit — it leaves
+// the pool entirely and the remaining factors are renormalised to 100.
+// Awarding full marks for "not measured" (the previous behaviour) meant
+// a store with no cameras configured scored 100/100 "Excellent", which
+// is the most misleading number a dashboard can show: it reported
+// silence as success. `measuredOf` carries how many factors actually
+// contributed so the UI can say so out loud.
 
 interface ScoreFactor {
   key: string
@@ -37,12 +43,14 @@ interface ScoreFactor {
   emoji: string
   points: number
   maxPoints: number
-  ok: 'good' | 'warn' | 'bad'
+  // 'none' = not measured; rendered grey and excluded from the total.
+  ok: 'good' | 'warn' | 'bad' | 'none'
   detail: string         // plain-English explanation under the bar
 }
 
 export interface StoreHealthScore {
-  total: number               // 0–100
+  total: number               // 0–100, over MEASURED factors only
+  measuredOf: { measured: number; total: number }
   band: 'great' | 'good' | 'needs_work' | 'poor'
   bandEmoji: string
   bandLabel: string
@@ -81,20 +89,25 @@ export function computeStoreHealth(
   tiles: Tiles,
   statusLight: 'green' | 'amber' | 'red' | undefined,
 ): StoreHealthScore {
-  // Factor 1 — staff coverage at counter.
+  // Factor 1 — someone present at the counter.
+  // staff_present_pct counts ANY person overlapping the counter zone,
+  // customers included (retail_p2 presence override), and it samples only
+  // when inference runs on that camera. So this is "someone was at the
+  // till in the moments we looked", not a staffing-compliance figure —
+  // the wording below deliberately avoids implying a staffing target.
   const staffPct = _numTile(tiles.staff_present_pct_today)
-  const f1Pts = staffPct == null ? 25
+  const f1Pts = staffPct == null ? 0
               : Math.round((Math.min(100, Math.max(0, staffPct)) / 100) * 25)
   const f1 = staffPct == null
-    ? { ok: 'good' as const, detail: 'Counter coverage not measured on this store yet.' }
-    : staffPct >= 80 ? { ok: 'good'  as const, detail: `Staff at counter ${Math.round(staffPct)}% of opening hours` }
-    : staffPct >= 60 ? { ok: 'warn'  as const, detail: `Counter coverage ${Math.round(staffPct)}% — a few gaps detected` }
-    : { ok: 'bad' as const, detail: `Counter coverage only ${Math.round(staffPct)}% — long gaps detected` }
+    ? { ok: 'none' as const, detail: 'Counter activity not measured — no counter zone on this store.' }
+    : staffPct >= 80 ? { ok: 'good'  as const, detail: `Someone at the counter in ${Math.round(staffPct)}% of checks` }
+    : staffPct >= 60 ? { ok: 'warn'  as const, detail: `Counter empty in ${100 - Math.round(staffPct)}% of checks` }
+    : { ok: 'bad' as const, detail: `Counter empty in ${100 - Math.round(staffPct)}% of checks — long gaps` }
 
   // Factor 2 — queue wait normal.
   const waitSec = _numTile(tiles.queue_wait_avg_today_sec)
   const f2Pts = waitSec == null
-    ? 20
+    ? 0
     : waitSec <= 120 ? 20      // ≤ 2 min: full marks
     : waitSec <= 240 ? 15
     : waitSec <= 360 ? 10
@@ -104,17 +117,17 @@ export function computeStoreHealth(
                   : waitSec < 60 ? `${Math.round(waitSec)} sec`
                   : `${(waitSec / 60).toFixed(1)} min`
   const f2 = waitSec == null
-    ? { ok: 'good' as const, detail: 'No queue camera configured — queue times not tracked.' }
+    ? { ok: 'none' as const, detail: 'No queue camera configured — queue times not tracked.' }
     : waitSec <= 180 ? { ok: 'good' as const, detail: `Queue times normal (${fmtWait} average)` }
     : waitSec <= 300 ? { ok: 'warn' as const, detail: `Queue times slightly elevated (${fmtWait} average)` }
     : { ok: 'bad' as const, detail: `Queue times high (${fmtWait} average) — open another till` }
 
   // Factor 3 — uniform compliance.
   const uniformPct = _numTile(tiles.uniform_compliance_pct_today)
-  const f3Pts = uniformPct == null ? 20
+  const f3Pts = uniformPct == null ? 0
               : Math.round((Math.min(100, Math.max(0, uniformPct)) / 100) * 20)
   const f3 = uniformPct == null
-    ? { ok: 'good' as const, detail: 'Uniform compliance not yet measured.' }
+    ? { ok: 'none' as const, detail: 'Uniform compliance not yet measured.' }
     : uniformPct >= 90 ? { ok: 'good' as const, detail: `Uniform compliance ${Math.round(uniformPct)}% — excellent` }
     : uniformPct >= 75 ? { ok: 'warn' as const, detail: `Uniform compliance ${Math.round(uniformPct)}% — a few exceptions` }
     : { ok: 'bad' as const, detail: `Uniform compliance only ${Math.round(uniformPct)}% — needs follow-up` }
@@ -136,8 +149,8 @@ export function computeStoreHealth(
   //   punish stores that haven't wired the entry/exit line yet).
   const openTile = tiles.shop_opened_today
   const openVal: any = openTile?.visible ? openTile.value : null
-  let f5Pts = 15
-  let f5: { ok: 'good' | 'warn' | 'bad'; detail: string }
+  let f5Pts = 0
+  let f5: { ok: 'good' | 'warn' | 'bad' | 'none'; detail: string }
   if (openVal && typeof openVal === 'object') {
     const eat: string = openVal.eat ?? openVal.eat_time ?? '?'
     if (openVal.on_time === false) {
@@ -147,10 +160,11 @@ export function computeStoreHealth(
       f5Pts = 15
       f5 = { ok: 'good', detail: `Opened on time at ${eat}` }
     } else {
+      f5Pts = 15
       f5 = { ok: 'good', detail: `Opening time: ${eat}` }
     }
   } else {
-    f5 = { ok: 'good', detail: 'Opening time not measured on this store yet' }
+    f5 = { ok: 'none', detail: 'Opening time not measured on this store yet' }
   }
 
   const factors: ScoreFactor[] = [
@@ -160,7 +174,15 @@ export function computeStoreHealth(
     { key: 'incidents', label: 'Incident rate',           emoji: '🛡️', points: f4Pts, maxPoints: 20, ...f4 },
     { key: 'opened',    label: 'Opened on time',          emoji: '🏬', points: f5Pts, maxPoints: 15, ...f5 },
   ]
-  const total = factors.reduce((s, f) => s + f.points, 0)
+  // Renormalise over the factors that actually reported. A store with
+  // only two working signals is scored out of those two, and the card
+  // states how many contributed — better an honest "72, from 2 of 5"
+  // than a confident 100 built mostly from silence.
+  const measured = factors.filter(f => f.ok !== 'none')
+  const earned = measured.reduce((s, f) => s + f.points, 0)
+  const available = measured.reduce((s, f) => s + f.maxPoints, 0)
+  const total = available > 0 ? Math.round((earned / available) * 100) : 0
+  const measuredOf = { measured: measured.length, total: factors.length }
   // vs-yesterday — rough proxy from the staff_present trend (the
   // dominant input). If absent we report null.
   const staffTrend = tiles.staff_present_pct_today?.trend
@@ -168,7 +190,7 @@ export function computeStoreHealth(
     ? Math.round(staffTrend.delta_pct * 0.5)   // ±50% trend → ±25 pts shift, halve to be conservative
     : null
 
-  return { total, ...(_band(total)), factors, vsYesterdayPts }
+  return { total, measuredOf, ...(_band(total)), factors, vsYesterdayPts }
 }
 
 
@@ -176,8 +198,11 @@ export function computeStoreHealth(
 // Score card UI
 // ---------------------------------------------------------------
 
-function _factorEmoji(ok: 'good' | 'warn' | 'bad'): string {
-  return ok === 'good' ? '✅' : ok === 'warn' ? '⚠️' : '🔴'
+function _factorEmoji(ok: 'good' | 'warn' | 'bad' | 'none'): string {
+  // Grey square, not a warning triangle: missing data is not a fault of
+  // the store and must not read like one.
+  return ok === 'none' ? '⬜'
+       : ok === 'good' ? '✅' : ok === 'warn' ? '⚠️' : '🔴'
 }
 function _bandColor(band: StoreHealthScore['band']): string {
   return band === 'great' ? 'text-emerald-600'
@@ -201,14 +226,23 @@ export function StoreHealthCard({ health }: { health: StoreHealthScore }) {
           {health.bandEmoji} {health.bandLabel}
         </div>
       </div>
-      <div className="text-xs text-slate-500 mb-3">{health.bandCopy}</div>
+      <div className="text-xs text-slate-500 mb-3">
+        {health.bandCopy}
+        {health.measuredOf.measured < health.measuredOf.total && (
+          <> · scored from {health.measuredOf.measured} of {health.measuredOf.total} signals</>
+        )}
+      </div>
       <ul className="text-sm space-y-1">
         {health.factors.map(f => (
           <li key={f.key} className="flex items-baseline gap-2">
             <span>{_factorEmoji(f.ok)}</span>
-            <span className="text-slate-700">{f.detail}</span>
+            <span className={f.ok === 'none' ? 'text-slate-400' : 'text-slate-700'}>
+              {f.detail}
+            </span>
             <span className="ml-auto text-xs text-slate-400 tabular-nums">
-              {f.points}/{f.maxPoints}
+              {/* An unmeasured factor shows a dash, not 0/25 — it did not
+                  score zero, it was never in the running. */}
+              {f.ok === 'none' ? '—' : `${f.points}/${f.maxPoints}`}
             </span>
           </li>
         ))}
@@ -298,9 +332,12 @@ export function TodayPlainEnglishPanel({ tiles }: { tiles: Tiles }) {
   }
   const staff = _numTile(tiles.staff_present_pct_today)
   if (staff != null) {
+    // "of the day" overstated it: the metric samples only when inference
+    // ran on that camera, and counts any person at the till including a
+    // customer being served. "of checks" is what it actually measures.
     items.push({
-      emoji: '✅',
-      text: <>Counter covered: <strong>{Math.round(staff)}%</strong> of the day</>,
+      emoji: staff >= 60 ? '✅' : '⚠️',
+      text: <>Someone at the counter in <strong>{Math.round(staff)}%</strong> of checks</>,
     })
   }
 
@@ -436,10 +473,14 @@ export function StaffPerformancePanel({ tiles, todayAlertHandledPct }: {
   const bars: StaffBar[] = []
   if (coverage != null) {
     bars.push({
-      label: 'Counter Coverage',
+      // Not a staffing figure — see the note on factor 1. Presence at the
+      // till includes customers, and the sample is only as dense as the
+      // inference schedule, so this is not a number to performance-manage
+      // a store on until the uniform model can tell staff from shoppers.
+      label: 'Counter Activity',
       pct: Math.max(0, Math.min(100, coverage)),
       trend: coverageTrend,
-      copy: `Staff covered the counter for ${Math.round(coverage)}% of opening hours.`,
+      copy: `Someone was at the counter in ${Math.round(coverage)}% of checks.`,
     })
   }
   if (uniform != null) {
@@ -447,8 +488,10 @@ export function StaffPerformancePanel({ tiles, todayAlertHandledPct }: {
       label: 'Uniform Compliance',
       pct: Math.max(0, Math.min(100, uniform)),
       trend: uniformTrend,
-      copy: uniform >= 90 ? 'All staff in full uniform today — well done.'
-          : `${Math.max(1, Math.round((100 - uniform) / 10))} staff seen without full uniform.`,
+      // Don't invent a headcount from a percentage — the old copy divided
+      // the shortfall by 10 and presented the result as a number of people.
+      copy: uniform >= 90 ? 'Uniform compliance high across today\'s checks.'
+          : `${Math.round(100 - uniform)}% of staff sightings were not in full uniform.`,
     })
   }
   if (todayAlertHandledPct != null) {
