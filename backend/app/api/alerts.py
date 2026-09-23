@@ -105,6 +105,10 @@ _SEVERITY_4: dict[str, str] = {
     "animal":             "HIGH",
     "person":             "HIGH",       # per-context override below
     "fitting_room":       "HIGH",       # service prompt, not a security event
+    # Open-ended VLM finding. HIGH because the model only speaks when it
+    # judges a frame worth a manager's attention — it stays silent (NONE)
+    # on ordinary retail activity, so a row here is already an exception.
+    "scene_review":       "HIGH",
 
     # Informational — the Store Update feed, not an incident.
     "sales_floor_insight":"LOW",
@@ -307,6 +311,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
     if dt == "fitting_room":
         return ("Fitting Rooms Busy" if extra.get("rule") == "fitting_room_congestion"
                 else "Fitting Room Check Recommended")
+    if dt == "scene_review":
+        return "Unusual Activity Seen"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -430,6 +436,13 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         steps = ["Check whether the customer needed help",
                  "Open a second till if a queue is building",
                  "Mark resolved"]
+    elif dt == "scene_review":
+        # The AI is describing, not concluding. Every step sends the
+        # operator to the footage rather than asking them to act on the
+        # model's word.
+        steps = ["Open the snapshot and check what the camera saw",
+                 "Call the store if it needs explaining",
+                 "Mark resolved, or report it if the description is wrong"]
     elif dt == "fitting_room":
         if (event.extra or {}).get("rule") == "fitting_room_congestion":
             steps = ["Send a staff member to the fitting rooms",
@@ -544,6 +557,7 @@ _TITLE_ICONS: dict[str, str] = {
     "tailgating":        "⚠️",
     "staff_present":     "👤",
     "fitting_room":      "👗",
+    "scene_review":      "👁️",
     "occupancy":         "📊",
 }
 
@@ -738,6 +752,15 @@ def _title(event: DetectionEvent, camera: Camera | None,
         if extra.get("rule") == "fitting_room_congestion":
             return f"{icon} Fitting rooms busy — {store_name}"
         return f"{icon} Fitting room check — {store_name}"
+    if dt == "scene_review":
+        # The model's own sentence is the headline. A generic "unusual
+        # activity" line would throw away the only thing that makes this
+        # detector worth having — that it can say WHAT it saw.
+        desc = " ".join(str(extra.get("description") or "").split())
+        if desc:
+            short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
+            return f"{icon} {short} — {cam}"
+        return f"{icon} Unusual activity seen — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -825,6 +848,18 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 f"service counter at {store_name} {when}. Please check "
                 f"immediately.").strip()
 
+    if dt == "scene_review":
+        desc = " ".join(str(extra.get("description") or "").split())
+        where = extra.get("camera_name") or "a camera"
+        if not desc:
+            return (f"The AI flagged something on {where} but did not "
+                    f"describe it. Open the snapshot to check.")
+        # Attributed on purpose. This is a machine's reading of one still
+        # frame, and an operator should weigh it as that — not as a
+        # confirmed fact about their store.
+        return (f"On {where}, the AI describes: \"{desc}\"\n\n"
+                f"This is an automatic reading of the snapshot below. "
+                f"Check the footage before acting on it.")
     if dt == "fitting_room":
         n = extra.get("occupancy")
         if extra.get("rule") == "fitting_room_congestion":

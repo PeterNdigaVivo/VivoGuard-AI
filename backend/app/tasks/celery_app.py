@@ -45,6 +45,7 @@ celery_app = Celery(
         "app.tasks.staff_classifier",
         "app.tasks.alerting",
         "app.tasks.fitting_room",
+        "app.tasks.scene_review",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
@@ -98,6 +99,10 @@ celery_app.conf.update(
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
         "fitting_room.check":                   {"queue": "alerts"},
+        # `alerts` is the only worker with the host.docker.internal
+        # mapping that reaches Ollama — and keeping VLM work off the
+        # inference queue protects the camera pipeline.
+        "scene_review.sweep":                   {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -379,6 +384,14 @@ celery_app.conf.update(
         "fitting-room-every-1min": {
             "task": "fitting_room.check",
             "schedule": timedelta(minutes=1),
+        },
+        # Open-ended VLM sweep. Runs every 5 min and reviews a slice of
+        # the fleet each time, so coverage is spread rather than bursty;
+        # the task no-ops unless SCENE_REVIEW_ENABLED is set. See
+        # tasks/scene_review.py.
+        "scene-review-every-5min": {
+            "task": "scene_review.sweep",
+            "schedule": timedelta(minutes=5),
         },
 
         "operations-coverage-every-5min": {

@@ -532,6 +532,31 @@ class Settings(BaseSettings):
     recording_source_retention_hours: int = 8
     recording_alert_clip_retention_hours: int = 48
 
+    # --- Scene review: open-ended VLM sweep -------------------------
+    # Every other detector answers a question someone wrote in advance,
+    # so it can only ever find things we already thought of. This one
+    # shows a frame to the VLM and asks whether anything is worth a
+    # manager's attention -- ladders, contractors, cleaning mid-trade,
+    # children climbing displays, staff on a phone. No enumeration.
+    #
+    # Ships SHADOW by default: it runs, logs every verdict and writes a
+    # metric, but raises no alert. Counter-unattended became 58% of the
+    # operator feed because nothing watched its false-positive rate
+    # before it went live. Read a week of shadow verdicts first.
+    scene_review_enabled: bool = False
+    scene_review_shadow_mode: bool = True
+    # Cameras per sweep, walked round-robin from a Redis cursor, so the
+    # fleet is covered over several sweeps instead of in one burst that
+    # competes with inference for CPU.
+    scene_review_cameras_per_sweep: int = Field(default=12, ge=1, le=200)
+    scene_review_model: str = "qwen2.5vl:7b"
+    scene_review_max_tokens: int = Field(default=120, ge=32, le=512)
+    scene_review_timeout_seconds: float = Field(default=90.0, ge=5.0, le=600.0)
+    # One alert per camera per window: an ongoing situation (a ladder
+    # that stays up for an hour) should not alert on every sweep.
+    scene_review_dedup_seconds: int = Field(default=1800, ge=60)
+    scene_review_trading_hours_only: bool = True
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"
