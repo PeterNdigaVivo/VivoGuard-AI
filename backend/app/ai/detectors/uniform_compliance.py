@@ -675,8 +675,7 @@ class UniformComplianceDetector(Detector):
                 crop = frame[py1:py2, px1:px2]
             if crop is None or crop.size == 0:
                 return None
-            root = (Path(settings.datasets_dir).parent
-                    / "training" / "uniform" / "_camera_crops")
+            root = Path(settings.training_dir) / "uniform" / "_camera_crops"
             root.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
             path = root / f"cam{ctx.camera_id}_{ts}.jpg"

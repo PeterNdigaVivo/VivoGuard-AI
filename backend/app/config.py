@@ -537,6 +537,12 @@ class Settings(BaseSettings):
     models_dir: str = "/data/models"
     datasets_dir: str = "/data/datasets"
     thumbnails_dir: str = "/data/thumbnails"
+    # Auto-harvested training crops (uniform_compliance + staff_identity).
+    # Must be a mounted volume in docker-compose.yml: the detectors that
+    # write here and the training worker that reads are separate
+    # containers, and an unmounted path is a per-container layer that
+    # dies with the container.
+    training_dir: str = "/data/training"
 
     # --- Derived helpers ---
     @property

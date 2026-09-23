@@ -194,6 +194,10 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Auto-harvested uniform crops. Shared by every service that writes
+      # or reads them — unmounted, this is a per-container layer that the
+      # next rebuild deletes, which is how 1000 training samples were lost.
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -245,6 +249,8 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Writes the crops (uniform_compliance + staff_identity detectors).
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -310,6 +316,8 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Writes operator-review preview crops alongside each sample.
+      - ./data/training:/data/training
       # Read-only shared access lets the frontend health check inspect
       # actual proxy responses instead of reporting an observability gap.
       - nginx_logs:/var/log/nginx:ro
@@ -338,6 +346,10 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Reads the crops it trains on. This mount was the missing one:
+      # every TrainingSample.frame_path failed Path.exists() here, so
+      # both uniform trainers aborted before the first epoch.
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }

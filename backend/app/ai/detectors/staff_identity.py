@@ -394,8 +394,7 @@ def _write_staff_crop(ctx: DetectorContext, bbox_norm) -> str | None:
         crop = ctx.frame_bgr[py1:py2, px1:px2]
         if crop.size == 0:
             return None
-        root = Path(getattr(settings, "training_dir", "/data/training")) / \
-                "uniform" / "_camera_crops"
+        root = Path(settings.training_dir) / "uniform" / "_camera_crops"
         root.mkdir(parents=True, exist_ok=True)
         ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S_%f")
         path = root / f"vivo_cam{ctx.camera_id}_{ts}.jpg"
