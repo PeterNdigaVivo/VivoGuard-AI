@@ -53,22 +53,41 @@ _SYSTEM = (
     "visibly in the frame. Never guess at intent, identity or motive."
 )
 
-# Deliberately NOT a list of things to look for. The moment this becomes
-# an enumeration it inherits the weakness of every other detector here.
+# A JSON boolean rather than a magic token. The first version asked for
+# the word NONE and got prose back a quarter of the time — the model
+# would decide a frame was fine and then write "The scene is ordinary
+# retail activity", which any token check reads as a finding. It also
+# echoed the instruction ("ONE plain sentence: ...") into its answer.
+# A boolean field cannot do either.
+#
+# The positive list is narrow on purpose. Left open, the model reported
+# every person standing near a till. These are the categories that
+# actually produced true hits in shadow — ladder, child on a counter,
+# cleaning equipment mid-trade, someone in a staff-only area.
 _QUESTION = (
-    "Is anything in this frame worth the store manager's attention right "
-    "now?\n"
-    "Reply with the single word {none} if the scene is ordinary retail "
-    "activity — customers browsing, staff working, an empty aisle, a "
-    "closed and empty store.\n"
-    "Otherwise reply with ONE or TWO plain sentences describing what you "
-    "see. No markdown, no headings, no lists, no preamble.\n"
-    "Treat as worth attention: anyone using a ladder or tools, "
-    "maintenance or cleaning work during trading hours, a person in an "
-    "area customers do not belong, someone who appears unwell or "
-    "distressed, unattended equipment blocking a walkway, or children "
-    "climbing on fixtures."
-).format(none=_NONE)
+    "Does this frame show something the store manager should act on?\n\n"
+    "Reply with JSON only, no other text:\n"
+    '{"noteworthy": true or false, "description": "one plain sentence"}\n\n'
+    "Use false for ordinary retail activity — customers browsing, "
+    "waiting or paying; staff serving, tidying, working at the till or "
+    "using the till computer or a phone at the counter; an empty aisle; "
+    "a closed and empty store. Leave description empty when false.\n\n"
+    "Use true only for: a ladder, tools or maintenance work; cleaning "
+    "equipment being used during trading hours; a person in a staff-only "
+    "area who is not working; a child climbing on counters, shelves or "
+    "displays; equipment or stock blocking a walkway.\n\n"
+    "Describe only what is visible. Never infer mood, health, intent or "
+    "identity."
+)
+
+# When the model ignores the schema and writes prose, these are the
+# phrases it uses to say "nothing here" — observed verbatim in shadow.
+# Cheaper and more honest than letting a paragraph become an alert.
+_ALL_CLEAR = (
+    "ordinary retail activity", "operating normally", "trading as usual",
+    "trading normally", "nothing unusual", "no signs of",
+    "no unusual activity", "require immediate attention",
+)
 
 
 def _context_line(store, camera, is_open: bool, local_now) -> str:
@@ -103,6 +122,10 @@ def _ask(jpeg: bytes, context: str) -> str | None:
         payload={
             "model": settings.scene_review_model,
             "stream": False,
+            # Constrained decoding: Ollama guarantees syntactically valid
+            # JSON, so the only failure left is a wrong judgement rather
+            # than an unparseable one.
+            "format": "json",
             "options": {"num_predict": settings.scene_review_max_tokens,
                         # Near-greedy: this is a judgement, not prose.
                         # Sampling variance here shows up as a camera
@@ -120,17 +143,51 @@ def _ask(jpeg: bytes, context: str) -> str | None:
 
 
 def is_noteworthy(reply: str | None) -> bool:
-    """True when the model reported something, False for NONE/empty.
+    """Prose fallback: True when the text reports something.
 
-    Tolerates the shapes the model actually produces: "NONE", "NONE.",
-    "none", and the occasional "NONE - nothing unusual". Anything that
-    STARTS with the token is a negative, so a stray trailing gloss can
-    never be mistaken for an incident.
+    Only reached when the JSON verdict is unusable. Tolerates the shapes
+    the model actually produces — "NONE", "NONE.", "none", "NONE - all
+    clear" — and treats the all-clear phrases it writes when it ignores
+    the schema as negatives too, since a paragraph saying "nothing here"
+    must not become an alert.
     """
     if not reply:
         return False
-    head = reply.strip().lstrip("*#- ").upper()
-    return not head.startswith(_NONE)
+    text = reply.strip()
+    if text.lstrip("*#- ").upper().startswith(_NONE):
+        return False
+    low = text.lower()
+    return not any(phrase in low for phrase in _ALL_CLEAR)
+
+
+def parse_verdict(reply: str | None) -> str | None:
+    """The description when the frame is worth reporting, else None.
+
+    Prefers the JSON contract; falls back to reading the prose when the
+    model returns something else. A `noteworthy: true` with no
+    description is treated as nothing — an alert an operator cannot act
+    on is worse than no alert.
+    """
+    import json
+
+    if not reply:
+        return None
+    text = reply.strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "noteworthy" in data:
+            flag = data.get("noteworthy")
+            if isinstance(flag, str):
+                flag = flag.strip().lower() in ("true", "yes", "1")
+            desc = " ".join(str(data.get("description") or "").split())
+            if not flag or not desc:
+                return None
+            # The model occasionally sets the flag and then describes an
+            # ordinary scene. Trust the words over the boolean.
+            return None if not is_noteworthy(desc) else desc
+    except (ValueError, TypeError):
+        pass
+    return " ".join(text.split()) if is_noteworthy(text) else None
 
 
 def _save_frame(camera_id: int, jpeg: bytes) -> str | None:
@@ -222,11 +279,12 @@ def scene_review_sweep() -> None:
                 recorder.record(db, "scene_review_checked", 1.0,
                                 camera_id=camera.id, store_id=camera.store_id,
                                 aggregator="sum")
-                if not is_noteworthy(reply):
+                note = parse_verdict(reply)
+                if not note:
                     continue
 
                 flagged += 1
-                note = " ".join((reply or "").split())[:500]
+                note = note[:500]
                 log.info("scene_review%s cam=%s store=%s: %s",
                          " [shadow]" if shadow else "", camera.id,
                          camera.store_id, note)
