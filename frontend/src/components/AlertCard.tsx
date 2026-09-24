@@ -450,6 +450,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   useEffect(() => { setLocal(incoming) }, [incoming])
   const sev = sevKey(alert.severity)
   const isPositive = alert.detection_type === 'positive_operational'
+  // scene_review ("Unusual Activity Seen"): the body is the AI's own
+  // description of the frame; operators must read it at a glance.
+  const isSceneReview = alert.detection_type === 'scene_review'
   const isCalibration = alert.review_only || alert.notification_suppressed
   // "Resolved" covers the three terminal statuses the API can set:
   // resolved (everyday "I handled it") + confirmed (legacy alias the
@@ -639,7 +642,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           {alert.detection_type === 'store_intelligence' && alert.store_intel ? (
             <StoreIntelCard si={alert.store_intel} />
           ) : alert.body ? (
-            <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">{alert.body}</div>
+            <div className={isSceneReview
+                ? 'text-sm font-bold text-black mt-1'                   // same in both themes (card stays bg-white)
+                : 'text-sm text-slate-600 dark:text-slate-300 mt-1'}>
+              {alert.body}
+            </div>
           ) : null}
 
           {isCalibration && (
