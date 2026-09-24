@@ -73,7 +73,21 @@ def test_priority_breaks_initial_tie_but_elapsed_wait_prevents_starvation():
     scheduler = WeightedFairBatchScheduler()
     candidates = [_candidate(1, priority=1), _candidate(2, priority=3)]
 
-    assert scheduler.select(candidates, batch_size=1, now=10.0)[0].camera_id == 2
+    selected = scheduler.select(candidates, batch_size=1, now=10.0)
+    assert selected[0].camera_id == 2
+    scheduler.mark_served(selected, now=10.0)
+    assert scheduler.select(candidates, batch_size=1, now=10.1)[0].camera_id == 1
+
+
+def test_selection_without_success_does_not_consume_fairness_credit():
+    scheduler = WeightedFairBatchScheduler()
+    candidates = [_candidate(1), _candidate(2)]
+
+    first = scheduler.select(candidates, batch_size=1, now=10.0)
+
+    assert first[0].camera_id == 1
+    assert scheduler.last_served == {}
+    assert scheduler.virtual_finish == {}
     assert scheduler.select(candidates, batch_size=1, now=10.1)[0].camera_id == 1
 
 
@@ -87,6 +101,7 @@ def test_replay_scheduler_covers_110_cameras_fairly():
     now = 1_000.0
     for _ in range(140):
         selected = scheduler.select(candidates, batch_size=8, now=now)
+        scheduler.mark_served(selected, now=now)
         for candidate in selected:
             counts[candidate.camera_id] += 1
         now += 0.05
@@ -147,6 +162,7 @@ def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):
     assert coordinator.redis.values[coordinator_module.EXPECTED_KEY] == (1, 21600)
     coordinator.write_health(now=100.5, candidates=0, detections=0)
     assert coordinator.redis.set_calls == 2
+    assert coordinator.scheduler.last_served == {1: 100.0, 2: 100.0}
 
 
 def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
@@ -163,4 +179,5 @@ def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
     monkeypatch.setattr(coordinator_module, "infer_batch", fail)
     assert coordinator.process_once(now=100.0) == 0
     assert coordinator.last_processed_ts == {}
+    assert coordinator.scheduler.last_served == {}
     assert coordinator.errors == 1
