@@ -303,6 +303,9 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     inference_batch_shadow = _decode_inference_pipeline(
         fb.r.get("vg:inference:batch-shadow-health"),
     )
+    recording_pipeline = _decode_inference_pipeline(
+        fb.r.get("vg:recording:health"),
+    )
     return {
         "now":            datetime.now(timezone.utc).isoformat(),
         "cameras":        cam_health,
@@ -313,6 +316,7 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "alerts_today":   int(new_alerts_24h),
         "inference_pipeline": inference_pipeline,
         "inference_batch_shadow": inference_batch_shadow,
+        "recording_pipeline": recording_pipeline,
     }
 
 

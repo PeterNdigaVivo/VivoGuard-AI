@@ -58,6 +58,7 @@ _WINDOWS = [
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
+_HEALTH_KEY = "vg:recording:health"
 
 
 def _redis():
@@ -303,6 +304,51 @@ def _any_recording_alive(r) -> bool:
     return False
 
 
+def _recording_health_snapshot(db, r, window_id: str | None, *,
+                               now: float | None = None) -> dict:
+    """Return aggregate expected-camera coverage without exposing identities."""
+    expected_ids = (
+        {int(camera.id) for camera in _key_cameras(db)}
+        if window_id else set()
+    )
+    active_ids: set[int] = set()
+    if window_id:
+        for key in r.scan_iter(match="vg:recording:pid:*", count=200):
+            try:
+                item = json.loads(r.get(key) or "{}")
+                camera_id = int(str(key).rsplit(":", 1)[-1])
+                if (camera_id in expected_ids
+                        and str(item.get("window_id") or "") == window_id
+                        and _pid_is_ffmpeg(int(item.get("pid") or 0))):
+                    active_ids.add(camera_id)
+            except Exception:
+                continue
+    expected = len(expected_ids)
+    active = len(active_ids)
+    missing = len(expected_ids - active_ids)
+    return {
+        "last_run_ts": float(now if now is not None else time.time()),
+        "window_active": bool(window_id),
+        "cameras_expected": expected,
+        "cameras_recording": active,
+        "cameras_missing": missing,
+        "status": (
+            "inactive" if not window_id
+            else "healthy" if expected > 0 and missing == 0
+            else "degraded"
+        ),
+    }
+
+
+def _publish_recording_health(db, r, window_id: str | None) -> None:
+    """Publish short-lived aggregate coverage for the operator health API."""
+    try:
+        payload = _recording_health_snapshot(db, r, window_id)
+        r.set(_HEALTH_KEY, json.dumps(payload), ex=180)
+    except Exception as exc:
+        log.warning("recorder: health telemetry publish failed: %s", exc)
+
+
 def _stop_all(r) -> None:
     """SIGTERM every tracked ffmpeg, then SIGKILL survivors after a grace.
     Only signals PIDs verified to be ffmpeg (a stale key after a restart
@@ -416,6 +462,8 @@ def tick() -> None:
             with SessionLocal() as db:
                 _close_window(db, prev)
             r.delete(_CURRENT_WINDOW_KEY)
+        with SessionLocal() as db:
+            _publish_recording_health(db, r, None)
         return
 
     window_id, seconds, wstart = win
@@ -440,6 +488,8 @@ def tick() -> None:
                     _start_window(db, r, window_id, remaining)
                 log.warning("recorder: recovered mid-window %s after restart "
                             "(%ds remaining)", window_id, remaining)
+        with SessionLocal() as db:
+            _publish_recording_health(db, r, window_id)
         return
     # Transition: stop + retain the previous source window, start the new one.
     _stop_all(r)
@@ -447,6 +497,7 @@ def tick() -> None:
         if prev:
             _close_window(db, prev)
         _start_window(db, r, window_id, seconds)
+        _publish_recording_health(db, r, window_id)
     r.set(_CURRENT_WINDOW_KEY, window_id, ex=6 * 3600)
 
 
