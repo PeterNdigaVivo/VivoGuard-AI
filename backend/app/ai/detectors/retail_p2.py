@@ -609,8 +609,11 @@ class AisleDwellDetector(Detector):
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
-        if not cfg or not cfg.get("enabled"):
+        if not isinstance(cfg, dict) or not cfg.get("enabled"):
             return []
+        cfg_extra = cfg.get("extra")
+        if not isinstance(cfg_extra, dict):
+            cfg_extra = {}
         # 'aisle' is the canonical tag; 'dwell' is the legacy alias —
         # accept both so older zone configs keep feeding metrics.
         zones = [z for z in ctx.zones
@@ -744,7 +747,7 @@ class AisleDwellDetector(Detector):
                 # Per-camera override: a busy Junction aisle and a quiet
                 # Eldoret one should not share one number.
                 need = max(self.UNATTENDED_MIN_CUSTOMERS,
-                           int((cfg.get("extra") or {}).get(
+                           int(cfg_extra.get(
                                "unattended_customers",
                                self.UNATTENDED_CUSTOMERS)))
                 qualifies = (len(customers) >= need
