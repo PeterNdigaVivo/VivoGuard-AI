@@ -67,12 +67,22 @@ _SYSTEM = (
 _QUESTION = (
     "Does this frame show something the store manager should act on?\n\n"
     "Reply with JSON only, no other text:\n"
-    '{"noteworthy": true or false, "description": "one plain sentence"}\n\n'
+    '{"noteworthy": true or false, "category": "unusual" or "phone", '
+    '"description": "one plain sentence"}\n\n'
     "Use false for ordinary retail activity — customers browsing, "
     "waiting or paying; staff serving, tidying, working at the till or "
     "using the till computer or a phone at the counter; an empty aisle; "
     "a closed and empty store. Leave description empty when false.\n\n"
-    "Use true for any of these:\n"
+    # Phone use AT the counter stays excluded above and that is
+    # deliberate: in Kenya an M-Pesa payment is taken on a handset, so a
+    # phone at the till is part of the transaction. Only distraction away
+    # from the service point is worth a manager's time.
+    "Use true with category \"phone\" when a person is standing AWAY "
+    "from the counter or service desk — in an aisle, a corner, or a back "
+    "area — holding a phone to their ear or looking at its screen, with "
+    "no customer beside them. Phone use at the counter is never "
+    "reported.\n\n"
+    "Use true with category \"unusual\" for any of these:\n"
     "- a ladder, tools, cables being worked on, or any maintenance or "
     "repair work\n"
     "- cleaning equipment in use while the store is trading\n"
@@ -172,8 +182,14 @@ def is_noteworthy(reply: str | None) -> bool:
     return not any(phrase in low for phrase in _ALL_CLEAR)
 
 
-def parse_verdict(reply: str | None) -> str | None:
-    """The description when the frame is worth reporting, else None.
+def parse_verdict(reply: str | None) -> tuple[str, str] | None:
+    """(detection_type, description) when reportable, else None.
+
+    One VLM call feeds two alert types. They stay separate detection
+    types rather than one merged stream so each can be silenced on its
+    own — phone_usage may prove noisy while the unusual-activity
+    categories are working, and one enable switch for both would mean
+    losing the good one to kill the bad.
 
     Prefers the JSON contract; falls back to reading the prose when the
     model returns something else. A `noteworthy: true` with no
@@ -196,10 +212,18 @@ def parse_verdict(reply: str | None) -> str | None:
                 return None
             # The model occasionally sets the flag and then describes an
             # ordinary scene. Trust the words over the boolean.
-            return None if not is_noteworthy(desc) else desc
+            if not is_noteworthy(desc):
+                return None
+            cat = str(data.get("category") or "").strip().lower()
+            return ("phone_usage" if cat.startswith("phone")
+                    else "scene_review"), desc
     except (ValueError, TypeError):
         pass
-    return " ".join(text.split()) if is_noteworthy(text) else None
+    if is_noteworthy(text):
+        # No category survived, so it cannot be attributed to the phone
+        # rule; the broader type is the safe default.
+        return "scene_review", " ".join(text.split())
+    return None
 
 
 def _save_frame(camera_id: int, jpeg: bytes) -> str | None:
@@ -291,13 +315,13 @@ def scene_review_sweep() -> None:
                 recorder.record(db, "scene_review_checked", 1.0,
                                 camera_id=camera.id, store_id=camera.store_id,
                                 aggregator="sum")
-                note = parse_verdict(reply)
-                if not note:
+                verdict = parse_verdict(reply)
+                if not verdict:
                     continue
+                dtype, note = verdict[0], verdict[1][:500]
 
                 flagged += 1
-                note = note[:500]
-                log.info("scene_review%s cam=%s store=%s: %s",
+                log.info("%s%s cam=%s store=%s: %s", dtype,
                          " [shadow]" if shadow else "", camera.id,
                          camera.store_id, note)
                 recorder.record(db, "scene_review_flagged", 1.0,
@@ -309,7 +333,9 @@ def scene_review_sweep() -> None:
                     continue
                 # One alert per camera per dedup window — a ladder that
                 # stays up for an hour is one situation, not twelve.
-                if not r.set(f"vg:scene_review:fired:{camera.id}", "1",
+                # Keyed per type: a phone note must not suppress a ladder
+                # on the same camera in the same window.
+                if not r.set(f"vg:scene_review:fired:{dtype}:{camera.id}", "1",
                              nx=True, ex=settings.scene_review_dedup_seconds):
                     continue
 
@@ -317,8 +343,9 @@ def scene_review_sweep() -> None:
                 _create_info_alert(
                     db, camera_id=int(camera.id), zone_id=None,
                     store_id=camera.store_id,
-                    detection_type="scene_review", cls="unusual_activity",
-                    extra={"rule": "unusual_activity", "priority": "high",
+                    detection_type=dtype, cls="unusual_activity",
+                    extra={"rule": "unusual_activity",
+                           "priority": "info" if dtype == "phone_usage" else "high",
                            "description": note,
                            "model": settings.scene_review_model,
                            "store_id": camera.store_id,

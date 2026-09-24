@@ -62,6 +62,10 @@ def _operator_alert_filter():
 # keep LOW so they stay out of the actionable tabs.
 _INFORMATIONAL_TYPES = {
     "store_intelligence", "sales_floor_insight", "positive_operational",
+    # A staff member on their phone away from the till is a coaching
+    # note for the floor manager, not an incident. Ranking it alongside
+    # intrusion would devalue HIGH.
+    "phone_usage",
 }
 
 _SEVERITY_4: dict[str, str] = {
@@ -111,6 +115,7 @@ _SEVERITY_4: dict[str, str] = {
     "scene_review":       "HIGH",
 
     # Informational — the Store Update feed, not an incident.
+    "phone_usage":        "LOW",
     "sales_floor_insight":"LOW",
     "store_intelligence": "LOW",
     "positive_operational": "LOW",
@@ -313,6 +318,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
                 else "Fitting Room Check Recommended")
     if dt == "scene_review":
         return "Unusual Activity Seen"
+    if dt == "phone_usage":
+        return "Staff on Phone Away From Till"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -436,6 +443,12 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         steps = ["Check whether the customer needed help",
                  "Open a second till if a queue is building",
                  "Mark resolved"]
+    elif dt == "phone_usage":
+        # Coaching, not enforcement — and the AI cannot reliably tell
+        # staff from customers yet, so step one is to check it IS staff.
+        steps = ["Open the snapshot and check this is a staff member",
+                 "Have a quiet word if they're away from the floor",
+                 "Mark resolved, or report it if the description is wrong"]
     elif dt == "scene_review":
         # The AI is describing, not concluding. Every step sends the
         # operator to the footage rather than asking them to act on the
@@ -558,6 +571,7 @@ _TITLE_ICONS: dict[str, str] = {
     "staff_present":     "👤",
     "fitting_room":      "👗",
     "scene_review":      "👁️",
+    "phone_usage":       "📱",
     "occupancy":         "📊",
 }
 
@@ -752,6 +766,12 @@ def _title(event: DetectionEvent, camera: Camera | None,
         if extra.get("rule") == "fitting_room_congestion":
             return f"{icon} Fitting rooms busy — {store_name}"
         return f"{icon} Fitting room check — {store_name}"
+    if dt == "phone_usage":
+        desc = " ".join(str(extra.get("description") or "").split())
+        if desc:
+            short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
+            return f"{icon} {short} — {cam}"
+        return f"{icon} Someone on a phone away from the till — {cam}"
     if dt == "scene_review":
         # The model's own sentence is the headline. A generic "unusual
         # activity" line would throw away the only thing that makes this
@@ -848,6 +868,17 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 f"service counter at {store_name} {when}. Please check "
                 f"immediately.").strip()
 
+    if dt == "phone_usage":
+        desc = " ".join(str(extra.get("description") or "").split())
+        where = extra.get("camera_name") or "a camera"
+        # Phone use AT the till is normal here — M-Pesa payments are taken
+        # on a handset — so the detector only looks away from the counter,
+        # and the copy says so to stop this being read as till policing.
+        return (f"On {where}, the AI describes: \"{desc}\"\n\n"
+                f"Phone use at the till is normal and is not flagged. "
+                f"This is someone away from the counter. The AI cannot "
+                f"reliably tell staff from customers yet — check the "
+                f"snapshot before treating it as a staff matter.")
     if dt == "scene_review":
         desc = " ".join(str(extra.get("description") or "").split())
         where = extra.get("camera_name") or "a camera"

@@ -59,10 +59,26 @@ def test_json_false_returns_nothing():
     assert parse_verdict('{"noteworthy": false, "description": ""}') is None
 
 
-def test_json_true_returns_the_description():
+def test_json_true_returns_type_and_description():
     assert parse_verdict(
-        '{"noteworthy": true, "description": "A red ladder is leaning '
-        'against the wall."}') == "A red ladder is leaning against the wall."
+        '{"noteworthy": true, "category": "unusual", "description": "A red '
+        'ladder is leaning against the wall."}') == (
+            "scene_review", "A red ladder is leaning against the wall.")
+
+
+def test_phone_category_routes_to_its_own_type():
+    # Must NOT become a scene_review alert: phone_usage is informational
+    # and independently disableable, which only works if it routes apart.
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "phone", "description": "A person '
+        'in an aisle is looking at a phone."}') == (
+            "phone_usage", "A person in an aisle is looking at a phone.")
+
+
+def test_missing_category_defaults_to_scene_review():
+    assert parse_verdict(
+        '{"noteworthy": true, "description": "A ladder is out."}'
+    ) == ("scene_review", "A ladder is out.")
 
 
 def test_json_true_with_empty_description_is_nothing():
@@ -74,7 +90,7 @@ def test_json_string_boolean():
     # Small models sometimes quote the boolean.
     assert parse_verdict(
         '{"noteworthy": "true", "description": "A child is on the counter."}'
-    ) == "A child is on the counter."
+    ) == ("scene_review", "A child is on the counter.")
 
 
 def test_json_true_but_describes_ordinary_scene():
@@ -104,7 +120,8 @@ def test_prose_all_clear_is_not_a_finding():
 def test_prose_real_finding_survives_fallback():
     assert parse_verdict(
         "A red ladder is leaning against the wall in the corner of the "
-        "store.") == ("A red ladder is leaning against the wall in the "
+        "store.") == ("scene_review",
+                      "A red ladder is leaning against the wall in the "
                       "corner of the store.")
 
 
