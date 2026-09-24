@@ -26,13 +26,29 @@ def _candidate(camera_id: int, *, weights: str = "model.pt",
 
 
 class _Redis:
-    def __init__(self):
+    def __init__(self, *, fresh_ids=None):
         self.values = {}
         self.set_calls = 0
+        self.fresh_ids = fresh_ids
+        self.pending_exists = []
 
     def set(self, key, value, *, ex):
         self.set_calls += 1
         self.values[key] = (json.loads(value), ex)
+
+    def pipeline(self, *, transaction):
+        assert transaction is False
+        self.pending_exists = []
+        return self
+
+    def exists(self, key):
+        self.pending_exists.append(int(str(key).rsplit(":", 1)[-1]))
+        return self
+
+    def execute(self):
+        if self.fresh_ids is None:
+            return [True] * len(self.pending_exists)
+        return [camera_id in self.fresh_ids for camera_id in self.pending_exists]
 
 
 class _Buffer:
@@ -182,3 +198,16 @@ def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
     assert coordinator.scheduler.last_served == {}
     assert coordinator.scheduler.virtual_finish == {1: 1.0}
     assert coordinator.errors == 1
+
+
+def test_health_wait_excludes_cameras_without_live_frame_keys():
+    coordinator = BatchShadowCoordinator()
+    coordinator.redis = _Redis(fresh_ids={1})
+    coordinator.specs = {1: ("model.pt", 1), 2: ("model.pt", 1)}
+    coordinator.scheduler.last_served = {1: 99.5, 2: 10.0}
+
+    coordinator.write_health(now=100.0, candidates=0, detections=0)
+
+    payload, _ttl = coordinator.redis.values[coordinator_module.HEALTH_KEY]
+    assert payload["fresh_cameras"] == 1
+    assert payload["max_camera_schedule_wait_seconds"] == 0.5
