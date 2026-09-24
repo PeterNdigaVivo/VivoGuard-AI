@@ -871,7 +871,13 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return (f"A customer has been in the fitting rooms for {took}. "
                 f"A customer service check is recommended.")
     if dt == "staff_present":
-        zone = extra.get("zone_name") or "service"
+        # Zone names are written by whoever drew the zone, and they
+        # usually already say "counter" — "Track staff at counter" run
+        # through "the {zone} counter" produced "at the Track staff at
+        # counter counter" on a live alert. Only add the noun when the
+        # name doesn't already carry it.
+        _zn = (extra.get("zone_name") or "service").strip()
+        zone = _zn if "counter" in _zn.lower() else f"{_zn} counter"
         # Two opposite conditions share this detection_type. long_service
         # means someone was at the counter too LONG; reading it with the
         # unattended copy told operators "no person detected" about an
@@ -885,15 +891,15 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 took = f"{int(float(secs))} seconds"
             else:
                 took = "an unusually long time"
-            return (f"One customer spent {took} at the {zone} counter. "
+            return (f"One customer spent {took} at the {zone}. "
                     f"Check whether they needed help or the till is slow.")
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
         last = extra.get("last_activity_eat")
         if mins is not None:
-            base = (f"No person detected at the {zone} counter for the past "
+            base = (f"No person detected at the {zone} for the past "
                     f"{int(round(float(mins)))} minutes.")
         else:
-            base = f"No person detected at the {zone} counter."
+            base = f"No person detected at the {zone}."
         if last:
             base += f" Last activity: {last}."
         else:
