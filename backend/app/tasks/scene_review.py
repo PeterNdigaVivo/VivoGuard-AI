@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from app.config import settings
@@ -176,6 +176,8 @@ def is_noteworthy(reply: str | None) -> bool:
     if not reply:
         return False
     text = reply.strip()
+    if not text:
+        return False
     if text.lstrip("*#- ").upper().startswith(_NONE):
         return False
     low = text.lower()

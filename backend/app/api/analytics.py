@@ -249,7 +249,6 @@ def store_live_dashboard(store_id: int,
       `visible` flag — the frontend hides the tile when no such zone
       exists in the store.
     """
-    from sqlalchemy import extract
     from app.utils.business_hours import (
         is_store_open, todays_session, todays_hours_label,
     )
