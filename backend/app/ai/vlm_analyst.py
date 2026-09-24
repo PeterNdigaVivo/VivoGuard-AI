@@ -2,8 +2,15 @@
 
 Adds a concise natural-language scene description to alert-worthy
 events via Anthropic Claude (Haiku by default). Modelled on
-DeepCamera's skills/analysis VLM integration, but cloud-only — the
-Hetzner host is CPU-only, so no local VLM.
+DeepCamera's skills/analysis VLM integration.
+
+NB: this module's "cloud-only, the host is CPU-only" note was stale and
+cost an afternoon of planning around API costs that do not apply. The
+host has an RTX PRO 4000 (24GB) and Ollama runs on it natively —
+qwen2.5vl:7b answers a CCTV frame in well under a second. Reaching it
+from a container needs the host.docker.internal mapping that `api` and
+`worker-alerts` already carry; see tasks/scene_review.py, which runs a
+local VLM across the whole fleet every five minutes.
 
 INVOKED ASYNC from the vlm.analyse_alert_scene Celery task on the
 alerts queue — never on the inference hot path. analyse() is
