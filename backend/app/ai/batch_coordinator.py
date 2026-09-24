@@ -106,14 +106,16 @@ class WeightedFairBatchScheduler:
             )
             ordered_groups.append((self._rank(ordered[0], now), weights, ordered))
         _, _, selected_group = min(ordered_groups, key=lambda item: (item[0], item[1]))
-        selected = selected_group[:batch_size]
-        for candidate in selected:
+        return selected_group[:batch_size]
+
+    def mark_served(self, candidates: list[BatchCandidate], *, now: float) -> None:
+        """Advance fairness only after a batch was successfully processed."""
+        for candidate in candidates:
             self.last_served[candidate.camera_id] = now
             self.virtual_finish[candidate.camera_id] = (
                 self.virtual_finish.get(candidate.camera_id, 0.0)
                 + 1.0 / max(1, candidate.priority)
             )
-        return selected
 
     def max_wait_seconds(self, active_camera_ids: set[int], *, now: float) -> float:
         waits = [
@@ -240,6 +242,7 @@ class BatchShadowCoordinator:
             )
             self.write_health(now=now, candidates=len(candidates), detections=0)
             return 0
+        self.scheduler.mark_served(selected, now=now)
         latency_ms = (time.perf_counter() - started) * 1000.0
         self.latencies_ms.append(latency_ms)
         self.per_frame_latencies_ms.append(latency_ms / len(selected))
