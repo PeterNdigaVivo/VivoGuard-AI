@@ -268,6 +268,7 @@ class BatchShadowCoordinator:
             return
         self.last_health_write = now
         active = set(self.specs)
+        fresh = self._fresh_camera_ids(active)
         latencies = list(self.latencies_ms)
         per_frame_latencies = list(self.per_frame_latencies_ms)
         payload = {
@@ -276,6 +277,7 @@ class BatchShadowCoordinator:
             "last_run_ts": now,
             "uptime_seconds": round(max(0.0, now - self.started), 1),
             "configured_cameras": len(active),
+            "fresh_cameras": len(fresh),
             "cameras_served": len(set(self.last_processed_ts) & active),
             "served_camera_ids": sorted(set(self.last_processed_ts) & active),
             "fresh_candidates": candidates,
@@ -298,7 +300,7 @@ class BatchShadowCoordinator:
                 if per_frame_latencies else None
             ),
             "max_camera_schedule_wait_seconds": round(
-                self.scheduler.max_wait_seconds(active, now=now), 2,
+                self.scheduler.max_wait_seconds(fresh, now=now), 2,
             ),
         }
         self.redis.set(
@@ -310,6 +312,31 @@ class BatchShadowCoordinator:
         # the central watchdog can distinguish failure from an intentionally
         # disabled dark launch. A planned stop must delete this marker first.
         self.redis.set(EXPECTED_KEY, "1", ex=6 * 60 * 60)
+
+    def _fresh_camera_ids(self, active_camera_ids: set[int]) -> set[int]:
+        """Return cameras with live raw-frame keys for wait accounting.
+
+        A configured camera without pixels cannot be scheduled successfully;
+        including it would turn recorder/network staleness into a false GPU
+        capacity failure.  Redis errors fail closed to the full active set so
+        telemetry never understates scheduling wait.
+        """
+        if not active_camera_ids:
+            return set()
+        try:
+            ordered = sorted(active_camera_ids)
+            pipe = self.redis.pipeline(transaction=False)
+            for camera_id in ordered:
+                pipe.exists(f"vg:frame:{camera_id}")
+            present = pipe.execute()
+            return {
+                camera_id
+                for camera_id, exists in zip(ordered, present)
+                if bool(exists)
+            }
+        except Exception as exc:
+            log.warning("batch shadow: fresh-frame check failed: %s", exc)
+            return set(active_camera_ids)
 
 
 def run() -> None:
