@@ -200,14 +200,20 @@ def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
     assert coordinator.errors == 1
 
 
-def test_health_wait_excludes_cameras_without_live_frame_keys():
+def test_health_wait_measures_only_currently_pending_frames():
     coordinator = BatchShadowCoordinator()
     coordinator.redis = _Redis(fresh_ids={1})
     coordinator.specs = {1: ("model.pt", 1), 2: ("model.pt", 1)}
-    coordinator.scheduler.last_served = {1: 99.5, 2: 10.0}
+    coordinator.scheduler.first_seen = {1: 99.5, 2: 10.0}
 
-    coordinator.write_health(now=100.0, candidates=0, detections=0)
+    coordinator.write_health(
+        now=100.0,
+        candidates=1,
+        detections=0,
+        pending_camera_ids={1},
+    )
 
     payload, _ttl = coordinator.redis.values[coordinator_module.HEALTH_KEY]
     assert payload["fresh_cameras"] == 1
+    assert payload["fresh_candidates"] == 1
     assert payload["max_camera_schedule_wait_seconds"] == 0.5

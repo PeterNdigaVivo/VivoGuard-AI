@@ -121,11 +121,14 @@ class WeightedFairBatchScheduler:
         """Record successful inference without conflating it with an attempt."""
         for candidate in candidates:
             self.last_served[candidate.camera_id] = now
+            self.first_seen.pop(candidate.camera_id, None)
 
-    def max_wait_seconds(self, active_camera_ids: set[int], *, now: float) -> float:
+    def max_pending_wait_seconds(self, pending_camera_ids: set[int], *,
+                                 now: float) -> float:
+        """Return the oldest current queue wait, excluding idle feeds."""
         waits = [
-            now - self.last_served.get(camera_id, self.first_seen.get(camera_id, now))
-            for camera_id in active_camera_ids
+            now - self.first_seen.get(camera_id, now)
+            for camera_id in pending_camera_ids
         ]
         return max(waits, default=0.0)
 
@@ -223,6 +226,7 @@ class BatchShadowCoordinator:
         now = time.time() if now is None else now
         self.refresh_specs(now=now)
         candidates = self.candidates()
+        pending_camera_ids = {candidate.camera_id for candidate in candidates}
         selected = self.scheduler.select(
             candidates,
             batch_size=settings.inference_batch_size,
@@ -230,7 +234,12 @@ class BatchShadowCoordinator:
         )
         selected = self.decode_selected(selected)
         if not selected:
-            self.write_health(now=now, candidates=0, detections=0)
+            self.write_health(
+                now=now,
+                candidates=len(candidates),
+                detections=0,
+                pending_camera_ids=pending_camera_ids,
+            )
             return 0
         started = time.perf_counter()
         try:
@@ -245,9 +254,17 @@ class BatchShadowCoordinator:
                 "batch shadow inference failed cameras=%s",
                 [candidate.camera_id for candidate in selected],
             )
-            self.write_health(now=now, candidates=len(candidates), detections=0)
+            self.write_health(
+                now=now,
+                candidates=len(candidates),
+                detections=0,
+                pending_camera_ids=pending_camera_ids,
+            )
             return 0
         self.scheduler.mark_served(selected, now=now)
+        pending_camera_ids.difference_update(
+            candidate.camera_id for candidate in selected
+        )
         latency_ms = (time.perf_counter() - started) * 1000.0
         self.latencies_ms.append(latency_ms)
         self.per_frame_latencies_ms.append(latency_ms / len(selected))
@@ -258,12 +275,16 @@ class BatchShadowCoordinator:
         detections = sum(len(result) for result in results)
         self.detections += detections
         self.write_health(
-            now=now, candidates=len(candidates), detections=detections,
+            now=now,
+            candidates=len(candidates),
+            detections=detections,
+            pending_camera_ids=pending_camera_ids,
         )
         return len(selected)
 
     def write_health(self, *, now: float, candidates: int,
-                     detections: int) -> None:
+                     detections: int,
+                     pending_camera_ids: set[int] | None = None) -> None:
         if now - self.last_health_write < 1.0:
             return
         self.last_health_write = now
@@ -300,7 +321,10 @@ class BatchShadowCoordinator:
                 if per_frame_latencies else None
             ),
             "max_camera_schedule_wait_seconds": round(
-                self.scheduler.max_wait_seconds(fresh, now=now), 2,
+                self.scheduler.max_pending_wait_seconds(
+                    pending_camera_ids or set(), now=now,
+                ),
+                2,
             ),
         }
         self.redis.set(
