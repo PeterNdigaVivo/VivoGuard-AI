@@ -532,6 +532,12 @@ class Settings(BaseSettings):
     recording_source_retention_hours: int = 8
     recording_alert_clip_retention_hours: int = 48
 
+    # Cap on unreviewed uniform crops before the staff_zone harvester
+    # stops collecting. Pending rows are already eligible for chain
+    # training, so this only needs to stop the pool running away — at
+    # 500 it stalled collection inside a day.
+    uniform_harvest_pending_cap: int = Field(default=3000, ge=100, le=50000)
+
     # --- Scene review: open-ended VLM sweep -------------------------
     # Every other detector answers a question someone wrote in advance,
     # so it can only ever find things we already thought of. This one

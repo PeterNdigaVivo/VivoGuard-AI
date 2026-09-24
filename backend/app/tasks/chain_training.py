@@ -336,16 +336,31 @@ def train_chain_model(self, detector_type: str) -> None:
     })
     kept, stats = _filter_and_balance(grouped)
 
-    short = {l: stats["kept_by_label"].get(l, 0) for l in labels
-             if stats["kept_by_label"].get(l, 0) < MIN_PER_LABEL}
-    if short:
-        msg = ("Need ≥%d frames per label after filtering. Short: %s"
-               % (MIN_PER_LABEL,
-                  ", ".join(f"{k}={v}" for k, v in short.items())))
+    # Score only the labels that actually have frames, not every label in
+    # the canonical set. The uniform taxonomy has seven classes and the
+    # harvesters only ever emit two, so requiring all seven aborted every
+    # run before the first epoch — including runs with 500 usable staff
+    # crops sitting ready. A classifier over the classes present is worth
+    # training; one that waits for classes nobody collects is not.
+    present = [l for l in labels if stats["kept_by_label"].get(l, 0) > 0]
+    short = {l: stats["kept_by_label"][l] for l in present
+             if stats["kept_by_label"][l] < MIN_PER_LABEL}
+    if len(present) < 2 or short:
+        if len(present) < 2:
+            msg = ("Need at least 2 labels with data. Found: %s"
+                   % (", ".join(present) or "none"))
+        else:
+            msg = ("Need ≥%d frames per label after filtering. Short: %s"
+                   % (MIN_PER_LABEL,
+                      ", ".join(f"{k}={v}" for k, v in short.items())))
         _set_status(detector_type, {"state": "failed", "message": msg,
                                     "stats": stats})
         log.warning("chain training %s aborted: %s", detector_type, msg)
         return
+    # Everything downstream iterates `kept`, so drop the empty classes:
+    # a model must not be given a class it has never seen an example of.
+    kept = {l: kept[l] for l in present}
+    labels = tuple(present)
 
     # Imbalance warning (informational; we still train).
     counts = [stats["kept_by_label"][l] for l in labels]

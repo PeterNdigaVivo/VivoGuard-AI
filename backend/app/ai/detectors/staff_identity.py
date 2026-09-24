@@ -312,7 +312,13 @@ def is_in_pure_staff_zone(ctx: DetectorContext, bbox_norm) -> tuple[bool, str | 
 # auto-harvest path.
 
 VIVO_STAFF_HARVEST_DEDUP_SECONDS = 5 * 60
-VIVO_STAFF_HARVEST_PENDING_CAP   = 500
+# Cap on rows sitting at approved IS NULL. It exists so an unreviewed
+# pool cannot run away — but nobody works that queue, and chain_training
+# accepts `approved IS TRUE OR approved IS NULL`, so pending rows are
+# already trainable. At 500 the pool refilled and stalled within a day,
+# blocking collection of data the trainer would have taken. Raised, and
+# made a setting so it can move without a rebuild.
+VIVO_STAFF_HARVEST_PENDING_CAP   = 500   # fallback only; see settings
 _last_staff_crop: dict[tuple[int, int], float] = {}
 
 
@@ -336,7 +342,10 @@ def _maybe_harvest_staff_zone_crop(ctx: DetectorContext, det: dict,
                       .count())
     except Exception:
         pending = 0
-    if pending >= VIVO_STAFF_HARVEST_PENDING_CAP:
+    from app.config import settings
+    cap = int(getattr(settings, "uniform_harvest_pending_cap",
+                      VIVO_STAFF_HARVEST_PENDING_CAP))
+    if pending >= cap:
         return
 
     path = _write_staff_crop(ctx, det.get("bbox_norm") or [0.0, 0.0, 1.0, 1.0])
