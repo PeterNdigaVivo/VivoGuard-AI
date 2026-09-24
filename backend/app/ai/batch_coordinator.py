@@ -106,16 +106,21 @@ class WeightedFairBatchScheduler:
             )
             ordered_groups.append((self._rank(ordered[0], now), weights, ordered))
         _, _, selected_group = min(ordered_groups, key=lambda item: (item[0], item[1]))
-        return selected_group[:batch_size]
-
-    def mark_served(self, candidates: list[BatchCandidate], *, now: float) -> None:
-        """Advance fairness only after a batch was successfully processed."""
-        for candidate in candidates:
-            self.last_served[candidate.camera_id] = now
+        selected = selected_group[:batch_size]
+        # Advance attempt order immediately so a feed whose JPEG is missing or
+        # whose inference fails cannot monopolise every subsequent batch.  A
+        # successful service timestamp is recorded separately by mark_served.
+        for candidate in selected:
             self.virtual_finish[candidate.camera_id] = (
                 self.virtual_finish.get(candidate.camera_id, 0.0)
                 + 1.0 / max(1, candidate.priority)
             )
+        return selected
+
+    def mark_served(self, candidates: list[BatchCandidate], *, now: float) -> None:
+        """Record successful inference without conflating it with an attempt."""
+        for candidate in candidates:
+            self.last_served[candidate.camera_id] = now
 
     def max_wait_seconds(self, active_camera_ids: set[int], *, now: float) -> float:
         waits = [

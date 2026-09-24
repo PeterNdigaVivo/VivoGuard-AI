@@ -79,7 +79,7 @@ def test_priority_breaks_initial_tie_but_elapsed_wait_prevents_starvation():
     assert scheduler.select(candidates, batch_size=1, now=10.1)[0].camera_id == 1
 
 
-def test_selection_without_success_does_not_consume_fairness_credit():
+def test_unsuccessful_selection_rotates_without_claiming_service():
     scheduler = WeightedFairBatchScheduler()
     candidates = [_candidate(1), _candidate(2)]
 
@@ -87,8 +87,8 @@ def test_selection_without_success_does_not_consume_fairness_credit():
 
     assert first[0].camera_id == 1
     assert scheduler.last_served == {}
-    assert scheduler.virtual_finish == {}
-    assert scheduler.select(candidates, batch_size=1, now=10.1)[0].camera_id == 1
+    assert scheduler.virtual_finish == {1: 1.0}
+    assert scheduler.select(candidates, batch_size=1, now=10.1)[0].camera_id == 2
 
 
 def test_replay_scheduler_covers_110_cameras_fairly():
@@ -180,4 +180,5 @@ def test_shadow_failure_does_not_mark_frames_processed(monkeypatch):
     assert coordinator.process_once(now=100.0) == 0
     assert coordinator.last_processed_ts == {}
     assert coordinator.scheduler.last_served == {}
+    assert coordinator.scheduler.virtual_finish == {1: 1.0}
     assert coordinator.errors == 1
