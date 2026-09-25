@@ -73,6 +73,14 @@ _QUESTION = (
     "waiting or paying; staff serving, tidying, working at the till or "
     "using the till computer or a phone at the counter; an empty aisle; "
     "a closed and empty store. Leave description empty when false.\n\n"
+    # A clothing shop is full of human-shaped and animal-shaped props.
+    # Without this, camera 77 reported the same mannequin on a stool
+    # eleven times in fourteen hours, including at 03:26 in a closed
+    # store, and camera 74 reported "possibly a giraffe".
+    "Mannequins, dummies, display figures, posters, printed images and "
+    "shop fittings are normal parts of a clothing shop. Never report "
+    "them, whatever pose they are in and however lifelike they look. "
+    "Only report living people.\n\n"
     # Phone use AT the counter stays excluded above and that is
     # deliberate: in Kenya an M-Pesa payment is taken on a handset, so a
     # phone at the till is part of the transaction. Only distraction away
@@ -95,7 +103,10 @@ _QUESTION = (
     "someone\n"
     "- a person carrying large boxes or equipment across the shop floor\n"
     "- a person sitting or lying on the floor, or on display furniture\n"
-    "- an animal inside the store\n"
+    # Animals removed deliberately. Seven days of AnimalDetector produced
+    # zero alerts, while this line produced a giraffe and a dog that were
+    # both shop props. A stray animal is not a KPI for fashion retail,
+    # and the category cost far more in false positives than it returned.
     "- a group standing close together who are not shopping\n"
     "- anything else clearly out of place for a clothing shop\n\n"
     "Describe only what is visible. Never infer mood, health, intent or "
