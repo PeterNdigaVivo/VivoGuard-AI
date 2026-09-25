@@ -119,6 +119,44 @@ def _build_source_extra(db: Session, ev: DetectionEvent,
     }
 
 
+# Verdicts on these detection types never become training data.
+#
+# They are judgements about a whole scene or a system state, not an
+# object with a bounding box. `scene_review` and `phone_usage` are
+# written by a VLM reading a frame; when an operator confirms one, they
+# are telling us the PROMPT was right, not that a detector should learn
+# to find "scene_review" in an image. Left unguarded, the loop created
+# feedback-scene_review and feedback-phone_usage datasets within hours
+# of each detector going live and queued YOLO fine-tunes against a class
+# that has no visual form.
+#
+# The others are counters, heartbeats and BI summaries whose snapshots
+# carry no learnable target either. `live_activity` is deliberately NOT
+# here: absorb_dismissed has special handling that redirects it to
+# feedback-negative-person, which is genuinely useful.
+NON_TRAINABLE_TYPES = frozenset({
+    "scene_review", "phone_usage",
+    "store_intelligence", "sales_floor_insight", "positive_operational",
+    "system_health", "camera_offline", "shop_open_close",
+})
+
+
+def _skip_non_trainable(db: Session, alert, detection_type: str) -> bool:
+    """Stamp and skip an alert whose verdict is not training data.
+
+    Stamping matters: without it every future pass retries the same
+    alert forever, because nothing else marks it as handled.
+    """
+    if detection_type not in NON_TRAINABLE_TYPES:
+        return False
+    alert.feedback_used_for_training = True
+    db.commit()
+    log.info("feedback: %s verdict on alert %s is not trainable — "
+             "skipped (scene-level judgement, no visual target)",
+             detection_type, alert.id)
+    return True
+
+
 def _ensure_dataset(db: Session, name: str, classes: list[str],
                     description: str) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.name == name).first()
@@ -219,6 +257,8 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     if not ev or not ev.thumbnail_path:
         return
     cls = ev.detection_type
+    if _skip_non_trainable(db, a, cls):
+        return
     # Legacy name without the `-positive-` infix is kept so feedback
     # absorbed by earlier deploys lands in the same Dataset.
     ds  = _ensure_dataset(
@@ -282,6 +322,8 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         db.commit()
         return
     cls = ev.detection_type
+    if _skip_non_trainable(db, a, cls):
+        return
     # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
     # frame (boxes burned in) — feeding it to YOLO would teach the model
     # to detect boxes, not people. Harvest the RAW sibling the sentinel
