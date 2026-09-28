@@ -57,6 +57,7 @@ celery_app = Celery(
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
         "app.tasks.odoo_sync",
+        "app.tasks.system_health_report",
     ],
 )
 celery_app.conf.update(
@@ -132,6 +133,12 @@ celery_app.conf.update(
         "training.harvest_temporal_frames":   {"queue": "alerts"},
         "training.run_shop_opening_specialist": {"queue": "alerts"},
         "training.run_store_specialist":      {"queue": "alerts"},
+        # Status report rides `beat`, which has a DEDICATED 1-slot
+        # runner process (compose: beat-runner inside worker-alerts) —
+        # training jobs filling the alerts pool starved it twice when
+        # beat shared their slots.
+        "system.daily_status_report":         {"queue": "beat"},
+        "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
         "maintenance.prune_metric_snapshots": {"queue": "beat"},
@@ -168,6 +175,15 @@ celery_app.conf.update(
         "refresh-ddns-every-5min": {
             "task": "maintenance.refresh_ddns",
             "schedule": 300.0,
+        },
+        # VivoGuard Status Report — the ONE daily email (11:30 EAT).
+        # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
+        # successful send, 15-min SMTP retries. Rides `beat`, which
+        # has a dedicated 1-slot runner so heavy `alerts` work can
+        # never delay it.
+        "vivoguard-status-report-every-5min": {
+            "task": "system.daily_status_report",
+            "schedule": timedelta(minutes=5),
         },
         # Reconciles cameras.status from the Redis frame-buffer key so
         # the dashboard health pill matches reality. Also deletes
