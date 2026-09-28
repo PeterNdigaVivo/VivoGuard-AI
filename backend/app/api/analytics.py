@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.analytics import recorder
 from app.database import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_role
 from app.utils.cache import cached_store_endpoint
 from app.models import (
     Alert, Camera, DetectionEvent, MetricSnapshot, Store,
@@ -3117,8 +3117,10 @@ def store_reid_journeys(store_id: int,
 # ---- Backfill metric_snapshots.store_id from current camera.store_id ----
 
 @router.post("/admin/backfill-store-ids")
-def backfill_store_ids(db: Session = Depends(get_db), _u=Depends(get_current_user)):
-    """One-shot fixer. Sets metric_snapshots.store_id = cameras.store_id
+def backfill_store_ids(db: Session = Depends(get_db),
+                       _u=Depends(require_role("admin"))):
+    """Admin only — it rewrites metric rows across every store.
+    One-shot fixer. Sets metric_snapshots.store_id = cameras.store_id
     for every metric row currently NULL whose camera is now attached to
     a store. The dashboard JOINs through cameras anyway, but writing it
     down makes per-store SQL queries cheaper and helps the PDF reports.
