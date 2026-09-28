@@ -1,0 +1,19 @@
+# Runs one VivoGuard database backup. Started nightly by
+# vivoguard-backup.timer; run by hand with:
+#   sudo systemctl start vivoguard-backup.service
+# Output: journalctl -u vivoguard-backup.service
+#
+# Install: see docs/BACKUP_AND_RESTORE.md. If the checkout is not at
+# /root/VivoGuard-AI, change ExecStart below after copying this file.
+[Unit]
+Description=VivoGuard nightly database backup
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/VivoGuard-AI/scripts/backup_db.sh
+# Low priority so the dump never competes with live camera inference.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

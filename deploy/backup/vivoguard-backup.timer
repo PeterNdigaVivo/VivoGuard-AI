@@ -1,0 +1,12 @@
+# Nightly at 03:15 Nairobi time, whatever the server's own timezone.
+# Persistent=true: if the server was off at 03:15, run at next boot.
+[Unit]
+Description=Nightly VivoGuard database backup (03:15 EAT)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Africa/Nairobi
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
