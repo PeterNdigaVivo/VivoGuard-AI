@@ -394,9 +394,13 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
             grace_minutes=settings.person_afterhours_actual_close_grace_min,
         ):
             return False
-    except Exception:
-        # A missing cache must never suppress a potentially real intrusion.
-        pass
+    except Exception as exc:
+        # A missing cache must never suppress a potentially real intrusion:
+        # carry on to the business-hours check below.
+        _log_throttled(
+            f"close-marker:{getattr(store, 'id', None)}", logging.WARNING,
+            "person after-hours: actual-close marker unreadable store=%s: %s "
+            "— ignoring the marker", getattr(store, "id", None), exc)
     try:
         from app.utils.business_hours import is_after_hours_with_grace
         return is_after_hours_with_grace(
@@ -404,8 +408,32 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
             grace_before_open_min=settings.person_afterhours_grace_before_min,
             grace_after_close_min=settings.person_afterhours_grace_after_min,
         )
-    except Exception:
-        return False
+    except Exception as exc:
+        # FAIL OPEN. If we cannot tell whether the store is closed, send
+        # the alert: a spurious daytime alert (bounded by the per-camera
+        # dedupe window) is far cheaper than a silent 2 a.m. break-in.
+        _log_throttled(
+            f"hours-check:{getattr(store, 'id', None)}", logging.ERROR,
+            "person after-hours: business-hours check failed store=%s: %s "
+            "— ALERTING anyway; check this store's opening hours",
+            getattr(store, "id", None), exc)
+        return True
+
+
+# Throttle for the fail-open log lines above: a broken store config would
+# otherwise log on every person detection, several times a second.
+_FAIL_OPEN_LOG_INTERVAL_S = 600.0
+_fail_open_last_logged: dict[str, float] = {}
+
+
+def _log_throttled(key: str, level: int, msg: str, *args) -> None:
+    """Log `msg` at most once per _FAIL_OPEN_LOG_INTERVAL_S for `key`."""
+    now = time.monotonic()
+    last = _fail_open_last_logged.get(key)
+    if last is not None and now - last < _FAIL_OPEN_LOG_INTERVAL_S:
+        return
+    _fail_open_last_logged[key] = now
+    log.log(level, msg, *args)
 
 
 def _person_alert_recently_fired(camera_id: int) -> bool:
@@ -418,7 +446,11 @@ def _person_alert_recently_fired(camera_id: int) -> bool:
         import redis
         r = redis.from_url(settings.redis_url, decode_responses=True)
         return bool(r.get(f"vg:person_afterhours:fired:{int(camera_id)}"))
-    except Exception:
+    except Exception as exc:
+        _log_throttled(
+            f"dedupe-read:{camera_id}", logging.WARNING,
+            "person after-hours: dedupe read failed cam=%s: %s "
+            "— allowing the alert", camera_id, exc)
         return False
 
 
@@ -428,8 +460,33 @@ def _mark_person_alert_fired(camera_id: int) -> None:
         r = redis.from_url(settings.redis_url, decode_responses=True)
         ttl = max(60, int(settings.person_afterhours_dedupe_min) * 60)
         r.set(f"vg:person_afterhours:fired:{int(camera_id)}", "1", ex=ttl)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Losing the marker only risks a duplicate alert, never a missed one.
+        _log_throttled(
+            f"dedupe-write:{camera_id}", logging.WARNING,
+            "person after-hours: dedupe write failed cam=%s: %s",
+            camera_id, exc)
+
+
+def _person_alert_suppressed(ev, zones: list[dict], store,
+                             camera_id: int) -> bool:
+    """True when a plain person detection should be stored WITHOUT an
+    alert (normal trading-hours traffic, or already alerted within the
+    dedupe window). The DetectionEvent row is written either way.
+
+    Fails OPEN: any unexpected error means "send the alert", so a bug or
+    outage in this check can never silently drop a real intrusion."""
+    try:
+        if not _person_alert_warranted(ev, zones, store):
+            return True
+        if _person_alert_recently_fired(camera_id):
+            return True
+        _mark_person_alert_fired(camera_id)
+        return False
+    except Exception as exc:
+        log.error("person suppress-check raised cam=%s: %s "
+                  "— ALERTING anyway (fail open)", camera_id, exc)
+        return False
 
 
 # Reset the tracker when frames resume after a gap this long — ByteTrack IDs
@@ -793,22 +850,9 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         # this frame (Vivo regression, Jun 2026).
                         suppress = False
                         if ev.detection_type == "person":
-                            try:
-                                if not _person_alert_warranted(ev, zones, store):
-                                    suppress = True
-                                elif _person_alert_recently_fired(camera_id):
-                                    suppress = True
-                                else:
-                                    _mark_person_alert_fired(camera_id)
-                            except Exception as _sup_exc:
-                                # Fail safe: persist the event, skip the
-                                # after-hours alert. Better to miss a
-                                # tag than to silently lose the row.
-                                log.warning(
-                                    "person suppress-check raised cam=%s: %s "
-                                    "— persisting event without alert",
-                                    camera_id, _sup_exc)
-                                suppress = True
+                            # Never raises; fails open (alert is sent).
+                            suppress = _person_alert_suppressed(
+                                ev, zones, store, camera_id)
                         # Temporal gate — suppress the ALERT (never the
                         # event row) when the underlying track hasn't
                         # persisted long enough; kills 1-frame blips.
