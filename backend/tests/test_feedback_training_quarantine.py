@@ -7,7 +7,10 @@ training to zero (cross-store jobs 807/808/809, pseudo-labeler
 labelled=0). These tests pin BOTH sides of the switch.
 """
 from app.config import settings
-from app.training.feedback_loop import _training_provenance
+from app.training.feedback_loop import (
+    _enqueue_if_trainable,
+    _training_provenance,
+)
 
 
 def test_dual_review_gate_quarantines_when_enabled(monkeypatch):
@@ -34,3 +37,32 @@ def test_single_reviewer_policy_trains_immediately_by_default(monkeypatch):
     assert dismissed["source_kind"] == "operator_dismissed"
     assert dismissed["eligible_for_training"] is True
     assert dismissed["review_state"] == "approved"
+
+
+def test_trainable_feedback_checks_retraining_immediately(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.training.feedback_loop._maybe_enqueue_training",
+        lambda db, detection_type: calls.append((db, detection_type)),
+    )
+    marker = object()
+
+    _enqueue_if_trainable(
+        marker, "uniform_compliance", {"eligible_for_training": True},
+    )
+
+    assert calls == [(marker, "uniform_compliance")]
+
+
+def test_quarantined_feedback_does_not_check_retraining(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.training.feedback_loop._maybe_enqueue_training",
+        lambda db, detection_type: calls.append((db, detection_type)),
+    )
+
+    _enqueue_if_trainable(
+        object(), "uniform_compliance", {"eligible_for_training": False},
+    )
+
+    assert calls == []

@@ -1,1 +1,2 @@
-"""Notification channels (SMTP, Twilio, webhook). Filled in step 7."""
+"""Notification channels. Alerts are delivered to the dashboard; the
+webhook notifier is the only outbound channel."""

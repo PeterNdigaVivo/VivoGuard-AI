@@ -31,8 +31,12 @@ from app.ai.snapshot import SNAPSHOT_TYPES
 from app.ai.yolov8_runner import infer, load_model, resolve_weights
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AIModel, Camera, DetectionConfig, DetectionEvent, Store, Zone, Alert
+from app.models import (
+    AIModel, Alert, Camera, DetectionConfig, DetectionEvent,
+    DETECTION_TYPES, Store, Zone,
+)
 from app.stream.frame_buffer import FrameBuffer
+from app.zone_purposes import detector_types_for_zone_tags
 
 log = logging.getLogger(__name__)
 
@@ -72,11 +76,13 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     # never toggled "queue" in the AI Settings page. This eliminates the
     # most common "I configured it but nothing happens" failure mode.
     # ------------------------------------------------------------------
-    zone_types: set[str] = set()
+    zone_tags: set[str] = set()
     for z in zones:
         for t in (z["detection_types_json"] or []):
-            zone_types.add(t)
-    for t in zone_types:
+            zone_tags.add(t)
+    for t in detector_types_for_zone_tags(zone_tags):
+        if t not in DETECTION_TYPES:
+            continue
         if t not in cfg:
             cfg[t] = {
                 "enabled": True,
@@ -191,6 +197,15 @@ _STATIC_PERSON_FILTER_TYPES: set[str] = {
 }
 
 
+def _alert_disposition(detection_type: str, suppress_alert: bool) -> str:
+    """Explain whether a persisted detection was promoted to an alert."""
+    if detection_type in _SKIP_ALERT_TYPES:
+        return "metric_only"
+    if suppress_alert:
+        return "filtered"
+    return "alert"
+
+
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None, store_id: int | None = None,
@@ -220,6 +235,9 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # into extra so the sub-type survives persistence instead of being
     # silently dropped (the shop_open_close NULL-cls bug, Jul 2026).
     extra = dict(ev.extra or {})
+    extra["alert_disposition"] = _alert_disposition(
+        ev.detection_type, suppress_alert,
+    )
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
@@ -304,6 +322,16 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                     datetime.now(timezone.utc).timestamp())
         except Exception as e:
             log.warning("filmstrip enqueue failed cam=%s: %s", camera_id, e)
+        # AI verification (annotate, never hide) - fire-and-forget for
+        # EVERY alert, including review_only ones. The verdict is
+        # written next to the alert; nothing is suppressed, hidden or
+        # delayed on its strength. .delay() is microseconds here.
+        try:
+            if bool(getattr(settings, "verifier_enabled", False)):
+                from app.tasks.alert_verify import verify_alert
+                verify_alert.delay(alert_id)
+        except Exception as e:
+            log.warning("verifier enqueue failed cam=%s: %s", camera_id, e)
         # VLM scene analysis — fire-and-forget on the alerts queue so
         # the 10s cloud call never blocks this inference loop. Guarded
         # by detection_type + a stored thumbnail; the task itself

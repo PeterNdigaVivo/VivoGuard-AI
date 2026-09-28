@@ -21,6 +21,18 @@ class AlertOut(BaseModel):
     notification_suppressed: bool = False
     quality_mode: str = "active"
     quality_reason: str | None = None
+    # AI verification (annotate-only): the verifier writes a verdict
+    # next to the alert and never hides or reclassifies it. ai_enabled
+    # mirrors the server switch so the card can render "AI: off"
+    # (switch off) vs "AI: checking" (pending).
+    ai_verdict: str | None = None          # true_alert | false_alert | uncertain
+    ai_confidence: float | None = None
+    ai_outcome: str | None = None
+    ai_action: str | None = None
+    ai_reason: str | None = None
+    ai_verified_at: datetime | None = None
+    ai_model: str | None = None
+    ai_enabled: bool = False
     created_at: datetime
     event_timestamp: datetime | None = None
     delivery_delay_seconds: int | None = None

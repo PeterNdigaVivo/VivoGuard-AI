@@ -53,8 +53,15 @@ interface LiveResponse {
   camera_count?: number
   cameras_total?: number
   cameras_online?: number
+  // Counts behind status_light — an actionable number beats a dot.
+  high_alert_count?: number
+  total_alert_count?: number
   is_open?: boolean
   hours_label?: string
+  // Today's trading session in UTC — drives the "closes in Xh Ym"
+  // countdown on the status strip.
+  session_open?: string
+  session_close?: string
   zone_capabilities: Record<string, boolean>
   // `data_source` / `data_source_label` are populated by the backend
   // on the visitor-count tile so the UI can render the glass-door
@@ -219,18 +226,11 @@ export default function StoreDashboardPage() {
           </div>
         }
       />
-      <div className="text-xs text-slate-500 dark:text-slate-300 -mt-3 flex flex-wrap items-center gap-3">
-        <span>Showing <strong>{range.label}</strong>. Trend arrows compare with the prior same-length window.</span>
-        {data.hours_label && (
-          <span>· Hours today: <strong>{data.hours_label}</strong></span>
-        )}
-        <span>
-          · Cameras:{' '}
-          <strong className={(data.cameras_online ?? 0) === 0 ? 'text-red-600' : 'text-emerald-700'}>
-            {data.cameras_online ?? 0}/{data.cameras_total ?? data.camera_count ?? 0} live
-          </strong>
-        </span>
-      </div>
+      {/* Status strip — trading state first, because that is the context
+          every other number on the page depends on. Camera counts are
+          telemetry and live in System diagnostics at the foot of the page;
+          only a FAULT is surfaced up here, where it changes what you do. */}
+      <StatusStrip data={data} rangeLabel={range.label} />
 
       {/* Contextual banner — subtle, never blocks. */}
       {banner && (
@@ -269,9 +269,8 @@ export default function StoreDashboardPage() {
           )}
           {t.staff_present_pct_today?.visible && (
             <Kpi label="Time staff were at counter" big dimmed={closed}
-                 value={`${fmtInt(t.staff_present_pct_today.value)}%`} />
+                 value={fmtUnit(t.staff_present_pct_today.value, '%')} />
           )}
-          <Kpi label="Cameras live" value={`${data.cameras_online ?? 0}/${data.cameras_total ?? data.camera_count ?? 0}`} />
         </div>
       </section>
 
@@ -295,13 +294,13 @@ export default function StoreDashboardPage() {
                trendPct={t.occupancy_peak_today?.trend?.delta_pct ?? null} />
           {t.checkout_avg_seconds_today?.visible && (
             <Kpi label="Avg checkout time"
-                 value={`${fmtInt(t.checkout_avg_seconds_today.value)} sec`}
+                 value={fmtUnit(t.checkout_avg_seconds_today.value, ' sec')}
                  trendDir={t.checkout_avg_seconds_today?.trend?.direction}
                  trendPct={t.checkout_avg_seconds_today?.trend?.delta_pct ?? null} />
           )}
           {t.checkout_max_seconds_today?.visible && (
             <Kpi label="Slowest checkout"
-                 value={`${fmtInt(t.checkout_max_seconds_today.value)} sec`}
+                 value={fmtUnit(t.checkout_max_seconds_today.value, ' sec')}
                  trendDir={t.checkout_max_seconds_today?.trend?.direction}
                  trendPct={t.checkout_max_seconds_today?.trend?.delta_pct ?? null} />
           )}
@@ -318,16 +317,26 @@ export default function StoreDashboardPage() {
           )}
           {t.queue_wait_avg_today_sec?.visible && (
             <Kpi label="Average wait in queue"
-                 value={`${fmtInt(t.queue_wait_avg_today_sec.value)} sec`}
+                 value={fmtUnit(t.queue_wait_avg_today_sec.value, ' sec')}
                  trendDir={t.queue_wait_avg_today_sec?.trend?.direction}
                  trendPct={t.queue_wait_avg_today_sec?.trend?.delta_pct ?? null} />
           )}
           {t.visitors_net_today?.visible && (
-            <Kpi label="Net visitors (in − out)"
-                 value={fmtInt(t.visitors_net_today.value)}
-                 sub={`${fmtInt(t.visitors_in_today?.value)} in · ${fmtInt(t.visitors_out_today?.value)} out`}
-                 trendDir={t.visitors_net_today?.trend?.direction}
-                 trendPct={t.visitors_net_today?.trend?.delta_pct ?? null} />
+            // More exits than entries isn't "negative footfall" — it's a
+            // line-placement or camera-angle fault. Say that, rather than
+            // printing "-8 visitors" and leaving a manager to interpret it.
+            (t.visitors_net_today as any).anomaly === 'exits_exceed_entries' ? (
+              <Kpi label="Entry/exit line"
+                   value="Check sensor"
+                   sub={`${fmtInt(t.visitors_out_today?.value)} exits vs `
+                        + `${fmtInt(t.visitors_in_today?.value)} entries — line may be mis-placed`} />
+            ) : (
+              <Kpi label="Net visitors (in − out)"
+                   value={fmtInt(t.visitors_net_today.value)}
+                   sub={`${fmtInt(t.visitors_in_today?.value)} in · ${fmtInt(t.visitors_out_today?.value)} out`}
+                   trendDir={t.visitors_net_today?.trend?.direction}
+                   trendPct={t.visitors_net_today?.trend?.delta_pct ?? null} />
+            )
           )}
         </div>
       </section>
@@ -375,6 +384,11 @@ export default function StoreDashboardPage() {
           <CustomerJourneysPanel storeId={storeId} />
         </section>
       </ScrollMounted>
+
+      {/* Telemetry, collapsed. Nobody opens a store page to read camera
+          counts — but when a number above looks wrong, this is the first
+          place to check whether the kit was even watching. */}
+      <SystemDiagnostics data={data} />
 
       {/* Edit-store modal — opens from the pen icon next to the title.
           Reuses the same StoreForm as /stores, so opening hours, manager
@@ -544,6 +558,100 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-300 uppercase tracking-wide mb-2">{children}</h2>
 }
 
+// ----- Status strip + system diagnostics -----
+//
+// Splits "is the business running" from "is the kit working". The first
+// belongs at the top; the second is only interesting when it breaks, so
+// it collapses into a footer and only escalates on a fault.
+
+function _closesIn(closeIso: string | undefined): string | null {
+  if (!closeIso) return null
+  const ms = new Date(closeIso).getTime() - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return null
+  const mins = Math.round(ms / 60000)
+  const h = Math.floor(mins / 60), m = mins % 60
+  return h ? `${h}h ${m}m` : `${m}m`
+}
+
+function StatusStrip({ data, rangeLabel }: { data: LiveResponse; rangeLabel: string }) {
+  const online = data.cameras_online ?? 0
+  const total  = data.cameras_total ?? data.camera_count ?? 0
+  const camFault = total > 0 && online < total
+  const closesIn = data.is_open ? _closesIn(data.session_close) : null
+  return (
+    <div className="-mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs
+                    text-slate-500 dark:text-slate-300">
+      <span className={'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-medium '
+        + (data.is_open
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+            : 'bg-slate-100 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300')}>
+        <span className={'w-1.5 h-1.5 rounded-full ' + (data.is_open ? 'bg-emerald-500' : 'bg-slate-400')} />
+        {data.is_open ? 'Open now' : 'Closed'}
+      </span>
+      {closesIn && <span>Closes in <strong>{closesIn}</strong></span>}
+      {data.hours_label && <span>· {data.hours_label}</span>}
+      {(data.high_alert_count ?? 0) > 0 && (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border
+                         bg-red-50 border-red-200 text-red-800 text-[11px] font-medium">
+          🔴 {data.high_alert_count} high-priority
+        </span>
+      )}
+      {(data.total_alert_count ?? 0) > 0 && (
+        <span>{data.total_alert_count} alert{data.total_alert_count === 1 ? '' : 's'} today</span>
+      )}
+      {/* Only surfaced when something is actually wrong. */}
+      {camFault && (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border
+                         bg-amber-50 border-amber-200 text-amber-800 text-[11px] font-medium">
+          ⚠ {total - online} of {total} cameras offline
+        </span>
+      )}
+      <span className="ml-auto">
+        {rangeLabel} · trends vs prior {rangeLabel.toLowerCase()}
+      </span>
+    </div>
+  )
+}
+
+function SystemDiagnostics({ data }: { data: LiveResponse }) {
+  const online = data.cameras_online ?? 0
+  const total  = data.cameras_total ?? data.camera_count ?? 0
+  return (
+    <details className="rounded-lg border border-slate-200 dark:border-slate-800 px-4 py-3">
+      <summary className="cursor-pointer text-xs uppercase tracking-wide text-slate-500
+                          dark:text-slate-400 select-none">
+        ⚙ System diagnostics
+      </summary>
+      <dl className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <div>
+          <dt className="text-xs text-slate-500 dark:text-slate-400">Cameras streaming</dt>
+          <dd className={'font-semibold tabular-nums '
+            + (online === 0 ? 'text-red-600' : online < total ? 'text-amber-600' : 'text-emerald-700')}>
+            {online}/{total}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500 dark:text-slate-400">Feed status</dt>
+          <dd className="font-semibold">{data.status.replace(/_/g, ' ')}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500 dark:text-slate-400">Last updated</dt>
+          <dd className="font-semibold tabular-nums">
+            {data.as_of ? new Date(data.as_of).toLocaleTimeString() : '—'}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500 dark:text-slate-400">Detectors reporting</dt>
+          <dd className="font-semibold tabular-nums">
+            {Object.values(data.zone_capabilities ?? {}).filter(Boolean).length}
+            <span className="text-slate-400 font-normal"> zone types</span>
+          </dd>
+        </div>
+      </dl>
+    </details>
+  )
+}
+
 function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
   label: string; value: string; big?: boolean; sub?: string
   trendDir?: 'up' | 'down' | 'flat'; trendPct?: number | null
@@ -560,14 +668,22 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
     badge?.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
     badge?.tone === 'amber'   ? 'bg-amber-50  text-amber-700  border-amber-200' :
                                  'bg-slate-50  text-slate-600  border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-800'
+  // A tile with no measurement is greyed and says so, rather than
+  // sitting at the same visual weight as a real number. Trend pills are
+  // suppressed too — there is nothing to trend against.
+  const noData = value === NO_DATA || value.startsWith(NO_DATA)
   return (
     <Card className="p-4 relative">
       <div className="text-xs text-slate-500 dark:text-slate-300">{label}</div>
       <div className={(big ? 'text-3xl' : 'text-2xl')
                        + ' font-semibold mt-1 '
-                       + (dimmed ? 'text-slate-400' : '')}>{value}</div>
-      {sub && <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">{sub}</div>}
-      {trendDir && trendPct !== undefined && (
+                       + (noData ? 'text-slate-300 dark:text-slate-600'
+                                 : dimmed ? 'text-slate-400' : '')}>{value}</div>
+      {noData && (
+        <div className="text-xs text-slate-400 dark:text-slate-500 mt-1">Not measured</div>
+      )}
+      {sub && !noData && <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">{sub}</div>}
+      {!noData && trendDir && trendPct !== undefined && (
         <div className="mt-1"><Trend direction={trendDir} deltaPct={trendPct} /></div>
       )}
       {badge && (
@@ -774,7 +890,21 @@ function DashboardSkeleton() {
   )
 }
 
+// An em-dash means "nothing reported this metric in this window", which
+// is a different claim from a measured zero. /live now sends null for
+// the former, so the two must not render identically — a dashboard that
+// prints "0 sec average wait" when no queue camera ran is asserting
+// perfect service it never observed.
+export const NO_DATA = '—'
+
 function fmtInt(v: any): string {
-  if (v === null || v === undefined || Number.isNaN(v)) return '0'
-  return String(Math.round(Number(v) || 0))
+  if (v === null || v === undefined || v === '') return NO_DATA
+  const n = Number(v)
+  return Number.isFinite(n) ? String(Math.round(n)) : NO_DATA
+}
+
+// Same rule, but keeps the unit off an em-dash — "— sec" reads as a bug.
+function fmtUnit(v: any, unit: string): string {
+  const s = fmtInt(v)
+  return s === NO_DATA ? s : `${s}${unit}`
 }

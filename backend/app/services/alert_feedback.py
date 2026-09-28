@@ -62,6 +62,10 @@ def record_independent_verdict(
         alert_id=alert.id, reviewer_id=user.id, verdict=second,
         classification="independent_agreement" if agreed
         else "independent_disagreement",
+        # AI verdict showing at decision time - the data needed to
+        # measure verifier precision per detection_type later.
+        extra={"ai_verdict": alert.ai_verdict,
+               "ai_confidence": alert.ai_confidence},
     ))
     images = (db.query(TrainingImage)
               .filter(TrainingImage.source_alert_id == alert.id).all())
@@ -141,7 +145,11 @@ def record_verdict(
     # latest decision and therefore never destroys history.
     db.add(AlertReviewDecision(
         alert_id=a.id, reviewer_id=user.id,
-        verdict="confirmed" if verdict == "confirm" else "dismissed"))
+        verdict="confirmed" if verdict == "confirm" else "dismissed",
+        # AI verdict showing at decision time - the data needed to
+        # measure verifier precision per detection_type later.
+        extra={"ai_verdict": a.ai_verdict,
+               "ai_confidence": a.ai_confidence}))
     db.flush()
 
     # Recalculate the pair circuit breaker using this verdict before any

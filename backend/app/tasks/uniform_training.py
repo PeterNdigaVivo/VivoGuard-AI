@@ -109,6 +109,8 @@ def train_uniform_model(self, store_id: int, camera_id: int | None = None) -> No
             data=str(root), epochs=50, imgsz=224, batch=16,
             project=str(out_dir), name="run", exist_ok=True,
             device=("0" if settings.use_gpu else "cpu"),
+            # 0 under Celery's prefork pool — see config comment.
+            workers=settings.training_dataloader_workers,
             # Staff face either direction → horizontal flip is fine.
             # Wider brightness + slight rotation for lighting/angle variety.
             fliplr=0.5, flipud=0.0, degrees=10, hsv_v=0.3, scale=0.1,
@@ -182,17 +184,7 @@ def _validate(weights: Path, dataset_root: Path) -> dict:
 
 
 def _notify(store_id: int, model_name: str, report: dict) -> None:
-    try:
-        acc = report.get("accuracy")
-        lines = [f"Uniform model training complete for store {store_id}.",
-                 f"Model: {model_name}",
-                 f"Accuracy: {round(acc * 100, 1)}%" if acc is not None else "Accuracy: n/a"]
-        for label, pc in (report.get("per_class") or {}).items():
-            lines.append(f"  {label}: {int(pc['precision']*100)}% prec, {int(pc['recall']*100)}% rec")
-        lines.append(report.get("recommendation", ""))
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], "\n".join(lines))
-    except Exception:
-        pass
+    log.info(
+        "uniform training complete: store=%s model=%s accuracy=%s",
+        store_id, model_name, report.get("accuracy"),
+    )

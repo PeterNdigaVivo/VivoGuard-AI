@@ -66,7 +66,7 @@ def test_odoo_webhook_signature_and_replay_window():
         )
 
 
-def test_assurance_agents_resolve_cases_when_conditions_clear():
+def test_assurance_checks_resolve_cases_when_conditions_clear():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:

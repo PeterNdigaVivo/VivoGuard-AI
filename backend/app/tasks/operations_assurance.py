@@ -1,4 +1,4 @@
-"""Scheduled deterministic assurance agents; all outputs require human review."""
+"""Scheduled deterministic operational checks; all outputs require human review."""
 import logging
 import os
 from pathlib import Path
@@ -19,10 +19,8 @@ log = logging.getLogger(__name__)
 
 
 def _report(name: str, started: float, findings: dict, *, status: str = "ok", gaps=None):
-    from app.tasks.agents import _heartbeat, _redis, _write_report
-    _heartbeat(_redis(), name)
-    _write_report(name, status, findings, gaps=gaps,
-                  duration_ms=int((time.time() - started) * 1000))
+    log.info("operation=%s status=%s duration_ms=%s findings=%s gaps=%s",
+             name, status, int((time.time() - started) * 1000), findings, gaps)
 
 
 @celery_app.task(name="operations.coverage_assurance", ignore_result=True)

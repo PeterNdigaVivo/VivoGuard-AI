@@ -18,6 +18,8 @@ swamping the gradient with background examples).
 """
 from __future__ import annotations
 import logging
+import shutil
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -26,6 +28,31 @@ from app.models import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _persist_feedback_image(dataset_id: int, alert_id: int,
+                            source_path: str) -> str | None:
+    """Copy alert evidence into the durable dataset volume.
+
+    Alert thumbnails are retention-managed and may be deleted before a
+    training job runs.  TrainingImage must therefore reference its own copy,
+    not the transient alert snapshot.
+    """
+    from app.training.dataset import dataset_root
+
+    source = Path(source_path)
+    if not source.is_file():
+        return None
+    suffix = source.suffix.lower() or ".jpg"
+    target = dataset_root(dataset_id) / "images" / f"alert_{alert_id}{suffix}"
+    try:
+        if not target.exists():
+            shutil.copy2(source, target)
+    except OSError as exc:
+        log.warning("feedback: could not preserve alert %s image %s: %s",
+                    alert_id, source, exc)
+        return None
+    return str(target)
 
 
 def _training_provenance(verdict: str) -> dict:
@@ -92,6 +119,44 @@ def _build_source_extra(db: Session, ev: DetectionEvent,
     }
 
 
+# Verdicts on these detection types never become training data.
+#
+# They are judgements about a whole scene or a system state, not an
+# object with a bounding box. `scene_review` and `phone_usage` are
+# written by a VLM reading a frame; when an operator confirms one, they
+# are telling us the PROMPT was right, not that a detector should learn
+# to find "scene_review" in an image. Left unguarded, the loop created
+# feedback-scene_review and feedback-phone_usage datasets within hours
+# of each detector going live and queued YOLO fine-tunes against a class
+# that has no visual form.
+#
+# The others are counters, heartbeats and BI summaries whose snapshots
+# carry no learnable target either. `live_activity` is deliberately NOT
+# here: absorb_dismissed has special handling that redirects it to
+# feedback-negative-person, which is genuinely useful.
+NON_TRAINABLE_TYPES = frozenset({
+    "scene_review", "phone_usage",
+    "store_intelligence", "sales_floor_insight", "positive_operational",
+    "system_health", "camera_offline", "shop_open_close",
+})
+
+
+def _skip_non_trainable(db: Session, alert, detection_type: str) -> bool:
+    """Stamp and skip an alert whose verdict is not training data.
+
+    Stamping matters: without it every future pass retries the same
+    alert forever, because nothing else marks it as handled.
+    """
+    if detection_type not in NON_TRAINABLE_TYPES:
+        return False
+    alert.feedback_used_for_training = True
+    db.commit()
+    log.info("feedback: %s verdict on alert %s is not trainable — "
+             "skipped (scene-level judgement, no visual target)",
+             detection_type, alert.id)
+    return True
+
+
 def _ensure_dataset(db: Session, name: str, classes: list[str],
                     description: str) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.name == name).first()
@@ -151,6 +216,13 @@ def _maybe_enqueue_training(db: Session, detection_type: str) -> None:
         log.warning("training enqueue failed: %s", e)
 
 
+def _enqueue_if_trainable(db: Session, detection_type: str,
+                          provenance: dict) -> None:
+    """Evaluate retraining immediately for feedback allowed by policy."""
+    if provenance.get("eligible_for_training"):
+        _maybe_enqueue_training(db, detection_type)
+
+
 def _enqueue_temporal_harvest(alert_id: int) -> None:
     """Kick the ±1s temporal-context frame extraction onto the WORKER
     (the clip lives on the shared volume and opencv only exists there).
@@ -185,6 +257,8 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     if not ev or not ev.thumbnail_path:
         return
     cls = ev.detection_type
+    if _skip_non_trainable(db, a, cls):
+        return
     # Legacy name without the `-positive-` infix is kept so feedback
     # absorbed by earlier deploys lands in the same Dataset.
     ds  = _ensure_dataset(
@@ -192,14 +266,22 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         [cls],
         description="auto: confirmed alerts (positive feedback pool)",
     )
+    file_path = _persist_feedback_image(ds.id, a.id, ev.thumbnail_path)
+    if not file_path:
+        log.warning("feedback: confirmed alert %s source image is unavailable",
+                    alert_id)
+        return
+    source_extra = _build_source_extra(db, ev, a, "correct")
+    source_extra["source_thumbnail_path"] = ev.thumbnail_path
+    provenance = _training_provenance("correct")
     img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=ev.thumbnail_path,
+        file_path=file_path,
         labeled=True,
-        source_extra=_build_source_extra(db, ev, a, "correct"),
+        source_extra=source_extra,
         source_alert_id=a.id,           # for revert_verdict
-        **_training_provenance("correct"),
+        **provenance,
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
@@ -219,9 +301,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     # moment bbox above must never be copied onto frames where the
     # person has moved.
     _enqueue_temporal_harvest(alert_id)
-    # A first reviewer creates evidence but cannot make it trainable alone.
-    # The independent-review workflow promotes the sample and evaluates the
-    # retraining threshold only after a second reviewer agrees.
+    _enqueue_if_trainable(db, cls, provenance)
     log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
 
 
@@ -242,6 +322,8 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         db.commit()
         return
     cls = ev.detection_type
+    if _skip_non_trainable(db, a, cls):
+        return
     # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
     # frame (boxes burned in) — feeding it to YOLO would teach the model
     # to detect boxes, not people. Harvest the RAW sibling the sentinel
@@ -271,25 +353,34 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         [],     # no classes — pure background
         description="auto: dismissed alerts (hard-negative pool)",
     )
+    durable_path = _persist_feedback_image(ds.id, a.id, file_path)
+    if not durable_path:
+        a.feedback_used_for_training = True
+        db.commit()
+        log.warning("feedback: dismissed alert %s source image is unavailable",
+                    alert_id)
+        return
+    provenance = _training_provenance("false")
     _src = _build_source_extra(db, ev, a, "false")
-    _src["training_quarantined_reason"] = "single_reviewer_dismissal"
+    _src["source_thumbnail_path"] = file_path
+    if not provenance["eligible_for_training"]:
+        _src["training_quarantined_reason"] = "single_reviewer_dismissal"
     if label_hint:
         _src["label_hint"] = label_hint
     neg_img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
-        file_path=file_path,
+        file_path=durable_path,
         labeled=True,           # labelled as background — no Annotation rows
         source_extra=_src,
         source_alert_id=a.id,           # for revert_verdict
-        **_training_provenance("false"),
+        **provenance,
     )
     db.add(neg_img); db.flush()
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    # Deliberately do not enqueue training.  A second, independent review must
-    # explicitly approve this hard negative before dataset export can see it.
+    _enqueue_if_trainable(db, cls, provenance)
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

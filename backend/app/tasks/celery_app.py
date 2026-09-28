@@ -41,26 +41,21 @@ celery_app = Celery(
         "app.tasks.inference_watchdog",
         "app.tasks.training",
         "app.tasks.maintenance",
-        "app.tasks.reports",
         "app.tasks.heatmap_archive",
         "app.tasks.staff_classifier",
-        "app.tasks.briefings",
         "app.tasks.alerting",
+        "app.tasks.fitting_room",
+        "app.tasks.scene_review",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
-        "app.tasks.queue_report",
         "app.tasks.vlm_tasks",
-        "app.tasks.agents",
         "app.tasks.recorder",
         "app.tasks.alert_snapshots",
-        "app.tasks.activity_sentinel",
         "app.tasks.uniform_miner",
-        "app.tasks.system_health_report",
+        "app.tasks.alert_verify",
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
-        "app.tasks.scenario_simulation",
-        "app.tasks.agent_accountability",
         "app.tasks.odoo_sync",
     ],
 )
@@ -94,15 +89,20 @@ celery_app.conf.update(
         # supervisor heartbeats must run on the dedicated short-task runner.
         "inference.supervise_all":            {"queue": "beat"},
         # Operator-facing alerts pool.
+        # AI alert verification (annotate-only) - short cloud call per
+        # alert, bounded by a Redis semaphore inside the task.
+        "alerts.verify":                        {"queue": "alerts"},
         "alerting.sales_floor_insights_check":  {"queue": "alerts"},
         "alerting.store_intelligence_update":   {"queue": "alerts"},
-        "alerting.live_activity_sentinel":      {"queue": "alerts"},
         "training.mine_live_uniform_crops":     {"queue": "alerts"},
-        "alerting.sales_floor_daily_summary":   {"queue": "alerts"},
         "alerting.shop_not_opened_check":       {"queue": "alerts"},
         "alerting.shop_open_inference_check":   {"queue": "alerts"},
         "alerting.shop_daily_summary_check":    {"queue": "alerts"},
-        "alerting.camera_health_check":         {"queue": "alerts"},
+        "fitting_room.check":                   {"queue": "alerts"},
+        # `alerts` is the only worker with the host.docker.internal
+        # mapping that reaches Ollama — and keeping VLM work off the
+        # inference queue protects the camera pipeline.
+        "scene_review.sweep":                   {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -117,20 +117,12 @@ celery_app.conf.update(
         "alerting.prune_alert_snapshots":       {"queue": "alerts"},
         # Beat-only / scheduled batch tasks (also picked up by the
         # alerts worker — `beat` is on the same -Q list).
-        "briefings.daily_fire_due":           {"queue": "beat"},
-        "briefings.weekly_fire_due":          {"queue": "beat"},
         "training.chain_retrain_due":         {"queue": "beat"},
         "training.compute_model_metrics_daily": {"queue": "beat"},
         "training.pseudo_label_pending":      {"queue": "beat"},
         "training.weekly_retrain_all":        {"queue": "beat"},
         "training.evaluate_pending_promotions": {"queue": "beat"},
         "training.dispatch_queued_jobs":      {"queue": "beat"},
-        # Status report rides `beat`, which now has a DEDICATED 1-slot
-        # runner process (compose: beat-runner inside worker-alerts) —
-        # training jobs filling the alerts pool starved it twice when
-        # beat shared their slots.
-        "system.daily_status_report":         {"queue": "beat"},
-        "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         # Heavy model fitting has its own worker. It must not consume alert
         # delivery capacity, and an alerts-worker restart must not kill a
         # multi-hour training process and blame the dataset.
@@ -140,28 +132,13 @@ celery_app.conf.update(
         "training.harvest_temporal_frames":   {"queue": "alerts"},
         "training.run_shop_opening_specialist": {"queue": "alerts"},
         "training.run_store_specialist":      {"queue": "alerts"},
-        "reports.dispatch_due":               {"queue": "beat"},
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
         "maintenance.prune_metric_snapshots": {"queue": "beat"},
         "maintenance.cameras_status_sync":    {"queue": "beat"},
-        "queue_report.fire_due":              {"queue": "beat"},
         "staff_classifier.classify_today":    {"queue": "beat"},
         "heatmap.snapshot_all":               {"queue": "beat"},
         "heatmap.snapshot_grids_hourly":      {"queue": "beat"},
-        # Autonomous monitoring agents — ALL on the alerts pool so they
-        # never compete with camera inference (RULE 5). Short (<60s) tasks.
-        "agents.ml_dataset":       {"queue": "alerts"},
-        "agents.training":         {"queue": "alerts"},
-        "agents.backend_health":   {"queue": "alerts"},
-        "agents.frontend":         {"queue": "alerts"},
-        "agents.db_admin":         {"queue": "alerts"},
-        "agents.streamer":         {"queue": "alerts"},
-        "agents.simulation":       {"queue": "alerts"},
-        "agents.detector_alerts":  {"queue": "alerts"},
-        "agents.retail_standards": {"queue": "alerts"},
-        "agents.inspection":       {"queue": "alerts"},
-        "agents.agent_watchdog":   {"queue": "alerts"},
         "operations.coverage_assurance": {"queue": "alerts"},
         "operations.alert_quality":      {"queue": "alerts"},
         "operations.lone_worker":        {"queue": "alerts"},
@@ -172,8 +149,6 @@ celery_app.conf.update(
         "odoo.sync_roster":              {"queue": "beat"},
         "odoo.sync_pos_sessions":        {"queue": "beat"},
         "odoo.sync_sales_and_assurance": {"queue": "beat"},
-        "agents.scenario_simulator":      {"queue": "alerts"},
-        "agents.accountability":          {"queue": "alerts"},
         # Rolling recorder — runs in the dedicated `recorder` compose service
         # (celery worker -Q recorder), so ffmpeg survives worker rebuilds.
         "recorder.tick":                  {"queue": "recorder"},
@@ -183,10 +158,7 @@ celery_app.conf.update(
         "recorder.backfill_evidence_hashes": {"queue": "recorder"},
         "recorder.storage_health_check":  {"queue": "recorder"},
     },
-    # Pin Beat's clock to EAT (NOT settings.app_timezone, which is UTC on the
-    # box) so the crontab-scheduled agents fire at their intended EAT times
-    # (Retail Standards 05:00, Inspection 06:00, the 6h agents). Only crontab
-    # schedules use this; interval (timedelta) schedules are timezone-agnostic.
+    # Pin Beat's clock to EAT for local-time scheduled operations.
     timezone="Africa/Nairobi",
     beat_schedule={
         "supervise-inference-every-30s": {
@@ -222,10 +194,6 @@ celery_app.conf.update(
             "task": "maintenance.prune_alerts",
             "schedule": 24 * 60 * 60.0,
         },
-        "scheduled-reports-dispatcher": {
-            "task": "reports.dispatch_due",
-            "schedule": 300.0,    # 5 min — granular enough for daily/weekly
-        },
         # Daily heatmap archive at 23:55 (UTC). 30-day rolling retention
         # built into the task itself.
         "heatmap-archive-nightly": {
@@ -249,20 +217,7 @@ celery_app.conf.update(
             "task": "staff_classifier.classify_today",
             "schedule": 600.0,
         },
-        # Daily WhatsApp briefing per store — fires at 08:00 store-local
-        # for each active store. The dispatcher checks the local clock
-        # every 5 minutes and uses a Redis day-marker to dedup.
-        "briefings-daily-every-5min": {
-            "task": "briefings.daily_fire_due",
-            "schedule": 300.0,
-        },
-        # Weekly chain briefing — fires Monday 07:00 anchor-time.
-        # Same 5-minute beat tick + iso-week marker for dedup.
-        "briefings-weekly-every-5min": {
-            "task": "briefings.weekly_fire_due",
-            "schedule": 300.0,
-        },
-        # Sustained-queue WhatsApp escalation — every 30s the task
+        # Sustained-queue alert — every 30s the task
         # checks the latest queue_length snapshot per zone. Fires once
         # per zone when count > 5 has held for > 3 min.
         "queue-escalation-every-30s": {
@@ -298,16 +253,8 @@ celery_app.conf.update(
             "task": "alerting.prune_alert_snapshots",
             "schedule": 60 * 60.0,
         },
-        # Camera-offline WhatsApp nudge — every 60s the task scans
-        # ai_enabled cameras and fires when last_seen is > 5 min stale
-        # AND the store is currently within business hours.
-        "camera-health-every-60s": {
-            "task": "alerting.camera_health_check",
-            "schedule": 60.0,
-        },
-        # Uniform-violation manager notification — every 60s scans for
-        # uniform_compliance alerts in the last ~2 min and WhatsApps the
-        # store manager. Deduped per store per 30 min.
+        # Uniform-violation deduplication — every 60s scans recent
+        # uniform_compliance alerts. Deduped per store per 30 min.
         "uniform-violation-every-60s": {
             "task": "alerting.uniform_violation_check",
             "schedule": 60.0,
@@ -324,12 +271,6 @@ celery_app.conf.update(
         "after-hours-prune-every-1h": {
             "task": "alerting.after_hours_prune",
             "schedule": 60 * 60.0,
-        },
-        # Daily Queue Intelligence report — fires once per store after
-        # 21:00 store-local. 5-min beat tick + per-store Redis dedup.
-        "queue-report-every-5min": {
-            "task": "queue_report.fire_due",
-            "schedule": 300.0,
         },
         # Weekly chain auto-retrain — 5-min beat tick. Fires Monday
         # 02:00 Africa/Nairobi when the chain dataset has grown since
@@ -379,15 +320,6 @@ celery_app.conf.update(
             "task": "training.dispatch_queued_jobs",
             "schedule": timedelta(minutes=5),
         },
-        # VivoGuard Status Report — the ONE daily email (11:30 EAT).
-        # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
-        # successful send, 15-min SMTP retries. Rides `beat`, which
-        # has a dedicated 1-slot runner so heavy `alerts` work can
-        # never delay it.
-        "vivoguard-status-report-every-5min": {
-            "task": "system.daily_status_report",
-            "schedule": timedelta(minutes=5),
-        },
         # Sales Floor Intelligence — 15-min timedelta tick (the
         # crontab schedule wasn't being picked up by this worker's
         # beat scheduler; switching to timedelta matches every other
@@ -409,15 +341,6 @@ celery_app.conf.update(
             "task": "alerting.store_intelligence_update",
             "schedule": timedelta(minutes=15),
         },
-        # Live Activity Sentinel — reads the same vg:activity:* keys the
-        # Live Activity tab uses and turns occupancy patterns into alerts.
-        # Dark-launched: the task body no-ops unless
-        # ACTIVITY_SENTINEL_ENABLED=true.
-        "live-activity-sentinel": {
-            "task": "alerting.live_activity_sentinel",
-            "schedule": timedelta(seconds=int(getattr(
-                settings, "activity_sentinel_interval_seconds", 60))),
-        },
         # metric_snapshots retention — nightly at 03:10 EAT (quiet hours),
         # batched deletes; see maintenance.prune_metric_snapshots.
         "prune-metric-snapshots-nightly": {
@@ -429,11 +352,6 @@ celery_app.conf.update(
         "uniform-crop-miner-every-2h": {
             "task": "training.mine_live_uniform_crops",
             "schedule": timedelta(hours=2),
-        },
-        # Daily 18:00 EAT WhatsApp summary — same routing rationale.
-        "sales-floor-daily-summary-every-5min": {
-            "task": "alerting.sales_floor_daily_summary",
-            "schedule": timedelta(minutes=5),
         },
         # 5-min dispatcher checking whether each store has had its
         # first inward line-crossing of the day before the
@@ -457,63 +375,25 @@ celery_app.conf.update(
         # 5-min dispatcher checking whether 22:00 EAT has passed for
         # each store; when it has, builds the daily open/close
         # summary from today's shop_open_close events and emits one
-        # INFO alert + WhatsApp.
+        # INFO alert.
         "shop-daily-summary-every-5min": {
             "task": "alerting.shop_daily_summary_check",
             "schedule": timedelta(minutes=5),
         },
-
-        # ── Autonomous monitoring agents ──────────────────────────────
-        # Clock-aligned/daily agents use crontab() (celery timezone is
-        # Africa/Nairobi = EAT, so hour= is EAT). Sub-hour agents use
-        # plain intervals. Staggered per the resource plan so they never
-        # wake up simultaneously. The watchdog re-enqueues any agent whose
-        # heartbeat lapses — so if the embedded -B beat ever fails to pick
-        # up a crontab entry, the agent still recovers.
-        "agents-ml-dataset-6h": {          # 00:00 06:00 12:00 18:00 EAT
-            "task": "agents.ml_dataset",
-            "schedule": crontab(minute=0, hour="0,6,12,18"),
+        # Replays changing-room crossings; see tasks/fitting_room.py.
+        "fitting-room-every-1min": {
+            "task": "fitting_room.check",
+            "schedule": timedelta(minutes=1),
         },
-        "agents-db-admin-6h": {            # 00:30 06:30 12:30 18:30 EAT
-            "task": "agents.db_admin",
-            "schedule": crontab(minute=30, hour="0,6,12,18"),
-        },
-        "agents-simulation-2h": {          # every 2 hours (Part 2 #4)
-            "task": "agents.simulation",
-            "schedule": crontab(minute=0, hour="*/2"),
-        },
-        "agents-training-1h": {            # :00 past every hour
-            "task": "agents.training",
-            "schedule": crontab(minute=0),
-        },
-        "agents-frontend-1h": {            # :15 past every hour
-            "task": "agents.frontend",
-            "schedule": crontab(minute=15),
-        },
-        "agents-retail-standards-daily": {  # 05:00 EAT
-            "task": "agents.retail_standards",
-            "schedule": crontab(minute=0, hour=5),
-        },
-        "agents-inspection-daily": {        # 06:00 EAT
-            "task": "agents.inspection",
-            "schedule": crontab(minute=0, hour=6),
-        },
-        "agents-backend-health-30min": {
-            "task": "agents.backend_health",
-            "schedule": timedelta(minutes=30),
-        },
-        "agents-streamer-5min": {
-            "task": "agents.streamer",
+        # Open-ended VLM sweep. Runs every 5 min and reviews a slice of
+        # the fleet each time, so coverage is spread rather than bursty;
+        # the task no-ops unless SCENE_REVIEW_ENABLED is set. See
+        # tasks/scene_review.py.
+        "scene-review-every-5min": {
+            "task": "scene_review.sweep",
             "schedule": timedelta(minutes=5),
         },
-        "agents-detector-alerts-15min": {
-            "task": "agents.detector_alerts",
-            "schedule": timedelta(minutes=15),
-        },
-        "agents-watchdog-10min": {
-            "task": "agents.agent_watchdog",
-            "schedule": timedelta(minutes=10),
-        },
+
         "operations-coverage-every-5min": {
             "task": "operations.coverage_assurance", "schedule": timedelta(minutes=5),
         },
@@ -545,12 +425,6 @@ celery_app.conf.update(
         "odoo-sales-assurance-every-15min": {
             "task": "odoo.sync_sales_and_assurance",
             "schedule": timedelta(minutes=settings.odoo_txn_minutes),
-        },
-        "agents-scenario-simulator-hourly": {
-            "task": "agents.scenario_simulator", "schedule": timedelta(hours=1),
-        },
-        "agents-accountability-every-5min": {
-            "task": "agents.accountability", "schedule": timedelta(minutes=5),
         },
 
         # ── Rolling recorder ──────────────────────────────────────────

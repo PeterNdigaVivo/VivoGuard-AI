@@ -1,14 +1,12 @@
-"""Sustained-condition alerting — celery beat tasks that escalate
-queue length + camera offline events to WhatsApp.
+"""Sustained-condition monitoring for queue and camera health events.
 
 These are deliberately SEPARATE from the per-frame DetectionEvent
 pipeline because they only fire on conditions that persist over time:
 
   - queue_escalation_check     queue length > threshold sustained > N minutes
-  - camera_health_check        camera offline > 5 minutes during business hours
 
-Both write WhatsApp to settings.dashboard_alert_to and dedup via a
-Redis marker so a single sustained incident produces one nudge.
+Redis markers deduplicate sustained incidents; actionable conditions are
+persisted as in-app alerts.
 """
 from __future__ import annotations
 import json
@@ -21,7 +19,6 @@ import redis
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
-from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
 from app.utils.business_hours import is_store_open
 
 log = logging.getLogger(__name__)
@@ -31,27 +28,10 @@ log = logging.getLogger(__name__)
 # threshold drifts.
 QUEUE_COUNT_THRESHOLD   = 5     # > 5 people
 QUEUE_DURATION_SECONDS  = 180   # for > 3 minutes
-QUEUE_DEDUP_TTL_SECONDS = 600   # one WhatsApp per zone per 10 min
-
-# Camera-health thresholds.
-CAMERA_OFFLINE_THRESHOLD_SECONDS = 5 * 60      # > 5 min
-CAMERA_HEALTH_DEDUP_TTL_SECONDS  = 30 * 60     # one nudge per camera / 30 min
-
+QUEUE_DEDUP_TTL_SECONDS = 600   # one escalation per zone per 10 min
 
 def _redis():
     return redis.from_url(settings.redis_url, decode_responses=True)
-
-
-def _dashboard_recipients() -> list[str]:
-    """Resolve the ops escalation number from settings → twilio format.
-    Returns [] when Twilio isn't configured so dev installs stay quiet."""
-    raw = settings.dashboard_alert_to or ""
-    out: list[str] = []
-    for part in raw.split(","):
-        norm = _format_whatsapp_recipient(part.strip())
-        if norm:
-            out.append(norm)
-    return out
 
 
 # ---- Business-hours gate for operational alerts -----------------------
@@ -94,11 +74,11 @@ def _within_operating_hours(store) -> bool:
 def queue_escalation_check() -> None:
     """Scan the latest queue_length metric snapshots for every camera.
     When count > threshold AND has been > threshold for > duration,
-    fire one WhatsApp.
+    create one in-app alert.
 
     Sustained-state tracking is in Redis:
       vg:queue_alert:start:{store_id}:{camera_id}:{zone_id} → epoch when high count first observed
-      vg:queue_alert:sent:{store_id}:{camera_id}:{zone_id}  → set once WhatsApp went out (TTL = dedup)
+      vg:queue_alert:sent:{store_id}:{camera_id}:{zone_id}  → alert dedup marker
     """
     from app.database import SessionLocal
     from app.models import Camera, MetricSnapshot, Store, Zone
@@ -154,10 +134,18 @@ def queue_escalation_check() -> None:
             body = (f"⚠️ Long queue at {store_name} ({zone_name}) — "
                     f"{count} people waiting {minutes} minutes "
                     f"[{cam_name}]")
-            recipients = _dashboard_recipients()
-            sent = _send_whatsapp(recipients, body)
-            log.info("queue escalation: %s (%d people %dm) → %d WhatsApp sent",
-                     store_name, count, minutes, sent)
+            _create_info_alert(
+                db, camera_id=cam_id, zone_id=zone_id or None,
+                store_id=store_id or None, detection_type="queue_length",
+                cls="long_queue", extra={
+                    "priority": "warning", "title": "Long queue",
+                    "message": body, "count": count,
+                    "duration_seconds": int(duration),
+                },
+            )
+            db.commit()
+            log.info("queue escalation alert: %s (%d people %dm)",
+                     store_name, count, minutes)
             r.set(sent_key, "1", ex=QUEUE_DEDUP_TTL_SECONDS)
 
 
@@ -253,7 +241,6 @@ def inference_pipeline_health_check() -> None:
     # (matches the shop_not_opened URGENT pattern; the alert is fleet-
     # scoped but the schema needs a camera_id).
     anchor_cam_id = None
-    created_event = None
     try:
         from app.database import SessionLocal as _SL
         from app.models import Camera as _Cam
@@ -263,7 +250,7 @@ def inference_pipeline_health_check() -> None:
                      .order_by(_Cam.id.asc()).first())
             anchor_cam_id = int(row[0]) if row else None
             if anchor_cam_id:
-                created_event = _create_info_alert(
+                _create_info_alert(
                     db, camera_id=anchor_cam_id, zone_id=None, store_id=None,
                     detection_type="system_health",
                     cls="inference_pipeline_stalled", extra=extra,
@@ -272,13 +259,6 @@ def inference_pipeline_health_check() -> None:
     except Exception as e:
         log.exception("inference_pipeline_health_check: alert write failed: %s", e)
         return
-
-    try:
-        recipients = _dashboard_recipients()
-        if recipients and _info_notification_allowed(created_event):
-            _send_whatsapp(recipients, f"🚨 {body}")
-    except Exception:
-        pass
 
     # No TTL: one incident must create one operator alert, not recur every
     # 30 minutes.  The healthy branch above clears this key on recovery.
@@ -534,86 +514,14 @@ def prune_checkout_snapshots() -> None:
                  len(stale), n_files)
 
 
-# ---- Camera health ----------------------------------------------------
-
-@celery_app.task(name="alerting.camera_health_check", ignore_result=True)
-def camera_health_check() -> None:
-    """Walk active cameras during their store's business hours. Any
-    camera whose `last_seen_at` is older than 5 minutes earns a
-    WhatsApp nudge (deduped per-camera per-30-minutes)."""
-    from app.database import SessionLocal
-    from app.models import Camera, Store
-    from app.utils.business_hours import is_store_open
-
-    r = _redis()
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(seconds=CAMERA_OFFLINE_THRESHOLD_SECONDS)
-
-    with SessionLocal() as db:
-        cameras = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
-        for cam in cameras:
-            if cam.store_id is None:
-                continue
-            store = db.get(Store, cam.store_id)
-            if not store or not is_store_open(store, now):
-                continue   # we only nudge during operating hours
-
-            last_seen = cam.last_seen_at
-            if last_seen is not None and last_seen.tzinfo is None:
-                last_seen = last_seen.replace(tzinfo=timezone.utc)
-
-            if last_seen is not None and last_seen >= cutoff:
-                # Online — clear any latched outage marker.
-                r.delete(f"vg:cam_offline:start:{cam.id}")
-                r.delete(f"vg:cam_offline:sent:{cam.id}")
-                continue
-
-            start_key = f"vg:cam_offline:start:{cam.id}"
-            sent_key  = f"vg:cam_offline:sent:{cam.id}"
-
-            if not r.get(start_key):
-                # First detection — record start, hold off on alerting.
-                r.set(start_key, str(int(now.timestamp())),
-                      ex=24 * 3600)
-                continue
-
-            if r.get(sent_key):
-                continue
-
-            # Compute uptime over the last 24h: fraction of the last
-            # 24h where the camera was reporting frames. Approximated
-            # using the last_seen field — if last_seen < 24h ago, the
-            # camera was up until that moment, so:
-            #   uptime = (now - 24h until last_seen) / 24h
-            window_start = now - timedelta(hours=24)
-            if last_seen is None or last_seen < window_start:
-                uptime_pct = 0
-            else:
-                up_seconds = (last_seen - window_start).total_seconds()
-                uptime_pct = max(0, min(100, int(up_seconds / (24 * 3600) * 100)))
-
-            last_seen_str = last_seen.astimezone(timezone.utc).strftime("%H:%M UTC") \
-                if last_seen else "never"
-            body = (f"⚠️ Camera offline: {cam.name} at {store.name}. "
-                    f"Last seen {last_seen_str}. 24h uptime {uptime_pct}%.")
-            recipients = _dashboard_recipients()
-            sent = _send_whatsapp(recipients, body)
-            log.info("camera health: %s (%s) offline → %d WhatsApp sent",
-                     cam.name, store.name, sent)
-            r.set(sent_key, "1", ex=CAMERA_HEALTH_DEDUP_TTL_SECONDS)
-
-
 # ---- Uniform-violation manager notification ---------------------------
 
-UNIFORM_DEDUP_TTL_SECONDS = 30 * 60   # one WhatsApp per store per 30 min
+UNIFORM_DEDUP_TTL_SECONDS = 30 * 60   # one alert per store per 30 min
 
 
 @celery_app.task(name="alerting.uniform_violation_check", ignore_result=True)
 def uniform_violation_check() -> None:
-    """Notify the store manager (falling back to the ops number) when a
-    uniform-compliance violation alert fired in the last ~2 minutes.
-    Runs off the inference hot path so the WhatsApp round-trip never
-    stalls a camera loop. Deduped per store per 30 min."""
+    """Deduplicate recent uniform-compliance alerts per store."""
     from app.database import SessionLocal
     from app.models import Alert, Camera, DetectionEvent, Store
 
@@ -655,17 +563,7 @@ def uniform_violation_check() -> None:
                     body = (f"🔴 Repeated uniform violations at {store_name} "
                             f"today [{cam.name}]")
 
-            # Prefer the store manager's number; fall back to ops.
-            recipients = []
-            mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-            if mgr:
-                recipients.append(mgr)
-            recipients.extend(_dashboard_recipients())
-            recipients = list(dict.fromkeys(recipients))  # dedup, keep order
-
-            sent = _send_whatsapp(recipients, body)
-            log.info("uniform violation: %s [%s] → %d WhatsApp sent",
-                     store_name, cam.name, sent)
+            log.info("uniform violation alert: %s", body)
             r.set(sent_key, "1", ex=UNIFORM_DEDUP_TTL_SECONDS)
 
 
@@ -977,16 +875,16 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
     except Exception as e:
         log.warning("filmstrip enqueue failed (info alert cam=%s): %s",
                     camera_id, e)
+    # AI verification (annotate, never hide) - beat-created alerts get
+    # the same fire-and-forget verdict as worker-created ones.
+    try:
+        if bool(getattr(settings, "verifier_enabled", False)):
+            from app.tasks.alert_verify import verify_alert
+            verify_alert.delay(alert.id)
+    except Exception as e:
+        log.warning("verifier enqueue failed (info alert cam=%s): %s",
+                    camera_id, e)
     return rec
-
-
-def _info_notification_allowed(event) -> bool:
-    """Apply the persisted pair policy to direct-task notifications."""
-    if event is None:
-        return True
-    quality = ((getattr(event, "extra", None) or {})
-               .get("quality_control") or {})
-    return not bool(quality.get("notification_suppressed"))
 
 
 def _save_alert_thumbnail(camera_id: int, detection_type: str) -> str | None:
@@ -1022,14 +920,14 @@ def _store_intel_ai_insight(store, summary: dict, hb: dict, local, opened) -> st
     None when the LLM is unavailable (no key / SDK missing / error) so the
     caller keeps the deterministic body only. Never raises."""
     api_key = getattr(settings, "anthropic_api_key", "") or ""
-    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+    if not api_key or not settings.vlm_enabled:
         return None
     try:
         import anthropic
     except Exception:
         return None
     model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
-    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    timeout = float(settings.vlm_timeout_seconds)
     city = getattr(store, "city", None) or getattr(store, "country", "") or ""
     winner = summary.get("winner") or {}
     opened_at = opened.get("opened_at") if isinstance(opened, dict) else None
@@ -1345,16 +1243,15 @@ def _maybe_emit_sfi_for_store(db, r, store, now_utc, window_start_utc,
     return "created"
 
 
-# ---- 18:00 Daily Sales Floor WhatsApp summary ------------------------
+# ---- 18:00 Daily Sales Floor summary ---------------------------------
 
 SFI_DAILY_HOUR = 18                  # 18:00 store-local trigger
 
 
 @celery_app.task(name="alerting.sales_floor_daily_summary", ignore_result=True)
 def sales_floor_daily_summary() -> None:
-    """Per-store 18:00 EAT WhatsApp summary of today's sales-floor
-    activity. 5-min beat tick + per-store-per-day Redis dedup matches
-    the briefings pattern."""
+    """Per-store 18:00 EAT summary of today's sales-floor
+    activity with per-store-per-day Redis deduplication."""
     return  # temporarily disabled (ops, Aug 2026) — delete this line to
     #         resume the daily sales-floor summary.
     from app.database import SessionLocal
@@ -1470,17 +1367,7 @@ def _sfi_send_daily_for_store(db, store, local_now) -> None:
         body += (f"\nTip: Consider moving popular items from {winner_name} "
                  f"to the main floor during quiet periods.")
 
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if not recipients:
-        return
-    sent = _send_whatsapp(recipients, body)
-    log.info("sales-floor daily: store=%s customers=%s → %d WhatsApp sent",
-             store.id, total_customers, sent)
+    log.info("sales-floor daily: store=%s customers=%s", store.id, total_customers)
 
 
 # ---- "Store Not Opened" URGENT (line-crossing path) ------------------
@@ -1491,6 +1378,7 @@ def _sfi_send_daily_for_store(db, store, local_now) -> None:
 # "Store Not Opened" alert. Per-store-per-day Redis dedupe.
 
 NOT_OPENED_DEDUP_TTL = 24 * 3600    # one URGENT per store per day
+NOT_OPENED_EVIDENCE_GRACE_MIN = 10   # allow delayed frames/events to settle
 
 
 @celery_app.task(name="alerting.shop_not_opened_check", ignore_result=True)
@@ -1591,7 +1479,13 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
         return
 
     local = _store_eat_now(store)
-    if local.time() < cfg["not_open_cutoff_t"]:
+    cutoff_local = local.replace(
+        hour=cfg["not_open_cutoff_t"].hour,
+        minute=cfg["not_open_cutoff_t"].minute,
+        second=0,
+        microsecond=0,
+    ) + timedelta(minutes=NOT_OPENED_EVIDENCE_GRACE_MIN)
+    if local < cutoff_local:
         return       # cutoff hasn't passed yet
 
     day_iso = local.date().isoformat()
@@ -1636,7 +1530,7 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     # No positive opening evidence exists, but absence is only actionable if
     # at least one configured entrance sensor is actually supplying pixels.
     # Otherwise the correct diagnosis is unavailable CCTV coverage, which the
-    # camera-health agent already reports — not "the store did not open".
+    # camera-health check already reports — not "the store did not open".
     fresh_entrance_cam_ids = _fresh_frame_camera_ids(r, entrance_cam_ids)
     if not fresh_entrance_cam_ids:
         log.warning(
@@ -1664,21 +1558,12 @@ def _shop_not_opened_for_store(db, r, store, read_cfg) -> None:
     }
     # Anchor on a currently streaming entrance camera so the alert can carry
     # evidence even when an older/stale camera record sorts first.
-    created_event = _create_info_alert(
+    _create_info_alert(
         db, camera_id=fresh_entrance_cam_ids[0], zone_id=None, store_id=store.id,
         detection_type="shop_open_close", cls="shop_not_opened", extra=extra)
     db.commit()
     r.set(sent_key, "1", ex=NOT_OPENED_DEDUP_TTL)
 
-    # WhatsApp the ops list too — this is a manager-actionable URGENT.
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if recipients and _info_notification_allowed(created_event):
-        _send_whatsapp(recipients, f"🚨 {body}")
     log.warning("shop_not_opened: store=%s (%s) past cutoff %s — URGENT fired",
                 store.id, store.name, cutoff_hhmm)
 
@@ -1707,14 +1592,13 @@ OCCUPANCY_FALLBACK_METRICS = ("occupancy", "queue_length", "passersby")
 
 def _morning_window_utc(cfg, local_now):
     """Returns (start_utc, end_utc) for today's "morning open window"
-    in the store's local clock — i.e. earliest_open → not_open_cutoff
-    in EAT, converted to UTC for the SQL filter."""
+    in the store's local clock — scheduled opening → now — converted
+    to UTC for the SQL filter."""
     from datetime import time as _time
-    earliest_t = cfg.get("earliest_open_t") or _time(7, 0)
-    cutoff_t   = cfg["not_open_cutoff_t"]
+    earliest_t = cfg.get("open_t") or _time(9, 0)
     midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_local = midnight.replace(hour=earliest_t.hour, minute=earliest_t.minute)
-    end_local   = midnight.replace(hour=cutoff_t.hour,   minute=cutoff_t.minute)
+    end_local = local_now
     return (start_local.astimezone(timezone.utc),
             end_local.astimezone(timezone.utc))
 
@@ -1750,12 +1634,8 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     occupancy evidence is found — the caller then proceeds to fire
     the URGENT as normal.
 
-    Only metric_snapshots from ENTRANCE cameras count as evidence —
-    a stockroom or back-counter camera recording occupancy at 06:00
-    must not be treated as a store-open signal. The full `cam_ids`
-    list is still accepted (for the retro-labeller, which walks
-    every shop_open_close DetectionEvent for the store regardless
-    of source camera).
+    A person on any store camera after scheduled opening proves occupancy.
+    Entrance cameras remain preferred as the evidence anchor.
     """
     from zoneinfo import ZoneInfo
     eat = ZoneInfo("Africa/Nairobi")
@@ -1764,7 +1644,7 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
         return None     # no drawn entrance line → no inference possible
 
     start_utc, end_utc = _morning_window_utc(cfg, local_now)
-    samples = _occupancy_samples_in_window(db, entrance_cam_ids,
+    samples = _occupancy_samples_in_window(db, cam_ids,
                                              start_utc, end_utc)
     if not samples:
         return None
@@ -1784,11 +1664,9 @@ def _occupancy_fallback_for_store(db, shop_state, store, entrance_cam_ids,
     # cutoff]. `_morning_window_utc` already bounds the sample query to
     # that window, so this is a belt-and-braces guard that keeps the
     # alert semantically "store opened during the opening window".
-    earliest_t = cfg.get("earliest_open_t")
-    cutoff_t   = cfg.get("not_open_cutoff_t")
-    if earliest_t is not None and cutoff_t is not None:
-        ot = opened_at_eat.time()
-        if not (earliest_t <= ot <= cutoff_t):
+    earliest_t = cfg.get("open_t")
+    if earliest_t is not None:
+        if opened_at_eat.time() < earliest_t:
             return None
 
     # Find a camera that contributed (preferring an entrance cam if
@@ -1855,7 +1733,7 @@ def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
     as confirmed false positives in their `extra` JSON. Idempotent —
     rows that already carry a training_label are left alone."""
     from sqlalchemy.orm.attributes import flag_modified
-    from app.models import DetectionEvent
+    from app.models import Alert, DetectionEvent
 
     midnight_local = local_now.replace(hour=0, minute=0,
                                         second=0, microsecond=0)
@@ -1884,22 +1762,56 @@ def _retro_label_false_positives(db, store, cam_ids, cfg, local_now,
             ex["evidence_peak_occupancy"] = evidence_peak
         ev.extra = ex
         flag_modified(ev, "extra")
+        alert = db.query(Alert).filter(Alert.event_id == ev.id).first()
+        if alert is not None and alert.status not in ("dismissed", "resolved"):
+            alert.status = "resolved"
+            alert.resolved_at = local_now.astimezone(timezone.utc)
+            alert.notification_suppressed = True
+            note = "Automatically resolved: person-presence evidence proved the store was open."
+            alert.notes = f"{alert.notes}\n{note}".strip() if alert.notes else note
         touched += 1
     if touched:
         log.info("retro-labelled %d shop_not_opened false-positives "
                  "for store=%s (%s)", touched, store.id, day_iso)
 
 
-# ---- Daily open/close summary (22:00 EAT) ----------------------------
+# ---- Daily open/close summary ----------------------------------------
+#
+# Fires as soon as the doors are observed closed. SHOP_DAILY_HOUR is only
+# the backstop for days when no close is ever detected (camera down, no
+# outward crossing seen) — those still need a summary saying so.
 
-SHOP_DAILY_HOUR = 22       # 22:00 store-local trigger
+SHOP_DAILY_HOUR = 22       # 22:00 store-local backstop
+
+
+def _closed_today(db, store, local_now) -> bool:
+    """Whether today's shop_closed event has landed for this store.
+
+    Nothing is gained by waiting after it does: the close time is fixed by
+    the FIRST outward crossing after 20:15 (see detectors/shop_state), so
+    the summary is already complete the moment that event is written.
+    """
+    from app.models import Camera, DetectionEvent
+    start_utc = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                          .astimezone(timezone.utc))
+    return (db.query(DetectionEvent.id)
+              .join(Camera, Camera.id == DetectionEvent.camera_id)
+              .filter(Camera.store_id == store.id,
+                      DetectionEvent.detection_type == "shop_open_close",
+                      DetectionEvent.timestamp >= start_utc,
+                      DetectionEvent.extra["rule"].as_string() == "shop_closed")
+              .first() is not None)
 
 
 @celery_app.task(name="alerting.shop_daily_summary_check", ignore_result=True)
 def shop_daily_summary_check() -> None:
-    """5-min dispatcher. Per-store-per-day at 22:00 EAT, builds the
-    open / close summary from today's shop_open_close DetectionEvent
-    rows and creates one INFO alert + WhatsApp.
+    """5-min dispatcher. Builds the open / close summary from today's
+    shop_open_close DetectionEvent rows and creates one INFO alert,
+    once per store per day.
+
+    Fires as soon as the store is observed closed rather than holding
+    the card until 22:00 — a store closing at 20:02 was leaving the
+    manager a two-hour gap before being told anything.
 
     "Vivo Yaya opened at 08:58 AM, closed at 21:05 PM
      Open for 12 hours 7 minutes today"
@@ -1913,11 +1825,15 @@ def shop_daily_summary_check() -> None:
         for store in stores:
             try:
                 local = _store_eat_now(store)
-                if local.hour < SHOP_DAILY_HOUR:
-                    continue
                 day_iso = local.date().isoformat()
                 key = f"vg:shop_daily_summary:{store.id}:{day_iso}"
                 if r.get(key):
+                    continue
+                # Doors observed closed → summarise now. Otherwise wait for
+                # the backstop hour, which is the "closing time not recorded"
+                # case worth telling someone about.
+                if (local.hour < SHOP_DAILY_HOUR
+                        and not _closed_today(db, store, local)):
                     continue
                 _shop_daily_summary_for_store(db, store, local)
                 r.set(key, "1", ex=2 * 24 * 3600)
@@ -2011,19 +1927,11 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
         "duration_text":      duration_text or None,
         "eat_time":           local_now.strftime("%H:%M"),
     }
-    created_event = _create_info_alert(
+    _create_info_alert(
         db, camera_id=cams[0].id, zone_id=None, store_id=store.id,
         detection_type="shop_open_close", cls="shop_daily_summary", extra=extra)
     db.commit()
 
-    recipients: list[str] = []
-    mgr = _format_whatsapp_recipient(getattr(store, "manager_phone", None))
-    if mgr:
-        recipients.append(mgr)
-    recipients.extend(_dashboard_recipients())
-    recipients = list(dict.fromkeys(recipients))
-    if recipients and _info_notification_allowed(created_event):
-        _send_whatsapp(recipients, f"📋 {summary}")
     log.info("shop_daily_summary: store=%s %s", store.id, summary)
 
 
@@ -2040,7 +1948,7 @@ def _shop_daily_summary_for_store(db, store, local_now) -> None:
 # crossing path and this one share the store-level Redis marker so
 # only one of them ever fires per day per store.
 
-PERSON_OPEN_THRESHOLD       = 2          # spec
+PERSON_OPEN_THRESHOLD       = 1
 OPEN_CONFIRMATION_WINDOW_S  = 5 * 60     # 5 minutes
 
 
@@ -2072,6 +1980,68 @@ def confirm_opening_from_events(timestamps,
         if (right - left + 1) >= threshold:
             return seq[left]
     return None
+
+
+def _before_hours_person_for_store(db, store, now_eat, open_time) -> None:
+    """Alert on a recent person from any active camera before opening.
+
+    This is a database-only fallback for cameras without an intrusion config.
+    Existing intrusion events win, and a 10-minute store bucket prevents floods.
+    """
+    from sqlalchemy import desc
+    from app.models import Camera, DetectionEvent
+
+    camera_ids = [camera_id for (camera_id,) in db.query(Camera.id).filter(
+        Camera.store_id == store.id,
+        Camera.is_deleted.is_(False),
+        Camera.ai_enabled.is_(True),
+    ).all()]
+    if not camera_ids:
+        return
+
+    now_utc = now_eat.astimezone(timezone.utc)
+    recent = now_utc - timedelta(seconds=90)
+    intrusion_exists = db.query(DetectionEvent.id).filter(
+        DetectionEvent.camera_id.in_(camera_ids),
+        DetectionEvent.detection_type == "intrusion",
+        DetectionEvent.timestamp >= recent,
+    ).first()
+    if intrusion_exists is not None:
+        return
+
+    person = db.query(DetectionEvent).filter(
+        DetectionEvent.camera_id.in_(camera_ids),
+        DetectionEvent.detection_type == "person",
+        DetectionEvent.timestamp >= recent,
+    ).order_by(desc(DetectionEvent.timestamp)).first()
+    if person is None:
+        return
+
+    r = _redis()
+    bucket = int(now_eat.timestamp() // 600)
+    key = f"vg:before_hours_person:{store.id}:{bucket}"
+    if r.get(key):
+        return
+
+    body = (f"Person detected at {store.name or 'Store ' + str(store.id)} "
+            f"before working hours ({now_eat.strftime('%H:%M')}; "
+            f"opens {open_time.strftime('%H:%M')}).")
+    _create_info_alert(
+        db, camera_id=person.camera_id, zone_id=person.zone_id,
+        store_id=store.id, detection_type="intrusion", cls="person",
+        extra={
+            "priority": "high",
+            "rule": "before_hours_person",
+            "time_context": "before_hours",
+            "store_id": store.id,
+            "store_name": store.name,
+            "message": body,
+            "scheduled_open": open_time.strftime("%H:%M"),
+            "signal": "person_on_any_store_camera",
+        },
+    )
+    db.commit()
+    r.set(key, "1", ex=11 * 60)
 
 
 @celery_app.task(name="alerting.shop_open_inference_check", ignore_result=True)
@@ -2117,8 +2087,9 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
         _ensure_open_alert_exists(db, store, marker, now_eat)
         return
 
-    # OPENING-WINDOW GATE. Store-opening inference is only meaningful
-    # between earliest_open (07:00) and not_open_cutoff (09:30) EAT.
+    # Before scheduled opening, any person is a security event rather than an
+    # opening fallback. After opening, one person on any store camera is enough
+    # to suppress a false "not opened" claim.
     # Outside that window we skip entirely — without the upper bound
     # this fired "Store Opened — inferred (16:52)" on ordinary
     # afternoon traffic.
@@ -2127,10 +2098,10 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     #                crossing/occupancy paths, or genuinely not opened
     #                and handled by the URGENT not-opened check)
     cfg = shop_state._read_cfg(None)
-    earliest_t = cfg.get("earliest_open_t")
+    earliest_t = cfg.get("open_t")
     if earliest_t is None:
         from datetime import time as _time
-        earliest_t = _time(7, 0)
+        earliest_t = _time(9, 0)
     cutoff_t = cfg.get("not_open_cutoff_t")
     if cutoff_t is None:
         from datetime import time as _time
@@ -2139,8 +2110,10 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     window_start_local = today_local_00.replace(
         hour=earliest_t.hour, minute=earliest_t.minute)
     window_end_local = today_local_00.replace(
-        hour=cutoff_t.hour, minute=cutoff_t.minute)
+        hour=cutoff_t.hour, minute=cutoff_t.minute) + timedelta(
+            minutes=NOT_OPENED_EVIDENCE_GRACE_MIN)
     if now_eat < window_start_local:
+        _before_hours_person_for_store(db, store, now_eat, earliest_t)
         return       # too early
     if now_eat > window_end_local:
         return       # past the opening cutoff — don't infer all day
@@ -2153,18 +2126,17 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
     now_utc          = now_eat.astimezone(timezone.utc)
     scan_end_utc     = min(now_utc, window_end_utc)
 
-    # ENTRANCE CAMERAS ONLY. A person detected in a stockroom or
-    # behind the counter must not satisfy the "store opened" rule —
-    # only crossings/detections at a drawn entrance line count.
-    # Stores with no entrance line drawn are honestly excluded from
-    # inference (the URGENT "Store Not Opened" still fires at the
-    # cutoff if no other evidence lands).
-    cam_ids = _entrance_cam_ids_for_store(db, store.id)
+    from app.models import Camera
+    cam_ids = [camera_id for (camera_id,) in db.query(Camera.id).filter(
+        Camera.store_id == store.id,
+        Camera.is_deleted.is_(False),
+        Camera.ai_enabled.is_(True),
+    ).all()]
     if not cam_ids:
         return
 
-    # Single chronological pull of person events for the entrance
-    # cameras only — one query (no N+1) backed by the existing
+    # Single chronological pull across all active store cameras — one query
+    # (no N+1) backed by the existing
     # (camera_id, timestamp) composite index.
     rows = (db.query(DetectionEvent.timestamp,
                      DetectionEvent.camera_id)
@@ -2232,7 +2204,7 @@ def _maybe_infer_open_for_store(db, store, shop_state) -> None:
             "confidence":        "medium",
             "opened_at_eat":     opened_at.strftime("%H:%M"),
             "opened_at_iso":     opened_at.isoformat(),
-            "signal":            "occupancy_two_in_five_min",
+            "signal":            "person_on_any_store_camera",
         }
         _create_info_alert(
             db, camera_id=anchor_cam_id, zone_id=None, store_id=store.id,
@@ -2258,7 +2230,8 @@ def _ensure_open_alert_exists(db, store, marker: dict, now_eat) -> None:
     today_start_utc = (now_eat.replace(hour=0, minute=0, second=0,
                                        microsecond=0)
                        .astimezone(timezone.utc))
-    opened_rules = ("shop_opened", "shop_opened_late", "shop_opened_inferred")
+    opened_rules = ("shop_opened", "shop_opened_late", "shop_opened_inferred",
+                    "shop_opened_via_occupancy", "shop_opened_before_hours")
     exists = (db.query(DetectionEvent.id)
                 .join(Camera, Camera.id == DetectionEvent.camera_id)
                 .filter(Camera.store_id == store.id,
@@ -2589,14 +2562,14 @@ def _store_intel_ai_v2(store, city, country, period_label, telemetry):
     """Claude Haiku BI insight -> (summary, recommendation). Best-effort;
     returns (None, None) when the LLM is unavailable."""
     api_key = getattr(settings, "anthropic_api_key", "") or ""
-    if not api_key or not getattr(settings, "agents_llm_enabled", True):
+    if not api_key or not settings.vlm_enabled:
         return None, None
     try:
         import anthropic
     except Exception:
         return None, None
     model = getattr(settings, "store_intel_llm_model", "claude-haiku-4-5")
-    timeout = float(getattr(settings, "agents_llm_timeout_seconds", 45))
+    timeout = float(settings.vlm_timeout_seconds)
     system = ("You are a retail business intelligence analyst for Vivo Fashion "
               "Group, a leading fashion retailer in East Africa. Analyze store "
               "telemetry and provide concise, actionable insights for store "

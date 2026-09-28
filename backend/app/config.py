@@ -80,17 +80,6 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = ""
 
-    # --- Object storage (MinIO/S3) ---
-    s3_endpoint: str = "http://minio:9000"
-    s3_region: str = "us-east-1"
-    s3_access_key: str = "minioadmin"
-    s3_secret_key: str = "minioadmin"
-    s3_bucket_clips: str = "clips"
-    s3_bucket_thumbs: str = "thumbnails"
-    s3_bucket_models: str = "models"
-    s3_bucket_datasets: str = "datasets"
-    s3_use_ssl: bool = False
-
     # --- Encryption (Fernet) ---
     credentials_fernet_key: str = ""
 
@@ -132,6 +121,16 @@ class Settings(BaseSettings):
     # trainer aborts with InsufficientDataError; the orchestrator projects
     # the same number before enqueueing so doomed jobs never queue.
     min_training_images: int = 50
+    # Ultralytics DataLoader worker processes. MUST stay 0 while the
+    # training worker runs Celery's prefork pool: prefork children are
+    # daemons, and Python forbids a daemon from having children, so any
+    # value above 0 kills the job instantly with "daemonic processes are
+    # not allowed to have children". Loading in-process is slower per
+    # epoch but these are small classifier datasets. Only raise this if
+    # the training worker moves to a non-daemonic pool — and note that
+    # solo/threads pools cannot be revoked, which the stall watchdog
+    # depends on. Env: TRAINING_DATALOADER_WORKERS.
+    training_dataloader_workers: int = Field(default=0, ge=0, le=16)
     # Dual-review training gate (codex data-integrity work). When True,
     # operator feedback is quarantined (eligible_for_training=false,
     # review_state=pending) until two independent reviewers agree —
@@ -166,7 +165,12 @@ class Settings(BaseSettings):
     # ---- aggressive feedback-driven retraining (Aug 2026) ----------------
     # After this many new True/False clicks on a detection type since its
     # last completed job → queue an incremental fine-tune immediately.
-    feedback_finetune_after: int = 10
+    # Evaluate the safe fine-tune gates after every accepted operator verdict.
+    # The orchestrator still requires a viable positive/negative mix and the
+    # trainer still enforces min_training_images, so this does not train a
+    # model from one click; it removes avoidable scheduling latency once the
+    # dataset is ready.
+    feedback_finetune_after: int = 1
     # After this many → queue a FULL retrain instead.
     feedback_full_retrain_after: int = 30
     # Feedback fine-tunes auto-deploy (registry-level) when the new map50
@@ -179,7 +183,12 @@ class Settings(BaseSettings):
     # alert fires (event rows always persist). Applies only to detectors
     # WITHOUT their own frame gates; entry_exit / shop_open_close exempt.
     # At the platform's 1-2 fps, 10 frames ≈ 5-10s — ops runs 4.
-    temporal_gate_min_frames: int = 10
+    # 10 discarded 17,507 detections in a week — every one of 100
+    # intrusion detections and 84% of staff_zone, because a person
+    # crossing a zone is not tracked for 10 straight frames at 1-2 fps.
+    # 4 is the value this comment has claimed ops runs since it was
+    # written; nothing ever set it.
+    temporal_gate_min_frames: int = 4
     # Retention for the metric_snapshots time-series table (days). The
     # dashboards' largest window is 30 days; 90 keeps triple margin.
     # 0 disables pruning entirely.
@@ -188,21 +197,6 @@ class Settings(BaseSettings):
     # by default so deploying migration 0040 cannot change alert behaviour.
     incident_foundations_enabled: bool = False
     delivery_outbox_enabled: bool = False
-    # ---- Live Activity Sentinel (dark-launched) --------------------------
-    # Consumes the vg:activity:* keys the Live Activity tab reads and
-    # turns occupancy patterns into alerts. Per-camera overrides live in
-    # detection_configs rows with detection_type="live_activity".
-    activity_sentinel_enabled: bool = False
-    activity_surge_people: int = 12
-    activity_surge_sustain_samples: int = 3
-    activity_store_surge_people: int = 30
-    activity_dead_scene_minutes: int = 0          # 0 = dead_scene rule off
-    activity_sentinel_interval_seconds: int = 60
-    # activity_presence rule — INFO alert on sustained activity
-    # (people >= threshold for N samples). Threshold 5 = the minimum
-    # people count required to trigger a presence alert, filtering out
-    # passersby / single browsers; the per-camera 10-min dedupe bucket
-    # bounds the rate.
     # Static-object (mannequin) filter for the activity feed: a tracked
     # person whose bbox centre moved less than this many pixels across
     # the last N frames is treated as a fixture and excluded from the
@@ -214,9 +208,6 @@ class Settings(BaseSettings):
     # Keep recently tracked people through short YOLO misses/occlusions.
     # Alert detectors still evaluate only the current frame.
     activity_track_hold_seconds: float = 5.0
-    activity_presence_enabled: bool = True
-    activity_presence_threshold: int = 5
-    activity_presence_sustain_samples: int = 2
     # 2 fps per camera by default — comfortably handles 40+ cameras on
     # CPU. Bump per camera via Camera.inference_fps if you need finer
     # tracking on a high-priority camera. Accepts INFERENCE_FPS (new
@@ -237,37 +228,38 @@ class Settings(BaseSettings):
     vlm_model: str = "claude-haiku-4-5"
     # Secret — env-only, never logged or committed.
     anthropic_api_key: str = ""
-    openai_api_key: str = ""
     vlm_timeout_seconds: int = 10
-
-    # ── Autonomous AI monitoring agents (app/tasks/agents.py) ──────────
-    # When enabled (and anthropic_api_key is set), each domain agent hands
-    # its deterministic telemetry to Claude for reasoning/diagnosis and
-    # natural-language recommendations. When disabled or the API is
-    # unreachable, agents fall back to their rule-based verdict so they
-    # never break. Shares anthropic_api_key with the VLM.
-    agents_llm_enabled: bool = True
-    # Provider order is fail-open: deterministic agent results are always
-    # retained. If the primary provider fails, the optional fallback is tried.
-    agents_llm_provider: str = "anthropic"
-    agents_llm_fallback_provider: str = "openai"
-    # Default (Sonnet) model — used by the two daily strategic agents
-    # (retail standards, inspection). The analytical agents override to
-    # claude-haiku-4-5 in agents.py.
-    agents_llm_model: str = "claude-sonnet-4-6"
-    agents_llm_openai_model: str = "gpt-5.4-mini"
-    # Emit a silent, resolved, evidence-backed in-app alert only when an
-    # autonomous agent transitions from warning/critical back to ok.
-    positive_agent_alerts_enabled: bool = True
-    positive_agent_alert_dedup_hours: int = Field(default=6, ge=1, le=168)
-    agents_llm_timeout_seconds: int = 45
-    # Persist a bounded sample of REAL camera frames examined by the live
-    # simulation probe. Evidence is quarantined and requires two-person review
-    # before it can become training data. Synthetic scenario rows are excluded.
-    simulation_evidence_enabled: bool = True
-    simulation_evidence_max_per_run: int = Field(default=10, ge=0, le=30)
-    simulation_evidence_dedupe_days: int = Field(default=7, ge=1, le=90)
-    simulation_evidence_control_fraction: float = Field(default=0.30, ge=0.0, le=1.0)
+    # --- AI alert verification (annotate, never hide) ---
+    # Writes a verdict next to every alert within seconds of creation.
+    # It NEVER suppresses, hides, reclassifies or delays an alert.
+    # Reuses anthropic_api_key; server flips VERIFIER_ENABLED once the
+    # key is set. NB: compose fallbacks override these defaults.
+    verifier_enabled: bool = False
+    verifier_model: str = "claude-sonnet-4-6"
+    verifier_parallel: int = 4
+    verifier_max_images: int = 3
+    # Alert types the verifier skips (no meaningful frame): verdict is
+    # written as uncertain / "non-visual alert type" with NO API call.
+    # Env VERIFIER_NON_VISUAL_TYPES takes a JSON list.
+    verifier_non_visual_types: list[str] = Field(
+        default_factory=lambda: [
+            "camera_offline", "system_health", "live_activity",
+            "store_intelligence", "sales_floor_insight", "entry_exit",
+            "occupancy", "occupancy_metrics", "unique_visitor",
+            "heatmap", "customer_journey", "demographic",
+        ],
+        validation_alias=AliasChoices("VERIFIER_NON_VISUAL_TYPES",
+                                      "verifier_non_visual_types"),
+    )
+    # Verifier provider: anthropic | openai | ollama. OpenAI and Ollama
+    # go through httpx (already a dependency) - no extra SDKs. Ollama
+    # reaches the HOST via host.docker.internal (compose adds the
+    # host-gateway mapping on api + worker-alerts).
+    verifier_provider: str = "anthropic"
+    openai_api_key: str = ""              # secret - env-only
+    verifier_openai_model: str = "gpt-4o-mini"
+    verifier_ollama_url: str = "http://host.docker.internal:11434"
+    verifier_ollama_model: str = "qwen2.5vl:7b"
     vlm_alert_types: list[str] = Field(
         default_factory=lambda: [
             "checkout_dwell", "staff_present", "trespass",
@@ -330,7 +322,7 @@ class Settings(BaseSettings):
     # slices so a full mixed fleet rotation cannot hide a critical view for
     # many minutes. The separate gap SLA is measured from actual task starts.
     inference_supervisor_interval_seconds: int = Field(default=30, ge=10, le=120)
-    inference_critical_slice_seconds: int = Field(default=15, ge=5, le=60)
+    inference_critical_slice_seconds: int = Field(default=15, ge=5, le=3600)
     inference_critical_requeue_seconds: int = Field(default=120, ge=30, le=600)
     inference_critical_gap_sla_seconds: int = Field(default=300, ge=60, le=900)
     inference_standard_gap_sla_seconds: int = Field(
@@ -382,21 +374,6 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "alerts@vivoguard.local"
     smtp_use_tls: bool = True
-    twilio_account_sid: str = ""
-    twilio_auth_token: str = ""
-    twilio_from_number: str = ""
-    # WhatsApp via Twilio Business API.
-    twilio_whatsapp_from: str = ""       # e.g. "whatsapp:+14155238886"
-    whatsapp_to: str = ""                # comma-separated "whatsapp:+254..."
-    whatsapp_priority_only: bool = True  # only high-priority alerts by default
-    # Weekly chain-briefing recipients (Monday 07:00). Comma-separated
-    # `whatsapp:+<msisdn>` numbers. Empty = no weekly briefing sent.
-    weekly_briefing_to: str = ""
-    # Dashboard escalation recipient — sustained queue + camera-health
-    # alerts go here regardless of per-store manager_phone wiring. The
-    # ops team wanted a single number that gets every high-priority
-    # nudge from the dashboard.
-    dashboard_alert_to: str = "whatsapp:+25441418586"
     # Phone numbers surfaced in the "What to do" alert steps so the
     # guidance is actionable. Blank = the card shows a generic phrase
     # ("building security", "IT support", "the store").
@@ -407,11 +384,15 @@ class Settings(BaseSettings):
     webhook_auth_header: str = ""
 
     # --- After-hours person alert tuning ---
-    # Pre-opening grace: staff arriving up to N minutes before opening
-    # don't trigger an URGENT "Person Detected After Hours" alert.
-    person_afterhours_grace_before_min: int = 60
-    # Symmetric post-closing grace for end-of-day staff egress.
-    person_afterhours_grace_after_min: int = 60
+    # Two distinct windows. TRADING is 09:30-20:00 (the fleet default in
+    # utils/business_hours) and gates operational alerts such as counter
+    # unattended. OCCUPANCY is 06:00-23:00 — staff legitimately open up
+    # early and close down late, so a person seen then is not an
+    # intruder. The graces below express occupancy as an offset from
+    # trading: 09:30 - 210min = 06:00, 20:00 + 180min = 23:00. Outside
+    # that, presence is a genuine after-hours intrusion.
+    person_afterhours_grace_before_min: int = 210
+    person_afterhours_grace_after_min: int = 180
     # A confirmed shop_closed event can occur later than the scheduled
     # close. Allow routine staff egress for 30 minutes after that observed
     # closure before escalating a person as an after-hours intrusion.
@@ -419,6 +400,23 @@ class Settings(BaseSettings):
     # Per-camera dedupe — once an after-hours person alert has fired
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30
+
+    # --- Alert quality control (the per camera+detector circuit breaker) ---
+    # When on, a pair whose reviewed false-alert rate crosses the threshold is
+    # quarantined: its alerts still persist but are flagged review_only and
+    # never pushed to the dashboard. Set false to let every detection reach
+    # the feed unfiltered — use it to measure raw detector precision, then
+    # turn it back on. Existing quarantines are ignored while off, not erased.
+    alert_quality_control_enabled: bool = True
+
+    # --- Fitting rooms (tasks/fitting_room.py) ---
+    # Occupancy is replayed from changing-room line crossings. Keep
+    # max_stay above overstay, or entries age out before they can alert.
+    fitting_room_alerts_enabled: bool = True
+    fitting_room_overstay_seconds: int = Field(default=600, ge=60, le=3600)
+    fitting_room_congestion_occupancy: int = Field(default=3, ge=2, le=20)
+    fitting_room_max_stay_seconds: int = Field(default=1800, ge=300, le=7200)
+    fitting_room_dedup_seconds: int = Field(default=900, ge=60, le=7200)
 
     # --- Sales-floor insight debugging ---
     # When True, sales_floor_insights_check skips the 15-min Redis
@@ -445,17 +443,6 @@ class Settings(BaseSettings):
     # now logs every generation so a silent disable can't recur.
     store_intelligence_enabled:  bool = True
     store_intel_llm_model: str = "claude-haiku-4-5"
-
-    # --- ROI / Value Report tuning ---
-    # Per-incident KES values used by /analytics/roi to estimate the
-    # value VivoGuard delivered this month. Conservative defaults —
-    # head office tunes via .env for their own pricing assumptions.
-    roi_theft_per_incident_kes:        int = 30000
-    roi_unauthorised_per_incident_kes: int = 8000
-    roi_queue_per_incident_kes:        int = 2000
-    # Monthly cost of running VivoGuard, used as the denominator in
-    # the ROI multiple. Set to the contracted SaaS + infra figure.
-    roi_monthly_cost_kes:              int = 45000
 
     # --- Shutter open/close detection method ---
     # When True, ShutterDetector runs its brightness + texture
@@ -496,6 +483,13 @@ class Settings(BaseSettings):
     # above ~2 fps where a real person reliably appears in multiple
     # consecutive frames. Env: GLASS_DOOR_MIN_FRAMES.
     glass_door_min_frames: int = 1
+    # How close a foot point must be to the entrance line SEGMENT for a
+    # side-flip to count as a crossing (normalised frame units). Without
+    # it the side test uses the infinite line, so people beyond a glass
+    # door register as entries and falsely open the store. Raise toward
+    # 0.4 if real crossings are missed; lower it if distant movement
+    # still counts. Env: ENTRY_EXIT_CROSSING_RADIUS.
+    entry_exit_crossing_radius: float = Field(default=0.25, ge=0.05, le=1.0)
 
     # --- Checkout dwell time ---
     # A single customer transaction at a counter zone. Sessions shorter
@@ -538,11 +532,48 @@ class Settings(BaseSettings):
     recording_source_retention_hours: int = 8
     recording_alert_clip_retention_hours: int = 48
 
+    # Cap on unreviewed uniform crops before the staff_zone harvester
+    # stops collecting. Pending rows are already eligible for chain
+    # training, so this only needs to stop the pool running away — at
+    # 500 it stalled collection inside a day.
+    uniform_harvest_pending_cap: int = Field(default=3000, ge=100, le=50000)
+
+    # --- Scene review: open-ended VLM sweep -------------------------
+    # Every other detector answers a question someone wrote in advance,
+    # so it can only ever find things we already thought of. This one
+    # shows a frame to the VLM and asks whether anything is worth a
+    # manager's attention -- ladders, contractors, cleaning mid-trade,
+    # children climbing displays, staff on a phone. No enumeration.
+    #
+    # Ships SHADOW by default: it runs, logs every verdict and writes a
+    # metric, but raises no alert. Counter-unattended became 58% of the
+    # operator feed because nothing watched its false-positive rate
+    # before it went live. Read a week of shadow verdicts first.
+    scene_review_enabled: bool = False
+    scene_review_shadow_mode: bool = True
+    # Cameras per sweep, walked round-robin from a Redis cursor, so the
+    # fleet is covered over several sweeps instead of in one burst that
+    # competes with inference for CPU.
+    scene_review_cameras_per_sweep: int = Field(default=12, ge=1, le=200)
+    scene_review_model: str = "qwen2.5vl:7b"
+    scene_review_max_tokens: int = Field(default=120, ge=32, le=512)
+    scene_review_timeout_seconds: float = Field(default=90.0, ge=5.0, le=600.0)
+    # One alert per camera per window: an ongoing situation (a ladder
+    # that stays up for an hour) should not alert on every sweep.
+    scene_review_dedup_seconds: int = Field(default=1800, ge=60)
+    scene_review_trading_hours_only: bool = True
+
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
     models_dir: str = "/data/models"
     datasets_dir: str = "/data/datasets"
     thumbnails_dir: str = "/data/thumbnails"
+    # Auto-harvested training crops (uniform_compliance + staff_identity).
+    # Must be a mounted volume in docker-compose.yml: the detectors that
+    # write here and the training worker that reads are separate
+    # containers, and an unmounted path is a per-container layer that
+    # dies with the container.
+    training_dir: str = "/data/training"
 
     # --- Derived helpers ---
     @property

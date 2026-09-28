@@ -619,7 +619,8 @@ class IntrusionDetector(Detector):
                     # • staff OUT of grace → ATTENTION (staff present
                     #   but at an unusual time)
                     # • unknown → URGENT (original behaviour)
-                    if level in ("high", "medium") and in_grace:
+                    if (level in ("high", "medium") and in_grace
+                            and time_context != "before_hours"):
                         staff_identity.mark_staff_track(
                             ctx, tid, source="opening_closing")
                         break
@@ -641,8 +642,8 @@ class IntrusionDetector(Detector):
                         continue
                     if level in ("high", "medium"):
                         # Staff outside the grace window — downgrade so
-                        # the manager sees it without being WhatsApped
-                        # in the middle of the night.
+                        # the manager sees it without it escalating in
+                        # the middle of the night.
                         staff_identity.mark_staff_track(
                             ctx, tid, source="afterhours_present")
                         priority = "attention"

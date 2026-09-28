@@ -235,6 +235,8 @@ class StaffPresenceDetector(Detector):
                 log.debug("business-hours check failed — treating store "
                           "as open", exc_info=True)
         in_opening_grace, in_closing_grace = self._opening_closing_grace(ctx, now)
+        # Store-wide, not per-zone — evaluate once and reuse below.
+        store_closed = self._store_closed_now(ctx)
         # P4: PolygonZone (foot-point) containment when a frame is available.
         _wh = None
         if ctx.frame_bgr is not None:
@@ -292,7 +294,15 @@ class StaffPresenceDetector(Detector):
                 recorder.record(ctx.db, "service_time", float(duration),
                                 camera_id=ctx.camera_id, store_id=ctx.store_id,
                                 zone_id=zone_id, aggregator="avg")
-            if duration >= self.SERVICE_TIME_ALERT_SECONDS:
+            # Trading-hours gate. A long counter session is a service
+            # problem, and there is no service to be slow about when the
+            # store is shut — this path had no gate at all, so a track
+            # lingering at a till overnight fired "counter" alerts at
+            # 22:19 and 06:55. The service_time METRIC above is
+            # deliberately still recorded either way.
+            if (duration >= self.SERVICE_TIME_ALERT_SECONDS
+                    and not store_closed
+                    and not in_opening_grace and not in_closing_grace):
                 out.append(DetectionEvent(
                     detection_type=self.detection_type, cls="long_service",
                     confidence=1.0, bbox_norm=[0, 0, 1, 1], zone_id=zone_id,
@@ -363,6 +373,15 @@ class StaffPresenceDetector(Detector):
             if attended:
                 state["last_attended_at"] = now
                 state["below_40_since"]   = None
+            elif store_closed:
+                # Nobody is expected at the counter while the store is
+                # shut, so the unattended countdown must not accumulate
+                # across the closed period. Without this the first
+                # evaluate after opening sees a run that began the
+                # previous evening and fires "unattended for 675
+                # minutes". last_attended_at is left alone so the alert
+                # body still reports the genuine last activity.
+                state["below_40_since"] = None
             else:
                 # Mark below-40 transition exactly once.
                 if score < self.SCORE_UNATTENDED and state["below_40_since"] is None:
@@ -388,7 +407,7 @@ class StaffPresenceDetector(Detector):
             # store opens or after it closes — staff aren't expected. The
             # grace check above only covers the ±minutes around open/close;
             # this suppresses the whole closed period (e.g. 07:37 EAT).
-            if self._store_closed_now(ctx):
+            if store_closed:
                 continue
             below_since = state.get("below_40_since")
             if below_since is None:
@@ -480,25 +499,26 @@ class StaffPresenceDetector(Detector):
             return False, False
 
     def _store_closed_now(self, ctx: DetectorContext) -> bool:
-        """True when the store is currently CLOSED, so a counter-unstaffed
-        alert (expected overnight / before opening) is suppressed.
+        """True when the store is outside TRADING hours, so a
+        counter-unstaffed alert (nobody is due at the till yet) is
+        suppressed.
 
         Unlike `_opening_closing_grace`, which only covers the ±minutes
-        around open/close, this covers the ENTIRE closed period. Uses the
-        store's configured business hours when available, else a default
-        08:00-21:00 EAT window. If the timezone can't be resolved it
-        treats the store as open (returns False) so a config error never
-        silently silences alerts."""
+        around open/close, this covers the ENTIRE closed period. Delegates
+        to is_open_with_default so an unconfigured store follows the fleet
+        trading schedule (09:30-20:00, Sun 10:00-19:00) rather than a
+        second, wider window defined here — the old local 08:00-21:00
+        fallback let "Counter Left Unattended" fire at 08:01, ninety
+        minutes before trading starts. If the timezone can't be resolved
+        it treats the store as open so a config error never silently
+        silences alerts."""
         tz = ctx.store_timezone or "Africa/Nairobi"
         try:
-            from app.utils.business_hours import is_open, localised_now
+            from app.utils.business_hours import is_open_with_default, localised_now
             now_local = localised_now(tz)
         except Exception:
             return False
-        if ctx.business_hours:
-            return not is_open(ctx.business_hours, now_local)
-        # No configured hours → default EAT operating window.
-        return not (8 <= now_local.hour < 21)
+        return not is_open_with_default(ctx.business_hours, now_local)
 
 
 # ---------------------------------------------------------------------------
@@ -552,8 +572,12 @@ class AisleDwellDetector(Detector):
     # ─ Sustained-duration knobs ────────────────────────────────────
     # Quick pass-throughs are filtered out — only browses ≥3 s count.
     MIN_BROWSE_SECONDS  = 3.0
-    UNATTENDED_CUSTOMERS = 8         # ≥N customers + no staff = alert
-    UNATTENDED_MIN_CUSTOMERS = 5     # below this, never alert
+    # ≥N customers in the zone with no staff = alert. Was 8, which no
+    # Vivo aisle ever reaches — the detector was armed on 59 cameras and
+    # produced 14 alerts in a week. Override per camera with
+    # detection_configs.extra.unattended_customers.
+    UNATTENDED_CUSTOMERS = 3
+    UNATTENDED_MIN_CUSTOMERS = 2     # absolute floor, whatever the override
     UNATTENDED_SECONDS   = 3 * 60    # sustained gap before alert
     UNATTENDED_DEDUP_SECONDS = 10 * 60
     STAFF_LEFT_GRACE_SECONDS = 2 * 60   # staff just left → don't alert
@@ -585,8 +609,11 @@ class AisleDwellDetector(Detector):
 
     def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
         cfg = ctx.config.get(self.detection_type)
-        if not cfg or not cfg.get("enabled"):
+        if not isinstance(cfg, dict) or not cfg.get("enabled"):
             return []
+        cfg_extra = cfg.get("extra")
+        if not isinstance(cfg_extra, dict):
+            cfg_extra = {}
         # 'aisle' is the canonical tag; 'dwell' is the legacy alias —
         # accept both so older zone configs keep feeding metrics.
         zones = [z for z in ctx.zones
@@ -717,10 +744,15 @@ class AisleDwellDetector(Detector):
                 staff_recently = (
                     now - self._last_staff_seen.get(gap_key, 0.0)
                     < self.STAFF_LEFT_GRACE_SECONDS)
-                qualifies = (len(customers) >= self.UNATTENDED_CUSTOMERS
+                # Per-camera override: a busy Junction aisle and a quiet
+                # Eldoret one should not share one number.
+                need = max(self.UNATTENDED_MIN_CUSTOMERS,
+                           int(cfg_extra.get(
+                               "unattended_customers",
+                               self.UNATTENDED_CUSTOMERS)))
+                qualifies = (len(customers) >= need
                              and not staff
-                             and not staff_recently
-                             and len(customers) >= self.UNATTENDED_MIN_CUSTOMERS)
+                             and not staff_recently)
                 if qualifies:
                     self._unattended_since.setdefault(gap_key, now)
                 else:

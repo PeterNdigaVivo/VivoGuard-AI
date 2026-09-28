@@ -22,16 +22,14 @@ if [ ! -f .env ]; then
   JWT=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))" 2>/dev/null \
         || docker run --rm python:3.11-slim python -c "import secrets; print(secrets.token_urlsafe(48))")
   PG_PW=$(openssl rand -base64 24 | tr -d '/=+')
-  S3_PW=$(openssl rand -base64 24 | tr -d '/=+')
 
   sed -i "s|^CREDENTIALS_FERNET_KEY=.*|CREDENTIALS_FERNET_KEY=${FERNET}|" .env
   sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${JWT}|"                            .env
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PG_PW}|"            .env
-  sed -i "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=${S3_PW}|"                    .env
 
   echo
   echo "Edit .env to set BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD,"
-  echo "USE_GPU, SMTP_*, TWILIO_*, WEBHOOK_*, then re-run this script."
+  echo "USE_GPU and any required notification integrations, then re-run this script."
   exit 0
 fi
 

@@ -113,7 +113,6 @@ secrets:
 # ---- Notification channels (env-only; blank = inactive) ---------------
 notifications:
   smtp:    { host: "", port: 587, user: "", password: "", from: "alerts@vivoguard.local", tls: true }
-  twilio:  { sid: "", token: "", fromNumber: "" }
   webhook: { url: "", authHeader: "" }
 
 # ---- Misc -------------------------------------------------------------

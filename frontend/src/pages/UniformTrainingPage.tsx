@@ -392,8 +392,8 @@ export default function UniformTrainingPage() {
                   ))}
                 </div>
                 <div className="text-[11px] text-slate-400 dark:text-slate-400 mt-1">
-                  JPG / PNG · up to 5 MB each · phone photos, screenshots,
-                  WhatsApp images all work
+                  JPG / PNG · up to 5 MB each · phone photos and
+                  screenshots both work
                 </div>
               </div>
             </Card>

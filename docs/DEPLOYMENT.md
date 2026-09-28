@@ -113,8 +113,8 @@ NVIDIA device. Alert, training and recorder workers retain the smaller CPU
 image and cannot overwrite the CUDA tag during a full build. Keep the shared
 `.env` setting `GPU_BACKEND=cpu`; the override applies CUDA only where needed.
 
-For a production host migration, follow the RTX 6000 Ada runbook in
-[`GEX44_MIGRATION_RUNBOOK.md`](GEX44_MIGRATION_RUNBOOK.md). A GPU does not by
+For a production host migration, follow the GEX45 Blackwell runbook in
+[`GEX45_MIGRATION_RUNBOOK.md`](GEX45_MIGRATION_RUNBOOK.md). A GPU does not by
 itself increase the number of long-lived camera tasks, so concurrency and
 camera coverage must be measured rather than assumed.
 

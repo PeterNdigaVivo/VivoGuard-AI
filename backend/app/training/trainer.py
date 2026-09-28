@@ -405,6 +405,8 @@ def run_job(job_id: int) -> None:
             exist_ok=True,
             device=("0" if settings.use_gpu else "cpu"),
             augment=augment,
+            # 0 under Celery's prefork pool — see config comment.
+            workers=settings.training_dataloader_workers,
         )
         # Augmentation kwargs (defaults merged with any per-job override),
         # validated against the INSTALLED ultralytics' config schema so an

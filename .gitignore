@@ -35,10 +35,20 @@ data/recordings/*
 data/models/*
 data/datasets/*
 data/thumbnails/*
+data/training/*
 !data/recordings/.gitkeep
 !data/models/.gitkeep
 !data/datasets/.gitkeep
 !data/thumbnails/.gitkeep
+!data/training/.gitkeep
+
+# --- Local backups / deployment editor copies ---
+# Database dumps and environment backups can contain production data or
+# secrets and must remain outside Git.
+backups/
+*.dump
+*.bak
+*.save
 
 # --- Vendor proprietary SDK blobs (must NOT be committed) ---
 vendor_sdk/*

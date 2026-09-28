@@ -14,9 +14,9 @@ import { stores as storesApi, type Store } from '@/api/stores'
 type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
-// actionable tabs (urgent / attention / resolved / all). Everything else —
-// including the routine sales_floor_insight + system_health heartbeats —
-// flows into the actionable tabs by severity/status like any other alert.
+// actionable tabs (urgent / attention / resolved / all). system_health never
+// arrives here at all — the API drops every subtype of it (see
+// _operator_alert_filter); it lives on the System Health page instead.
 const STORE_INTEL_TYPE = 'store_intelligence'
 const POSITIVE_TYPE = 'positive_operational'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
@@ -31,6 +31,9 @@ interface ProofOfLife {
   now: string
   state: 'active' | 'degraded' | 'offline'
   latest_detection_age_seconds: number | null
+  latest_detection_type: string | null
+  latest_detection_is_alert: boolean
+  latest_detection_disposition: 'alert' | 'filtered' | 'metric_only' | null
   latest_alert_age_seconds: number | null
   pipeline_age_seconds: number | null
   cameras_total: number
@@ -48,11 +51,21 @@ function ageLabel(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)}h ago`
 }
 
+function detectionLabel(proof: ProofOfLife): string {
+  const kind = proof.latest_detection_type?.replaceAll('_', ' ') ?? 'unknown'
+  if (proof.latest_detection_is_alert) return `${kind} · alerted`
+  if (proof.latest_detection_disposition === 'metric_only') return `${kind} · metric only`
+  if (proof.latest_detection_disposition === 'filtered') return `${kind} · filtered`
+  return `${kind} · not alerted`
+}
+
 export default function AlertsPage() {
   const [items, setItems] = useState<Alert[]>([])
   const [range, setRange] = useState<DateRange>(() => rangeFor('today'))
   const [quick, setQuick] = useState<Quick>('all')
   const [storeId, setStoreId] = useState<string>('')
+  // AI verdict filter (annotate-only): '' = All, never hides by default.
+  const [aiVerdict, setAiVerdict] = useState<string>('')
   const [search, setSearch] = useState('')
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(true)
@@ -69,6 +82,9 @@ export default function AlertsPage() {
     unread_urgent: 0,
     critical_today: 0, high_today: 0, medium_today: 0, low_today: 0,
     calibration_today: 0, operational_today_count: 0,
+    ai_true_today: 0, ai_false_today: 0,
+    ai_uncertain_today: 0, ai_pending_today: 0,
+    ai_verifier_enabled: false,
     avg_response_seconds: null as number | null,
     today_count: 0, yesterday_count: 0,
     trend_vs_yesterday_pct: null as number | null,
@@ -90,7 +106,7 @@ export default function AlertsPage() {
     const load = () => api<ProofOfLife>('/system/proof-of-life')
       .then(setProof).catch(() => setProof(null))
     load()
-    const timer = setInterval(load, 15_000)
+    const timer = setInterval(load, 60_000)
     return () => clearInterval(timer)
   }, [])
 
@@ -105,6 +121,7 @@ export default function AlertsPage() {
     try {
       const page = await alertsApi.list({
         store_id: storeId || undefined,
+        ai_verdict: aiVerdict || undefined,
         since: range.since,
         until: range.until,
         limit: PAGE_SIZE,
@@ -126,7 +143,7 @@ export default function AlertsPage() {
         setLoadingMore(false)
       }
     }
-  }, [storeId, range.since, range.until])
+  }, [storeId, aiVerdict, range.since, range.until])
 
   const reload = useCallback(() => { void loadPage(false) }, [loadPage])
 
@@ -172,9 +189,7 @@ export default function AlertsPage() {
   }, [items])
 
   // Client-side quick-filter + search over the loaded window. The
-  // actionable tabs exclude only store_intelligence (which has its own
-  // "Store Update" tab); sales_floor_insight + system_health flow into
-  // the "All" tab (and the others by severity) like normal alerts.
+  // Actionable tabs exclude store intelligence, which has its own tab.
   const filtered = useMemo(() => {
     let rows = items
     if (quick === 'store') {
@@ -208,8 +223,7 @@ export default function AlertsPage() {
 
   // Per-bucket counts derived from the loaded items, so each filter
   // button's badge equals what the user will actually see when they
-  // click it. Only store_intelligence is excluded from the actionable
-  // buckets; it has its own Store Update tab.
+  // click it. Store intelligence has its own Store Update tab.
   const counts = useMemo(() => {
     const operational = items.filter(_isOperational)
     return {
@@ -363,6 +377,16 @@ export default function AlertsPage() {
           {stores.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
         </select>
 
+        <select className="border rounded px-2 py-1 text-sm"
+                title="AI verification filter (annotate-only; All shows every alert)"
+                value={aiVerdict} onChange={e => setAiVerdict(e.target.value)}>
+          <option value="">AI: All</option>
+          <option value="true_alert">AI: Real</option>
+          <option value="false_alert">AI: Likely false</option>
+          <option value="uncertain">AI: Uncertain</option>
+          <option value="pending">AI: Pending</option>
+        </select>
+
         <input value={search} onChange={e => setSearch(e.target.value)}
                placeholder="Search alerts…"
                className="border rounded px-2 py-1 text-sm flex-1 min-w-[160px]" />
@@ -446,14 +470,19 @@ function ProofOfLifeCard({ proof }: { proof: ProofOfLife }) {
           <div className="font-semibold">{title}</div>
           <div className="text-xs opacity-75">Pipeline heartbeat {ageLabel(proof.pipeline_age_seconds)}</div>
         </div>
-        <div><span className="text-xs opacity-70">Latest detection</span><br /><strong>{ageLabel(proof.latest_detection_age_seconds)}</strong></div>
+        <div>
+          <span className="text-xs opacity-70">Latest AI activity</span><br />
+          <strong>{ageLabel(proof.latest_detection_age_seconds)}</strong>
+          <div className="text-[11px] opacity-70">{detectionLabel(proof)}</div>
+        </div>
         <div><span className="text-xs opacity-70">Latest alert</span><br /><strong>{ageLabel(proof.latest_alert_age_seconds)}</strong></div>
         <div><span className="text-xs opacity-70">Fresh feeds</span><br /><strong>{proof.cameras_fresh}/{proof.cameras_total}</strong></div>
         <div><span className="text-xs opacity-70">Active / waiting</span><br /><strong>{proof.cameras_actively_inferencing ?? '—'} / {proof.cameras_waiting_for_worker ?? '—'}</strong></div>
         <div><span className="text-xs opacity-70">Full rotation</span><br /><strong>{proof.estimated_full_rotation_seconds == null ? '—' : `${Math.ceil(proof.estimated_full_rotation_seconds / 60)} min`}</strong></div>
       </div>
       <div className="mt-2 text-xs opacity-75">
-        A quiet alert feed is healthy only when detections and the pipeline heartbeat remain current.
+        Routine metrics and filtered detections confirm AI activity but do not create incidents.
+        Alert-worthy detections always appear in the alert feed.
       </div>
     </Card>
   )
@@ -495,6 +524,8 @@ function ExecutiveSummaryBar({ summary }: {
     medium_today:   number; low_today:  number
     calibration_today: number
     resolved_today: number
+    ai_true_today?: number; ai_false_today?: number
+    ai_uncertain_today?: number; ai_pending_today?: number
     avg_response_seconds: number | null
     today_count: number; yesterday_count: number
     trend_vs_yesterday_pct: number | null
@@ -537,6 +568,10 @@ function ExecutiveSummaryBar({ summary }: {
                  tone="text-blue-700 bg-blue-50 border-blue-200" />
         <SevPill label="Calibration" emoji="🧪" count={summary.calibration_today}
                  tone="text-violet-700 bg-violet-50 border-violet-200" />
+        <span className="text-xs text-slate-500 dark:text-slate-300 ml-2"
+              title="AI verification counts (annotate-only)">
+          AI: {summary.ai_true_today ?? 0} real / {summary.ai_false_today ?? 0} likely false / {summary.ai_uncertain_today ?? 0} uncertain / {summary.ai_pending_today ?? 0} pending
+        </span>
         <span className="text-slate-300">|</span>
         <span className="text-emerald-700">
           ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved

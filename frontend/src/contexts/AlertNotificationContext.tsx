@@ -3,7 +3,7 @@
 // and exposes mute + per-type settings (all persisted to localStorage).
 //
 // Mounted inside <Protected> (authenticated pages only). Reuses the existing
-// /ws/alerts push for immediacy AND a 15s poll as a fallback.
+// /ws/alerts push for immediacy AND a low-frequency poll as a fallback.
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
@@ -22,7 +22,7 @@ const DEFAULTS: NotifSettings = { urgentOnly: true, allAlerts: false, sound: tru
 const SETTINGS_KEY = 'vg_notif_settings'
 const MUTE_KEY = 'vg_notif_muted'
 const NOTIFIED_KEY = 'vg_notif_ids'
-const POLL_MS = 15_000
+const POLL_MS = 60_000
 const MAX_TRACKED = 300
 
 // Inline "logo" so the browser notification has an icon with no file dep.

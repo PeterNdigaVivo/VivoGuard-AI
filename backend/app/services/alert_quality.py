@@ -8,6 +8,7 @@ from math import sqrt
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
     DetectionEvent, EvidenceManifest, RecordingClip, Store,
@@ -92,6 +93,10 @@ def refresh_pair_control(db: Session, camera_id: int,
     Recovery is deliberately never automatic.  A human must review at least
     ``RECOVERY_SAMPLES`` newer decisions and explicitly release the pair.
     """
+    # Don't open new breakers while the control is switched off, otherwise a
+    # deliberate unfiltered run would quarantine half the fleet on its way.
+    if not settings.alert_quality_control_enabled:
+        return None
     metrics = pair_metrics(db, camera_id, detection_type)
     state = (db.query(AlertQualityControl)
                .filter(AlertQualityControl.camera_id == camera_id,
@@ -177,6 +182,11 @@ def set_manual_mode(db: Session, camera_id: int, detection_type: str,
 
 def apply_quality_control(db: Session, alert: Alert,
                           event: DetectionEvent) -> AlertQualityControl | None:
+    # Breaker disabled — every alert reaches the feed unfiltered. Existing
+    # quarantine rows are left untouched so turning it back on restores the
+    # previous state rather than starting from a clean slate.
+    if not settings.alert_quality_control_enabled:
+        return None
     state = (db.query(AlertQualityControl)
                .filter(AlertQualityControl.camera_id == event.camera_id,
                        AlertQualityControl.detection_type == event.detection_type)

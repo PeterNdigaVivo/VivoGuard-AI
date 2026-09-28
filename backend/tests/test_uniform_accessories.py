@@ -1,0 +1,92 @@
+"""Accessory rules must override stale uniform-model predictions."""
+from types import SimpleNamespace
+
+import pytest
+
+np = pytest.importorskip("numpy")
+cv2 = pytest.importorskip("cv2")
+
+from app.ai.detectors.uniform_compliance import (
+    FULL_COMPLIANT,
+    UniformComplianceDetector,
+    _clearly_inside_staff_zone,
+    _missing_nametag_alerts_enabled,
+    uniform_features,
+)
+
+
+def _compliant_staff_frame(*, badge: bool = True):
+    frame = np.full((240, 120, 3), 220, dtype=np.uint8)
+    frame[:130, :] = (25, 25, 25)  # black uniform top
+    frame[130:, :] = (20, 20, 20)  # black trousers
+    orange = (0, 140, 255)
+    cv2.line(frame, (48, 35), (60, 105), orange, 4)
+    cv2.line(frame, (72, 35), (60, 105), orange, 4)
+    if badge:
+        cv2.rectangle(frame, (48, 82), (73, 96), (245, 245, 245), -1)
+    return frame
+
+
+def test_orange_lanyard_and_white_card_are_valid_nametag() -> None:
+    features = uniform_features(_compliant_staff_frame(), [0, 0, 1, 1])
+
+    assert features is not None
+    assert features["top_ok"] is True
+    assert features["has_lanyard"] is True
+    assert features["has_nametag"] is True
+
+
+def test_visible_accessories_override_no_lanyard_model_prediction() -> None:
+    frame = _compliant_staff_frame()
+    detection = {"cls": "person", "conf": 0.9, "bbox_norm": [0, 0, 1, 1]}
+    context = SimpleNamespace(
+        frame_bgr=frame,
+        raw_detections=[
+            {"cls": "no_lanyard", "conf": 0.99, "bbox_norm": [0, 0, 1, 1]},
+        ],
+    )
+
+    state = UniformComplianceDetector()._classify(
+        context, detection, {"confidence_threshold": 0.5, "extra": {}},
+    )
+
+    assert state == FULL_COMPLIANT
+
+
+def test_orange_lanyard_alone_overrides_missing_tag_prediction() -> None:
+    frame = _compliant_staff_frame(badge=False)
+    detection = {"cls": "person", "conf": 0.9, "bbox_norm": [0, 0, 1, 1]}
+    context = SimpleNamespace(
+        frame_bgr=frame,
+        raw_detections=[
+            {"cls": "no_lanyard", "conf": 0.99, "bbox_norm": [0, 0, 1, 1]},
+        ],
+    )
+
+    features = uniform_features(frame, detection["bbox_norm"])
+    state = UniformComplianceDetector()._classify(
+        context, detection, {"confidence_threshold": 0.5, "extra": {}},
+    )
+
+    assert features is not None
+    assert features["has_lanyard"] is True
+    assert features["has_nametag"] is False
+    assert state == FULL_COMPLIANT
+
+
+def test_missing_nametag_alerts_require_explicit_camera_opt_in() -> None:
+    assert _missing_nametag_alerts_enabled({"extra": {}}) is False
+    assert _missing_nametag_alerts_enabled({
+        "extra": {"missing_nametag_alerts_enabled": True},
+    }) is True
+
+
+def test_person_touching_counter_boundary_is_not_staff() -> None:
+    counter = [[0.2, 0.6], [0.8, 0.6], [0.8, 1.0], [0.2, 1.0]]
+    # Feet touch the counter region, but most of the customer remains outside.
+    assert _clearly_inside_staff_zone(
+        [0.4, 0.2, 0.6, 0.9], counter,
+    ) is False
+    assert _clearly_inside_staff_zone(
+        [0.4, 0.65, 0.6, 0.95], counter,
+    ) is True

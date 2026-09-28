@@ -172,6 +172,11 @@ export default function AnnotationPage() {
     nav(`/training/jobs/${job.id}`)
   }
 
+  const directTrainingAllowed = classes.length > 0 && trainableCount >= 25
+  const trainingHint = classes.length === 0
+    ? 'Hard-negative pools are used through incremental fine-tuning with a positive dataset.'
+    : `${trainableCount}/25 approved images; 25 are needed for a meaningful validation split.`
+
   return (
     <div className="p-6">
       <PageHeader
@@ -179,7 +184,8 @@ export default function AnnotationPage() {
         actions={
           <>
             <Button variant="ghost" onClick={() => nav('/training')}>Back</Button>
-            <Button onClick={startTraining} disabled={trainableCount < 5}>
+            <Button onClick={startTraining} disabled={!directTrainingAllowed}
+                    title={directTrainingAllowed ? undefined : trainingHint}>
               Start training ({trainableCount} approved)
             </Button>
           </>

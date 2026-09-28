@@ -2,11 +2,15 @@
 
 Two modes, model-first then rule-based fallback:
 
-1. Custom-model mode: if the assigned model emits class labels
+1. Accessory evidence: a valid uniform top with an orange lanyard is
+   compliant. The attached white card strengthens the result but is not
+   required at distant CCTV resolution.
+
+2. Custom-model mode: if the assigned model emits class labels
    `uniform_ok` / `uniform_violation` / `no_lanyard` / `civilian`,
    the highest-confidence detection per person wins.
 
-2. Rule-based mode (works immediately, no training): for each person
+3. Rule-based mode (works immediately, no training): for each person
    standing in a `counter` / `staff` zone, analyse the upper-body
    crop in HSV —
      • correct uniform colour: Vivo black OR burgundy/maroon top
@@ -24,7 +28,7 @@ only score staff who should be in uniform.
 Writes the `uniform_compliance_pct` metric (rolling avg, 1.0 ok /
 0.5 partial / 0.0 violation). Alerts:
   • violation sustained > 2 min  → "staff uniform violation" (warning)
-  • no lanyard sustained > 5 min → "staff missing name tag"  (info)
+  • optional name-tag enforcement (high-resolution cameras only)
   • > 3 violations in a day      → "repeated uniform violations" (warning)
 Dedup: same track + same violation, max once per 30 min.
 """
@@ -36,15 +40,15 @@ from datetime import datetime, timezone
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
-from app.ai.zone_logic import bbox_in_zone, iou, zone_contains
+from app.ai.zone_logic import bbox_in_zone, iou, point_in_polygon
 
 log = logging.getLogger(__name__)
 
 
 # Compliance state constants — also the alert `cls` strings.
 # Spec P5: six-state classifier.
-#   FULL_COMPLIANT    correct top + lanyard + nametag        → no alert
-#   PARTIAL_COMPLIANT correct top + lanyard, no nametag      → ATTENTION 5min
+#   FULL_COMPLIANT    correct top + orange lanyard, or strap + tag → no alert
+#   PARTIAL_COMPLIANT correct top without conclusive tag evidence → ATTENTION 5min
 #   COLOR_ONLY        correct top only                       → ATTENTION 5min (folded with partial)
 #   NON_COMPLIANT     wrong colour / no uniform top          → URGENT 2min
 #   CUSTOMER          not in staff zone                      → skip
@@ -76,17 +80,39 @@ _METRIC = {
 # Sustained-duration thresholds (seconds) before an alert fires.
 VIOLATION_SECONDS  = 2 * 60       # NON_COMPLIANT sustained
 NO_LANYARD_SECONDS = 5 * 60       # PARTIAL/COLOR sustained
+# Was 5 minutes, which defeated the point: an unauthorised person at a
+# till is there for seconds, so the detector never assessed the case it
+# exists to catch. 90s still excludes a customer leaning over the counter.
 # Time in the staff/counter zone before we'll trust that someone really
 # works there. NON_COMPLIANT alerts only fire after this dwell — a
 # customer who briefly enters a staff zone in street clothes must not
 # trigger a uniform-violation alert.
-CONFIRMED_STAFF_SECONDS = 5 * 60
+CONFIRMED_STAFF_SECONDS = 90
 # Per (track, kind) dedup window.
 DEDUP_SECONDS = 30 * 60
 # Repeated-violations-today threshold.
 REPEAT_THRESHOLD = 3
 
 STAFF_ZONE_TAGS = {"counter", "staff", "staff_zone"}
+
+
+def _missing_nametag_alerts_enabled(cfg: dict) -> bool:
+    """Negative accessory evidence is unsafe on distant CCTV by default."""
+    return bool((cfg.get("extra") or {}).get(
+        "missing_nametag_alerts_enabled", False,
+    ))
+
+
+def _clearly_inside_staff_zone(bbox_norm: list[float], polygon: list) -> bool:
+    """Require both body centre and feet inside before treating someone as staff."""
+    x1, y1, x2, y2 = bbox_norm
+    centre_x = (x1 + x2) / 2.0
+    centre_y = (y1 + y2) / 2.0
+    foot_y = y2 - max(0.001, (y2 - y1) * 0.02)
+    return (
+        point_in_polygon(centre_x, centre_y, polygon)
+        and point_in_polygon(centre_x, foot_y, polygon)
+    )
 
 
 def uniform_features(frame_bgr, bbox_norm) -> dict | None:
@@ -102,10 +128,10 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
                     are uniformly dark and we want to avoid
                     counting customer denim/jeans as match)
     LANYARD ZONE (top 15-65%, centre 30-70% of width):
-      • orange: H 5..25, S ≥ 179, V ≥ 179
+      • orange: H 3..32, S ≥ 100, V ≥ 80
       • dark  : V < 128 (any H)
     NAMETAG ZONE (top 20-60%, centre 20-80% of width):
-      • white rectangle: S < 77, V > 179
+      • white rectangle: S < 100, V > 145
 
     Return dict keys:
       top_ok, top_share, top_black_share, top_maroon_share, top_is_black
@@ -186,10 +212,14 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             lhsv = cv2.cvtColor(lanyard_zone, cv2.COLOR_BGR2HSV)
             lH, lS, lV = lhsv[:, :, 0], lhsv[:, :, 1], lhsv[:, :, 2]
             lt = lH.size or 1
-            orange = (((lH >= 5) & (lH <= 25) & (lS >= 179) & (lV >= 179))
+            # Orange shifts toward brown and loses saturation in compressed
+            # overhead CCTV, so use a wider band than phone-camera training.
+            orange = (((lH >= 3) & (lH <= 32) & (lS >= 100) & (lV >= 80))
                       .sum() / lt)
             dark   = (lV < 128).sum() / lt
-            has_lanyard = bool(orange >= 0.005 or dark >= 0.08)
+            has_lanyard = bool(orange >= 0.002 or dark >= 0.08)
+        else:
+            orange = 0.0
 
         # Nametag zone — top 20..60%, centre 20..80% width. White card.
         nt_y1 = py1 + int(bh * 0.20); nt_y2 = py1 + int(bh * 0.60)
@@ -200,8 +230,24 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             nhsv = cv2.cvtColor(nametag_zone, cv2.COLOR_BGR2HSV)
             nS, nV = nhsv[:, :, 1], nhsv[:, :, 2]
             nt = nS.size or 1
-            white = ((nS < 77) & (nV > 179)).sum() / nt
-            has_nametag = bool(white >= 0.015)
+            white_mask = ((nS < 100) & (nV > 145)).astype("uint8")
+            white = white_mask.sum() / nt
+            # Cards are small at NVR resolution. Require either a useful
+            # white share or a compact rectangular component, which avoids
+            # depending on a large pixel-percentage threshold.
+            min_area = max(4, int(nt * 0.0015))
+            rectangular = any(
+                area >= min_area and 0.45 <= width / max(height, 1) <= 5.0
+                and area / max(width * height, 1) >= 0.45
+                for contour in cv2.findContours(
+                    white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )[0]
+                for x, y, width, height in [cv2.boundingRect(contour)]
+                for area in [cv2.contourArea(contour)]
+            )
+            has_nametag = bool(white >= 0.006 or rectangular)
+        else:
+            white = 0.0
 
         # Confidence — strengthened when the bottom half also reads
         # black. The dual-region signal is the strongest "this is a
@@ -220,6 +266,8 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
             "dual_black":       dual_black,
             "has_lanyard":      has_lanyard,
             "has_nametag":      has_nametag,
+            "orange_share":     float(orange),
+            "white_share":      float(white),
             "confidence":       confidence,
         }
     except Exception:
@@ -261,8 +309,11 @@ class UniformComplianceDetector(Detector):
         if not cfg or not cfg.get("enabled"):
             return []
 
-        staff_zones = [z for z in ctx.zones
-                       if STAFF_ZONE_TAGS & set(z.get("detection_types_json") or [])]
+        staff_zones = [
+            z for z in ctx.zones
+            if (STAFF_ZONE_TAGS & set(z.get("detection_types_json") or []))
+            and not z.get("suppressed")
+        ]
         # Without a staff/counter zone we have no way to tell staff from
         # customers, so we don't guess — operators must tag the counter.
         if not staff_zones:
@@ -272,12 +323,6 @@ class UniformComplianceDetector(Detector):
         out: list[DetectionEvent] = []
         scored = 0
         ok_like = 0
-        # P4: PolygonZone (foot-point) containment when a frame is available.
-        _wh = None
-        if ctx.frame_bgr is not None:
-            _h, _w = ctx.frame_bgr.shape[:2]
-            _wh = (_w, _h)
-
         # Each person currently standing in a staff zone gets scored.
         for det in ctx.raw_detections:
             if det["cls"] not in COCO_PERSON:
@@ -285,14 +330,17 @@ class UniformComplianceDetector(Detector):
             # Which (if any) staff/counter tag this detection sits in —
             # also feeds the shared time-in-zone registry.
             zone_tag: str | None = None
+            zone_id: int | None = None
             for z in staff_zones:
-                if zone_contains(det["bbox_norm"], z["polygon_coords_json"],
-                                 zone_id=z["id"], frame_wh=_wh):
+                if _clearly_inside_staff_zone(
+                    det["bbox_norm"], z["polygon_coords_json"],
+                ):
                     tags = set(z.get("detection_types_json") or [])
                     if "staff_zone" in tags:
                         zone_tag = "staff_zone"
                     else:
                         zone_tag = "counter"
+                    zone_id = z.get("id")
                     break
             if zone_tag is None:
                 continue   # civilian / not at the counter — skip
@@ -364,8 +412,9 @@ class UniformComplianceDetector(Detector):
             if state == NON_COMPLIANT and elapsed_in_zone < CONFIRMED_STAFF_SECONDS:
                 continue
 
-            evt = self._maybe_alert(ctx, det, tid, state, now)
+            evt = self._maybe_alert(ctx, det, tid, state, now, cfg)
             if evt is not None:
+                evt.zone_id = zone_id
                 # Detection-time uniform-colour stamp (Part 6) — the
                 # single source of truth read later by:
                 #   • capture_alert_snapshot → paints orange box on the
@@ -418,6 +467,15 @@ class UniformComplianceDetector(Detector):
         Model-class first, then the colour rule-based fallback."""
         extra = cfg.get("extra") or {}
         thr = float(cfg.get("confidence_threshold", 0.5))
+        feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
+
+        # Clear physical evidence wins over a stale or under-trained model.
+        # An orange Vivo lanyard carries the staff card; the white rectangle
+        # is often only a few pixels (or hidden by the counter) in overhead
+        # CCTV, so its absence must not create a missing-tag alert.
+        if (feats and feats["top_ok"]
+                and feats.get("orange_share", 0.0) >= 0.002):
+            return FULL_COMPLIANT
         # Mode 1: custom model emitting the seven canonical classes
         # OR the legacy four. List of (state, class-name) — was a dict,
         # but dict keys silently overwrote: the three legacy aliases
@@ -450,7 +508,6 @@ class UniformComplianceDetector(Detector):
             return best_state
 
         # Mode 2: colour rule-based, six-state decision tree.
-        feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
         if feats is None or feats["confidence"] < 0.25:
             # Pixels missing or top didn't match anything cleanly — let
             # the caller skip (no alert) rather than false-alarm. The
@@ -467,7 +524,8 @@ class UniformComplianceDetector(Detector):
             if feats.get("top_share", 0.0) >= 0.10:
                 return UNCERTAIN
             return NON_COMPLIANT
-        if feats["has_lanyard"] and feats["has_nametag"]:
+        if (feats.get("orange_share", 0.0) >= 0.002
+                or (feats["has_lanyard"] and feats["has_nametag"])):
             return FULL_COMPLIANT
         if feats["has_lanyard"]:
             return PARTIAL_COMPLIANT
@@ -617,8 +675,7 @@ class UniformComplianceDetector(Detector):
                 crop = frame[py1:py2, px1:px2]
             if crop is None or crop.size == 0:
                 return None
-            root = (Path(settings.datasets_dir).parent
-                    / "training" / "uniform" / "_camera_crops")
+            root = Path(settings.training_dir) / "uniform" / "_camera_crops"
             root.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
             path = root / f"cam{ctx.camera_id}_{ts}.jpg"
@@ -636,11 +693,12 @@ class UniformComplianceDetector(Detector):
         return now - prev[1]
 
     def _maybe_alert(self, ctx: DetectorContext, det: dict, tid: int,
-                     state: str, now: float) -> DetectionEvent | None:
+                     state: str, now: float, cfg: dict) -> DetectionEvent | None:
         elapsed = self._observe_state(tid, state, now)
 
         if state == NON_COMPLIANT and elapsed >= VIOLATION_SECONDS:
-            if now - self._fired.get((tid, NON_COMPLIANT), 0) >= DEDUP_SECONDS:
+            last_fired = self._fired.get((tid, NON_COMPLIANT))
+            if last_fired is None or now - last_fired >= DEDUP_SECONDS:
                 self._fired[(tid, NON_COMPLIANT)] = now
                 self._bump_violation_count(ctx, now)
                 repeated = self._violation_count_today(ctx) > REPEAT_THRESHOLD
@@ -652,11 +710,16 @@ class UniformComplianceDetector(Detector):
                            "shift": _shift_label(),
                            "repeated_today": repeated},
                 )
-        # Partial compliance and "right colour but no lanyard" both get
-        # the gentle 5-minute INFO nudge — same operator action.
-        if state in (PARTIAL_COMPLIANT, COLOR_ONLY) and elapsed >= NO_LANYARD_SECONDS:
+        # Missing-name-tag alerts are opt-in. At normal overhead CCTV
+        # resolution, "not visible" is not reliable proof that a small
+        # lanyard/card is absent. Security and uniform-colour violations
+        # remain enabled independently.
+        if (_missing_nametag_alerts_enabled(cfg)
+                and state in (PARTIAL_COMPLIANT, COLOR_ONLY)
+                and elapsed >= NO_LANYARD_SECONDS):
             kind = state
-            if now - self._fired.get((tid, kind), 0) >= DEDUP_SECONDS:
+            last_fired = self._fired.get((tid, kind))
+            if last_fired is None or now - last_fired >= DEDUP_SECONDS:
                 self._fired[(tid, kind)] = now
                 rule = "no_lanyard" if state == PARTIAL_COMPLIANT else "color_only"
                 return DetectionEvent(

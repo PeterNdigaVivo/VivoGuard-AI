@@ -1,5 +1,7 @@
 """Recorder coverage and evidence retention."""
+import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -10,7 +12,7 @@ from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_window, _current_window, _prune_expired_source_windows,
-    _recording_path,
+    _recording_health_snapshot, _recording_path,
 )
 
 
@@ -48,6 +50,58 @@ def _session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)()
+
+
+class _RecorderHealthRedis:
+    def __init__(self):
+        self.values = {
+            "vg:recording:pid:1": json.dumps({
+                "pid": 101, "window_id": "current",
+            }),
+            "vg:recording:pid:2": json.dumps({
+                "pid": 102, "window_id": "current",
+            }),
+            "vg:recording:pid:3": json.dumps({
+                "pid": 103, "window_id": "previous",
+            }),
+            "vg:recording:pid:99": json.dumps({
+                "pid": 199, "window_id": "current",
+            }),
+        }
+
+    def scan_iter(self, *, match: str, count: int):
+        assert match == "vg:recording:pid:*"
+        assert count == 200
+        return iter(self.values)
+
+    def get(self, key: str):
+        return self.values.get(key)
+
+
+def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None:
+    expected_cameras = [
+        SimpleNamespace(id=camera_id) for camera_id in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        "app.tasks.recorder._key_cameras", lambda _db: expected_cameras,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid in {101, 199},
+    )
+
+    result = _recording_health_snapshot(
+        object(), _RecorderHealthRedis(), "current", now=1_000.0,
+    )
+
+    assert result == {
+        "last_run_ts": 1_000.0,
+        "window_active": True,
+        "cameras_expected": 3,
+        "cameras_recording": 1,
+        "cameras_missing": 2,
+        "status": "degraded",
+    }
+    assert "camera_ids" not in result
 
 
 def test_close_window_retains_source_for_delayed_extraction(tmp_path, monkeypatch) -> None:

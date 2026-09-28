@@ -22,8 +22,8 @@ a built-in AI Training Studio for custom YOLOv8 models.
   driven by alert confirm/dismiss actions.
 - **Live VMS** — multi-tile grid (1×1 → 4×4), per-tile AI bbox overlay,
   alerts feed with real-time WebSocket push, system health dashboard.
-- **Alert pipeline** — pluggable SMTP / Twilio SMS / outbound webhook
-  channels; channels with missing creds stay silently inactive.
+- **Alert pipeline** — alerts land on the dashboard in real time; an
+  optional outbound webhook stays silently inactive without a URL.
 - **Production-ready** — single `docker compose up -d` brings up
   FastAPI + Celery worker + streamer + frontend + Postgres + Redis +
   MinIO behind Nginx (HTTPS-ready).

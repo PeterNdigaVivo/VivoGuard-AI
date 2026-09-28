@@ -366,7 +366,7 @@ export default function ShutterTrainingPage() {
               </div>
               {msg && <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">{msg}</div>}
 
-              {/* Image upload — phone photos / screenshots / WhatsApp.
+              {/* Image upload — phone photos / screenshots.
                   JPG/PNG, 5 MB cap per file. */}
               <div className="mt-3 border-t dark:border-slate-800 pt-3">
                 <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">

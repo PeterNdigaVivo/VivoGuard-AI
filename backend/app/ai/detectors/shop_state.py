@@ -57,11 +57,8 @@ DEFAULT_CLOSING_THRESH  = "20:00"
 # "Store Not Opened" alert. Configurable via the entry_exit detector
 # config's `extra.not_opened_cutoff_eat` field.
 DEFAULT_NOT_OPENED_CUTOFF = "09:30"
-# Outside this morning window, an inward line-crossing is NOT
-# considered a store-opening signal. Before 07:00 the only people on
-# camera are security / cleaning, so we ignore. After 09:30 every
-# crossing is regular customer traffic — the metric still increments,
-# but the open-alert path returns without firing.
+# Ignore overnight crossings before 07:00. After that, the first inward
+# entrance crossing is the authoritative opening signal, including late opens.
 EARLIEST_OPEN_EAT = "07:00"
 # Symmetric upper bound on the close-detection window — outward
 # crossings after this are just late customers leaving.
@@ -280,17 +277,11 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
     open_t      = cfg["open_t"]
     late_t      = cfg["late_t"]
     earliest_t  = cfg["earliest_open_t"]
-    cutoff_t    = cfg["not_open_cutoff_t"]
-
-    # Morning-window gate. Crossings outside 07:00 – 09:30 EAT are
-    # NOT considered store-opening signals:
-    #   t < 07:00  → security / cleaning, ignore silently.
-    #   t > 09:30  → regular customer traffic; the metric still
-    #                ticks via EntryExitDetector, but no alert fires.
-    # This is the single rule that eliminates 99% of false alerts.
+    # Ignore overnight noise before 07:00. From then on, the first inward
+    # crossing is authoritative and is classified against working hours.
+    # Later crossings are harmless because the store-level marker admits only
+    # the first inward crossing of the day.
     if earliest_t is not None and t < earliest_t:
-        return None
-    if cutoff_t is not None and t > cutoff_t:
         return None
 
     # Idempotency — fire the "Store Opened" alert exactly ONCE per store
@@ -319,7 +310,12 @@ def maybe_emit_open_alert(ctx: DetectorContext, cfg_extra: dict | None,
     _mark_fired(ctx.camera_id, day_iso, "open")
 
     glass_suffix = " — confirmed via glass door sensor" if via_glass_door else ""
-    if t <= late_t:
+    if t < open_t:
+        kind = "shop_opened_before_hours"
+        priority = "high"
+        message = (f"Person entered before working hours at "
+                   f"{now_eat.strftime('%H:%M')}{glass_suffix}")
+    elif t <= late_t:
         kind     = "shop_opened"
         priority = "info"
         message  = (f"Shop opened at {now_eat.strftime('%H:%M')}{glass_suffix}"

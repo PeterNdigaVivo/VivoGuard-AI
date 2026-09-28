@@ -13,7 +13,7 @@ echo "Checking host GPU"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 echo "Checking Docker NVIDIA runtime"
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 \
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 \
   nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 echo "Validating GPU Compose profile"

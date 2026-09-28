@@ -1,6 +1,7 @@
 // Reusable store create/edit form. Used inline on /stores (modal) and
 // later on /stores/:id/edit. Includes a simple weekday-grid business
-// hours editor and manager-contact fields for WhatsApp routing.
+// hours editor and manager-contact fields. The manager phone fills the
+// {store_phone} placeholder in an alert's "What to do" steps.
 
 import { useEffect, useState } from 'react'
 import { Button, Card, Input, Select } from '@/components/ui/Primitives'
@@ -179,7 +180,7 @@ export default function StoreForm({
         <Field label="Manager name">
           <Input value={form.manager_name} onChange={upd('manager_name')} placeholder="Jane Wanjiku" />
         </Field>
-        <Field label="Manager WhatsApp / phone">
+        <Field label="Manager phone">
           <Input value={form.manager_phone} onChange={upd('manager_phone')}
                  placeholder="+254712345678" />
         </Field>

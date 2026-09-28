@@ -252,6 +252,8 @@ def _train_yolo(root: Path, detector_type: str, ts: str) -> tuple[Path, dict]:
         data=str(root), epochs=50, imgsz=224, batch=16,
         project=str(out_dir), name="run", exist_ok=True,
         device=("0" if settings.use_gpu else "cpu"),
+        # 0 under Celery's prefork pool — see config comment.
+        workers=settings.training_dataloader_workers,
         # Per-spec augmentation (P5 chain trainer):
         flipud=0.0, fliplr=0.5,
         hsv_h=0.1, hsv_s=0.3, hsv_v=0.3,
@@ -299,22 +301,10 @@ def _validate(weights: Path, dataset_root: Path, labels: tuple[str, ...]) -> dic
 
 def _notify_chain(detector_type: str, model_id: int, report: dict,
                   sample_count: int, store_count: int) -> None:
-    try:
-        acc = report.get("accuracy")
-        lines = [
-            f"Chain {detector_type} model training complete.",
-            f"Model id: {model_id}",
-            f"Samples: {sample_count} from {store_count} stores",
-            (f"Accuracy: {round(acc * 100, 1)}%"
-             if acc is not None else "Accuracy: n/a"),
-            report.get("recommendation", ""),
-        ]
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], "\n".join(lines))
-    except Exception:
-        pass
+    log.info(
+        "chain training complete: detector=%s model=%s samples=%s stores=%s accuracy=%s",
+        detector_type, model_id, sample_count, store_count, report.get("accuracy"),
+    )
 
 
 @celery_app.task(name="training.train_chain_model", bind=True, ignore_result=True)
@@ -346,16 +336,31 @@ def train_chain_model(self, detector_type: str) -> None:
     })
     kept, stats = _filter_and_balance(grouped)
 
-    short = {l: stats["kept_by_label"].get(l, 0) for l in labels
-             if stats["kept_by_label"].get(l, 0) < MIN_PER_LABEL}
-    if short:
-        msg = ("Need ≥%d frames per label after filtering. Short: %s"
-               % (MIN_PER_LABEL,
-                  ", ".join(f"{k}={v}" for k, v in short.items())))
+    # Score only the labels that actually have frames, not every label in
+    # the canonical set. The uniform taxonomy has seven classes and the
+    # harvesters only ever emit two, so requiring all seven aborted every
+    # run before the first epoch — including runs with 500 usable staff
+    # crops sitting ready. A classifier over the classes present is worth
+    # training; one that waits for classes nobody collects is not.
+    present = [l for l in labels if stats["kept_by_label"].get(l, 0) > 0]
+    short = {l: stats["kept_by_label"][l] for l in present
+             if stats["kept_by_label"][l] < MIN_PER_LABEL}
+    if len(present) < 2 or short:
+        if len(present) < 2:
+            msg = ("Need at least 2 labels with data. Found: %s"
+                   % (", ".join(present) or "none"))
+        else:
+            msg = ("Need ≥%d frames per label after filtering. Short: %s"
+                   % (MIN_PER_LABEL,
+                      ", ".join(f"{k}={v}" for k, v in short.items())))
         _set_status(detector_type, {"state": "failed", "message": msg,
                                     "stats": stats})
         log.warning("chain training %s aborted: %s", detector_type, msg)
         return
+    # Everything downstream iterates `kept`, so drop the empty classes:
+    # a model must not be given a class it has never seen an example of.
+    kept = {l: kept[l] for l in present}
+    labels = tuple(present)
 
     # Imbalance warning (informational; we still train).
     counts = [stats["kept_by_label"][l] for l in labels]
@@ -526,14 +531,4 @@ def chain_retrain_due() -> None:
 
 
 def _notify_auto_retrain_started(detector_type: str) -> None:
-    try:
-        from app.tasks.briefings import _send_whatsapp, _format_whatsapp_recipient
-        to = _format_whatsapp_recipient(getattr(settings, "dashboard_alert_to", ""))
-        if to:
-            _send_whatsapp([to], (
-                f"🔁 Weekly chain retrain started — {detector_type}.\n"
-                "Pooled samples from every store. You'll get another "
-                "WhatsApp when training completes with accuracy stats."
-            ))
-    except Exception:
-        pass
+    log.info("chain auto-retrain started: detector=%s", detector_type)

@@ -53,15 +53,6 @@ x-app-env: &app-env
   REDIS_PORT: ${REDIS_PORT:-6379}
   REDIS_DB: ${REDIS_DB:-0}
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-  S3_REGION: ${S3_REGION:-us-east-1}
-  S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-  S3_SECRET_KEY: ${S3_SECRET_KEY}
-  S3_BUCKET_CLIPS: ${S3_BUCKET_CLIPS:-clips}
-  S3_BUCKET_THUMBS: ${S3_BUCKET_THUMBS:-thumbnails}
-  S3_BUCKET_MODELS: ${S3_BUCKET_MODELS:-models}
-  S3_BUCKET_DATASETS: ${S3_BUCKET_DATASETS:-datasets}
-  S3_USE_SSL: ${S3_USE_SSL:-false}
   CREDENTIALS_FERNET_KEY: ${CREDENTIALS_FERNET_KEY}
   USE_GPU: ${USE_GPU:-false}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
@@ -92,9 +83,6 @@ x-app-env: &app-env
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   SMTP_FROM: ${SMTP_FROM:-alerts@vivoguard.local}
   SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
-  TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
-  TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-  TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
   WEBHOOK_URL: ${WEBHOOK_URL:-}
   WEBHOOK_AUTH_HEADER: ${WEBHOOK_AUTH_HEADER:-}
   DDNS_REFRESH_INTERVAL_SECONDS: ${DDNS_REFRESH_INTERVAL_SECONDS:-300}
@@ -114,37 +102,45 @@ x-app-env: &app-env
   STREAMER_RETRY_UNREACHABLE: ${STREAMER_RETRY_UNREACHABLE:-30}
   STREAMER_RECHECK_REACHABLE: ${STREAMER_RECHECK_REACHABLE:-300}
   INFERENCE_CRITICAL_SLICE_SECONDS: ${INFERENCE_CRITICAL_SLICE_SECONDS:-15}
+  INFERENCE_RUN_SECONDS: ${INFERENCE_RUN_SECONDS:-120}
   INFERENCE_CRITICAL_REQUEUE_SECONDS: ${INFERENCE_CRITICAL_REQUEUE_SECONDS:-180}
   INFERENCE_CRITICAL_GAP_SLA_SECONDS: ${INFERENCE_CRITICAL_GAP_SLA_SECONDS:-300}
   INFERENCE_STANDARD_GAP_SLA_SECONDS: ${INFERENCE_STANDARD_GAP_SLA_SECONDS:-900}
   INFERENCE_CAPACITY_HEADROOM_PERCENT: ${INFERENCE_CAPACITY_HEADROOM_PERCENT:-80}
   INFERENCE_CRITICAL_WATCHDOG_GRACE_SECONDS: ${INFERENCE_CRITICAL_WATCHDOG_GRACE_SECONDS:-60}
+  ALERT_QUALITY_CONTROL_ENABLED: ${ALERT_QUALITY_CONTROL_ENABLED:-true}
   REID_ENABLED: ${REID_ENABLED:-false}
   VLM_ENABLED: ${VLM_ENABLED:-false}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # AI alert verification (annotate-only). Server enables after the
+  # Anthropic key is set. NB: these fallbacks override Python defaults.
+  VERIFIER_ENABLED: ${VERIFIER_ENABLED:-false}
+  VERIFIER_MODEL: ${VERIFIER_MODEL:-claude-sonnet-4-6}
+  VERIFIER_PARALLEL: ${VERIFIER_PARALLEL:-4}
+  VERIFIER_MAX_IMAGES: ${VERIFIER_MAX_IMAGES:-3}
+  # shop_open_close belongs here: the daily summary is built from database
+  # rows, has no frames, and the verifier was scoring it "likely false"
+  # because it could not find any to look at.
+  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic","shop_open_close"]}
+  # Verifier provider: anthropic | openai | ollama.
+  VERIFIER_PROVIDER: ${VERIFIER_PROVIDER:-anthropic}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  AGENTS_LLM_ENABLED: ${AGENTS_LLM_ENABLED:-false}
-  AGENTS_LLM_PROVIDER: ${AGENTS_LLM_PROVIDER:-anthropic}
-  AGENTS_LLM_FALLBACK_PROVIDER: ${AGENTS_LLM_FALLBACK_PROVIDER:-openai}
-  AGENTS_LLM_MODEL: ${AGENTS_LLM_MODEL:-claude-sonnet-4-6}
-  AGENTS_LLM_OPENAI_MODEL: ${AGENTS_LLM_OPENAI_MODEL:-gpt-5.4-mini}
-  AGENTS_LLM_TIMEOUT_SECONDS: ${AGENTS_LLM_TIMEOUT_SECONDS:-45}
-  SIMULATION_EVIDENCE_ENABLED: ${SIMULATION_EVIDENCE_ENABLED:-true}
-  SIMULATION_EVIDENCE_MAX_PER_RUN: ${SIMULATION_EVIDENCE_MAX_PER_RUN:-10}
-  SIMULATION_EVIDENCE_DEDUPE_DAYS: ${SIMULATION_EVIDENCE_DEDUPE_DAYS:-7}
-  SIMULATION_EVIDENCE_CONTROL_FRACTION: ${SIMULATION_EVIDENCE_CONTROL_FRACTION:-0.30}
+  VERIFIER_OPENAI_MODEL: ${VERIFIER_OPENAI_MODEL:-gpt-4o-mini}
+  VERIFIER_OLLAMA_URL: ${VERIFIER_OLLAMA_URL:-http://host.docker.internal:11434}
+  VERIFIER_OLLAMA_MODEL: ${VERIFIER_OLLAMA_MODEL:-qwen2.5vl:7b}
   CELERYD_CONCURRENCY: ${CELERYD_CONCURRENCY:-10}
   CELERYD_MAX_TASKS_PER_CHILD: ${CELERYD_MAX_TASKS_PER_CHILD:-500}
   FRAME_BUFFER_SIZE: ${FRAME_BUFFER_SIZE:-5}
   CHECKOUT_MIN_FRAMES: ${CHECKOUT_MIN_FRAMES:-5}
   CHECKOUT_ALERT_MINUTES: ${CHECKOUT_ALERT_MINUTES:-3}
   CHECKOUT_SESSION_FRESH_SECONDS: ${CHECKOUT_SESSION_FRESH_SECONDS:-90}
-  POSITIVE_AGENT_ALERTS_ENABLED: ${POSITIVE_AGENT_ALERTS_ENABLED:-true}
-  POSITIVE_AGENT_ALERT_DEDUP_HOURS: ${POSITIVE_AGENT_ALERT_DEDUP_HOURS:-6}
   UNIFORM_CONFIDENCE_THRESHOLD: ${UNIFORM_CONFIDENCE_THRESHOLD:-0.65}
   TRESPASS_MIN_FRAMES: ${TRESPASS_MIN_FRAMES:-5}
   COUNTER_MIN_EMPTY_FRAMES: ${COUNTER_MIN_EMPTY_FRAMES:-10}
   ENTRY_EXIT_MIN_FRAMES_PER_SIDE: ${ENTRY_EXIT_MIN_FRAMES_PER_SIDE:-1}
+  # Crossings must happen at the doorway, not anywhere along the line's
+  # infinite extension — stops people beyond a glass door counting as entries.
+  ENTRY_EXIT_CROSSING_RADIUS: ${ENTRY_EXIT_CROSSING_RADIUS:-0.25}
   # Store Intelligence 45-min BI update — re-enabled Aug 2026 (the
   # Jul pause emptied the Store Update tab for a month). NB: this
   # compose fallback overrides the Python default — keep both in sync.
@@ -152,6 +148,9 @@ x-app-env: &app-env
   # Training-pipeline hardening (ML audit): combined-dataset floor,
   # anti-forgetting replay fraction, blur-exclusion threshold.
   MIN_TRAINING_IMAGES: ${MIN_TRAINING_IMAGES:-50}
+  # Must stay 0 while worker-training uses Celery's prefork pool — its
+  # children are daemons and cannot spawn DataLoader workers.
+  TRAINING_DATALOADER_WORKERS: ${TRAINING_DATALOADER_WORKERS:-0}
   BASE_MIX_FRACTION: ${BASE_MIX_FRACTION:-0.18}
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
   MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
@@ -159,20 +158,17 @@ x-app-env: &app-env
   INCIDENT_FOUNDATIONS_ENABLED: ${INCIDENT_FOUNDATIONS_ENABLED:-false}
   DELIVERY_OUTBOX_ENABLED: ${DELIVERY_OUTBOX_ENABLED:-false}
   # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
-  TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-10}
-  # Live Activity Sentinel — dark-launched; enable per rollout plan.
-  ACTIVITY_SENTINEL_ENABLED: ${ACTIVITY_SENTINEL_ENABLED:-false}
-  ACTIVITY_SURGE_PEOPLE: ${ACTIVITY_SURGE_PEOPLE:-12}
-  ACTIVITY_SURGE_SUSTAIN_SAMPLES: ${ACTIVITY_SURGE_SUSTAIN_SAMPLES:-3}
-  ACTIVITY_STORE_SURGE_PEOPLE: ${ACTIVITY_STORE_SURGE_PEOPLE:-30}
-  ACTIVITY_DEAD_SCENE_MINUTES: ${ACTIVITY_DEAD_SCENE_MINUTES:-0}
-  ACTIVITY_SENTINEL_INTERVAL_SECONDS: ${ACTIVITY_SENTINEL_INTERVAL_SECONDS:-60}
+  TEMPORAL_GATE_MIN_FRAMES: ${TEMPORAL_GATE_MIN_FRAMES:-4}
+  # Open-ended VLM scene sweep. SHADOW stays true until a week of
+  # verdicts has been read — see tasks/scene_review.py.
+  SCENE_REVIEW_ENABLED: ${SCENE_REVIEW_ENABLED:-false}
+  SCENE_REVIEW_SHADOW_MODE: ${SCENE_REVIEW_SHADOW_MODE:-true}
+  SCENE_REVIEW_CAMERAS_PER_SWEEP: ${SCENE_REVIEW_CAMERAS_PER_SWEEP:-12}
+  SCENE_REVIEW_MODEL: ${SCENE_REVIEW_MODEL:-qwen2.5vl:7b}
+  SCENE_REVIEW_TRADING_HOURS_ONLY: ${SCENE_REVIEW_TRADING_HOURS_ONLY:-true}
   MANNEQUIN_FILTER_ENABLED: ${MANNEQUIN_FILTER_ENABLED:-true}
   ACTIVITY_STATIC_DISPLACEMENT_PX: ${ACTIVITY_STATIC_DISPLACEMENT_PX:-5}
   ACTIVITY_STATIC_WINDOW_FRAMES: ${ACTIVITY_STATIC_WINDOW_FRAMES:-10}
-  ACTIVITY_PRESENCE_ENABLED: ${ACTIVITY_PRESENCE_ENABLED:-true}
-  ACTIVITY_PRESENCE_THRESHOLD: ${ACTIVITY_PRESENCE_THRESHOLD:-5}
-  ACTIVITY_PRESENCE_SUSTAIN_SAMPLES: ${ACTIVITY_PRESENCE_SUSTAIN_SAMPLES:-2}
 
 # --- GPU reservation block (used by api + worker; no-op if USE_GPU=false) -
 x-gpu: &gpu-reservation
@@ -195,12 +191,20 @@ services:
       dockerfile: Dockerfile.api
     image: vivoguard/api:latest
     restart: unless-stopped
+    # Lets the container reach an Ollama server on the HOST when
+    # VERIFIER_PROVIDER=ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment: *app-env
     volumes:
       - ./data/recordings:/data/recordings
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Auto-harvested uniform crops. Shared by every service that writes
+      # or reads them — unmounted, this is a per-container layer that the
+      # next rebuild deletes, which is how 1000 training samples were lost.
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -234,7 +238,7 @@ services:
     command:
       - sh
       - -c
-      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --disable-prefetch --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
+      - "celery -A app.tasks.celery_app worker -B -Q ${INFERENCE_QUEUES:-inference},default --pool=threads --loglevel=info --concurrency=${WORKER_INFERENCE_CONCURRENCY:-8} --disable-prefetch --max-memory-per-child=${WORKER_INFERENCE_MAX_MEMORY_KIB:-1572864} -n inference-worker@%h"
     environment:
       <<: *app-env
       # One Celery child handles one camera loop. Without explicit native
@@ -252,6 +256,8 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Writes the crops (uniform_compliance + staff_identity detectors).
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -303,6 +309,10 @@ services:
         GPU_BACKEND: ${GPU_BACKEND:-cpu}
     image: vivoguard/worker:latest
     restart: unless-stopped
+    # Lets the container reach an Ollama server on the HOST when
+    # VERIFIER_PROVIDER=ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - sh
       - -c
@@ -313,7 +323,9 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
-      # Read-only shared access lets the frontend assurance agent inspect
+      # Writes operator-review preview crops alongside each sample.
+      - ./data/training:/data/training
+      # Read-only shared access lets the frontend health check inspect
       # actual proxy responses instead of reporting an observability gap.
       - nginx_logs:/var/log/nginx:ro
     depends_on:
@@ -341,6 +353,10 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Reads the crops it trains on. This mount was the missing one:
+      # every TrainingSample.frame_path failed Path.exists() here, so
+      # both uniform trainers aborted before the first epoch.
+      - ./data/training:/data/training
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -354,6 +370,7 @@ services:
   # Concurrency 2: the tick and clip-extraction tasks are light; the actual
   # recordings are detached ffmpeg processes, not celery task runtime.
   recorder:
+    profiles: ["continuous"]
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
@@ -454,26 +471,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # --- MinIO: S3-compatible object store ------------------------------
-  # OPTIONAL — opt in with `docker compose --profile object-store up -d`.
-  # Default deployments use the bind-mounted ./data/* directories below,
-  # which is enough for single-node installs and avoids ~250 MB of MinIO.
-  # For cloud / multi-node, point CREDENTIALS_FERNET_KEY-style envs at
-  # AWS S3 (set S3_ENDPOINT=https://s3.<region>.amazonaws.com) instead
-  # of running this container.
-  minio:
-    image: minio/minio:latest
-    container_name: vivoguard-minio
-    restart: unless-stopped
-    profiles: ["object-store"]
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
-    volumes:
-      - minio_data:/data
-    networks: [vivoguard]
-
   # --- Nginx: TLS termination + reverse proxy -------------------------
   nginx:
     image: nginx:alpine
@@ -511,5 +508,4 @@ networks:
 volumes:
   pg_data:
   redis_data:
-  minio_data:
   nginx_logs:

@@ -1,7 +1,7 @@
 """Automatic staff-uniform crop miner (Part 6).
 
 Every 2 hours, mine live camera frames for uniform training data so the
-uniform_compliance detector stops being starved (the simulation agent is only
+uniform_compliance detector stops being starved (the simulation probe is only
 a QA probe — it never produced training crops). For cameras that have a
 `staff_zone` or `counter` zone:
 

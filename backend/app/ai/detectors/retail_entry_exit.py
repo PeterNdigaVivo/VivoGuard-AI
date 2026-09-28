@@ -121,6 +121,26 @@ class EntryExitDetector(Detector):
     # time so a config change picks up without restarting the worker).
     GLASS_DOOR_MIN_FRAMES_SEEN_DEFAULT = 1
 
+    # ---- crossing proximity -----------------------------------------
+    # A crossing must happen AT the doorway. `_side()` tests the
+    # INFINITE line, so without this anyone whose foot point flips
+    # across its extension counts as entering — including people on the
+    # far side of a glass door who never came near it. Normalised
+    # distance to the line SEGMENT, so it is framing-independent.
+    # Generous by default: a person clears a door in one frame at 1-2
+    # fps, and too tight a radius silently stops counting real entries.
+    # Env: ENTRY_EXIT_CROSSING_RADIUS.
+    CROSSING_RADIUS_DEFAULT = 0.25
+
+    @classmethod
+    def _crossing_radius(cls) -> float:
+        try:
+            from app.config import settings
+            return float(getattr(settings, "entry_exit_crossing_radius",
+                                 cls.CROSSING_RADIUS_DEFAULT))
+        except Exception:
+            return cls.CROSSING_RADIUS_DEFAULT
+
     @classmethod
     def _glass_door_min_frames(cls) -> int:
         try:
@@ -235,6 +255,7 @@ class EntryExitDetector(Detector):
                          ctx.camera_id, len(good_lines), len(persons))
 
         inward_sign = float(((cfg.get("extra") or {}).get("inward_sign")) or 1.0)
+        crossing_radius = self._crossing_radius()
         out: list[DetectionEvent] = []
 
         for z in good_lines:
@@ -252,6 +273,12 @@ class EntryExitDetector(Detector):
             # pre-filtered `persons` list and fire on the first clean
             # side-flip as before.
             is_glass_door = "glass_door" in (z.get("detection_types_json") or [])
+            # A fitting-room threshold is not the shop door. Its crossings
+            # are still emitted — tasks/fitting_room and odoo_assurance read
+            # them — but they must not count as store footfall or open/close
+            # the store: the first customer into a fitting room would
+            # otherwise claim the day's "Store Opened" marker.
+            is_changing_room = "changing_room" in (z.get("detection_types_json") or [])
             zone_persons = (
                 [d for d in persons if d.get("conf", 0.0) >= self.GLASS_DOOR_MIN_CONF]
                 if is_glass_door else persons
@@ -279,11 +306,18 @@ class EntryExitDetector(Detector):
                              "idx=%d dist=%.3f", ctx.camera_id, z["id"],
                              det_idx, dist_to_line)
 
-                # Side with a deadband near the line so sub-pixel
-                # jitter on a foot point sitting right on the line
-                # doesn't generate phantom crossings.
-                side_now = 0 if dist_to_line < self.SIDE_DEADBAND \
-                              else _side((fx, fy), a, b)
+                # Side, with two bands that both mean "no usable side":
+                #   • inside SIDE_DEADBAND — sub-pixel jitter on a foot
+                #     point sitting on the line would flip the sign.
+                #   • beyond the crossing radius — too far from the
+                #     doorway for this to be an entry at all.
+                # A crossing needs a real side on consecutive readings,
+                # so both bands make distant movement uncountable.
+                side_now = (
+                    0 if (dist_to_line < self.SIDE_DEADBAND
+                          or dist_to_line > crossing_radius)
+                    else _side((fx, fy), a, b)
+                )
 
                 # Match to nearest pseudo-track within MATCH_RADIUS,
                 # skipping ones already claimed by another detection
@@ -300,7 +334,8 @@ class EntryExitDetector(Detector):
                     # First sighting — no crossing inferable yet.
                     hist.append({"cx": cx, "cy": cy, "side": side_now,
                                  "last_seen": now, "last_fired": 0.0,
-                                 "frames_seen": 1})
+                                 "frames_seen": 1,
+                                 "side_frames": 1 if side_now != 0 else 0})
                     continue
 
                 entry = hist[best_i]
@@ -359,10 +394,11 @@ class EntryExitDetector(Detector):
                                  ctx.camera_id, direction, z["id"],
                                  "strict" if strict_ok else "occlusion",
                                  pend["new_frames"], frame_gap)
-                        # Visitor counting is unconditional — the trading-window
-                        # gate lives in shop_state and only suppresses the
-                        # operator-facing Store Opened/Closed alert, not metrics.
-                        if ctx.db is not None:
+                        # Visitor counting is unconditional at the shop door — the
+                        # trading-window gate lives in shop_state and only
+                        # suppresses the Store Opened/Closed alert, not metrics.
+                        # Fitting-room trips are not store visits.
+                        if ctx.db is not None and not is_changing_room:
                             from app.analytics import recorder
                             recorder.record(ctx.db, f"visitor_count_{direction}", 1.0,
                                             camera_id=ctx.camera_id, store_id=ctx.store_id,
@@ -378,19 +414,22 @@ class EntryExitDetector(Detector):
                             extra={"direction": direction, "store_id": ctx.store_id},
                         ))
                         entry["last_fired"] = now
-                        from app.ai.detectors import shop_state
-                        if direction == "in":
-                            shop_alert = shop_state.maybe_emit_open_alert(
-                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                                via_glass_door=is_glass_door)
-                        else:
-                            shop_alert = shop_state.maybe_emit_close_alert(
-                                ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
-                                via_glass_door=is_glass_door)
-                        if shop_alert is not None:
-                            log.info("EntryExit camera=%s shop alert raised: rule=%s",
-                                     ctx.camera_id, (shop_alert.extra or {}).get("rule"))
-                            out.append(shop_alert)
+                        # Not `continue`: the position update below must still
+                        # run for this detection, or its pseudo-track goes stale.
+                        if not is_changing_room:
+                            from app.ai.detectors import shop_state
+                            if direction == "in":
+                                shop_alert = shop_state.maybe_emit_open_alert(
+                                    ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                    via_glass_door=is_glass_door)
+                            else:
+                                shop_alert = shop_state.maybe_emit_close_alert(
+                                    ctx, cfg.get("extra"), 0, z["id"], det["bbox_norm"],
+                                    via_glass_door=is_glass_door)
+                            if shop_alert is not None:
+                                log.info("EntryExit camera=%s shop alert raised: rule=%s",
+                                         ctx.camera_id, (shop_alert.extra or {}).get("rule"))
+                                out.append(shop_alert)
 
                 # Always update position + last_seen. Only commit the
                 # side when it's NOT in the deadband — otherwise we'd

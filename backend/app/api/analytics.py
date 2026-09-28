@@ -249,7 +249,6 @@ def store_live_dashboard(store_id: int,
       `visible` flag — the frontend hides the tile when no such zone
       exists in the store.
     """
-    from sqlalchemy import extract
     from app.utils.business_hours import (
         is_store_open, todays_session, todays_hours_label,
     )
@@ -368,32 +367,35 @@ def store_live_dashboard(store_id: int,
     # Each helper takes an explicit window so we can call it twice —
     # once for the active range, once for the prior same-length window
     # — and surface trend-vs-previous on every KPI.
-    def _sum(metric: str, t0: datetime, t1: datetime) -> float:
-        v = (db.query(func.sum(MetricSnapshot.value))
+    def _agg(fn, metric: str, t0: datetime, t1: datetime) -> float | None:
+        """Aggregate `metric` over [t0,t1), keeping SQL NULL as None.
+
+        NULL here means "no camera reported this metric in the window",
+        which is a different claim from "the measured value was zero".
+        The tiles below rely on the distinction so the dashboard can show
+        an em-dash instead of asserting a 0 nobody measured.
+        """
+        v = (db.query(fn(MetricSnapshot.value))
                .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                        MetricSnapshot.metric_type == metric,
                        MetricSnapshot.period_start >= t0,
                        MetricSnapshot.period_start <  t1)
                .scalar())
-        return float(v) if v is not None else 0.0
+        return float(v) if v is not None else None
+
+    # Zero-collapsing wrappers — kept because callers elsewhere in this
+    # endpoint do arithmetic on the result and predate the tri-state.
+    def _sum(metric: str, t0: datetime, t1: datetime) -> float:
+        v = _agg(func.sum, metric, t0, t1)
+        return v if v is not None else 0.0
 
     def _max(metric: str, t0: datetime, t1: datetime) -> float:
-        v = (db.query(func.max(MetricSnapshot.value))
-               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                       MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= t0,
-                       MetricSnapshot.period_start <  t1)
-               .scalar())
-        return float(v) if v is not None else 0.0
+        v = _agg(func.max, metric, t0, t1)
+        return v if v is not None else 0.0
 
     def _avg(metric: str, t0: datetime, t1: datetime) -> float:
-        v = (db.query(func.avg(MetricSnapshot.value))
-               .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
-                       MetricSnapshot.metric_type == metric,
-                       MetricSnapshot.period_start >= t0,
-                       MetricSnapshot.period_start <  t1)
-               .scalar())
-        return float(v) if v is not None else 0.0
+        v = _agg(func.avg, metric, t0, t1)
+        return v if v is not None else 0.0
 
     def _trend(curr: float, prev: float) -> dict:
         """Trend dict for the frontend's Trend pill."""
@@ -419,6 +421,21 @@ def store_live_dashboard(store_id: int,
         c = _max(metric, active_since, active_until)
         p = _max(metric, prev_since,   prev_until)
         return {"value": c, "trend": _trend(c, p)}
+
+    def _kpi_opt(fn, metric: str, *, scale: float = 1.0, ndigits: int = 0) -> dict:
+        """KPI tile that keeps "not measured" distinct from "measured 0".
+
+        `value` is None when nothing wrote the metric in the window; the
+        frontend renders that as an em-dash. The trend still compares
+        against the previous window treating absence as 0, since a trend
+        pill is decoration and an absent-vs-zero trend is not actionable.
+        """
+        c = _agg(fn, metric, active_since, active_until)
+        p = _agg(fn, metric, prev_since, prev_until)
+        return {
+            "value": None if c is None else round(c * scale, ndigits),
+            "trend": _trend((c or 0.0) * scale, (p or 0.0) * scale),
+        }
 
     def _count(metric: str, t0: datetime, t1: datetime) -> int:
         """COUNT(*) of rows for a metric in [t0,t1). Used by per-session
@@ -505,7 +522,12 @@ def store_live_dashboard(store_id: int,
     # within the active range. For multi-day ranges this becomes 24 bars
     # of "average peak by hour-of-day"; for single-day ranges it's the
     # familiar today sparkline.
-    hourly_rows = (db.query(extract("hour", MetricSnapshot.period_start).label("hr"),
+    # Hours are bucketed in the STORE's timezone, not UTC. The chart axis
+    # is labelled EAT, so extracting a UTC hour shifted every Vivo bar by
+    # three hours and put the "busiest time" in the wrong part of the day.
+    _tz_name = store.timezone or "Africa/Nairobi"
+    hourly_rows = (db.query(func.extract("hour",
+                                func.timezone(_tz_name, MetricSnapshot.period_start)).label("hr"),
                             func.max(MetricSnapshot.value))
                      .filter(((MetricSnapshot.store_id == store_id) | MetricSnapshot.camera_id.in_(cam_ids)),
                              MetricSnapshot.metric_type == "occupancy",
@@ -513,6 +535,16 @@ def store_live_dashboard(store_id: int,
                              MetricSnapshot.period_start <  active_until)
                      .group_by("hr").order_by("hr").all())
     hourly_footfall = [{"hour": int(h), "value": float(v or 0)} for h, v in hourly_rows]
+
+    # Peak / quiet hour come from the SAME buckets as the chart above, so
+    # the narrative and the bars can never disagree. Every bucket here was
+    # measured (the query only returns hours that reported), so a zero is
+    # a genuinely empty hour and belongs in the quiet-hour running —
+    # but not in the busiest-hour one, where "peak: 0 customers" is noise.
+    _busy = [b for b in hourly_footfall if b["value"] > 0]
+    _peak_bucket  = max(_busy, key=lambda b: b["value"], default=None)
+    _quiet_bucket = min(hourly_footfall, key=lambda b: b["value"], default=None)
+    _measured = hourly_footfall
 
     # Per-aisle dwell, top 3, in the active range.
     aisle_rows = (db.query(MetricSnapshot.zone_id,
@@ -552,11 +584,56 @@ def store_live_dashboard(store_id: int,
     else:
         status_light = "green"
 
+    # ---- Tiles the health panels read but /live never sent -----------
+    # Each of these was already being consumed by StoreHealthPanels and
+    # silently resolving to undefined, which the panels scored as "not
+    # measured" and awarded full credit for. Computing them here is what
+    # makes the health score mean anything.
+
+    # Uniform compliance — same metric and window as /staff-timeline uses
+    # (analytics.py, uniform_compliance_pct), so the two agree.
+    _uni = _agg(func.avg, "uniform_compliance_pct", active_since, active_until)
+    uniform_pct_today = round(_uni * 100, 1) if _uni is not None else None
+
+    # Average browse time across all dwell zones, and the zone with the
+    # longest average — top_aisles is already sorted by dwell desc.
+    browse_avg_seconds = _agg(func.avg, "dwell_seconds", active_since, active_until)
+    top_browse_zone = (
+        {"name": top_aisles[0]["zone_name"],
+         "avg_seconds": top_aisles[0]["avg_dwell_seconds"]}
+        if top_aisles else None
+    )
+
+    # Opening time — first shop_opened / shop_opened_late event today on
+    # one of this store's cameras. Mirrors the chain opening board so a
+    # store reads the same on both pages.
+    def _shop_opened_today() -> dict | None:
+        from zoneinfo import ZoneInfo
+        ev = (db.query(DetectionEvent)
+                .filter(DetectionEvent.camera_id.in_(cam_ids),
+                        DetectionEvent.detection_type == "shop_open_close",
+                        DetectionEvent.timestamp >= active_since,
+                        DetectionEvent.timestamp <  active_until)
+                .order_by(DetectionEvent.timestamp.asc())
+                .all())
+        for e in ev:
+            rule = (e.extra or {}).get("rule", "")
+            if rule not in ("shop_opened", "shop_opened_late"):
+                continue
+            ts = e.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            local = ts.astimezone(ZoneInfo(_tz_name))
+            return {"eat": local.strftime("%H:%M"),
+                    "on_time": rule != "shop_opened_late"}
+        return None
+
+    shop_opened = _shop_opened_today()
+
     # Every KPI tile carries a trend dict computed against the prior
     # same-length window. Operator picks "Last week" → trend shows
     # vs the week before that, etc.
     occupancy_peak  = _kpi_max("occupancy")
-    queue_wait_avg  = _kpi_avg("queue_wait_seconds")
     visitors_in     = _kpi_sum("visitor_count_in")
     visitors_out    = _kpi_sum("visitor_count_out")
 
@@ -587,28 +664,29 @@ def store_live_dashboard(store_id: int,
             "data_source":       visitor_source,
             "data_source_label": visitor_source_label,
         },
+        # None (not 0) when no queue camera reported — "we did not measure
+        # a wait" is not the same claim as "nobody waited".
         "queue_wait_avg_today_sec": {
-            "value": round(queue_wait_avg["value"], 0),
-            "trend": queue_wait_avg["trend"],
+            **_kpi_opt(func.avg, "queue_wait_seconds"),
             "visible": capabilities["queue"],
         },
+        # NB: staff_present_pct is a PRESENCE metric — retail_p2 counts the
+        # counter as attended when ANY person overlaps the zone, including
+        # a customer being served, because staff-vs-customer classification
+        # isn't reliable yet. It is not a staffing-compliance figure and
+        # the UI must not label it as one.
         "staff_present_pct_today": {
-            "value": round((staff_avg or 0) * 100, 0),
-            "trend": _trend(
-                staff_avg or 0,
-                _avg("staff_present_pct", prev_since, prev_until) if capabilities["counter"] else 0,
-            ),
+            **_kpi_opt(func.avg, "staff_present_pct", scale=100.0),
             "visible": capabilities["counter"],
+            "measures": "any_person_at_counter",
         },
         # ---- Checkout dwell time (one row per completed transaction) -----
         "checkout_avg_seconds_today": {
-            "value": round(_kpi_avg("checkout_dwell_seconds")["value"], 0),
-            "trend": _kpi_avg("checkout_dwell_seconds")["trend"],
+            **_kpi_opt(func.avg, "checkout_dwell_seconds"),
             "visible": capabilities["counter"],
         },
         "checkout_max_seconds_today": {
-            "value": round(_kpi_max("checkout_dwell_seconds")["value"], 0),
-            "trend": _kpi_max("checkout_dwell_seconds")["trend"],
+            **_kpi_opt(func.max, "checkout_dwell_seconds"),
             "visible": capabilities["counter"],
         },
         "checkout_count_today": {
@@ -631,6 +709,10 @@ def store_live_dashboard(store_id: int,
             "trend": visitors_out["trend"],
             "visible": capabilities["entry_exit"],
         },
+        # Net is in−out. A negative value is not "negative footfall" — it
+        # means the line recorded more exits than entries, which is a
+        # sensor/placement fault, not a business number. Flagged so the UI
+        # can say that instead of printing "-8 visitors".
         "visitors_net_today": {
             "value": round(visitors_in["value"] - visitors_out["value"], 0),
             "trend": _trend(
@@ -639,6 +721,44 @@ def store_live_dashboard(store_id: int,
                  - _sum("visitor_count_out", prev_since, prev_until),
             ),
             "visible": capabilities["entry_exit"],
+            "anomaly": ("exits_exceed_entries"
+                        if visitors_out["value"] > visitors_in["value"] else None),
+        },
+        # ---- Previously missing: consumed by StoreHealthPanels --------
+        "uniform_compliance_pct_today": {
+            "value": uniform_pct_today,
+            "visible": uniform_pct_today is not None,
+        },
+        "shop_opened_today": {
+            "value": shop_opened,
+            "visible": shop_opened is not None,
+        },
+        "peak_hour_today": {
+            "value": _peak_bucket["hour"] if _peak_bucket else None,
+            "visible": _peak_bucket is not None,
+        },
+        "peak_hour_count_today": {
+            "value": round(_peak_bucket["value"], 0) if _peak_bucket else None,
+            "visible": _peak_bucket is not None,
+        },
+        "quiet_hour_today": {
+            # Only meaningful once there's more than one reporting hour —
+            # with a single bucket the peak and the quiet hour are the same
+            # hour, which reads as nonsense.
+            "value": _quiet_bucket["hour"] if len(_measured) > 1 else None,
+            "visible": len(_measured) > 1,
+        },
+        "browse_time_seconds_today": {
+            "value": round(browse_avg_seconds, 0) if browse_avg_seconds is not None else None,
+            "visible": browse_avg_seconds is not None,
+        },
+        "top_browse_zone_today": {
+            "value": top_browse_zone,
+            "visible": top_browse_zone is not None,
+        },
+        "queue_peak_today": {
+            **_kpi_opt(func.max, "queue_length"),
+            "visible": capabilities["queue"],
         },
         # Non-KPI tiles (lists / charts / image URL).
         "top_aisles":            {"value": top_aisles, "visible": capabilities["aisle"]},
@@ -670,6 +790,10 @@ def store_live_dashboard(store_id: int,
         "camera_count": len(cams),
         "cameras_total":  len(cams),
         "cameras_online": cameras_online,
+        # Counts behind status_light, so the header can state the number
+        # instead of only showing a coloured dot that is easy to miss.
+        "high_alert_count":  high_alerts,
+        "total_alert_count": sum(alerts_today.values()),
         "is_open": open_now,
         "hours_label": hours_label,
         "session_open":  session_open_utc.isoformat(),
@@ -3130,44 +3254,6 @@ def campaign_lift_endpoint(campaign_id: int,
         raise HTTPException(404, str(e)) from e
 
 
-# ---- Exportable reports (P4) ---------------------------------------
-
-@router.get("/report.csv")
-def report_csv(since: datetime, until: datetime,
-               store_id: int | None = None,
-               db: Session = Depends(get_db),
-               _u=Depends(get_current_user)):
-    from fastapi.responses import StreamingResponse as _Stream
-    from app.analytics.reports import store_rollup, stores_csv
-    if store_id:
-        ids = [store_id]
-    else:
-        ids = [s.id for s in db.query(Store).filter(Store.is_active == True).all()]  # noqa: E712
-    rollups = [store_rollup(db, sid, since=since, until=until) for sid in ids]
-    payload = stores_csv(rollups)
-    return _Stream(iter([payload]), media_type="text/csv",
-                   headers={"Content-Disposition": 'attachment; filename="vivoguard_report.csv"'})
-
-
-@router.get("/report.pdf")
-def report_pdf(since: datetime, until: datetime,
-               store_id: int | None = None,
-               db: Session = Depends(get_db),
-               _u=Depends(get_current_user)):
-    from fastapi.responses import StreamingResponse as _Stream
-    from app.analytics.reports import store_rollup, stores_pdf
-    if store_id:
-        ids = [store_id]
-        title = f"VivoGuard — store #{store_id} report"
-    else:
-        ids = [s.id for s in db.query(Store).filter(Store.is_active == True).all()]  # noqa: E712
-        title = "VivoGuard — chain report"
-    rollups = [store_rollup(db, sid, since=since, until=until) for sid in ids]
-    pdf = stores_pdf(title, rollups)
-    return _Stream(iter([pdf]), media_type="application/pdf",
-                   headers={"Content-Disposition": 'attachment; filename="vivoguard_report.pdf"'})
-
-
 @router.get("/dashboard/multi")
 @cached_store_endpoint("chain-multi", ttl=60)
 def multi_store(db: Session = Depends(get_db), _u=Depends(get_current_user),
@@ -4492,100 +4578,6 @@ def chain_top_issues(db: Session = Depends(get_db),
         top.append(rec)
 
     return {"as_of": now_local.isoformat(), "top_issues": top}
-
-
-# ====================================================================
-# ROI / Value Report — Commit 4 of the dashboard rework.
-# ====================================================================
-
-@router.get("/roi")
-@cached_store_endpoint("roi-report", ttl=300)
-def roi_report(db: Session = Depends(get_db),
-               _u=Depends(get_current_user)):
-    """Month-to-date "VivoGuard Value Report" — count of incidents
-    caught + an estimated value, derived from real alert / detection
-    data with per-incident KES values from settings.
-
-    All money figures are estimates. The per-incident values are
-    deliberately conservative; head-office can tune them via
-    .env (ROI_THEFT_PER_INCIDENT_KES, ROI_UNAUTHORISED_PER_INCIDENT_KES,
-    ROI_QUEUE_PER_INCIDENT_KES, ROI_MONTHLY_COST_KES).
-    """
-    from sqlalchemy import func as _func
-    from app.config import settings as _settings
-    now_local = _eat_now()
-    month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month_start_utc   = month_start_local.astimezone(timezone.utc)
-    prev_month_end_local = month_start_local
-    prev_month_start_local = (month_start_local - timedelta(days=1)
-                              ).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    prev_month_start_utc = prev_month_start_local.astimezone(timezone.utc)
-    prev_month_end_utc   = prev_month_end_local.astimezone(timezone.utc)
-    now_utc = datetime.now(timezone.utc)
-
-    def _count(types, status_in=None, t0=month_start_utc, t1=now_utc):
-        q = (db.query(_func.count(Alert.id))
-               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-               .filter(DetectionEvent.detection_type.in_(types),
-                       Alert.created_at >= t0,
-                       Alert.created_at <  t1))
-        if status_in:
-            q = q.filter(Alert.status.in_(status_in))
-        return int(q.scalar() or 0)
-
-    theft_alerts        = _count(("shrinkage",))
-    theft_confirmed     = _count(("shrinkage",), status_in=("resolved", "confirmed"))
-    unauthorised        = _count(("trespass", "intrusion", "staff_zone"))
-    queue_resolved      = _count(("queue", "queue_length"),
-                                 status_in=("resolved", "confirmed"))
-
-    # Staff compliance change: average uniform_compliance_pct this
-    # month vs last. Returns a fraction (0..1); we report the
-    # percentage-point delta.
-    def _avg_uniform(t0, t1):
-        v = (db.query(_func.avg(MetricSnapshot.value))
-               .filter(MetricSnapshot.metric_type == "uniform_compliance_pct",
-                       MetricSnapshot.period_start >= t0,
-                       MetricSnapshot.period_start <  t1).scalar())
-        return float(v or 0.0)
-    cur_uniform  = _avg_uniform(month_start_utc, now_utc) * 100.0
-    prev_uniform = _avg_uniform(prev_month_start_utc, prev_month_end_utc) * 100.0
-    uniform_delta_pts = round(cur_uniform - prev_uniform, 1)
-
-    # Estimated KES values — defaults are conservative; head-office
-    # tunes via env. "Value of theft prevention" uses CONFIRMED
-    # shrinkage alerts so we don't inflate the figure with false
-    # positives.
-    v_theft  = theft_confirmed * int(_settings.roi_theft_per_incident_kes)
-    v_unauth = unauthorised    * int(_settings.roi_unauthorised_per_incident_kes)
-    v_ops    = queue_resolved  * int(_settings.roi_queue_per_incident_kes)
-    total_value   = v_theft + v_unauth + v_ops
-    monthly_cost  = int(_settings.roi_monthly_cost_kes)
-    roi_multiple  = round(total_value / monthly_cost, 1) if monthly_cost else None
-
-    return {
-        "month_label": now_local.strftime("%B %Y"),
-        "as_of":       now_local.isoformat(),
-        "incidents": {
-            "theft_alerts":         theft_alerts,
-            "theft_confirmed":      theft_confirmed,
-            "unauthorised_access":  unauthorised,
-            "queue_issues_resolved": queue_resolved,
-            "uniform_compliance_change_pts": uniform_delta_pts,
-        },
-        "estimated_value_kes": {
-            "theft_prevention":     v_theft,
-            "operational_savings":  v_ops + v_unauth,
-            "total":                total_value,
-        },
-        "monthly_cost_kes":         monthly_cost,
-        "roi_multiple":             roi_multiple,
-        "per_incident_kes": {
-            "theft":         int(_settings.roi_theft_per_incident_kes),
-            "unauthorised":  int(_settings.roi_unauthorised_per_incident_kes),
-            "queue":         int(_settings.roi_queue_per_incident_kes),
-        },
-    }
 
 
 # ---- Inference latency telemetry (Sprint 1.2 PerfTracker) ------------

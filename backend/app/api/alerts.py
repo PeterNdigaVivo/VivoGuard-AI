@@ -26,81 +26,50 @@ from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
+def _operator_alert_filter():
+    """Keep infrastructure telemetry out of the incident feed.
+
+    No system_health subtype reaches store staff — not camera
+    availability, and not the fleet-wide AI pipeline stall either. These
+    describe the platform, not a scene on a camera, so an operator has
+    nothing to confirm or dismiss on them. They stay visible on System
+    Health and the rows remain in the database for IT.
+    """
+    return DetectionEvent.detection_type != "system_health"
+
+
 # ---- Title / body / severity translation ---------------------------
 #
 # Single source of truth for the human-readable alert presentation.
 # Same logic feeds the per-store dashboard feed AND the chain /alerts
 # page so labels are consistent.
 
-# Severity bucket per detection_type. Front-end pulls from this for
-# the colour (red / amber / blue dots).
-_SEVERITY: dict[str, str] = {
-    # critical — security / safety incidents
-    "fight":             "critical",
-    "intrusion":         "critical",
-    "weapon":            "critical",
-    "weapon_brandished": "critical",
-    "fall":              "critical",
-    "fire":              "critical",
-    "smoke":             "critical",
-    "shrinkage":         "critical",
-    # warning — operational risks
-    "queue":             "warning",
-    "queue_length":      "warning",
-    "crowd":             "warning",
-    "trespass":          "warning",
-    "loitering":         "warning",
-    "shutter":           "warning",
-    "abandoned_object":  "warning",
-    "tailgating":        "warning",
-    # info — routine operational signals
-    "staff_present":     "info",
-    "occupancy":         "info",
-    "entry_exit":        "info",
-    "dwell":             "info",
-    "passersby":         "info",
-    "live_activity":     "warning",
-    "shop_open_close":   "info",
-    "sales_floor_insight": "info",
-    "store_intelligence":  "info",
-    "positive_operational": "info",
+# _SEVERITY_4 is the ONE ranking; the colour bucket and traffic-light
+# label are derived from it below, so a detector can never be ranked on
+# one scale and missing from another — which is how "Sales Floor
+# Unattended" rendered as a blue INFO card while sitting at HIGH.
+#
+# Two tiers, not four. Operations rejected MEDIUM / LOW: anything worth
+# putting in front of a store manager is worth acting on, and the lower
+# tiers were read as "ignore". At ~19 alerts an hour across 26 stores
+# there is no volume argument for a backlog tier.
+#
+#   CRITICAL — safety and security. Act now.
+#   HIGH     — everything else that is an incident. Act today.
+#
+# The INFORMATIONAL types below are deliberately NOT incidents: they are
+# the Store Update feed, which has its own tab and a "close" action. They
+# keep LOW so they stay out of the actionable tabs.
+_INFORMATIONAL_TYPES = {
+    "store_intelligence", "sales_floor_insight", "positive_operational",
+    # A staff member on their phone away from the till is a coaching
+    # note for the floor manager, not an incident. Ranking it alongside
+    # intrusion would devalue HIGH.
+    "phone_usage",
 }
 
-# Feed-ordering rank lists are derived from the 4-tier _SEVERITY_4 ladder
-# (defined below) so ALL high-priority types surface — see _RANK_CRITICAL /
-# _RANK_HIGH after the _SEVERITY_4 definition.
-
-
-def _severity(detection_type: str | None) -> str:
-    return _SEVERITY.get(detection_type or "", "info")
-
-
-# Non-technical traffic-light labels. Spec Part 3 mapping:
-#   URGENT (red)    — act now
-#   ATTENTION (amber) — act within ~15 min
-#   INFO (blue)     — for the record
-_SEVERITY_LABEL: dict[str, str] = {
-    "fight": "URGENT", "intrusion": "URGENT", "weapon": "URGENT",
-    "weapon_brandished": "URGENT", "fall": "URGENT", "trespass": "URGENT",
-    "fire": "URGENT", "smoke": "URGENT", "shrinkage": "URGENT",
-    "staff_zone":         "URGENT",     # default; per-rule override below
-    "uniform_compliance": "ATTENTION", "shutter": "ATTENTION",
-    "queue": "ATTENTION", "queue_length": "ATTENTION",
-    "staff_present": "ATTENTION", "crowd": "ATTENTION",
-    "abandoned_object": "ATTENTION", "loitering": "ATTENTION",
-    "tailgating": "ATTENTION", "camera_offline": "ATTENTION",
-}
-
-# Four-tier severity ladder (spec Part 1 §1):
-#   CRITICAL — immediate action required (theft, fight, weapon, fire,
-#              fall, smoke, shrinkage, after-hours intrusion).
-#   HIGH     — act within 5 minutes (suspicious behaviour, restricted
-#              area, counter unstaffed, person after-hours).
-#   MEDIUM   — review within 30 minutes (queue, loitering, uniform,
-#              tailgating, crowd, sales-floor unattended).
-#   LOW      — review end of day (routine heartbeats, on-time shop
-#              open / close, sales-floor insight).
 _SEVERITY_4: dict[str, str] = {
+    # Safety / security — immediate.
     "fight":              "CRITICAL",
     "weapon":             "CRITICAL",
     "weapon_brandished":  "CRITICAL",
@@ -109,41 +78,86 @@ _SEVERITY_4: dict[str, str] = {
     "fall":               "CRITICAL",
     "shrinkage":          "CRITICAL",
     "intrusion":          "CRITICAL",
+    "trespass":           "CRITICAL",
+    "stockroom_access":   "CRITICAL",
+    "tripwire":           "CRITICAL",
 
-    "trespass":           "HIGH",
+    # Trading conditions, compliance and equipment — act today.
     "staff_present":      "HIGH",       # counter unstaffed
-    "staff_zone":         "HIGH",       # default; per-rule override below
+    "dwell":              "HIGH",       # sales floor unattended
+    "checkout_dwell":     "HIGH",       # checkout taking too long
+    "staff_zone":         "HIGH",
     "abandoned_object":   "HIGH",
     "camera_offline":     "HIGH",
+    "queue":              "HIGH",
+    "queue_length":       "HIGH",
+    "crowd":              "HIGH",
+    "loitering":          "HIGH",
+    "tailgating":         "HIGH",
+    "uniform_compliance": "HIGH",
+    "shutter":            "HIGH",
+    "shelf_change":       "HIGH",
+    "shelf":              "HIGH",
+    "live_activity":      "HIGH",
+    "shop_open_close":    "HIGH",       # per-rule override below
+    "entry_exit":         "HIGH",
+    "passersby":          "HIGH",
+    "occupancy":          "HIGH",
+    "lpr":                "HIGH",
+    "custom":             "HIGH",
+    "vehicle":            "HIGH",
+    "animal":             "HIGH",
+    "person":             "HIGH",       # per-context override below
+    "fitting_room":       "HIGH",       # service prompt, not a security event
+    # Open-ended VLM finding. HIGH because the model only speaks when it
+    # judges a frame worth a manager's attention — it stays silent (NONE)
+    # on ordinary retail activity, so a row here is already an exception.
+    "scene_review":       "HIGH",
 
-    "queue":              "MEDIUM",
-    "queue_length":       "MEDIUM",
-    "crowd":              "MEDIUM",
-    "loitering":          "MEDIUM",
-    "tailgating":         "MEDIUM",
-    "uniform_compliance": "MEDIUM",
-    "shutter":            "MEDIUM",
-
-    "live_activity":      "MEDIUM",
-    "shop_open_close":    "LOW",
+    # Informational — the Store Update feed, not an incident.
+    "phone_usage":        "LOW",
     "sales_floor_insight":"LOW",
     "store_intelligence": "LOW",
-    "entry_exit":         "LOW",
-    "dwell":              "LOW",
-    "passersby":          "LOW",
-    "occupancy":          "LOW",
-    "person":             "LOW",        # default; per-context override below
+    "positive_operational": "LOW",
 }
 
 _SEVERITY_4_COLOR: dict[str, str] = {
     "CRITICAL": "#dc2626",      # red-600
     "HIGH":     "#ea580c",      # orange-600
-    "MEDIUM":   "#ca8a04",      # yellow-600
+    "MEDIUM":   "#ca8a04",      # yellow-600 (retained for old rows)
     "LOW":      "#2563eb",      # blue-600
 }
 _SEVERITY_4_EMOJI: dict[str, str] = {
     "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵",
 }
+
+# ---- Derived views of the ladder ------------------------------------
+# Traffic-light label the operator reads, and the colour bucket the card
+# renders. Both come from the tier so they cannot drift apart. MEDIUM is
+# still mapped because alerts written before the two-tier change keep
+# their stored label.
+_LABEL_FOR_TIER: dict[str, str] = {
+    "CRITICAL": "URGENT", "HIGH": "ATTENTION",
+    "MEDIUM":   "ATTENTION", "LOW": "INFO",
+}
+_TONE_FOR_TIER: dict[str, str] = {
+    "CRITICAL": "critical", "HIGH": "warning",
+    "MEDIUM":   "warning", "LOW": "info",
+}
+
+# Static per-type label. system_health imports this to build the set of
+# URGENT detection types, so it must stay a plain dict.
+_SEVERITY_LABEL: dict[str, str] = {
+    dt: _LABEL_FOR_TIER[tier] for dt, tier in _SEVERITY_4.items()
+}
+
+
+def _severity(detection_type: str | None) -> str:
+    """Colour bucket (critical / warning / info) for the card's edge bar."""
+    dt = detection_type or ""
+    if dt in _INFORMATIONAL_TYPES:
+        return "info"
+    return _TONE_FOR_TIER.get(_SEVERITY_4.get(dt, "HIGH"), "warning")
 
 # Feed-ordering rank buckets — derived from the 4-tier ladder so EVERY
 # critical/high detection type surfaces to the top of the alerts feed.
@@ -157,43 +171,43 @@ _RANK_HIGH     = [dt for dt, s in _SEVERITY_4.items() if s == "HIGH"]
 def _severity_4_label(detection_type: str | None,
                       event: DetectionEvent | None = None,
                       zone: Zone | None = None, store=None) -> str:
-    """4-tier severity ladder. Per-rule overrides for the detectors
-    whose level depends on the event context."""
+    """CRITICAL or HIGH for every incident; LOW only for the Store Update
+    feed. Per-rule overrides promote the context that carries a security
+    implication up to CRITICAL."""
     dt = detection_type or ""
     extra = (event.extra or {}) if event is not None else {}
     rule = extra.get("rule", "")
-    # Person: customer = LOW; after-hours / restricted = HIGH.
+    # Person: someone in the store outside trading hours, or in a
+    # staff-only area, is a security event. A customer on the shop floor
+    # during trading is not — the worker doesn't raise an alert for one.
     if dt == "person":
         if event is not None:
             ctxt = _person_context(event, zone, store)
-            return "LOW" if ctxt == "customer" else "HIGH"
-        return "HIGH"
-    # Uniform compliance: no-lanyard is gentle; wrong colour is louder.
-    if dt == "uniform_compliance":
-        return "LOW" if rule == "no_lanyard" else "MEDIUM"
-    # Staff zone: customer/intruder behind counter is HIGH; missing
-    # nametag is just LOW.
+            return "HIGH" if ctxt == "customer" else "CRITICAL"
+        return "CRITICAL"
+    # An unidentified person behind the counter is a security event; a
+    # staffer who forgot their name tag is a compliance one.
     if dt == "staff_zone":
-        return "LOW" if rule == "missing_nametag" else "HIGH"
-    # Sales-floor insight: low engagement / unattended floor = MEDIUM;
-    # everything else (quiet/good/baseline) is the LOW heartbeat.
+        return "HIGH" if rule == "missing_nametag" else "CRITICAL"
+    # Sales-floor insight stays in the Store Update feed.
     if dt == "sales_floor_insight":
-        return "MEDIUM" if rule in ("low_engagement", "unattended_floor") else "LOW"
-    # Shop open/close: not-opened-by-cutoff is CRITICAL; before-hours
-    # Live Activity Sentinel: severity rides on the rule.
-    if dt == "live_activity":
-        return {"after_hours_activity": "HIGH",
-                "occupancy_surge":      "MEDIUM",
-                "store_surge":          "MEDIUM",
-                "dead_scene":           "MEDIUM",
-                "activity_presence":    "LOW"}.get(rule, "MEDIUM")
-    # / late-opening are HIGH/MEDIUM; routine open + close are LOW.
-    if dt == "shop_open_close":
-        if rule == "shop_not_opened":           return "CRITICAL"
-        if rule == "shop_opened_before_hours":  return "HIGH"
-        if rule == "shop_opened_late":          return "MEDIUM"
         return "LOW"
-    return _SEVERITY_4.get(dt, "LOW")
+    if dt == "live_activity":
+        return "CRITICAL" if rule == "after_hours_activity" else "HIGH"
+    # A store that never opened, or that opened before hours, is a
+    # security question. Late opening and routine open/close are trading
+    # conditions.
+    if dt == "shop_open_close":
+        if rule in ("shop_not_opened", "shop_opened_before_hours"):
+            return "CRITICAL"
+        return "HIGH"
+    # Default HIGH, not LOW. A detector nobody added to the table is an
+    # incident nobody has triaged — it belongs in front of an operator,
+    # not silently at the bottom of the feed. `dwell` sat at LOW for
+    # exactly this reason and "Sales Floor Unattended" went unseen.
+    if dt in _INFORMATIONAL_TYPES:
+        return "LOW"
+    return _SEVERITY_4.get(dt, "HIGH")
 
 
 def _severity_4_color(label: str) -> str:
@@ -203,52 +217,15 @@ def _severity_4_color(label: str) -> str:
 def _severity_label(detection_type: str | None,
                     event: DetectionEvent | None = None,
                     zone: Zone | None = None, store=None) -> str:
+    """Traffic-light label, derived from the ladder so the two can never
+    disagree. Keeping a second hand-maintained table is what let `dwell`
+    be HIGH on one ladder and absent from the other, rendering a blue
+    INFO card for an unattended sales floor."""
     if detection_type == "positive_operational":
         return str((event.extra or {}).get("positive_label")
                    if event is not None else "POSITIVE – AUTOMATED")
-    # Person detection is context-aware: customer = INFO, after-hours
-    # or restricted-zone = URGENT. When called without context (e.g.
-    # the summary count), a persisted person ALERT is always URGENT —
-    # the worker only creates one when after-hours or restricted.
-    if detection_type == "person":
-        if event is not None:
-            ctxt = _person_context(event, zone, store)
-            return "INFO" if ctxt == "customer" else "URGENT"
-        return "URGENT"
-    # Uniform compliance: a missing name tag is just INFO (gentle
-    # nudge); a person at the counter with no uniform at all is
-    # ATTENTION (could be an unidentified person).
-    if detection_type == "uniform_compliance" and event is not None:
-        return "INFO" if (event.extra or {}).get("rule") == "no_lanyard" else "ATTENTION"
-    # Staff-only zone: missing name tag is INFO, anything else
-    # (unauthorised / customer in staff area) is URGENT.
-    if detection_type == "staff_zone" and event is not None:
-        return "INFO" if (event.extra or {}).get("rule") == "missing_nametag" else "URGENT"
-    # Shop open / close: routine open + close are INFO; before-hours
-    # is URGENT (security implication); late-opening is ATTENTION
-    # (staffing issue, not an emergency).
-    if detection_type == "live_activity":
-        rule = (event.extra or {}).get("rule", "") if event is not None else ""
-        if rule == "after_hours_activity":
-            return "URGENT"
-        return "INFO" if rule == "activity_presence" else "ATTENTION"
-    if detection_type == "shop_open_close" and event is not None:
-        rule = (event.extra or {}).get("rule", "")
-        if rule in ("shop_opened_before_hours", "shop_not_opened"):
-            return "URGENT"
-        if rule == "shop_opened_late":
-            return "ATTENTION"
-        return "INFO"      # shop_opened, shop_closed
-    # Sales-floor insight: heartbeat is INFO; low engagement and
-    # unattended floor are ATTENTION (a manager-actionable nudge);
-    # detection_offline is ATTENTION too — it's an ops / IT issue,
-    # not a customer-flow signal.
-    if detection_type == "sales_floor_insight" and event is not None:
-        rule = (event.extra or {}).get("rule", "")
-        if rule in ("low_engagement", "unattended_floor", "detection_offline"):
-            return "ATTENTION"
-        return "INFO"
-    return _SEVERITY_LABEL.get(detection_type or "", "INFO")
+    return _LABEL_FOR_TIER.get(
+        _severity_4_label(detection_type, event, zone, store), "ATTENTION")
 
 
 # Plain-English card heading (no camera suffix) — the big title a
@@ -289,6 +266,8 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
                 return "Person Detected Before Hours"
             return "Person Detected After Hours"
         return "Customer in Store"
+    if dt == "intrusion" and _time_context(event, store) == "before_hours":
+        return "Person Detected Before Hours"
     if dt == "shutter":
         rule = extra.get("rule", "")
         state = extra.get("shutter_state", "")
@@ -311,6 +290,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "shop_opened_inferred":
             opened = extra.get("opened_at_eat") or eat
             return f"✅ Store Opened — inferred ({opened})"
+        if rule == "shop_opened_via_occupancy":
+            opened = extra.get("opened_at_eat") or eat
+            return f"✅ Store Opened — person detected ({opened})"
         if rule == "shop_not_opened":
             return "🚨 Store Not Opened"
         if rule == "shop_closed":
@@ -327,6 +309,17 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         # the severity colour + body carry the rule-specific tone.
         store_name = extra.get("store_name") or (store.name if store else "Store")
         return f"Status Update — {store_name}"
+    # staff_present covers two opposite conditions — see _body.
+    if dt == "staff_present" and (extra.get("rule")
+                                  or extra.get("cls")) == "long_service":
+        return "Slow Service at Counter"
+    if dt == "fitting_room":
+        return ("Fitting Rooms Busy" if extra.get("rule") == "fitting_room_congestion"
+                else "Fitting Room Check Recommended")
+    if dt == "scene_review":
+        return "Unusual Activity Seen"
+    if dt == "phone_usage":
+        return "Staff on Phone Away From Till"
     if dt == "uniform_compliance":
         rule = extra.get("rule", "")
         if rule == "no_lanyard":
@@ -341,6 +334,10 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         if rule == "missing_nametag":
             return "Staff Member Missing Name Tag"
         return "Unidentified Person Behind Counter"
+    if dt == "dwell":
+        # The aisle detector's only alert is the sales-floor staffing
+        # gap; its browse-time output is metrics-only, never an alert.
+        return "Sales Floor Unattended"
     if dt == "checkout_dwell":
         # All variants today are "long session" alerts. If the schema
         # grows more rules (e.g. abandoned-basket), branch on
@@ -381,6 +378,9 @@ _WHAT_TO_DO: dict[str, list[str]] = {
     "staff_present": ["Ask nearby staff to cover the counter",
                       "Check if the staff member is on a break",
                       "Make sure the counter is always covered"],
+    "dwell": ["Send a staff member onto the sales floor",
+              "Check whether any customer is waiting for help",
+              "Mark resolved once the floor is covered"],
     "camera_offline": ["Check the camera power cable is connected",
                        "Restart the camera from the NVR",
                        "Call IT support if still offline: {it_phone}"],
@@ -437,6 +437,34 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Confirm whether they are a staff member",
                      "Ask them to leave the counter if unauthorised"]
+    elif dt == "staff_present" and (
+            (event.extra or {}).get("rule")
+            or (event.extra or {}).get("cls")) == "long_service":
+        steps = ["Check whether the customer needed help",
+                 "Open a second till if a queue is building",
+                 "Mark resolved"]
+    elif dt == "phone_usage":
+        # Coaching, not enforcement — and the AI cannot reliably tell
+        # staff from customers yet, so step one is to check it IS staff.
+        steps = ["Open the snapshot and check this is a staff member",
+                 "Have a quiet word if they're away from the floor",
+                 "Mark resolved, or report it if the description is wrong"]
+    elif dt == "scene_review":
+        # The AI is describing, not concluding. Every step sends the
+        # operator to the footage rather than asking them to act on the
+        # model's word.
+        steps = ["Open the snapshot and check what the camera saw",
+                 "Call the store if it needs explaining",
+                 "Mark resolved, or report it if the description is wrong"]
+    elif dt == "fitting_room":
+        if (event.extra or {}).get("rule") == "fitting_room_congestion":
+            steps = ["Send a staff member to the fitting rooms",
+                     "Help customers waiting for a room",
+                     "Mark resolved once it has cleared"]
+        else:
+            steps = ["Offer help with sizes or styles",
+                     "Check the customer has what they need",
+                     "Mark resolved once checked"]
     elif dt == "staff_zone":
         rule = (event.extra or {}).get("rule", "")
         if rule == "customer_in_staff_zone":
@@ -541,6 +569,9 @@ _TITLE_ICONS: dict[str, str] = {
     "abandoned_object":  "🧳",
     "tailgating":        "⚠️",
     "staff_present":     "👤",
+    "fitting_room":      "👗",
+    "scene_review":      "👁️",
+    "phone_usage":       "📱",
     "occupancy":         "📊",
 }
 
@@ -724,6 +755,32 @@ def _title(event: DetectionEvent, camera: Camera | None,
         store_name = (store.name if store else None) \
                       or (extra.get("store_name")) or "Unknown store"
         return f"{icon} Checkout Taking Too Long — {store_name}"
+    if dt == "dwell":
+        n = _extract(extra, "customer_count", default=None)
+        if n:
+            return (f"{icon} Sales floor unattended — "
+                    f"{int(float(n))} customers, no staff — {cam}")
+        return f"{icon} Sales floor unattended — {cam}"
+    if dt == "fitting_room":
+        store_name = (store.name if store else None) or "store"
+        if extra.get("rule") == "fitting_room_congestion":
+            return f"{icon} Fitting rooms busy — {store_name}"
+        return f"{icon} Fitting room check — {store_name}"
+    if dt == "phone_usage":
+        desc = " ".join(str(extra.get("description") or "").split())
+        if desc:
+            short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
+            return f"{icon} {short} — {cam}"
+        return f"{icon} Someone on a phone away from the till — {cam}"
+    if dt == "scene_review":
+        # The model's own sentence is the headline. A generic "unusual
+        # activity" line would throw away the only thing that makes this
+        # detector worth having — that it can say WHAT it saw.
+        desc = " ".join(str(extra.get("description") or "").split())
+        if desc:
+            short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
+            return f"{icon} {short} — {cam}"
+        return f"{icon} Unusual activity seen — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -811,15 +868,69 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                 f"service counter at {store_name} {when}. Please check "
                 f"immediately.").strip()
 
+    if dt == "phone_usage":
+        desc = " ".join(str(extra.get("description") or "").split())
+        where = extra.get("camera_name") or "a camera"
+        # Phone use AT the till is normal here — M-Pesa payments are taken
+        # on a handset — so the detector only looks away from the counter,
+        # and the copy says so to stop this being read as till policing.
+        return (f"On {where}, the AI describes: \"{desc}\"\n\n"
+                f"Phone use at the till is normal and is not flagged. "
+                f"This is someone away from the counter. The AI cannot "
+                f"reliably tell staff from customers yet — check the "
+                f"snapshot before treating it as a staff matter.")
+    if dt == "scene_review":
+        desc = " ".join(str(extra.get("description") or "").split())
+        where = extra.get("camera_name") or "a camera"
+        if not desc:
+            return (f"The AI flagged something on {where} but did not "
+                    f"describe it. Open the snapshot to check.")
+        # Attributed on purpose. This is a machine's reading of one still
+        # frame, and an operator should weigh it as that — not as a
+        # confirmed fact about their store.
+        return (f"On {where}, the AI describes: \"{desc}\"\n\n"
+                f"This is an automatic reading of the snapshot below. "
+                f"Check the footage before acting on it.")
+    if dt == "fitting_room":
+        n = extra.get("occupancy")
+        if extra.get("rule") == "fitting_room_congestion":
+            who = f"{int(n)} customers are" if n else "Several customers are"
+            return (f"{who} in the fitting rooms at once. "
+                    f"Send someone to help them.")
+        mins = extra.get("stay_minutes")
+        took = f"over {int(mins)} minutes" if mins else "an extended time"
+        return (f"A customer has been in the fitting rooms for {took}. "
+                f"A customer service check is recommended.")
     if dt == "staff_present":
+        # Zone names are written by whoever drew the zone, and they
+        # usually already say "counter" — "Track staff at counter" run
+        # through "the {zone} counter" produced "at the Track staff at
+        # counter counter" on a live alert. Only add the noun when the
+        # name doesn't already carry it.
+        _zn = (extra.get("zone_name") or "service").strip()
+        zone = _zn if "counter" in _zn.lower() else f"{_zn} counter"
+        # Two opposite conditions share this detection_type. long_service
+        # means someone was at the counter too LONG; reading it with the
+        # unattended copy told operators "no person detected" about an
+        # event that means the exact reverse.
+        if (extra.get("rule") or extra.get("cls")) == "long_service":
+            secs = _extract(extra, "service_seconds", default=None)
+            mins = _extract(extra, "service_minutes", default=None)
+            if mins:
+                took = f"{int(float(mins))} minutes"
+            elif secs:
+                took = f"{int(float(secs))} seconds"
+            else:
+                took = "an unusually long time"
+            return (f"One customer spent {took} at the {zone}. "
+                    f"Check whether they needed help or the till is slow.")
         mins = _extract(extra, "unstaffed_minutes", "duration_min", default=None)
-        zone = extra.get("zone_name") or "service"
         last = extra.get("last_activity_eat")
         if mins is not None:
-            base = (f"No person detected at the {zone} counter for the past "
+            base = (f"No person detected at the {zone} for the past "
                     f"{int(round(float(mins)))} minutes.")
         else:
-            base = f"No person detected at the {zone} counter."
+            base = f"No person detected at the {zone}."
         if last:
             base += f" Last activity: {last}."
         else:
@@ -925,6 +1036,15 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return ("An object has been left unattended in the store. Investigate.")
     if dt == "loitering":
         return ("A person has been lingering in one area beyond the typical browsing window.")
+    if dt == "dwell":
+        n     = _extract(extra, "customer_count", default=None)
+        mins  = _extract(extra, "unattended_minutes", default=None)
+        where = zone_name or _extract(extra, "zone_name", default=None) \
+                or "the sales floor"
+        who      = f"{int(float(n))} customers" if n else "Customers"
+        how_long = f" for {int(float(mins))} minutes" if mins else ""
+        return (f"{who} have been browsing {where}{how_long} with no staff "
+                f"member in the area. Send someone to the floor to help them.")
     if dt == "checkout_dwell":
         # `dwell_seconds` is set by the alerting task. Format as
         # "X minutes Y seconds" with the noun matched to the value
@@ -1067,6 +1187,10 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.zone_id        = event.zone_id
     item.zone_name      = zone.name if zone else None
     item.thumbnail_path = event.thumbnail_path
+    # AI verification is annotate-only; ai_* fields come straight off
+    # the row via from_attributes. ai_enabled lets the card distinguish
+    # "AI: off" from "AI: checking" while ai_verified_at is NULL.
+    item.ai_enabled     = bool(getattr(settings, "verifier_enabled", False))
     item.severity       = _severity(event.detection_type)
     item.severity_label = _severity_label(event.detection_type, event, zone, store)
     # Four-tier ladder for the redesigned alerts page. severity_label
@@ -1184,7 +1308,8 @@ def alerts_summary(db: Session = Depends(get_db),
     yq = (db.query(func.count(Alert.id))
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-            .filter(DetectionEvent.timestamp >= yest_start,
+            .filter(_operator_alert_filter(),
+                    DetectionEvent.timestamp >= yest_start,
                     DetectionEvent.timestamp < today,
                     DetectionEvent.detection_type != "positive_operational",
                     Alert.notification_suppressed.is_(False)))
@@ -1205,7 +1330,8 @@ def alerts_summary(db: Session = Depends(get_db),
             .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
             .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
             .outerjoin(_Store, Camera.store_id == _Store.id)
-            .filter(DetectionEvent.timestamp >= today,
+            .filter(_operator_alert_filter(),
+                    DetectionEvent.timestamp >= today,
                     DetectionEvent.timestamp < tomorrow,
                     DetectionEvent.detection_type != "positive_operational"))
     if store_id is not None:
@@ -1270,6 +1396,28 @@ def alerts_summary(db: Session = Depends(get_db),
     elif operational_today_count > 0:
         trend_vs_yesterday_pct = 100.0
 
+    # AI verification counts for the selected day (annotate-only:
+    # these never change which alerts are shown). pending = not yet
+    # verified; NULL verdicts with a verified_at stamp count uncertain.
+    ai_counts = {"true_alert": 0, "false_alert": 0,
+                 "uncertain": 0, "pending": 0}
+    _pending = Alert.ai_verified_at.is_(None)
+    aq = (db.query(Alert.ai_verdict, _pending, func.count(Alert.id))
+            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
+            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+            .filter(DetectionEvent.timestamp >= today,
+                    DetectionEvent.timestamp < tomorrow))
+    if store_id is not None:
+        aq = aq.filter(Camera.store_id == store_id)
+    for verdict, is_pending, n in (
+            aq.group_by(Alert.ai_verdict, _pending).all()):
+        if is_pending:
+            ai_counts["pending"] += int(n)
+        elif verdict in ai_counts:
+            ai_counts[verdict] += int(n)
+        else:
+            ai_counts["uncertain"] += int(n)
+
     # Friendly date label in the store's timezone (or EAT default).
     from zoneinfo import ZoneInfo
     try:
@@ -1301,7 +1449,32 @@ def alerts_summary(db: Session = Depends(get_db),
         "yesterday_count":       yest_count,
         "trend_vs_yesterday_pct": trend_vs_yesterday_pct,
         "date_label":            date_label,
+        # AI verification (annotate-only) counts + the server switch.
+        "ai_true_today":        ai_counts["true_alert"],
+        "ai_false_today":       ai_counts["false_alert"],
+        "ai_uncertain_today":   ai_counts["uncertain"],
+        "ai_pending_today":     ai_counts["pending"],
+        "ai_verifier_enabled":  bool(getattr(settings, "verifier_enabled",
+                                             False)),
     }
+
+
+# ---- AI verification re-run (admin) ------------------------------
+
+@router.post("/{alert_id}/verify")
+def rerun_ai_verification(alert_id: int, db: Session = Depends(get_db),
+                          _u: User = Depends(require_role("admin"))):
+    """Re-run AI verification for one alert on demand. Annotate-only:
+    the verdict is written next to the alert; nothing is hidden,
+    reclassified or delayed. force=True bypasses the verifier_enabled
+    gate so admins can test before flipping the switch."""
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    from app.tasks.alert_verify import verify_alert
+    res = verify_alert.delay(alert_id, True)
+    return {"queued": True, "alert_id": alert_id,
+            "task_id": getattr(res, "id", None)}
 
 
 # ---- Acknowledge endpoint ----------------------------------------
@@ -1345,7 +1518,8 @@ def export_alerts_xlsx(
     q = (db.query(Alert, DetectionEvent, Camera, _Store)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .outerjoin(_Store, Camera.store_id == _Store.id))
+           .outerjoin(_Store, Camera.store_id == _Store.id)
+           .filter(_operator_alert_filter()))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
     if detection_type:
@@ -1401,6 +1575,12 @@ def list_alerts(
     detection_type: Optional[str] = Query(None),
     zone_id: Optional[int]     = Query(None),
     status: Optional[str]      = Query(None),
+    ai_verdict: Optional[str]  = Query(
+        None,
+        description="Filter by AI verification verdict: true_alert | "
+                    "false_alert | uncertain | pending (pending = not "
+                    "yet verified). Annotate-only: with no filter the "
+                    "feed always contains every alert."),
     since: Optional[datetime]  = Query(None),
     until: Optional[datetime]  = Query(None),
     limit: int                 = Query(100, le=500),
@@ -1420,7 +1600,8 @@ def list_alerts(
 ):
     q = (db.query(Alert, DetectionEvent, Camera)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id))
+           .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
+           .filter(_operator_alert_filter()))
     if before_id is not None:
         cursor = db.get(Alert, before_id)
         if cursor is not None:
@@ -1429,6 +1610,11 @@ def list_alerts(
                          < tuple_(cursor.created_at, cursor.id))
     if status:
         q = q.filter(Alert.status == status)
+    if ai_verdict:
+        if ai_verdict == "pending":
+            q = q.filter(Alert.ai_verified_at.is_(None))
+        else:
+            q = q.filter(Alert.ai_verdict == ai_verdict)
     if camera_id:
         q = q.filter(DetectionEvent.camera_id == camera_id)
     if store_id is not None:

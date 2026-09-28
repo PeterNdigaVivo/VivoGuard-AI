@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_gpu_override_is_isolated_to_inference():
+def test_gpu_override_accelerates_inference_and_training_only():
     profile = (ROOT / "docker-compose.gpu.yml").read_text()
 
     assert "vivoguard/worker:cuda" in profile
@@ -13,7 +13,15 @@ def test_gpu_override_is_isolated_to_inference():
     assert "INFERENCE_MAX_BATCH_SIZE" in profile
     assert "driver: nvidia" in profile
     assert "count: 1" in profile
-    assert "worker-training:" not in profile
+    assert "worker-training:" in profile
+    training = profile.split("  worker-training:", 1)[1].split(
+        "  worker-inference-batch-shadow:", 1
+    )[0]
+    assert "vivoguard/worker:cuda" in training
+    assert "GPU_BACKEND: cuda" in training
+    assert 'USE_GPU: "true"' in training
+    assert 'WORKER_TRAINING_CONCURRENCY: "1"' in training
+    assert "driver: nvidia" in training
     assert "worker-alerts:" not in profile
 
 
@@ -42,7 +50,7 @@ def test_gpu_readiness_does_not_start_production_services():
 
 
 def test_migration_runbook_has_safety_and_rollback_gates():
-    runbook = (ROOT / "docs" / "GEX44_MIGRATION_RUNBOOK.md").read_text()
+    runbook = (ROOT / "docs" / "GEX45_MIGRATION_RUNBOOK.md").read_text()
 
     for required in (
         "action-time approval",

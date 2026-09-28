@@ -36,7 +36,8 @@ class Store(Base):
     # Soft cap used by occupancy alerts.
     capacity:  Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # Manager contact — surfaces in the alerts pipeline (WhatsApp routing).
+    # Manager contact. manager_phone fills the {store_phone} placeholder
+    # in an alert's "What to do" steps.
     manager_name:  Mapped[str | None] = mapped_column(String(128), nullable=True)
     manager_phone: Mapped[str | None] = mapped_column(String(32),  nullable=True)
 
@@ -47,7 +48,7 @@ class Store(Base):
     default_rtsp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Queue SLA targets used by the Queue Intelligence dashboard and
-    # the daily WhatsApp report. queue_sla_seconds = the max wait time
+    # the daily report. queue_sla_seconds = the max wait time
     # a customer should see at the till before it counts as a breach
     # (default 3 min). queue_sla_length = the max queue length before
     # it counts as too long (default 6).

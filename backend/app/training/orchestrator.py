@@ -427,7 +427,22 @@ def run_weekly_for_all(db: Session, *, dry_run: bool = False) -> list[dict]:
                 .filter(~Dataset.name.like("feedback-negative-%"))
                 .all())
     types = sorted({d.name[len("feedback-"):] for d in pools})
-    return [enqueue_fine_tune_if_due(db, t, dry_run=dry_run) for t in types]
+    results: list[dict] = []
+    for detection_type in types:
+        try:
+            results.append(enqueue_fine_tune_if_due(
+                db, detection_type, dry_run=dry_run))
+        except Exception as exc:
+            # One malformed legacy pool must not hide the readiness of every
+            # other detector or turn the dashboard preview into a blanket 500.
+            log.exception("orchestrator: %s failed", detection_type)
+            db.rollback()
+            results.append({
+                "detection_type": detection_type,
+                "status": "error",
+                "reason": str(exc),
+            })
+    return results
 
 
 # ── Cross-store generalist dataset (top-3 stores) ──────────────────────────

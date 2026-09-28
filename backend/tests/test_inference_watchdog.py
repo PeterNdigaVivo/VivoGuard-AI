@@ -301,7 +301,6 @@ def test_watchdog_checks_notification_policy_before_session_detaches(monkeypatch
             return None
 
     fake_redis = FakeRedis()
-    sent = []
     monkeypatch.setattr(inference_watchdog.redis, "from_url", lambda *_a: fake_redis)
 
     import app.database
@@ -311,13 +310,6 @@ def test_watchdog_checks_notification_policy_before_session_detaches(monkeypatch
     monkeypatch.setattr(
         app.tasks.alerting, "_create_info_alert", lambda *_a, **_kw: event,
     )
-    monkeypatch.setattr(app.tasks.alerting, "_dashboard_recipients", lambda: ["ops"])
-    monkeypatch.setattr(
-        app.tasks.alerting, "_send_whatsapp",
-        lambda recipients, body: sent.append((recipients, body)),
-    )
-
     inference_watchdog.inference_health_watchdog.run()
 
-    assert sent and sent[0][0] == ["ops"]
     assert fake_redis.values[inference_watchdog.SENT_KEY] == _signature(problems)

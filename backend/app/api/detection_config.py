@@ -83,7 +83,14 @@ _DEFAULTS: dict[str, dict] = {
     "shelf_change":      {"confidence_threshold": 0.5},
     "passersby":         {"confidence_threshold": 0.5},
     "window_engagement": {"confidence_threshold": 0.5, "dwell_time_seconds": 5},
-    "uniform_compliance":{"confidence_threshold": 0.5},
+    "uniform_compliance":{
+        "confidence_threshold": 0.5,
+        "extra": {"missing_nametag_alerts_enabled": False},
+    },
+    "staff_zone": {
+        "confidence_threshold": 0.5,
+        "extra": {"missing_nametag_alerts_enabled": False},
+    },
     "custom":            {"confidence_threshold": 0.5},
 }
 

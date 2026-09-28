@@ -31,6 +31,7 @@ import redis
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
+from app.zone_purposes import detector_types_for_zone_tags
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ def _camera_is_latency_critical(camera) -> bool:
         not bool(zone.suppressed)
         and bool(
             CRITICAL_DETECTION_TYPES.intersection(
-                str(value) for value in (zone.detection_types_json or [])
+                detector_types_for_zone_tags(zone.detection_types_json or [])
             )
         )
         for zone in (camera.zones or [])
