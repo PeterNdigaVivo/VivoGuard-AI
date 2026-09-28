@@ -107,6 +107,7 @@ _OPTIONAL_ROUTERS = [
     ("app.api.operations",         ["router"]),
     ("app.api.quality",            ["router"]),
     ("app.api.odoo",               ["router"]),
+    ("app.api.csp_report",         ["router"]),
 ]
 for _module_name, _attrs in _OPTIONAL_ROUTERS:
     try:
