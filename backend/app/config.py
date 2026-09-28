@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_ttl_minutes: int = 60
     jwt_refresh_ttl_days: int = 30
+    # Failed-login throttling (app/auth/login_throttle.py). Counters live in
+    # Redis; each rule blocks for the rest of its window once reached.
+    # Tight "person" rule = one account from one connection, so staff
+    # sharing a store's internet connection are not blocked by a colleague.
+    login_throttle_enabled: bool = True
+    login_fail_person_limit: int = Field(default=5, ge=1)
+    login_fail_person_window_s: int = Field(default=15 * 60, ge=60)
+    login_fail_account_limit: int = Field(default=20, ge=1)
+    login_fail_account_window_s: int = Field(default=60 * 60, ge=60)
+    login_fail_ip_limit: int = Field(default=100, ge=1)
+    login_fail_ip_window_s: int = Field(default=15 * 60, ge=60)
     # Odoo signs ``<unix timestamp>.<raw body>`` with HMAC-SHA256.
     # An empty secret keeps the service endpoint unavailable, never unsigned.
     odoo_webhook_secret: str = ""

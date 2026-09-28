@@ -4,6 +4,21 @@ import { useState, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 
+// The API client throws "<status> <statusText>: <body>". For a throttled
+// login (429) show the server's plain sentence ("Too many failed
+// attempts. Try again in N minutes.") instead of the raw JSON.
+function loginErrorText(message: string): string {
+  if (!message.startsWith('429')) return message
+  const body = message.slice(message.indexOf(':') + 1).trim()
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown }).detail
+    if (typeof detail === 'string') return detail
+  } catch {
+    // Body was not JSON; fall through to the generic sentence.
+  }
+  return 'Too many failed attempts. Please wait a few minutes and try again.'
+}
+
 export default function LoginPage() {
   const { login } = useAuth()
   const nav = useNavigate()
@@ -22,7 +37,7 @@ export default function LoginPage() {
       await login(email, password)
       nav(loc.state?.from ?? '/cameras', { replace: true })
     } catch (err) {
-      setError((err as Error).message)
+      setError(loginErrorText((err as Error).message))
     } finally {
       setBusy(false)
     }
