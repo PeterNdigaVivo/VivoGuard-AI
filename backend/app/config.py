@@ -608,6 +608,19 @@ class Settings(BaseSettings):
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
 
+# The compiled-in default and the .env.example placeholder.
+_DEFAULT_DB_PASSWORDS = frozenset({"vivoguard", "change-me"})
+
+
+def _effective_db_password(candidate: Settings) -> str:
+    """The password the app will actually connect with: DATABASE_URL's
+    when that override is set, else POSTGRES_PASSWORD."""
+    if not candidate.database_url_override:
+        return candidate.postgres_password
+    from sqlalchemy.engine import make_url
+    return make_url(candidate.database_url_override).password or ""
+
+
 def validate_production_security(candidate: Settings) -> None:
     """Refuse to start production with development authentication defaults.
 
@@ -628,6 +641,9 @@ def validate_production_security(candidate: Settings) -> None:
         errors.append("BOOTSTRAP_ADMIN_PASSWORD must not use the documented default")
     if candidate.app_debug:
         errors.append("APP_DEBUG must be disabled in production")
+    if _effective_db_password(candidate) in _DEFAULT_DB_PASSWORDS:
+        errors.append("the database password (POSTGRES_PASSWORD or the one in "
+                      "DATABASE_URL) must not be a documented default")
     if errors:
         raise RuntimeError("insecure production configuration: " + "; ".join(errors))
 
