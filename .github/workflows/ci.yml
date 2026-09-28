@@ -1,0 +1,70 @@
+# Continuous integration — runs the existing backend tests and the
+# frontend production build on every push and pull request, so a broken
+# change shows a red ❌ on GitHub before anyone pulls it onto the server.
+#
+# Needs no secrets: tests use development defaults, and nothing here
+# talks to the live system.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # One store-hours test builds its "now" with the machine's local
+      # timezone. The production server runs on Nairobi time, so the
+      # suite runs there too rather than on the runner's UTC default.
+      TZ: Africa/Nairobi
+      # Several tests import the sibling `streamer/` and `scripts/`
+      # packages and read docker-compose / nginx files from the repo root.
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # matches backend/Dockerfile.api
+          cache: pip
+          cache-dependency-path: backend/requirements.api.txt
+      - name: Install dependencies
+        # API requirements plus the two light worker libraries some tests
+        # import. The heavy model stack (torch / ultralytics) is not needed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.api.txt numpy opencv-python-headless pytest
+      - name: Run tests
+        working-directory: backend
+        run: python -m pytest -q -p no:cacheprovider
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"         # matches frontend/Dockerfile
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check and build
+        run: pnpm build
