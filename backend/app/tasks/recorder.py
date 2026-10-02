@@ -57,6 +57,7 @@ _WINDOWS = [
 ]
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
+_REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
 
@@ -135,41 +136,49 @@ def _substream_url(cam) -> str | None:
         return None
 
 
+def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
+    """Start one non-destructive recorder segment without committing."""
+    from app.models import RecordingClip
+
+    url = _substream_url(cam)
+    if not url:
+        return False
+    out_dir = _clips_root() / window_id / str(cam.store_id or 0)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = _recording_path(out_dir, cam.id)
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "error",
+        "-rtsp_transport", "tcp", "-i", url,
+        "-t", str(seconds), "-c", "copy",
+        "-movflags", "+frag_keyframe+empty_moov",
+        "-y", str(out_path),
+    ]
+    try:
+        # Detached so it isn't reaped when the tick task returns; it lives
+        # for the window (or until -t / SIGTERM). If the camera refuses a
+        # 2nd connection, ffmpeg exits quickly and the file stays tiny -
+        # inference always keeps priority (we never touch the streamer).
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as e:
+        log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
+        return False
+    r.set(_PID_KEY_FMT.format(cam=cam.id),
+          json.dumps({"pid": proc.pid, "window_id": window_id,
+                      "path": str(out_path)}),
+          ex=6 * 3600)
+    db.add(RecordingClip(camera_id=cam.id, store_id=cam.store_id,
+                         window_id=window_id, file_path=str(out_path),
+                         status="recording"))
+    return True
+
+
 def _start_window(db, r, window_id: str, seconds: int) -> int:
     """Spawn one stream-copy ffmpeg per key camera. Returns count started."""
-    from app.models import RecordingClip
-    started = 0
-    for cam in _key_cameras(db):
-        url = _substream_url(cam)
-        if not url:
-            continue
-        out_dir = _clips_root() / window_id / str(cam.store_id or 0)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = _recording_path(out_dir, cam.id)
-        cmd = [
-            "ffmpeg", "-nostdin", "-loglevel", "error",
-            "-rtsp_transport", "tcp", "-i", url,
-            "-t", str(seconds), "-c", "copy",
-            "-movflags", "+frag_keyframe+empty_moov",
-            "-y", str(out_path),
-        ]
-        try:
-            # Detached so it isn't reaped when the tick task returns; it lives
-            # for the window (or until -t / SIGTERM). If the camera refuses a
-            # 2nd connection, ffmpeg exits quickly and the file stays tiny —
-            # inference always keeps priority (we never touch the streamer).
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, start_new_session=True)
-        except Exception as e:
-            log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
-            continue
-        r.set(_PID_KEY_FMT.format(cam=cam.id),
-              json.dumps({"pid": proc.pid, "window_id": window_id, "path": str(out_path)}),
-              ex=6 * 3600)
-        db.add(RecordingClip(camera_id=cam.id, store_id=cam.store_id,
-                             window_id=window_id, file_path=str(out_path),
-                             status="recording"))
-        started += 1
+    started = sum(
+        _start_camera(db, r, cam, window_id, seconds)
+        for cam in _key_cameras(db)
+    )
     db.commit()
     log.info("Started recording %d cameras for window %s", started, window_id)
     return started
@@ -304,6 +313,23 @@ def _any_recording_alive(r) -> bool:
     return False
 
 
+def _live_recording_ids(r, window_id: str,
+                        expected_ids: set[int]) -> set[int]:
+    """Return expected cameras with a live recorder in the current window."""
+    active_ids: set[int] = set()
+    for key in r.scan_iter(match="vg:recording:pid:*", count=200):
+        try:
+            item = json.loads(r.get(key) or "{}")
+            camera_id = int(str(key).rsplit(":", 1)[-1])
+            if (camera_id in expected_ids
+                    and str(item.get("window_id") or "") == window_id
+                    and _pid_is_ffmpeg(int(item.get("pid") or 0))):
+                active_ids.add(camera_id)
+        except Exception:
+            continue
+    return active_ids
+
+
 def _recording_health_snapshot(db, r, window_id: str | None, *,
                                now: float | None = None) -> dict:
     """Return aggregate expected-camera coverage without exposing identities."""
@@ -311,18 +337,10 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         {int(camera.id) for camera in _key_cameras(db)}
         if window_id else set()
     )
-    active_ids: set[int] = set()
-    if window_id:
-        for key in r.scan_iter(match="vg:recording:pid:*", count=200):
-            try:
-                item = json.loads(r.get(key) or "{}")
-                camera_id = int(str(key).rsplit(":", 1)[-1])
-                if (camera_id in expected_ids
-                        and str(item.get("window_id") or "") == window_id
-                        and _pid_is_ffmpeg(int(item.get("pid") or 0))):
-                    active_ids.add(camera_id)
-            except Exception:
-                continue
+    active_ids = (
+        _live_recording_ids(r, window_id, expected_ids)
+        if window_id else set()
+    )
     expected = len(expected_ids)
     active = len(active_ids)
     missing = len(expected_ids - active_ids)
@@ -407,6 +425,59 @@ def _close_window(db, window_id: str, *, ended_at: datetime | None = None) -> in
     return int(updated)
 
 
+def _close_stale_camera_recordings(
+    db, camera_id: int, window_id: str, *, now: datetime | None = None,
+) -> int:
+    """Close dead recorder rows at their last provable file-write time."""
+    from app.models import RecordingClip
+
+    now_utc = _as_utc(now or datetime.now(timezone.utc))
+    rows = (db.query(RecordingClip)
+             .filter(RecordingClip.camera_id == camera_id,
+                     RecordingClip.window_id == window_id,
+                     RecordingClip.status == "recording")
+             .all())
+    for clip in rows:
+        started = _as_utc(clip.started_at) if clip.started_at else now_utc
+        ended = started
+        try:
+            if clip.file_path:
+                file_time = datetime.fromtimestamp(
+                    Path(clip.file_path).stat().st_mtime, tz=timezone.utc,
+                )
+                ended = max(started, min(now_utc, file_time))
+        except OSError:
+            pass
+        clip.status = "completed"
+        clip.ended_at = ended
+    return len(rows)
+
+
+def _repair_missing_recordings(db, r, window_id: str,
+                               seconds: int) -> int:
+    """Restart only missing live-camera recorders, with bounded retries."""
+    cameras = {int(camera.id): camera for camera in _key_cameras(db)}
+    active_ids = _live_recording_ids(r, window_id, set(cameras))
+    repaired = 0
+    for camera_id in sorted(set(cameras) - active_ids):
+        # Do not create futile rows for an offline feed, and do not retry a
+        # camera more than once per five minutes when a second RTSP connection
+        # is refused. The authoritative streamer remains untouched.
+        if not r.exists(f"vg:frame:{camera_id}"):
+            continue
+        if not r.set(_REPAIR_KEY_FMT.format(cam=camera_id), "1",
+                     nx=True, ex=300):
+            continue
+        r.delete(_PID_KEY_FMT.format(cam=camera_id))
+        _close_stale_camera_recordings(db, camera_id, window_id)
+        if _start_camera(db, r, cameras[camera_id], window_id, seconds):
+            repaired += 1
+    db.commit()
+    if repaired:
+        log.warning("recorder: repaired %d missing camera recorder(s)", repaired)
+    return repaired
+
+
 def _prune_expired_source_windows(
     db, *, now: datetime | None = None, retention_hours: int | None = None,
 ) -> int:
@@ -488,6 +559,11 @@ def tick() -> None:
                     _start_window(db, r, window_id, remaining)
                 log.warning("recorder: recovered mid-window %s after restart "
                             "(%ds remaining)", window_id, remaining)
+        else:
+            remaining = int((wstart.timestamp() + seconds) - now_eat.timestamp())
+            if remaining > 30:
+                with SessionLocal() as db:
+                    _repair_missing_recordings(db, r, window_id, remaining)
         with SessionLocal() as db:
             _publish_recording_health(db, r, window_id)
         return

@@ -1,5 +1,6 @@
 """Recorder coverage and evidence retention."""
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -11,8 +12,9 @@ from app.config import settings
 from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
-    _close_window, _current_window, _prune_expired_source_windows,
-    _recording_health_snapshot, _recording_path,
+    _close_stale_camera_recordings, _close_window, _current_window,
+    _prune_expired_source_windows, _recording_health_snapshot,
+    _recording_path, _repair_missing_recordings,
 )
 
 
@@ -102,6 +104,105 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "status": "degraded",
     }
     assert "camera_ids" not in result
+
+
+class _RepairRedis(_RecorderHealthRedis):
+    def __init__(self):
+        super().__init__()
+        self.values.pop("vg:recording:pid:99")
+        self.live_frames = {2, 3}
+        self.locks = set()
+        self.deleted = []
+
+    def exists(self, key: str) -> bool:
+        return int(key.rsplit(":", 1)[-1]) in self.live_frames
+
+    def set(self, key: str, value: str, **kwargs) -> bool:
+        if key.startswith("vg:recording:repair:"):
+            if key in self.locks:
+                return False
+            assert kwargs == {"nx": True, "ex": 300}
+            self.locks.add(key)
+            return True
+        self.values[key] = value
+        return True
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.values.pop(key, None)
+
+
+def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> None:
+    cameras = [
+        SimpleNamespace(id=camera_id, store_id=1) for camera_id in range(1, 4)
+    ]
+    redis = _RepairRedis()
+    closed = []
+    started = []
+
+    class _Db:
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+    db = _Db()
+    monkeypatch.setattr(
+        "app.tasks.recorder._key_cameras", lambda _db: cameras,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid == 101,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._close_stale_camera_recordings",
+        lambda _db, camera_id, window_id: closed.append(
+            (camera_id, window_id),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._start_camera",
+        lambda _db, _r, camera, window_id, seconds: started.append(
+            (camera.id, window_id, seconds),
+        ) or True,
+    )
+
+    assert _repair_missing_recordings(db, redis, "current", 600) == 2
+    assert started == [(2, "current", 600), (3, "current", 600)]
+    assert closed == [(2, "current"), (3, "current")]
+    assert "vg:recording:pid:1" not in redis.deleted
+    assert db.commits == 1
+
+    assert _repair_missing_recordings(db, redis, "current", 600) == 0
+    assert db.commits == 2
+
+
+def test_dead_recorder_row_ends_at_last_provable_file_write(tmp_path) -> None:
+    db = _session()
+    now = datetime(2026, 10, 2, 6, 30, tzinfo=timezone.utc)
+    started = now - timedelta(minutes=10)
+    last_write = now - timedelta(minutes=4)
+    source = tmp_path / "stopped.mp4"
+    source.write_bytes(b"partial recording")
+    os.utime(source, (last_write.timestamp(), last_write.timestamp()))
+    clip = RecordingClip(
+        camera_id=7, window_id="current", file_path=str(source),
+        status="recording", started_at=started,
+    )
+    db.add(clip)
+    db.commit()
+
+    assert _close_stale_camera_recordings(
+        db, 7, "current", now=now,
+    ) == 1
+    db.commit()
+    db.refresh(clip)
+
+    assert clip.status == "completed"
+    assert abs((_as_utc_for_test(clip.ended_at) - last_write).total_seconds()) < 1
+
+
+def _as_utc_for_test(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def test_close_window_retains_source_for_delayed_extraction(tmp_path, monkeypatch) -> None:
