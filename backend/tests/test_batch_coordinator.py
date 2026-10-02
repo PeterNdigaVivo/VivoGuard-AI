@@ -132,6 +132,7 @@ def test_replay_scheduler_covers_110_cameras_fairly():
 def test_coordinator_decodes_only_the_selected_bounded_batch():
     coordinator = BatchShadowCoordinator()
     coordinator.buffer = _Buffer()
+    coordinator.redis = _Redis()
     coordinator.specs = {
         camera_id: ("model.pt", 1) for camera_id in range(1, 111)
     }
@@ -146,6 +147,21 @@ def test_coordinator_decodes_only_the_selected_bounded_batch():
     assert len(decoded) == 8
     assert len(coordinator.buffer.reads) == 8
     assert all(candidate.frame is not None for candidate in decoded)
+
+
+def test_coordinator_excludes_stale_health_without_live_jpeg():
+    coordinator = BatchShadowCoordinator()
+    coordinator.buffer = _Buffer()
+    coordinator.redis = _Redis(fresh_ids={1})
+    coordinator.specs = {
+        1: ("model.pt", 1),
+        2: ("model.pt", 1),
+    }
+
+    candidates = coordinator.candidates()
+
+    assert [candidate.camera_id for candidate in candidates] == [1]
+    assert coordinator.redis.pending_exists == [1, 2]
 
 
 def test_shadow_process_records_telemetry_without_emitting_results(monkeypatch):

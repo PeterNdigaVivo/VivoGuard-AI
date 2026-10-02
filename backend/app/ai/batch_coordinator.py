@@ -182,7 +182,13 @@ class BatchShadowCoordinator:
     def candidates(self) -> list[BatchCandidate]:
         """Collect lightweight frame metadata; pixels are decoded after select."""
         candidates = []
-        for camera_id, (weights, priority) in self.specs.items():
+        # Stream health outlives the JPEG key.  Without this gate an offline
+        # camera retains a historical ``last_frame_at`` forever and becomes a
+        # permanently pending candidate whose queue wait grows with process
+        # uptime even though there are no pixels available to serve.
+        fresh_ids = self._fresh_camera_ids(set(self.specs))
+        for camera_id in sorted(fresh_ids):
+            weights, priority = self.specs[camera_id]
             health = self.buffer.health(camera_id) or {}
             frame_ts = float(health.get("last_frame_at") or 0.0)
             if frame_ts <= self.last_processed_ts.get(camera_id, 0.0):
