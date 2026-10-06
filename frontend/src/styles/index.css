@@ -30,3 +30,47 @@ html.dark body { color: #e2e8f0; }          /* slate-200 */
 @media (prefers-reduced-motion: reduce) {
   html { transition: none; }
 }
+
+/* ---- Live alert feed (AlertsPage) ------------------------------------
+   New cards open out at the top and glow softly for a few seconds so
+   operators notice them without the page jumping. Height is animated with
+   grid rows + opacity only: a transform on the wrapper would make it the
+   containing block for the card's full-screen snapshot / clip viewers. */
+.vg-feed-enter {
+  display: grid;
+  animation: vg-feed-open 300ms ease-out;
+}
+.vg-feed-enter > * {
+  min-height: 0;
+  overflow: hidden;
+}
+@keyframes vg-feed-open {
+  from { grid-template-rows: 0fr; opacity: 0; }
+  to   { grid-template-rows: 1fr; opacity: 1; }
+}
+.vg-feed-glow {
+  border-radius: 0.25rem;
+  animation: vg-feed-glow 4s ease-out forwards;
+}
+@keyframes vg-feed-glow {
+  from { box-shadow: 0 0 0 2px rgb(56 189 248 / 0.9), 0 0 14px 2px rgb(56 189 248 / 0.45); }
+  to   { box-shadow: 0 0 0 2px rgb(56 189 248 / 0),   0 0 14px 2px rgb(56 189 248 / 0); }
+}
+.vg-count-glow {
+  animation: vg-count-glow 4s ease-out forwards;
+}
+@keyframes vg-count-glow {
+  from { background-color: rgb(186 230 253); }   /* sky-200 */
+  to   { background-color: transparent; }
+}
+/* Reduce motion: no opening animation and no fading; a plain highlight
+   is shown instead and removed by the page after a few seconds. */
+@media (prefers-reduced-motion: reduce) {
+  .vg-feed-enter { animation: none; }
+  .vg-feed-enter > * { overflow: visible; }
+  .vg-feed-glow { animation: none; box-shadow: 0 0 0 2px rgb(56 189 248); }
+  .vg-count-glow { animation: none; background-color: rgb(186 230 253); }
+}
+/* Let the browser keep what the operator is reading in place when
+   content above it changes (scroll anchoring). */
+.vg-feed-list { overflow-anchor: auto; }

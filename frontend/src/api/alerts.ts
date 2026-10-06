@@ -131,7 +131,20 @@ export const alerts = {
   // Live alerts WebSocket
   subscribe: (onEvent: (data: any) => void) => {
     const ws = authenticatedWebSocket('/ws/alerts')
-    ws.onmessage = e => { try { onEvent(JSON.parse(e.data)) } catch {} }
+    ws.onmessage = e => {
+      let data: unknown
+      try {
+        data = JSON.parse(e.data)
+      } catch (error) {
+        console.warn('[alerts] ignoring unreadable live-feed message', error)
+        return
+      }
+      try {
+        onEvent(data)
+      } catch (error) {
+        console.warn('[alerts] live-feed handler failed', error)
+      }
+    }
     return () => ws.close()
   },
 }

@@ -438,16 +438,18 @@ export interface AlertCardProps {
   groupLast?: string
   groupUnresolvedCount?: number
   groupSiblings?: Alert[]
+  // Briefly glow the "×N today" count — set by the live feed when a
+  // new alert has just joined this group.
+  highlightCount?: boolean
   onChanged?: () => void
 }
 
 export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresolvedCount,
-  groupSiblings, onChanged }: AlertCardProps) {
+  groupSiblings, highlightCount, onChanged }: AlertCardProps) {
   // Local copy of the alert so we can reflect a resolve / dismiss
   // immediately without waiting for the parent's reload — feels
   // instantaneous and never flashes back to "new".
   const [alert, setLocal] = useState(incoming)
-  useEffect(() => { setLocal(incoming) }, [incoming])
   const sev = sevKey(alert.severity)
   const isPositive = alert.detection_type === 'positive_operational'
   // scene_review ("Unusual Activity Seen"): the body is the AI's own
@@ -469,6 +471,18 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  // Re-sync the local copy whenever the parent passes new data. A group
+  // card's head can change when a newer alert joins the group; while the
+  // operator has this card's note box, snapshot or clip open, keep showing
+  // the alert they are working on so a note or True/False verdict cannot
+  // land on an alert they have not seen. Updates to the SAME alert
+  // (status, AI verdict) always apply; the switch happens on close.
+  const interacting = noteOpen || lightbox || filmIdx !== null || clipModal
+  useEffect(() => {
+    if (interacting && incoming.id !== alert.id) return
+    setLocal(incoming)
+  }, [incoming, interacting, alert.id])
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true)
@@ -625,7 +639,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             )}
             {groupCount && groupCount > 1 && (
               <button onClick={() => setGroupExpanded(g => !g)}
-                      className="text-[11px] text-sky-700 hover:underline">
+                      className={'text-[11px] text-sky-700 hover:underline rounded px-0.5 '
+                                 + (highlightCount ? 'vg-count-glow' : '')}>
                 ×{groupCount} today (last: {formatTime(groupLast ?? alert.created_at)}) {groupExpanded ? '▴' : '▾'}
                 {(groupUnresolvedCount ?? 0) > 0 && (
                   <span className="ml-1 font-semibold text-red-700">
@@ -1026,55 +1041,10 @@ function formatTime(iso: string): string {
 }
 
 
-// ---- Grouping helper ------------------------------------------------
-//
-// Groups repeat-of-same-thing alerts within the same day so the feed
-// reads as
-//   "Counter Unstaffed ×7 today (last: 3:06 PM)"
-// instead of seven separate rows for one ongoing condition.
-//
-// Rule: alerts share a group iff they have the same detection_type,
-// the same camera_id, and the same calendar day. The "head" of each
-// group is the most recent alert; siblings render in the expand
-// accordion.
-
-export function groupAlerts(rows: Alert[]): {
-  head: Alert; count: number; last: string; unresolvedCount: number; siblings: Alert[]
-}[] {
-  const eatDay = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit',
-  })
-  const groups = new Map<string, Alert[]>()
-  for (const a of rows) {
-    const parsed = new Date(a.created_at || '')
-    const day = Number.isNaN(parsed.getTime()) ? (a.created_at || '').slice(0, 10) : eatDay.format(parsed)
-    const key = `${day}|${a.detection_type ?? ''}|${a.camera_id ?? 'na'}`
-    const arr = groups.get(key) ?? []
-    arr.push(a)
-    groups.set(key, arr)
-  }
-  const closed = (alert: Alert) => ['resolved', 'confirmed', 'dismissed'].includes(alert.status)
-  const out: {
-    head: Alert; count: number; last: string; unresolvedCount: number; siblings: Alert[]
-  }[] = []
-  for (const arr of groups.values()) {
-    arr.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
-    const last = arr[0].created_at
-    const unresolved = arr.filter(alert => !closed(alert))
-    // An unresolved occurrence must own the card even when a newer sibling
-    // was resolved; otherwise grouping hides work from the operator.
-    const head = unresolved[0] ?? arr[0]
-    out.push({
-      head,
-      count: arr.length,
-      last,
-      unresolvedCount: unresolved.length,
-      siblings: arr.filter(alert => alert.id !== head.id),
-    })
-  }
-  out.sort((a, b) => (b.last || '').localeCompare(a.last || ''))
-  return out
-}
+// Grouping helper — lives in lib/alertGroups.ts so it can be unit
+// tested without the card UI; re-exported here for existing imports.
+export { groupAlerts } from '@/lib/alertGroups'
+export type { AlertGroup } from '@/lib/alertGroups'
 
 
 // Lifecycle pip — three-dot timeline showing how far the alert is
