@@ -4,6 +4,7 @@ import type { Alert } from '../api/alerts'
 import { groupAlerts } from './alertGroups'
 import {
   appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap, mergeLatestPage,
+  patchAlert,
 } from './alertFeed'
 
 // Minimal alert rows: only the fields the feed logic and grouping read.
@@ -194,5 +195,20 @@ describe('createRefreshScheduler', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(run).not.toHaveBeenCalled()
     vi.useRealTimers()
+  })
+})
+
+describe('patchAlert', () => {
+  it('updates one row and leaves the others as the same objects', () => {
+    const rows = [alert(2, 10), alert(1, 5)]
+    const next = patchAlert(rows, 1, { status: 'dismissed' })
+    expect(next[1].status).toBe('dismissed')
+    expect(next[0]).toBe(rows[0])
+    expect(rows[1].status).toBe('new')            // original untouched
+  })
+
+  it('returns the same array when the id is not shown', () => {
+    const rows = [alert(1, 5)]
+    expect(patchAlert(rows, 99, { status: 'dismissed' })).toBe(rows)
   })
 })

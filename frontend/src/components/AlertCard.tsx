@@ -489,6 +489,41 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
+  // True while a True/False/close is being saved: the result already
+  // shows (optimistic), this only blocks a second click and shows
+  // "saving…" until the server answers.
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+
+  // Save one verdict/close: optimistic result first, then the request.
+  // No list reload afterwards — the page updates this one row from the
+  // 'vg:alert-resolved' event (patch = what the server stores).
+  async function saveOutcome(opts: {
+    optimistic: Partial<Alert>
+    request: () => Promise<unknown>
+    action: 'resolve' | 'dismiss'
+    failure: string
+  }) {
+    if (savingRef.current) return          // double-click guard
+    savingRef.current = true
+    setSaving(true)
+    const before = alert
+    setLocal({ ...alert, ...opts.optimistic })
+    setHeldId(alert.id)
+    try {
+      await opts.request()
+      window.dispatchEvent(new CustomEvent('vg:alert-resolved', {
+        detail: { id: before.id, action: opts.action, patch: opts.optimistic },
+      }))
+    } catch (e) {
+      setLocal(before)   // rollback to exactly what was shown
+      setHeldId(null)
+      window.alert(opts.failure + ' ' + e)
+    } finally {
+      savingRef.current = false
+      setSaving(false)
+    }
+  }
 
   // After the operator marks this alert (True/False/close), keep showing
   // THAT alert with its result for HOLD_AFTER_VERDICT_MS, even if the
@@ -573,71 +608,54 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
   async function markTrue() {
-    const before = alert
     // ✅ True Alert — the AI was right. Positive training sample via
-    // /alerts/{id}/confirm → absorb_confirmed.
+    // /alerts/{id}/confirm (made in the background on the server).
     const prompt = isCalibration
       ? 'Mark this calibration alert as TRUE? It will remain quarantined until independent review.'
       : 'Mark this alert as TRUE? It will be added to AI training as a positive example.'
-    if (!window.confirm(prompt)) return
-    setLocal({ ...alert, status: 'confirmed', resolved_at: null,
-               acknowledged_at: new Date().toISOString() })
-    setHeldId(alert.id)
-    try {
-      await alertsApi.confirm(alert.id)
-      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
-        { detail: { id: alert.id, action: 'resolve' } }))
-      onChanged?.()
-    } catch (e) {
-      setLocal(before)   // rollback to exactly what was shown
-      setHeldId(null)
-      window.alert('Could not mark True. ' + e)
-    }
+    if (savingRef.current || !window.confirm(prompt)) return
+    await saveOutcome({
+      optimistic: { status: 'confirmed', resolved_at: null,
+                    acknowledged_at: new Date().toISOString() },
+      request: () => alertsApi.confirm(alert.id),
+      action: 'resolve',
+      failure: 'Could not mark True.',
+    })
   }
 
+
   async function markFalse() {
-    const before = alert
-    // ❌ False Alert — the AI was wrong. Hard-negative training
-    // sample via /alerts/{id}/dismiss → absorb_dismissed.
+    // ❌ False Alert — the AI was wrong. Hard-negative training sample
+    // via /alerts/{id}/dismiss (made in the background on the server).
     const prompt = isCalibration
       ? 'Mark this calibration alert as FALSE? It will remain quarantined until independent review.'
       : 'Mark this alert as FALSE? It will be added to AI training as a negative example.'
-    if (!window.confirm(prompt)) return
-    setLocal({ ...alert, status: 'dismissed', resolved_at: null,
-               acknowledged_at: new Date().toISOString() })
-    setHeldId(alert.id)
-    try {
-      await alertsApi.dismiss(alert.id)
-      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
-        { detail: { id: alert.id, action: 'dismiss' } }))
-      onChanged?.()
-    } catch (e) {
-      setLocal(before)   // rollback to exactly what was shown
-      setHeldId(null)
-      window.alert('Could not mark False. ' + e)
-    }
+    if (savingRef.current || !window.confirm(prompt)) return
+    await saveOutcome({
+      optimistic: { status: 'dismissed', resolved_at: null,
+                    acknowledged_at: new Date().toISOString() },
+      request: () => alertsApi.dismiss(alert.id),
+      action: 'dismiss',
+      failure: 'Could not mark False.',
+    })
   }
+
 
   // Informational cards (store updates, positive operational notes) carry
   // no verdict — there is no AI judgement to agree or disagree with. They
   // still need clearing, otherwise the tab count only ever grows. /resolve
   // closes without feeding a training sample.
   async function closeUpdate() {
-    const before = alert
-    setLocal({ ...alert, status: 'resolved',
-               resolved_at: new Date().toISOString() })
-    setHeldId(alert.id)
-    try {
-      await alertsApi.resolve(alert.id)
-      window.dispatchEvent(new CustomEvent('vg:alert-resolved',
-        { detail: { id: alert.id, action: 'resolve' } }))
-      onChanged?.()
-    } catch (e) {
-      setLocal(before)   // rollback to exactly what was shown
-      setHeldId(null)
-      window.alert('Could not close this update. ' + e)
-    }
+    // The server stores status "confirmed" plus resolved_at for /resolve.
+    const now = new Date().toISOString()
+    await saveOutcome({
+      optimistic: { status: 'confirmed', resolved_at: now, acknowledged_at: now },
+      request: () => alertsApi.resolve(alert.id),
+      action: 'resolve',
+      failure: 'Could not close this update.',
+    })
   }
+
 
   async function submitNote() {
     if (!noteText.trim()) return
@@ -873,6 +891,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                                   : alertOutcome(alert) === 'resolved' ? 'bg-slate-600' : 'bg-green-600')}>
                 {isDismissed ? '✓ Marked False'
                   : alertOutcome(alert) === 'resolved' ? '✓ Resolved' : '✓ Marked True'}
+                {saving && <span className="ml-1 font-normal opacity-80">· saving…</span>}
               </span>
             )}
             {/* Incident review is always visible for camera alerts. When a

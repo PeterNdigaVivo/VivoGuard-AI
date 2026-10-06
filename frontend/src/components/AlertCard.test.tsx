@@ -33,11 +33,12 @@ function alert(id: number, hhmm: string, extra: Partial<Alert> = {}): Alert {
   } as Alert
 }
 
-function card(head: Alert, siblings: Alert[]) {
+function card(head: Alert, siblings: Alert[], onChanged?: () => void) {
   return (
     <MemoryRouter>
       <AlertCard alert={head} groupCount={1 + siblings.length}
-                 groupLast={head.created_at} groupSiblings={siblings} />
+                 groupLast={head.created_at} groupSiblings={siblings}
+                 onChanged={onChanged} />
     </MemoryRouter>
   )
 }
@@ -118,5 +119,42 @@ describe('grouped AlertCard verdicts', () => {
     render(card(olderOpen, [newerTrue]))
     fireEvent.click(screen.getByRole('button', { name: /×2 today/ }))
     expect(screen.getByText('✓ True')).toBeTruthy()
+  })
+})
+
+describe('verdict responsiveness', () => {
+  it('shows the result at once with "saving…", and a second click sends nothing', async () => {
+    let finish: (v: { id: number; status: string }) => void = () => {}
+    api.dismiss.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    render(card(alert(1, '10:00'), []))
+    const falseBtn = screen.getByRole('button', { name: /False Alert/ })
+    await act(async () => { fireEvent.click(falseBtn); fireEvent.click(falseBtn) })
+    expect(screen.getByText('✓ Marked False')).toBeTruthy()
+    expect(screen.getByText(/saving…/)).toBeTruthy()
+    expect(api.dismiss).toHaveBeenCalledTimes(1)
+    await act(async () => { finish({ id: 1, status: 'dismissed' }) })
+    expect(screen.queryByText(/saving…/)).toBeNull()
+  })
+
+  it('does not reload the list; it announces the saved change instead', async () => {
+    const onChanged = vi.fn()
+    const events: unknown[] = []
+    const listener = (e: Event) => events.push((e as CustomEvent).detail)
+    window.addEventListener('vg:alert-resolved', listener)
+    render(card(alert(1, '10:00'), [], onChanged))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /True Alert/ })) })
+    window.removeEventListener('vg:alert-resolved', listener)
+    expect(onChanged).not.toHaveBeenCalled()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ id: 1, action: 'resolve',
+                                      patch: { status: 'confirmed', resolved_at: null } })
+  })
+
+  it('cancelling the "Are you sure?" popup saves nothing', async () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(false)
+    render(card(alert(1, '10:00'), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    expect(api.dismiss).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /False Alert/ })).toBeTruthy()
   })
 })

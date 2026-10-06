@@ -12,6 +12,7 @@ THREE places to stay consistent. Factoring it here closes that gap.
 """
 from __future__ import annotations
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
@@ -120,16 +121,24 @@ def record_verdict(
     user: User,
     event: Optional[DetectionEvent] = None,   # Part 5 sprint signature
 ) -> AlertActionOut:
-    """Flip an alert to confirmed/dismissed AND fire the feedback-loop
-    side effect that grows the training pool. Idempotent — calling
-    again on an already-confirmed alert is a no-op (the absorb_*
-    helpers guard on `feedback_used_for_training`).
+    """Flip an alert to confirmed/dismissed and reply straight away.
 
-    `event` is an optional, already-fetched DetectionEvent the caller
-    may pass to avoid a second round-trip (the sprint endpoint joins
-    Alert→DetectionEvent for dwell-display anyway). When None, the
-    feedback-loop helpers do their own lookups.
+    In the request: the verdict, its append-only review decision and the
+    alert-quality breaker. The breaker stays here on purpose: it decides
+    whether THIS alert may feed training and must count this verdict
+    before the next alert from the pair is created (it is a bounded query,
+    so it does not slow down as history grows).
+
+    After the commit: the training sample (snapshot copy into the dataset
+    + retraining check) is handed to the `feedback.absorb_verdict` Celery
+    task, so nothing that happens there can delay, undo or alter the
+    operator's verdict. Idempotent — a repeat click is a no-op for
+    training because the task checks `feedback_used_for_training`.
+
+    `event` is an optional, already-fetched DetectionEvent the caller may
+    pass to save a lookup (the sprint endpoint already has it).
     """
+    started = time.perf_counter()
     if verdict not in ("confirm", "dismiss"):
         raise HTTPException(
             422, f"verdict must be 'confirm' or 'dismiss', got {verdict!r}")
@@ -155,6 +164,7 @@ def record_verdict(
     # Recalculate the pair circuit breaker using this verdict before any
     # learning side effect. If the threshold is crossed, this alert and all
     # subsequent alerts stay evidence-only until a governed release.
+    quality_started = time.perf_counter()
     ev_for_quality = event or db.get(DetectionEvent, a.event_id)
     if ev_for_quality is not None:
         from app.services.alert_quality import refresh_pair_control
@@ -164,30 +174,38 @@ def record_verdict(
             a.review_only = True
             a.notification_suppressed = True
             a.training_eligible = False
+    quality_ms = (time.perf_counter() - quality_started) * 1000
 
-    # Feedback-loop side effect — the actual reason rule #2 exists.
-    # Best-effort: never block the operator's verdict on a feedback-
-    # loop failure, but DO log it (the previous inline handlers
-    # swallowed silently — switched to log.exception per the dry-run
-    # decision).
-    try:
-        if not a.training_eligible:
-            log.info("alert_feedback: training skipped for quality-controlled "
-                     "alert=%s", alert_id)
-        elif verdict == "confirm":
-            from app.training.feedback_loop import absorb_confirmed
-            absorb_confirmed(db, a.id)
-        else:
-            from app.training.feedback_loop import mark_dismissed
-            mark_dismissed(db, a.id)
-    except Exception:
-        log.exception("alert_feedback: feedback-loop side effect failed "
-                      "alert=%s verdict=%s", alert_id, verdict)
-
+    training_eligible = bool(a.training_eligible)
     db.commit()
-    # `event` arg accepted for API stability with the sprint caller; not
-    # currently used by record_verdict itself (the absorb_* helpers look
-    # up DetectionEvent from alert.event_id internally). Reserved for
-    # future enrichment without changing this signature again.
-    _ = event
+
+    # Training sample in the background, AFTER the commit so the worker
+    # sees the saved verdict.
+    if training_eligible:
+        _enqueue_absorb(a.id, verdict)
+    else:
+        log.info("alert_feedback: training skipped for quality-controlled "
+                 "alert=%s", alert_id)
+
+    log.info("alert_feedback: verdict saved alert=%s verdict=%s "
+             "quality_ms=%.0f total_ms=%.0f",
+             a.id, verdict, quality_ms, (time.perf_counter() - started) * 1000)
     return AlertActionOut(id=a.id, status=a.status)
+
+
+def _enqueue_absorb(alert_id: int, verdict: str) -> None:
+    """Queue the training-sample task. If the queue is unreachable the
+    verdict still stands; the `feedback.absorb_pending` sweep picks the
+    alert up later, so this only logs."""
+    try:
+        from app.tasks.feedback_absorb import absorb_verdict
+        # One quick publish retry at most: the operator is waiting on this
+        # reply, and the sweep covers a queue that is down.
+        absorb_verdict.apply_async(
+            args=[alert_id, verdict], retry=True,
+            retry_policy={"max_retries": 1, "interval_start": 0,
+                          "interval_step": 0.2, "interval_max": 0.2})
+    except Exception:
+        log.exception("alert_feedback: could not queue the training sample "
+                      "for alert=%s verdict=%s — the 15-minute sweep will "
+                      "retry", alert_id, verdict)

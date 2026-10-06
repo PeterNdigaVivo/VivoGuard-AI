@@ -10,8 +10,8 @@ import { api } from '@/api/client'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 import {
-  appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap,
-  type RefreshScheduler,
+  appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap, patchAlert,
+  type AlertResolvedDetail, type RefreshScheduler,
 } from '@/lib/alertFeed'
 
 // Simple quick-filter buttons non-technical staff understand.
@@ -384,8 +384,14 @@ export default function AlertsPage() {
   // The /summary fetch fired by reload() then reconciles the truth.
   useEffect(() => {
     function onResolved(e: Event) {
-      const detail = (e as CustomEvent).detail || {}
+      const detail: AlertResolvedDetail = (e as CustomEvent).detail || {}
       const id = detail.id
+      // Update just this row (no list reload after a verdict); the next
+      // live-feed refresh reconciles anything else the server changed.
+      if (id != null && detail.patch) {
+        const patch = detail.patch
+        setItems(rows => patchAlert(rows, id, patch))
+      }
       const action: 'resolve' | 'dismiss' = detail.action === 'dismiss' ? 'dismiss' : 'resolve'
       const closed = items.find(a => a.id === id)
       if (!closed) return

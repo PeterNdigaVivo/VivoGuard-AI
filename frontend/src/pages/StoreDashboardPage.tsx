@@ -28,6 +28,7 @@ const StoreBIPanels        = lazy(() => import('@/components/StoreBIPanels'))
 const StoreAIIntelligence  = lazy(() => import('@/components/StoreAIIntelligence'))
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import type { Alert as AlertRowFull } from '@/api/alerts'
+import { patchAlert, type AlertResolvedDetail } from '@/lib/alertFeed'
 
 // Parse a camera_id out of the live tile's heatmap thumb URL.
 // Format: /api/analytics/heatmap/{cam}/image?...
@@ -839,6 +840,19 @@ function AlertsFeedSection({ storeId }: { storeId: number }) {
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
   }, [storeId])
+  // After a True/False/close, update that one row instead of reloading
+  // the feed; the 30-second poll reconciles anything else.
+  useEffect(() => {
+    function onResolved(e: Event) {
+      const detail: AlertResolvedDetail = (e as CustomEvent).detail || {}
+      const id = detail.id
+      const patch = detail.patch
+      if (id == null || !patch) return
+      setRows(rows => (rows ? patchAlert(rows, id, patch) : rows))
+    }
+    window.addEventListener('vg:alert-resolved', onResolved)
+    return () => window.removeEventListener('vg:alert-resolved', onResolved)
+  }, [])
 
   if (rows === null) return null
   const groups = groupAlerts(rows)
@@ -862,7 +876,9 @@ function AlertsFeedSection({ storeId }: { storeId: number }) {
           </div>
         ) : (
           groups.map(g => (
-            <AlertCard key={g.head.id}
+            // Keyed by the group so a card keeps its state (and the
+            // just-marked alert) when the group's head changes.
+            <AlertCard key={g.key}
                        alert={g.head}
                        groupCount={g.count}
                        groupLast={g.last}

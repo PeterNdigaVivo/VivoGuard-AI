@@ -58,6 +58,7 @@ celery_app = Celery(
         "app.tasks.operations_assurance",
         "app.tasks.odoo_sync",
         "app.tasks.system_health_report",
+        "app.tasks.feedback_absorb",
     ],
 )
 celery_app.conf.update(
@@ -138,6 +139,10 @@ celery_app.conf.update(
         # training jobs filling the alerts pool starved it twice when
         # beat shared their slots.
         "system.daily_status_report":         {"queue": "beat"},
+        # True/False verdict → training sample, off the request path.
+        # `alerts` mounts the thumbnails + datasets volumes it copies between.
+        "feedback.absorb_verdict":            {"queue": "alerts"},
+        "feedback.absorb_pending":            {"queue": "beat"},
         "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -181,6 +186,12 @@ celery_app.conf.update(
         # successful send, 15-min SMTP retries. Rides `beat`, which
         # has a dedicated 1-slot runner so heavy `alerts` work can
         # never delay it.
+        # Safety net for verdicts whose training sample never got made
+        # (queue down at click time, worker restart, retries spent).
+        "feedback-absorb-pending-every-15min": {
+            "task": "feedback.absorb_pending",
+            "schedule": timedelta(minutes=15),
+        },
         "vivoguard-status-report-every-5min": {
             "task": "system.daily_status_report",
             "schedule": timedelta(minutes=5),

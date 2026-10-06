@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import sqrt
 
-from sqlalchemy import or_
+from sqlalchemy import exists, or_, tuple_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -41,36 +41,50 @@ def _wilson_lower_bound(successes: int, total: int) -> float | None:
 
 def _reviewed_pair(db: Session, camera_id: int, detection_type: str,
                    *, limit: int = ROLLING_SAMPLE_SIZE) -> list[tuple[Alert, str]]:
-    rows = (db.query(Alert, AlertReviewDecision)
+    """The newest `limit` human-reviewed alerts for one camera/type pair,
+    each with its authoritative verdict.
+
+    Runs on every True/False click, so it must not grow with history: it
+    asks the database for the newest reviewed alerts a page at a time
+    (keyset on created_at, id) and stops as soon as it has `limit`,
+    instead of loading every reviewed alert the pair ever had. Same
+    result as before — the order, the "reviewed" test and the verdict
+    rule are unchanged.
+    """
+    reviewed_filter = or_(
+        Alert.status.in_(("confirmed", "dismissed")),
+        exists().where(AlertReviewDecision.alert_id == Alert.id))
+    base = (db.query(Alert)
               .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
-              .outerjoin(AlertReviewDecision,
-                         AlertReviewDecision.alert_id == Alert.id)
               .filter(DetectionEvent.camera_id == camera_id,
                       DetectionEvent.detection_type == detection_type,
-                      or_(Alert.status.in_(("confirmed", "dismissed")),
-                          AlertReviewDecision.id.is_not(None)))
-              .order_by(Alert.created_at.desc(), Alert.id.desc(),
-                        AlertReviewDecision.created_at,
-                        AlertReviewDecision.id).all())
-    # Alert.status is mutable lifecycle state (for example `resolved`). The
-    # latest append-only decision remains the authoritative human verdict.
-    alerts: dict[int, Alert] = {}
-    verdicts: dict[int, str] = {}
-    order: list[int] = []
-    for alert, decision in rows:
-        if alert.id not in alerts:
-            alerts[alert.id] = alert
-            order.append(alert.id)
-        if decision is not None:
-            verdicts[alert.id] = decision.verdict
-    reviewed = []
-    for alert_id in order:
-        alert = alerts[alert_id]
-        verdict = verdicts.get(alert_id, alert.status)
-        if verdict in {"confirmed", "dismissed"}:
-            reviewed.append((alert, verdict))
-        if len(reviewed) >= limit:
+                      reviewed_filter))
+    reviewed: list[tuple[Alert, str]] = []
+    cursor: tuple | None = None
+    while len(reviewed) < limit:
+        page_q = base
+        if cursor is not None:
+            page_q = page_q.filter(tuple_(Alert.created_at, Alert.id) < cursor)
+        page = (page_q.order_by(Alert.created_at.desc(), Alert.id.desc())
+                      .limit(limit).all())
+        if not page:
             break
+        # Alert.status is mutable lifecycle state (for example `resolved`).
+        # The latest append-only decision remains the authoritative human
+        # verdict.
+        latest: dict[int, str] = {}
+        for decision in (db.query(AlertReviewDecision)
+                           .filter(AlertReviewDecision.alert_id.in_([a.id for a in page]))
+                           .order_by(AlertReviewDecision.created_at,
+                                     AlertReviewDecision.id)):
+            latest[decision.alert_id] = decision.verdict
+        for alert in page:
+            verdict = latest.get(alert.id, alert.status)
+            if verdict in {"confirmed", "dismissed"}:
+                reviewed.append((alert, verdict))
+                if len(reviewed) >= limit:
+                    break
+        cursor = (page[-1].created_at, page[-1].id)
     return reviewed
 
 

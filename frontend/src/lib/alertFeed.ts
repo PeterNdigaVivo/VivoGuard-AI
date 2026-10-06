@@ -182,3 +182,24 @@ export function createRefreshScheduler(
 
   return { request, requestNow, dispose }
 }
+
+// ---- Verdicts without a reload ----------------------------------------
+
+/** Detail of the window 'vg:alert-resolved' event a card fires after the
+ *  operator marks / closes an alert. `patch` is what the server stored,
+ *  so lists can update that one row instead of re-fetching everything. */
+export interface AlertResolvedDetail {
+  id?: number
+  action?: 'resolve' | 'dismiss'
+  bulk?: number
+  patch?: Partial<Pick<Alert, 'status' | 'acknowledged_at' | 'resolved_at'>>
+}
+
+/** Apply a patch to one alert; returns `rows` itself when nothing changes. */
+export function patchAlert(rows: Alert[], id: number, patch: Partial<Alert>): Alert[] {
+  const index = rows.findIndex(a => a.id === id)
+  if (index < 0) return rows
+  const next = rows.slice()
+  next[index] = { ...rows[index], ...patch }
+  return next
+}
