@@ -9,6 +9,10 @@ import { alerts as alertsApi, type Alert } from '@/api/alerts'
 import { api } from '@/api/client'
 import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
+import {
+  appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap,
+  type RefreshScheduler,
+} from '@/lib/alertFeed'
 
 // Simple quick-filter buttons non-technical staff understand.
 type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
@@ -26,6 +30,51 @@ const _isCalibration = (a: Alert) => a.review_only || a.notification_suppressed
 const _isOperational = (a: Alert) => _isActionable(a) && !_isCalibration(a)
 const _isOpen = (a: Alert) => !['resolved', 'confirmed', 'dismissed'].includes(a.status)
 const PAGE_SIZE = 100
+
+// Live feed tuning. Alerts arriving within REFRESH_BURST_MS share one
+// background refresh; new cards open out over ~300 ms (CSS) and glow for
+// FRESH_GLOW_MS. Past SCROLLED_DOWN_PX the operator is reading further
+// down, so new alerts wait behind the "↑ N new alerts" button.
+const REFRESH_BURST_MS = 1000
+const FRESH_ENTER_MS = 400
+const FRESH_GLOW_MS = 4000
+const SCROLLED_DOWN_PX = 40
+
+// Client-side quick-filter + search. Shared by the list and by the live
+// feed's "would this new alert be visible?" check. The Actionable tabs
+// exclude store intelligence, which has its own tab.
+function matchesView(a: Alert, quick: Quick, search: string): boolean {
+  if (quick === 'store') {
+    if (!_isStoreIntel(a)) return false
+  } else if (quick === 'positive') {
+    if (!_isPositive(a)) return false
+  } else {
+    if (quick === 'calibration') {
+      if (!(_isActionable(a) && _isCalibration(a))) return false
+    } else if (!_isOperational(a)) {
+      // Operational tabs exclude quarantined/review-only evidence. Those
+      // records remain available in the dedicated Calibration tab.
+      return false
+    }
+    if (quick === 'urgent' && !(a.severity_label === 'URGENT' && _isOpen(a))) return false
+    if (quick === 'attention' && !(a.severity_label === 'ATTENTION' && _isOpen(a))) return false
+    // 'confirmed' covers alerts the /resolve endpoint flipped (it re-uses
+    // that bucket as a "handled" state). 'dismissed' covers "Not a problem".
+    if (quick === 'resolved' && !['resolved', 'confirmed', 'dismissed'].includes(a.status)) return false
+  }
+  const q = search.trim().toLowerCase()
+  if (q) {
+    return (a.plain_title ?? a.title ?? '').toLowerCase().includes(q) ||
+      (a.camera_name ?? '').toLowerCase().includes(q) ||
+      (a.detection_type ?? '').toLowerCase().includes(q)
+  }
+  return true
+}
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+}
 
 interface ProofOfLife {
   now: string
@@ -110,12 +159,47 @@ export default function AlertsPage() {
     return () => clearInterval(timer)
   }, [])
 
+  // ---- Live feed state ---------------------------------------------
+  // `epoch` changes on every first/filter load so a background refresh
+  // started under old filters can never land in the new list.
+  const rootRef = useRef<HTMLDivElement>(null)
+  const epochRef = useRef(0)
+  const loadingRef = useRef(true)
+  const itemsRef = useRef<Alert[]>([])
+  itemsRef.current = items
+  // Newest page from the last background refresh, and whether its new
+  // alerts are being held back because the operator scrolled down.
+  const [latest, setLatest] = useState<Alert[] | null>(null)
+  const [holding, setHolding] = useState(false)
+  const holdingRef = useRef(false)
+  holdingRef.current = holding
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [gapNotice, setGapNotice] = useState(false)
+  // Ids of just-inserted alerts: opening animation, then a fading glow.
+  const [enterIds, setEnterIds] = useState<ReadonlySet<number>>(new Set())
+  const [glowIds, setGlowIds] = useState<ReadonlySet<number>>(new Set())
+  const animateNextRef = useRef(false)
+  const prevIdsRef = useRef<Set<number>>(new Set())
+  const freshTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+  const viewRef = useRef<(a: Alert) => boolean>(() => true)
+  viewRef.current = (a: Alert) => matchesView(a, quick, search)
+
   const loadPage = useCallback(async (append = false, beforeId?: number) => {
     const sequence = ++requestSequence.current
     if (append) setLoadingMore(true)
     else {
+      // First load or a filter change: the only time the list is emptied
+      // and "Loading alerts…" shown. Reset everything the live feed holds.
+      epochRef.current += 1
+      loadingRef.current = true
       setLoading(true)
       setItems([])
+      setLatest(null)
+      setHolding(false)
+      setRefreshError(null)
+      setGapNotice(false)
+      setEnterIds(new Set())
+      setGlowIds(new Set())
     }
     setLoadError(null)
     try {
@@ -129,9 +213,7 @@ export default function AlertsPage() {
         before_id: beforeId,
       })
       if (sequence !== requestSequence.current) return
-      setItems(previous => append
-        ? [...previous, ...page.filter(row => !previous.some(existing => existing.id === row.id))]
-        : page)
+      setItems(previous => append ? appendOlderPage(previous, page) : page)
       setHasMore(page.length === PAGE_SIZE)
     } catch (error) {
       if (sequence !== requestSequence.current) return
@@ -139,6 +221,7 @@ export default function AlertsPage() {
       if (!append) setHasMore(false)
     } finally {
       if (sequence === requestSequence.current) {
+        loadingRef.current = false
         setLoading(false)
         setLoadingMore(false)
       }
@@ -157,8 +240,143 @@ export default function AlertsPage() {
       .finally(() => setSummaryLoading(false))
   }, [reload, storeId])
 
-  // Real-time: when /ws/alerts pushes a new event, refetch.
-  useEffect(() => alertsApi.subscribe(reload), [reload])
+  // ---- Background refresh -----------------------------------------
+  // Never empties the list: fetches the newest page (same filters) and
+  // merges it into what is on screen (lib/alertFeed.ts), so open
+  // snapshots, half-typed notes and "Load more" pages survive. The header
+  // summary is refreshed alongside, quietly (no "Refreshing…" card).
+  const scrollContainer = useCallback((): HTMLElement | null => {
+    return (rootRef.current?.closest('main') as HTMLElement | null)
+      ?? (document.scrollingElement as HTMLElement | null)
+  }, [])
+  const isScrolledDown = useCallback(
+    () => (scrollContainer()?.scrollTop ?? 0) > SCROLLED_DOWN_PX, [scrollContainer])
+
+  const refreshQuietly = useCallback(async () => {
+    // A first/filter load already in flight will bring fresh data itself.
+    if (loadingRef.current) return
+    const epoch = epochRef.current
+    const summaryRequest = alertsApi.summary(storeId ? Number(storeId) : undefined)
+      .then(next => {
+        if (epoch !== epochRef.current) return
+        setSummary(next)
+        setSummaryError(null)
+      })
+      .catch(error => console.warn('[alerts] summary refresh failed; keeping the last counts', error))
+    try {
+      const page = await alertsApi.list({
+        store_id: storeId || undefined,
+        ai_verdict: aiVerdict || undefined,
+        since: range.since,
+        until: range.until,
+        limit: PAGE_SIZE,
+        order: 'recent',
+      })
+      if (epoch !== epochRef.current) return
+      const hold = isScrolledDown()
+      if (!hold && detectGap(itemsRef.current, page, PAGE_SIZE)) {
+        setGapNotice(true)
+        setHasMore(true)
+      }
+      animateNextRef.current = true
+      setLatest(page)
+      setHolding(hold)
+      setItems(current => applyLatestPage(
+        current, page, PAGE_SIZE, hold ? row => viewRef.current(row) : undefined))
+      setRefreshError(null)
+    } catch (error) {
+      if (epoch !== epochRef.current) return
+      console.warn('[alerts] background refresh failed; keeping the current list', error)
+      setRefreshError(error instanceof Error ? error.message : String(error))
+    }
+    await summaryRequest
+  }, [storeId, aiVerdict, range.since, range.until, isScrolledDown])
+
+  // One live-feed connection for the page's lifetime. Bursts of alerts
+  // collapse into one refresh; the scheduler always calls the CURRENT
+  // refresh function (filters may have changed since it was created).
+  const refreshRef = useRef(refreshQuietly)
+  refreshRef.current = refreshQuietly
+  const schedulerRef = useRef<RefreshScheduler | null>(null)
+  useEffect(() => {
+    const scheduler = createRefreshScheduler(() => refreshRef.current(), REFRESH_BURST_MS)
+    schedulerRef.current = scheduler
+    const unsubscribe = alertsApi.subscribe(() => scheduler.request())
+    return () => {
+      unsubscribe()
+      scheduler.dispose()
+      schedulerRef.current = null
+    }
+  }, [])
+  // After an operator action (True/False, resolve, note): refresh now.
+  const refreshNow = useCallback(() => { schedulerRef.current?.requestNow() }, [])
+
+  // New alerts held while scrolled down, under the current tab + search.
+  const held = useMemo(() => {
+    if (!holding || !latest) return []
+    const shown = new Set(items.map(a => a.id))
+    return latest.filter(a => !shown.has(a.id) && matchesView(a, quick, search))
+  }, [holding, latest, items, quick, search])
+
+  // Insert the held alerts (the button, or scrolling back to the top).
+  const releaseHeld = useCallback(() => {
+    if (!latest) return
+    if (detectGap(itemsRef.current, latest, PAGE_SIZE)) {
+      setGapNotice(true)
+      setHasMore(true)
+    }
+    animateNextRef.current = true
+    setHolding(false)
+    setItems(current => applyLatestPage(current, latest, PAGE_SIZE))
+  }, [latest])
+  const releaseRef = useRef(releaseHeld)
+  releaseRef.current = releaseHeld
+
+  function showHeld() {
+    scrollContainer()?.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
+    releaseHeld()
+  }
+
+  // Scrolling back up to the top by hand releases held alerts too.
+  useEffect(() => {
+    const container = scrollContainer()
+    if (!container) return
+    const target: HTMLElement | Window =
+      container === document.scrollingElement ? window : container
+    const onScroll = () => {
+      if (holdingRef.current && container.scrollTop <= SCROLLED_DOWN_PX) releaseRef.current()
+    }
+    target.addEventListener('scroll', onScroll, { passive: true })
+    return () => target.removeEventListener('scroll', onScroll)
+  }, [scrollContainer])
+
+  // Mark alerts inserted by the live feed (not first loads or "Load
+  // more") so their cards animate in and glow. A gap replacement brings
+  // a whole page at once; animating that would be noise, so it is skipped.
+  useEffect(() => {
+    const ids = new Set(items.map(a => a.id))
+    if (animateNextRef.current) {
+      animateNextRef.current = false
+      const added = items.filter(a => !prevIdsRef.current.has(a.id)).map(a => a.id)
+      if (added.length > 0 && added.length <= PAGE_SIZE / 2) {
+        setEnterIds(s => new Set([...s, ...added]))
+        setGlowIds(s => new Set([...s, ...added]))
+        const drop = (setter: typeof setEnterIds, ms: number) => {
+          const timer = setTimeout(() => {
+            freshTimers.current.delete(timer)
+            setter(s => new Set([...s].filter(id => !added.includes(id))))
+          }, ms)
+          freshTimers.current.add(timer)
+        }
+        drop(setEnterIds, FRESH_ENTER_MS)
+        drop(setGlowIds, FRESH_GLOW_MS)
+      }
+    }
+    prevIdsRef.current = ids
+  }, [items])
+  useEffect(() => () => {
+    for (const timer of freshTimers.current) clearTimeout(timer)
+  }, [])
 
   // Instant-feedback: any time a card fires the resolve/dismiss
   // event, locally decrement the urgent/attention count so the header
@@ -188,38 +406,9 @@ export default function AlertsPage() {
     return () => window.removeEventListener('vg:alert-resolved', onResolved)
   }, [items])
 
-  // Client-side quick-filter + search over the loaded window. The
-  // Actionable tabs exclude store intelligence, which has its own tab.
-  const filtered = useMemo(() => {
-    let rows = items
-    if (quick === 'store') {
-      rows = rows.filter(_isStoreIntel)
-    } else if (quick === 'positive') {
-      rows = rows.filter(_isPositive)
-    } else {
-      if (quick === 'calibration') {
-        rows = rows.filter(a => _isActionable(a) && _isCalibration(a))
-      } else {
-        // Operational tabs exclude quarantined/review-only evidence. Those
-        // records remain available in the dedicated Calibration tab.
-        rows = rows.filter(_isOperational)
-      }
-      if (quick === 'urgent')         rows = rows.filter(a => a.severity_label === 'URGENT' && _isOpen(a))
-      else if (quick === 'attention') rows = rows.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a))
-      // 'confirmed' covers alerts the /resolve endpoint flipped (it
-      // re-uses that bucket as a "handled" state). 'dismissed' covers
-      // "Not a problem".
-      else if (quick === 'resolved')  rows = rows.filter(a => ['resolved', 'confirmed', 'dismissed'].includes(a.status))
-    }
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      rows = rows.filter(a =>
-        (a.plain_title ?? a.title ?? '').toLowerCase().includes(q) ||
-        (a.camera_name ?? '').toLowerCase().includes(q) ||
-        (a.detection_type ?? '').toLowerCase().includes(q))
-    }
-    return rows
-  }, [items, quick, search])
+  // Client-side quick-filter + search over the loaded window.
+  const filtered = useMemo(
+    () => items.filter(a => matchesView(a, quick, search)), [items, quick, search])
 
   // Per-bucket counts derived from the loaded items, so each filter
   // button's badge equals what the user will actually see when they
@@ -271,7 +460,7 @@ export default function AlertsPage() {
         resolved_today: s.resolved_today + resolved,
       }))
       window.dispatchEvent(new CustomEvent('vg:alert-resolved', { detail: { bulk: resolved } }))
-      reload()
+      refreshNow()
     } catch (e) {
       setToast(`Could not resolve: ${e}`)
     }
@@ -296,7 +485,7 @@ export default function AlertsPage() {
   }
 
   return (
-    <div className="p-6">
+    <div className="p-6" ref={rootRef}>
       <PageHeader title="Alerts" actions={
         <div className="flex items-center gap-2">
           <DateRangePicker value={range} onChange={setRange} />
@@ -398,7 +587,44 @@ export default function AlertsPage() {
         </span>
       </Card>
 
-      <div className="space-y-2">
+      {!loading && refreshError && (
+        <Card className="p-2 mb-2 text-xs text-amber-900 bg-amber-50 border-amber-200
+                         flex items-center gap-2">
+          <span role="status">
+            Couldn’t refresh just now — showing the alerts already loaded. ({refreshError})
+          </span>
+          <button type="button" onClick={refreshNow}
+                  className="ml-auto px-2 py-0.5 rounded bg-amber-700 text-white">
+            Retry
+          </button>
+        </Card>
+      )}
+
+      {!loading && gapNotice && (
+        <Card className="p-2 mb-2 text-xs text-sky-900 bg-sky-50 border-sky-200
+                         flex items-center gap-2">
+          <span role="status">
+            More than {PAGE_SIZE} alerts arrived at once — showing the newest {PAGE_SIZE}.
+            Use “Load next” below for older ones.
+          </span>
+          <button type="button" onClick={() => setGapNotice(false)}
+                  aria-label="Dismiss" className="ml-auto px-1 text-sky-700">×</button>
+        </Card>
+      )}
+
+      {/* "↑ N new alerts" — zero-height sticky row so its appearance never
+          moves the list the operator is reading. */}
+      {!loading && held.length > 0 && (
+        <div className="sticky top-2 z-20 h-0 flex justify-center">
+          <button type="button" onClick={showHeld}
+                  className="px-3 py-1.5 rounded-full bg-sky-600 text-white text-sm
+                             font-medium shadow-lg hover:bg-sky-500">
+            ↑ {held.length} new alert{held.length === 1 ? '' : 's'}
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2 vg-feed-list">
         {loading ? (
           <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
             <div role="status">Loading alerts…</div>
@@ -415,12 +641,25 @@ export default function AlertsPage() {
         ) : groups.length === 0 ? (
           <Card className="p-8 text-center text-slate-500 dark:text-slate-300">No alerts to show.</Card>
         ) : (
-          groups.map(g => (
-            <AlertCard key={g.head.id} alert={g.head}
-                       groupCount={g.count} groupLast={g.last}
-                       groupUnresolvedCount={g.unresolvedCount}
-                       groupSiblings={g.siblings} onChanged={reload} />
-          ))
+          groups.map(g => {
+            // Keyed by the GROUP, not its newest alert, so a group that
+            // grows updates in place and keeps the card's open state.
+            const rowIds = [g.head.id, ...g.siblings.map(s => s.id)]
+            const freshCount = rowIds.filter(id => glowIds.has(id)).length
+            const isNewGroup = freshCount > 0 && freshCount === rowIds.length
+            const entering = isNewGroup && rowIds.some(id => enterIds.has(id))
+            return (
+              <div key={g.key}
+                   className={(entering ? 'vg-feed-enter ' : '') + (isNewGroup ? 'vg-feed-glow' : '')}>
+                <AlertCard alert={g.head}
+                           groupCount={g.count} groupLast={g.last}
+                           groupUnresolvedCount={g.unresolvedCount}
+                           groupSiblings={g.siblings}
+                           highlightCount={freshCount > 0 && !isNewGroup}
+                           onChanged={refreshNow} />
+              </div>
+            )
+          })
         )}
       </div>
 
