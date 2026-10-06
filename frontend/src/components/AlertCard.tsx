@@ -16,9 +16,12 @@
 // component just renders one card. The group helper is exported
 // separately so callers control grouping policy.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import {
+  alertOutcome, groupSummaryText, nextOpenAlert, summarizeGroup, type AlertOutcome,
+} from '@/lib/alertGroups'
 
 
 // <img src=…> can't carry the bearer header, so we fetch the
@@ -423,6 +426,21 @@ function SceneAnalysis({ alert }: { alert: Alert }) {
   )
 }
 
+// How long a card keeps showing the alert the operator just marked.
+const HOLD_AFTER_VERDICT_MS = 10_000
+
+const OUTCOME_CHIP: Record<AlertOutcome, { label: string; cls: string }> = {
+  open:     { label: 'Open',     cls: 'bg-amber-100 text-amber-800' },
+  true:     { label: '✓ True',   cls: 'bg-green-100 text-green-800' },
+  false:    { label: '✗ False',  cls: 'bg-red-100 text-red-800' },
+  resolved: { label: 'Resolved', cls: 'bg-slate-200 text-slate-700' },
+}
+
+function OutcomeChip({ outcome }: { outcome: AlertOutcome }) {
+  const { label, cls } = OUTCOME_CHIP[outcome]
+  return <span className={'px-1.5 py-0.5 rounded text-[10px] font-semibold ' + cls}>{label}</span>
+}
+
 function sevKey(s: string | null): 'critical' | 'warning' | 'info' | 'default' {
   if (s === 'critical' || s === 'warning' || s === 'info') return s
   return 'default'
@@ -472,17 +490,65 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [groupExpanded, setGroupExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
 
-  // Re-sync the local copy whenever the parent passes new data. A group
-  // card's head can change when a newer alert joins the group; while the
-  // operator has this card's note box, snapshot or clip open, keep showing
-  // the alert they are working on so a note or True/False verdict cannot
-  // land on an alert they have not seen. Updates to the SAME alert
-  // (status, AI verdict) always apply; the switch happens on close.
-  const interacting = noteOpen || lightbox || filmIdx !== null || clipModal
+  // After the operator marks this alert (True/False/close), keep showing
+  // THAT alert with its result for HOLD_AFTER_VERDICT_MS, even if the
+  // group's head moves to another alert. Ends early on "Show now" or when
+  // the group list is collapsed.
+  const [heldId, setHeldId] = useState<number | null>(null)
   useEffect(() => {
-    if (interacting && incoming.id !== alert.id) return
-    setLocal(incoming)
-  }, [incoming, interacting, alert.id])
+    if (heldId === null) return
+    const timer = setTimeout(() => setHeldId(null), HOLD_AFTER_VERDICT_MS)
+    return () => clearTimeout(timer)
+  }, [heldId])
+
+  // Every alert in this card's group, by id (the head plus its siblings).
+  const groupRows = useMemo(
+    () => [incoming, ...(groupSiblings ?? [])], [incoming, groupSiblings])
+
+  // Re-sync the local copy whenever the parent passes new data. A group
+  // card's head can change when a newer alert joins the group or one is
+  // marked. While the operator is working on this card (note box,
+  // snapshot or clip open) or has just marked it, keep showing the alert
+  // they were looking at, refreshed from the group data, so a note or
+  // verdict cannot land on an alert they have not seen and their result
+  // does not vanish. Only re-sync when the source object actually changed,
+  // so an unchanged row never overwrites an optimistic local update.
+  const interacting = noteOpen || lightbox || filmIdx !== null || clipModal
+  const pinned = interacting || heldId === alert.id
+  const lastSource = useRef<Alert | null>(null)
+  useEffect(() => {
+    const source = pinned && incoming.id !== alert.id
+      ? groupRows.find(row => row.id === alert.id)
+      : incoming
+    if (!source || source === lastSource.current) return
+    lastSource.current = source
+    setLocal(source)
+  }, [incoming, groupRows, pinned, alert.id])
+
+  // A short fade when the card moves on to a different alert.
+  const [swapping, setSwapping] = useState(false)
+  const shownIdRef = useRef(alert.id)
+  useEffect(() => {
+    if (shownIdRef.current === alert.id) return
+    shownIdRef.current = alert.id
+    setSwapping(true)
+    const timer = setTimeout(() => setSwapping(false), 400)
+    return () => clearTimeout(timer)
+  }, [alert.id])
+
+  // Group view: every alert with this card's own (possibly optimistic)
+  // copy, the summary line, the other alerts, and the next open one.
+  const groupView = useMemo(() => {
+    const byId = new Map(groupRows.map(row => [row.id, row]))
+    byId.set(alert.id, alert)
+    const rows = [...byId.values()]
+    return {
+      summary: groupSummaryText(summarizeGroup(rows)),
+      others: rows.filter(row => row.id !== alert.id)
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
+      next: nextOpenAlert(rows, alert.id),
+    }
+  }, [groupRows, alert])
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true)
@@ -491,6 +557,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
   async function acknowledgeOne() {
+    const before = alert
     // 👁 I'm on it — operational acknowledgement. Stamps
     // acknowledged_at so the lifecycle pip moves to the middle step
     // while keeping the alert in the active list (status stays 'new'
@@ -500,47 +567,53 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
       await alertsApi.acknowledge(alert.id)
       onChanged?.()
     } catch (e) {
-      setLocal(incoming)
+      setLocal(before)   // rollback to exactly what was shown
       window.alert('Could not acknowledge. ' + e)
     }
   }
 
   async function markTrue() {
+    const before = alert
     // ✅ True Alert — the AI was right. Positive training sample via
     // /alerts/{id}/confirm → absorb_confirmed.
     const prompt = isCalibration
       ? 'Mark this calibration alert as TRUE? It will remain quarantined until independent review.'
       : 'Mark this alert as TRUE? It will be added to AI training as a positive example.'
     if (!window.confirm(prompt)) return
-    setLocal({ ...alert, status: 'confirmed',
-               resolved_at: new Date().toISOString() })
+    setLocal({ ...alert, status: 'confirmed', resolved_at: null,
+               acknowledged_at: new Date().toISOString() })
+    setHeldId(alert.id)
     try {
       await alertsApi.confirm(alert.id)
       window.dispatchEvent(new CustomEvent('vg:alert-resolved',
         { detail: { id: alert.id, action: 'resolve' } }))
       onChanged?.()
     } catch (e) {
-      setLocal(incoming)   // rollback
+      setLocal(before)   // rollback to exactly what was shown
+      setHeldId(null)
       window.alert('Could not mark True. ' + e)
     }
   }
 
   async function markFalse() {
+    const before = alert
     // ❌ False Alert — the AI was wrong. Hard-negative training
     // sample via /alerts/{id}/dismiss → absorb_dismissed.
     const prompt = isCalibration
       ? 'Mark this calibration alert as FALSE? It will remain quarantined until independent review.'
       : 'Mark this alert as FALSE? It will be added to AI training as a negative example.'
     if (!window.confirm(prompt)) return
-    setLocal({ ...alert, status: 'dismissed',
-               resolved_at: new Date().toISOString() })
+    setLocal({ ...alert, status: 'dismissed', resolved_at: null,
+               acknowledged_at: new Date().toISOString() })
+    setHeldId(alert.id)
     try {
       await alertsApi.dismiss(alert.id)
       window.dispatchEvent(new CustomEvent('vg:alert-resolved',
         { detail: { id: alert.id, action: 'dismiss' } }))
       onChanged?.()
     } catch (e) {
-      setLocal(incoming)
+      setLocal(before)   // rollback to exactly what was shown
+      setHeldId(null)
       window.alert('Could not mark False. ' + e)
     }
   }
@@ -550,15 +623,18 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // still need clearing, otherwise the tab count only ever grows. /resolve
   // closes without feeding a training sample.
   async function closeUpdate() {
+    const before = alert
     setLocal({ ...alert, status: 'resolved',
                resolved_at: new Date().toISOString() })
+    setHeldId(alert.id)
     try {
       await alertsApi.resolve(alert.id)
       window.dispatchEvent(new CustomEvent('vg:alert-resolved',
         { detail: { id: alert.id, action: 'resolve' } }))
       onChanged?.()
     } catch (e) {
-      setLocal(incoming)
+      setLocal(before)   // rollback to exactly what was shown
+      setHeldId(null)
       window.alert('Could not close this update. ' + e)
     }
   }
@@ -586,7 +662,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
     <div className={'relative bg-white rounded border overflow-hidden transition-opacity '
                     + (isPositive ? 'border-emerald-200 '
                       : isCalibration ? 'border-violet-200 ' : 'border-slate-200 ')
-                    + (isClosed && !isPositive ? 'opacity-60' : '')}>
+                    + (isClosed && !isPositive ? 'opacity-60 ' : '')
+                    + (swapping ? 'vg-card-swap' : '')}>
       {/* Severity colour bar — greyed when resolved/dismissed. */}
       <div className={'absolute left-0 top-0 bottom-0 w-1 '
                       + (isPositive ? 'bg-emerald-500' : isClosed ? 'bg-slate-300'
@@ -638,7 +715,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               <span className="text-xs text-slate-500">· {alert.camera_name}</span>
             )}
             {groupCount && groupCount > 1 && (
-              <button onClick={() => setGroupExpanded(g => !g)}
+              <button onClick={() => {
+                        if (groupExpanded) setHeldId(null)
+                        setGroupExpanded(g => !g)
+                      }}
                       className={'text-[11px] text-sky-700 hover:underline rounded px-0.5 '
                                  + (highlightCount ? 'vg-count-glow' : '')}>
                 ×{groupCount} today (last: {formatTime(groupLast ?? alert.created_at)}) {groupExpanded ? '▴' : '▾'}
@@ -705,11 +785,21 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
             <div className="text-xs text-slate-600 mt-1 font-medium">{alert.time_range}</div>
           )}
 
-          {/* Group siblings */}
-          {groupExpanded && groupSiblings && groupSiblings.length > 0 && (
+          {/* Group summary, e.g. "2 alerts: 1 marked True, 1 marked False". */}
+          {groupCount && groupCount > 1 && (
+            <div className="mt-1 text-xs font-medium text-slate-600" data-testid="group-summary">
+              {groupView.summary}
+            </div>
+          )}
+
+          {/* The group's other alerts, each with its own result. */}
+          {groupExpanded && groupView.others.length > 0 && (
             <div className="mt-2 pl-2 border-l-2 border-slate-200 space-y-0.5 text-xs text-slate-500">
-              {groupSiblings.map(s => (
-                <div key={s.id}>{formatTime(s.created_at)} — {s.title ?? s.detection_type}</div>
+              {groupView.others.map(s => (
+                <div key={s.id} className="flex items-center gap-2">
+                  <span>{formatTime(s.created_at)} — {s.title ?? s.detection_type}</span>
+                  <OutcomeChip outcome={alertOutcome(s)} />
+                </div>
               ))}
             </div>
           )}
@@ -779,8 +869,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               </>
             ) : (
               <span className={'px-3 py-1.5 rounded font-bold text-white '
-                                + (isDismissed ? 'bg-red-600' : 'bg-green-600')}>
-                ✓ Marked {isDismissed ? 'False' : 'True'}
+                                + (isDismissed ? 'bg-red-600'
+                                  : alertOutcome(alert) === 'resolved' ? 'bg-slate-600' : 'bg-green-600')}>
+                {isDismissed ? '✓ Marked False'
+                  : alertOutcome(alert) === 'resolved' ? '✓ Resolved' : '✓ Marked True'}
               </span>
             )}
             {/* Incident review is always visible for camera alerts. When a
@@ -806,6 +898,19 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               📋 Write a note
             </ActionBtn>
           </div>
+
+          {/* Just marked, and another alert in the group is still open:
+              say so instead of swapping the card under the operator. */}
+          {heldId === alert.id && groupView.next && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-sky-800 bg-sky-50
+                            border border-sky-200 rounded px-2 py-1" role="status">
+              <span>Next in this group: {formatTime(groupView.next.created_at)}</span>
+              <button type="button" onClick={() => setHeldId(null)}
+                      className="ml-auto font-semibold text-sky-700 hover:underline">
+                Show now →
+              </button>
+            </div>
+          )}
 
           {/* Note composer */}
           {noteOpen && (
