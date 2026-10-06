@@ -4,7 +4,7 @@ import type { Alert } from '../api/alerts'
 import { groupAlerts } from './alertGroups'
 import {
   appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap, mergeLatestPage,
-  patchAlert,
+  patchAlert, summarizeHeld,
 } from './alertFeed'
 
 // Minimal alert rows: only the fields the feed logic and grouping read.
@@ -210,5 +210,27 @@ describe('patchAlert', () => {
   it('returns the same array when the id is not shown', () => {
     const rows = [alert(1, 5)]
     expect(patchAlert(rows, 99, { status: 'dismissed' })).toBe(rows)
+  })
+})
+
+describe('summarizeHeld (the "↑ N new alerts" button)', () => {
+  it('counts waiting alerts in the normal colour', () => {
+    const s = summarizeHeld([alert(2, 10), alert(1, 5)])
+    expect(s).toMatchObject({ count: 2, urgent: 0, tone: 'normal', label: '2 new alerts' })
+    expect(s.announcement).toBe('2 new alerts waiting. Use the new alerts button at the top to show them.')
+  })
+
+  it('turns urgent when any waiting alert is urgent or critical', () => {
+    const s = summarizeHeld([
+      alert(3, 20, { severity_label: 'URGENT' }), alert(2, 10, { severity: 'critical' }), alert(1, 5),
+    ])
+    expect(s).toMatchObject({ count: 3, urgent: 2, tone: 'urgent', label: '3 new alerts · 2 urgent',
+                              shortLabel: '3 new · 2 urgent' })
+    expect(s.announcement).toContain('3 new alerts waiting, 2 urgent.')
+  })
+
+  it('uses the singular for one alert and says nothing for none', () => {
+    expect(summarizeHeld([alert(1, 5, { severity_label: 'URGENT' })]).label).toBe('1 new alert · 1 urgent')
+    expect(summarizeHeld([]).announcement).toBe('')
   })
 })

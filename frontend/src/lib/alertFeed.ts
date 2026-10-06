@@ -203,3 +203,38 @@ export function patchAlert(rows: Alert[], id: number, patch: Partial<Alert>): Al
   next[index] = { ...rows[index], ...patch }
   return next
 }
+
+// ---- "↑ N new alerts" button ------------------------------------------
+
+/** Urgent/critical: what turns the waiting-alerts button red. */
+export function isUrgentAlert(a: Alert): boolean {
+  return a.severity_label === 'URGENT' || a.severity === 'critical'
+}
+
+export interface HeldSummary {
+  count: number
+  urgent: number
+  tone: 'urgent' | 'normal'
+  /** Button text after the arrow, e.g. "3 new alerts · 1 urgent". */
+  label: string
+  /** Narrow screens, e.g. "3 new · 1 urgent". */
+  shortLabel: string
+  /** Polite screen-reader announcement. */
+  announcement: string
+}
+
+export function summarizeHeld(rows: Alert[]): HeldSummary {
+  const count = rows.length
+  const urgent = rows.filter(isUrgentAlert).length
+  const noun = `new alert${count === 1 ? '' : 's'}`
+  return {
+    count,
+    urgent,
+    tone: urgent > 0 ? 'urgent' : 'normal',
+    label: urgent > 0 ? `${count} ${noun} · ${urgent} urgent` : `${count} ${noun}`,
+    shortLabel: urgent > 0 ? `${count} new · ${urgent} urgent` : `${count} new`,
+    announcement: count === 0 ? ''
+      : `${count} ${noun} waiting${urgent > 0 ? `, ${urgent} urgent` : ''}. `
+        + 'Use the new alerts button at the top to show them.',
+  }
+}

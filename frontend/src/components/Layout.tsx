@@ -1,6 +1,6 @@
 // Shared shell — sidebar nav + top bar. Used by every authenticated page.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
 import { useTheme } from '@/contexts/ThemeContext'
@@ -30,6 +30,19 @@ export default function Layout() {
   const [urgentBadge, setUrgentBadge] = useState(0)
   const [urgentCount, setUrgentCount] = useState(0)
   const [criticalCount, setCriticalCount] = useState(0)
+  // Height of the sticky urgent ribbon (0 when hidden), published to the
+  // pages as --vg-sticky-top so their own sticky controls (e.g. the
+  // Alerts page's "↑ N new alerts" button) sit just below it, never under it.
+  const [ribbonEl, setRibbonEl] = useState<HTMLDivElement | null>(null)
+  const [stickyTop, setStickyTop] = useState(0)
+  useEffect(() => {
+    if (!ribbonEl) { setStickyTop(0); return }
+    const update = () => setStickyTop(Math.ceil(ribbonEl.getBoundingClientRect().height))
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(ribbonEl)
+    return () => observer.disconnect()
+  }, [ribbonEl])
   useEffect(() => {
     let alive = true
     const refresh = () => alertsApi.summary()
@@ -104,8 +117,9 @@ export default function Layout() {
       <AlertNotificationBell />
 
       {/* Main */}
-      <main className="flex-1 overflow-auto bg-slate-100 dark:bg-slate-950 transition-colors duration-200">
-        <UrgentRibbon urgent={urgentCount} critical={criticalCount} />
+      <main className="flex-1 overflow-auto bg-slate-100 dark:bg-slate-950 transition-colors duration-200"
+            style={{ '--vg-sticky-top': `${stickyTop}px` } as CSSProperties}>
+        <UrgentRibbon urgent={urgentCount} critical={criticalCount} onElement={setRibbonEl} />
         <Outlet />
       </main>
     </div>
@@ -121,7 +135,11 @@ export default function Layout() {
 const RIBBON_DISMISS_KEY = 'vg_ribbon_dismissed_until'
 const RIBBON_DISMISS_MS  = 10 * 60 * 1000
 
-function UrgentRibbon({ urgent, critical }: { urgent: number; critical: number }) {
+function UrgentRibbon({ urgent, critical, onElement }: {
+  urgent: number; critical: number
+  // Receives the ribbon element (null while hidden) so Layout can measure it.
+  onElement?: (el: HTMLDivElement | null) => void
+}) {
   const nav = useNavigate()
   const total = Math.max(urgent, critical)
   // Pull a few alert titles so the "2–5 alerts" banner can name them.
@@ -180,6 +198,7 @@ function UrgentRibbon({ urgent, critical }: { urgent: number; critical: number }
 
   return (
     <div
+      ref={onElement}
       role="alert"
       style={{ backgroundColor: '#dc2626' }}
       className={

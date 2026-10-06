@@ -11,7 +11,7 @@ import { AlertCard, groupAlerts } from '@/components/AlertCard'
 import { stores as storesApi, type Store } from '@/api/stores'
 import {
   appendOlderPage, applyLatestPage, createRefreshScheduler, detectGap, patchAlert,
-  type AlertResolvedDetail, type RefreshScheduler,
+  summarizeHeld, type AlertResolvedDetail, type RefreshScheduler,
 } from '@/lib/alertFeed'
 
 // Simple quick-filter buttons non-technical staff understand.
@@ -318,6 +318,24 @@ export default function AlertsPage() {
     return latest.filter(a => !shown.has(a.id) && matchesView(a, quick, search))
   }, [holding, latest, items, quick, search])
 
+  // The "↑ N new alerts" button: what is waiting, a short pulse when the
+  // number goes up, and a polite screen-reader announcement.
+  const heldSummary = useMemo(() => summarizeHeld(held), [held])
+  const [heldPulse, setHeldPulse] = useState(false)
+  const [heldAnnouncement, setHeldAnnouncement] = useState('')
+  const prevHeldCount = useRef(0)
+  useEffect(() => {
+    const prev = prevHeldCount.current
+    prevHeldCount.current = heldSummary.count
+    if (heldSummary.count === 0) { setHeldAnnouncement(''); return }
+    if (heldSummary.count <= prev) return
+    setHeldAnnouncement(heldSummary.announcement)
+    if (prev === 0) return            // first appearance slides in instead
+    setHeldPulse(true)
+    const timer = setTimeout(() => setHeldPulse(false), 700)
+    return () => clearTimeout(timer)
+  }, [heldSummary])
+
   // Insert the held alerts (the button, or scrolling back to the top).
   const releaseHeld = useCallback(() => {
     if (!latest) return
@@ -618,17 +636,38 @@ export default function AlertsPage() {
         </Card>
       )}
 
-      {/* "↑ N new alerts" — zero-height sticky row so its appearance never
-          moves the list the operator is reading. */}
-      {!loading && held.length > 0 && (
-        <div className="sticky top-2 z-20 h-0 flex justify-center">
-          <button type="button" onClick={showHeld}
-                  className="px-3 py-1.5 rounded-full bg-sky-600 text-white text-sm
-                             font-medium shadow-lg hover:bg-sky-500">
-            ↑ {held.length} new alert{held.length === 1 ? '' : 's'}
+      {/* "↑ N new alerts" — a zero-height sticky row, so its appearance
+          never moves the list being read. It sticks just below the urgent
+          ribbon (--vg-sticky-top, published by Layout), at z-[45]: above
+          the ribbon (z-40) and the cards, below pop-up viewers (z-50).
+          Only the pill itself takes clicks. */}
+      {!loading && heldSummary.count > 0 && (
+        <div className="sticky z-[45] h-0 -mx-6 px-2 flex justify-center pointer-events-none"
+             style={{ top: 'calc(var(--vg-sticky-top, 0px) + 0.75rem)' }}>
+          <button type="button" onClick={showHeld} data-testid="new-alerts-button"
+                  aria-label={`Show ${heldSummary.label}`}
+                  className={'vg-newpill pointer-events-auto inline-flex items-center gap-2 '
+                             // Narrow screens: may wrap to two lines rather than cut text.
+                             + 'min-h-[44px] max-w-full px-3 sm:px-5 py-1 sm:py-0 rounded-2xl sm:rounded-full '
+                             + 'whitespace-normal sm:whitespace-nowrap text-center leading-tight '
+                             + 'text-sm sm:text-[15px] font-semibold text-white '
+                             + 'shadow-lg shadow-slate-900/25 '
+                             + 'ring-1 ring-white/30 focus-visible:outline focus-visible:outline-2 '
+                             + 'focus-visible:outline-offset-2 '
+                             + (heldSummary.tone === 'urgent'
+                               ? 'bg-red-600 hover:bg-red-500 focus-visible:outline-red-400 '
+                               : 'bg-sky-600 hover:bg-sky-500 focus-visible:outline-sky-400 ')
+                             + (heldPulse ? 'vg-newpill-pulse' : '')}>
+            <span aria-hidden="true" className="text-lg leading-none">↑</span>
+            <span className="truncate hidden sm:inline">{heldSummary.label}</span>
+            <span className="sm:hidden">{heldSummary.shortLabel}</span>
           </button>
         </div>
       )}
+      {/* Announced politely when new alerts start waiting. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {heldAnnouncement}
+      </div>
 
       <div className="space-y-2 vg-feed-list">
         {loading ? (

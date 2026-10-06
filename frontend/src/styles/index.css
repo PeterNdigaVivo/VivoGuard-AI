@@ -82,3 +82,21 @@ html.dark body { color: #e2e8f0; }          /* slate-200 */
 @media (prefers-reduced-motion: reduce) {
   .vg-card-swap { animation: none; }
 }
+
+/* "↑ N new alerts" button on the Alerts page: slides in when it appears,
+   a short pulse when the number goes up. (Transforms are safe here: the
+   pill has no fixed-position children.) */
+.vg-newpill { animation: vg-newpill-in 250ms ease-out; }
+@keyframes vg-newpill-in {
+  from { transform: translateY(-12px); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+.vg-newpill.vg-newpill-pulse { animation: vg-newpill-pulse 600ms ease-out; }
+@keyframes vg-newpill-pulse {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vg-newpill, .vg-newpill.vg-newpill-pulse { animation: none; }
+}
