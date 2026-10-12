@@ -155,7 +155,11 @@ def _validate(weights: Path, dataset_root: Path) -> dict:
         from ultralytics import YOLO
         import numpy as np
         m = YOLO(str(weights))
-        metrics = m.val(data=str(dataset_root), split="val", verbose=False)
+        # workers=0 — see chain_training._validate. Without it the
+        # DataLoader subprocess raises and the score is lost.
+        metrics = m.val(data=str(dataset_root), split="val", verbose=False,
+                        workers=int(getattr(settings,
+                                            "training_dataloader_workers", 0)))
         acc = float(getattr(metrics, "top1", 0.0) or 0.0)
         report: dict = {"accuracy": round(acc, 4)}
         cm = getattr(metrics, "confusion_matrix", None)

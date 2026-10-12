@@ -270,7 +270,15 @@ def _validate(weights: Path, dataset_root: Path, labels: tuple[str, ...]) -> dic
         from ultralytics import YOLO
         import numpy as np
         m = YOLO(str(weights))
-        metrics = m.val(data=str(dataset_root), split="val", verbose=False)
+        # workers=0 for the same reason model.train() needs it: a
+        # Celery child cannot spawn DataLoader subprocesses. Training was
+        # given this in September and validation was not, so every run
+        # since has trained fine and then died here -- the exception
+        # swallowed into {"accuracy": null}, which is why no uniform
+        # model has ever had a measurable score.
+        metrics = m.val(data=str(dataset_root), split="val", verbose=False,
+                        workers=int(getattr(settings,
+                                            "training_dataloader_workers", 0)))
         acc = float(getattr(metrics, "top1", 0.0) or 0.0)
         report: dict = {"accuracy": round(acc, 4)}
         cm = getattr(metrics, "confusion_matrix", None)
