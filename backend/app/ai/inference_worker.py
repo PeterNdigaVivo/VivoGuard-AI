@@ -644,6 +644,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 min_px=_minpx, window=_win,
             )
 
+            _static_set = frozenset(_static_ids or ())
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
                 raw_detections=raw, tracks=tracks,
@@ -651,6 +652,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
             static_filtered_ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
@@ -659,6 +661,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
 
             # track_id -> consecutive frames seen: ByteTrack's rolling
