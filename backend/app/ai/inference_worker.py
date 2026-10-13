@@ -37,6 +37,29 @@ from app.stream.frame_buffer import FrameBuffer
 log = logging.getLogger(__name__)
 
 
+def _zone_list(value, *, zone_id: int | None, field: str) -> list:
+    """Return a zone JSON-list across legacy and current storage formats.
+
+    Early rectangle zones were double-encoded before being written to JSON
+    columns, so SQLAlchemy returns strings such as ``"[[0, 0], ...]"`` and
+    ``"[\"counter\"]"``.  Passing those strings into geometry code makes it
+    iterate characters and fail per detection.  Decode only valid JSON lists;
+    malformed values remain inert and are surfaced once when camera state is
+    loaded instead of raising on every frame.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, list):
+            return decoded
+    log.warning("zone %s has invalid %s payload; ignoring it", zone_id, field)
+    return []
+
+
 def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list[dict], dict, str]:
     cam = db.get(Camera, camera_id)
     if not cam or not cam.ai_enabled:
@@ -46,8 +69,16 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     for z in db.query(Zone).filter(Zone.camera_id == camera_id):
         zones.append({
             "id": z.id, "name": z.name, "shape": z.shape,
-            "polygon_coords_json": z.polygon_coords_json,
-            "detection_types_json": z.detection_types_json,
+            "polygon_coords_json": _zone_list(
+                z.polygon_coords_json,
+                zone_id=z.id,
+                field="polygon_coords_json",
+            ),
+            "detection_types_json": _zone_list(
+                z.detection_types_json,
+                zone_id=z.id,
+                field="detection_types_json",
+            ),
             "active_schedule_json": z.active_schedule_json,
             "suppressed": z.suppressed,
         })
