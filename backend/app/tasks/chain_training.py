@@ -80,6 +80,13 @@ _ALLOWED_SAMPLE_SOURCES = ("capture", "upload", "camera_crop",
 PER_STORE_PER_LABEL_CAP = 500
 # Minimum acceptable samples per label across the whole chain.
 MIN_PER_LABEL = 50
+# How much larger the biggest class may be than the smallest before the
+# surplus is trimmed for this run. A classifier at 6:1 scores well by
+# always answering with the majority class -- which for uniform means
+# calling every shopper staff, the exact failure these models exist to
+# avoid. 2.0 keeps a useful amount of extra data without letting one
+# class dominate the loss.
+MAX_CLASS_IMBALANCE = 2.0
 # Laplacian variance — anything below is rejected as too blurry.
 BLUR_THRESHOLD = 100.0
 
@@ -279,6 +286,17 @@ def _validate(weights: Path, dataset_root: Path, labels: tuple[str, ...]) -> dic
         metrics = m.val(data=str(dataset_root), split="val", verbose=False,
                         workers=int(getattr(settings,
                                             "training_dataloader_workers", 0)))
+        # Take the class list from the MODEL, not the caller. The caller
+        # passes the canonical set for the detector -- seven labels for
+        # uniform -- but training only ever covers the classes that had
+        # data, so the confusion matrix is 3x3 and indexing it with
+        # seven labels raised "index 3 is out of bounds for axis 0 with
+        # size 3". The model's own names always match its matrix.
+        _names = getattr(m, "names", None)
+        if isinstance(_names, dict) and _names:
+            labels = tuple(_names[k] for k in sorted(_names))
+        elif _names:
+            labels = tuple(_names)
         acc = float(getattr(metrics, "top1", 0.0) or 0.0)
         report: dict = {"accuracy": round(acc, 4)}
         cm = getattr(metrics, "confusion_matrix", None)
@@ -369,6 +387,27 @@ def train_chain_model(self, detector_type: str) -> None:
     # a model must not be given a class it has never seen an example of.
     kept = {l: kept[l] for l in present}
     labels = tuple(present)
+
+    # Cap every class against the smallest one. The staff_zone harvester
+    # collects thousands of staff crops and the civilian miner a few
+    # hundred, so without this the majority class runs away: model 101
+    # trained on 2930 staff against 500 customer and the trainer's own
+    # 5x imbalance warning fired. Holding rows back with
+    # `approved = false` fixed exactly one run before collection refilled
+    # the class, so the cap belongs here, at training time, where it
+    # applies on every run without anyone remembering to do it.
+    #
+    # Trimming is random (the rows were shuffled in _filter_and_balance)
+    # and only affects THIS run's dataset -- no sample is deleted or
+    # marked, so the full pool stays available for later.
+    _smallest = min(len(v) for v in kept.values())
+    _cap = max(MIN_PER_LABEL, int(_smallest * MAX_CLASS_IMBALANCE))
+    for _label, _paths in kept.items():
+        if len(_paths) > _cap:
+            stats["dropped_imbalance"] = (stats.get("dropped_imbalance", 0)
+                                          + len(_paths) - _cap)
+            kept[_label] = _paths[:_cap]
+            stats["kept_by_label"][_label] = _cap
 
     # Imbalance warning (informational; we still train).
     counts = [stats["kept_by_label"][l] for l in labels]
