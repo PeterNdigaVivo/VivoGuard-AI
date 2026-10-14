@@ -2,7 +2,7 @@
 
 Everything else in the sweep is I/O. This one function decides whether
 a frame becomes an alert, and it reads free text from a model that was
-asked — but cannot be forced — to answer with a single token. Getting
+asked â€” but cannot be forced â€” to answer with a single token. Getting
 it wrong in one direction floods the operator feed; in the other it
 silently drops real findings.
 """
@@ -63,7 +63,34 @@ def test_json_true_returns_type_and_description():
     assert parse_verdict(
         '{"noteworthy": true, "category": "unusual", "description": "A red '
         'ladder is leaning against the wall."}') == (
-            "scene_review", "A red ladder is leaning against the wall.")
+            "scene_review", "A red ladder is leaning against the wall.",
+            "unusual")
+
+
+def test_compliance_category_is_carried_through():
+    # The whole point of the taxonomy: the operator sees "Working at
+    # Height", not "Unusual Activity Seen", and can filter on it.
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "height_work", "description": '
+        '"A man is standing on a stepladder near the fitting rooms."}'
+    ) == ("scene_review",
+          "A man is standing on a stepladder near the fitting rooms.",
+          "height_work")
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "exit_blocked", "description": '
+        '"Boxes are stacked in front of the fire exit."}'
+    ) == ("scene_review", "Boxes are stacked in front of the fire exit.",
+          "exit_blocked")
+
+
+def test_invented_category_falls_back_without_losing_the_finding():
+    # A label the prompt never offered must not cost us the alert — the
+    # description is what the operator actually reads.
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "weather", "description": '
+        '"A ladder is propped against the shelving."}'
+    ) == ("scene_review", "A ladder is propped against the shelving.",
+          "unusual")
 
 
 def test_phone_category_routes_to_its_own_type():
@@ -71,14 +98,13 @@ def test_phone_category_routes_to_its_own_type():
     # and independently disableable, which only works if it routes apart.
     assert parse_verdict(
         '{"noteworthy": true, "category": "phone", "description": "A person '
-        'in an aisle is looking at a phone."}') == (
-            "phone_usage", "A person in an aisle is looking at a phone.")
+        'in an aisle is looking at a phone."}') == ("phone_usage", "A person in an aisle is looking at a phone.", "phone")
 
 
 def test_missing_category_defaults_to_scene_review():
     assert parse_verdict(
         '{"noteworthy": true, "description": "A ladder is out."}'
-    ) == ("scene_review", "A ladder is out.")
+    ) == ("scene_review", "A ladder is out.", "unusual")
 
 
 def test_json_true_with_empty_description_is_nothing():
@@ -90,7 +116,7 @@ def test_json_string_boolean():
     # Small models sometimes quote the boolean.
     assert parse_verdict(
         '{"noteworthy": "true", "description": "A child is on the counter."}'
-    ) == ("scene_review", "A child is on the counter.")
+    ) == ("scene_review", "A child is on the counter.", "unusual")
 
 
 def test_json_true_but_describes_ordinary_scene():
@@ -122,7 +148,7 @@ def test_prose_real_finding_survives_fallback():
         "A red ladder is leaning against the wall in the corner of the "
         "store.") == ("scene_review",
                       "A red ladder is leaning against the wall in the "
-                      "corner of the store.")
+                      "corner of the store.", "unusual")
 
 
 def test_prose_none_token_still_handled():
@@ -154,4 +180,5 @@ def test_animal_words_do_not_match_inside_other_words():
         '{"noteworthy": true, "category": "unusual", "description": '
         '"Catalogues are stacked on a crate blocking the fire exit."}'
     ) == ("scene_review",
-          "Catalogues are stacked on a crate blocking the fire exit.")
+          "Catalogues are stacked on a crate blocking the fire exit.",
+          "unusual")
