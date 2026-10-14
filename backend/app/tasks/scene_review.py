@@ -81,6 +81,23 @@ _QUESTION = (
     "shop fittings are normal parts of a clothing shop. Never report "
     "them, whatever pose they are in and however lifelike they look. "
     "Only report living people.\n\n"
+    # Removing the animal CATEGORY was not enough: the catch-all at the
+    # end of the positive list let dogs back in, twice in two days, and
+    # the model held to "dog" even when offered "crouching person" and
+    # "bag or box" as alternatives. They may well be real -- these are
+    # street-level shops -- but the operator has ruled twice that animal
+    # alerts are not actionable for this estate, so the exclusion has to
+    # be explicit and has to outrank the catch-all.
+    "Never report animals of any kind — dogs, cats, birds — whatever "
+    "they are doing. This rule overrides every category below, "
+    "including the final catch-all.\n\n"
+    # Staff kneel, crouch and bend to unpack stock, especially before
+    # opening. Five frames one morning were reported as someone "lying
+    # on the floor", one of them "appearing to be in distress or
+    # possibly injured", between 05:50 and 08:15 — setup time.
+    "A person crouching, kneeling, squatting or bending down is working, "
+    "not collapsed. Only report someone on the floor if they are lying "
+    "flat and plainly not working.\n\n"
     # Phone use AT the counter stays excluded above and that is
     # deliberate: in Kenya an M-Pesa payment is taken on a handset, so a
     # phone at the till is part of the transaction. Only distraction away
