@@ -128,3 +128,30 @@ def test_prose_real_finding_survives_fallback():
 def test_prose_none_token_still_handled():
     assert parse_verdict("NONE") is None
     assert parse_verdict(None) is None
+
+
+# ---- animals are excluded in code, not just in the prompt --------------
+
+def test_animal_findings_are_dropped():
+    # Both dogs that reached the dashboard, verbatim. The prompt had
+    # already been told not to report animals; it reported them anyway,
+    # so the rule is enforced here where it cannot be declined.
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "unusual", "description": '
+        '"A dog is running across the store floor."}') is None
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "unusual", "description": '
+        '"A dog is standing on the floor near the counter, looking '
+        'towards the staff member."}') is None
+    # Prose fallback path too.
+    assert parse_verdict("A cat is sitting on the counter.") is None
+
+
+def test_animal_words_do_not_match_inside_other_words():
+    # "catalogue" contains cat, "crate" contains rat. Word boundaries
+    # keep real findings alive.
+    assert parse_verdict(
+        '{"noteworthy": true, "category": "unusual", "description": '
+        '"Catalogues are stacked on a crate blocking the fire exit."}'
+    ) == ("scene_review",
+          "Catalogues are stacked on a crate blocking the fire exit.")

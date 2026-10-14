@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -130,6 +131,23 @@ _QUESTION = (
     "identity — report what a person is doing, not how they seem to feel."
 )
 
+# Animals are excluded in the prompt, but a prompt is a request and the
+# model can decline it — the category was removed on 25 Sep and dogs
+# still arrived on the 12th and the 14th through the catch-all. The
+# operator's instruction is "anything with animals should not appear",
+# which is an absolute, so it is enforced here where it cannot be
+# talked out of rather than only in the wording.
+#
+# Word boundaries matter: "cat" must not match "catalogue", "rat" must
+# not match "crate".
+_ANIMAL_RE = re.compile(
+    r"\b(animal|animals|dog|dogs|puppy|puppies|cat|cats|kitten|kittens|"
+    r"bird|birds|pigeon|pigeons|rat|rats|mouse|mice|rodent|rodents|"
+    r"monkey|monkeys|goat|goats|chicken|chickens|cow|cows|snake|snakes|"
+    r"pet|pets|stray)\b",
+    re.IGNORECASE,
+)
+
 # When the model ignores the schema and writes prose, these are the
 # phrases it uses to say "nothing here" — observed verbatim in shadow.
 # Cheaper and more honest than letting a paragraph become an alert.
@@ -207,6 +225,11 @@ def is_noteworthy(reply: str | None) -> bool:
     if not text:
         return False
     if text.lstrip("*#- ").upper().startswith(_NONE):
+        return False
+    # Hard exclusion, not a preference — see _ANIMAL_RE. Checked in
+    # is_noteworthy so it covers BOTH paths: the JSON contract (whose
+    # description is re-checked here) and the prose fallback.
+    if _ANIMAL_RE.search(text):
         return False
     low = text.lower()
     return not any(phrase in low for phrase in _ALL_CLEAR)
