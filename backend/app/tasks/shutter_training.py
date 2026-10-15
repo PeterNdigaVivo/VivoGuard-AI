@@ -193,7 +193,11 @@ def _validate(weights: Path, dataset_root: Path) -> dict:
     try:
         from ultralytics import YOLO
         m = YOLO(str(weights))
-        metrics = m.val(data=str(dataset_root), split="val", verbose=False)
+        # workers=0 — see chain_training._validate. Without it the
+        # DataLoader subprocess raises and the score is lost.
+        metrics = m.val(data=str(dataset_root), split="val", verbose=False,
+                        workers=int(getattr(settings,
+                                            "training_dataloader_workers", 0)))
         acc = float(getattr(getattr(metrics, "top1", None), "__float__", lambda: 0.0)()) \
             if hasattr(metrics, "top1") else None
         # top1 is usually a plain float attribute.

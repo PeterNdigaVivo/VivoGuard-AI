@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +46,24 @@ log = logging.getLogger(__name__)
 _NONE = "NONE"
 
 _CURSOR_KEY = "vg:scene_review:cursor"
+
+# Compliance categories the model may return, mapped onto the operator's
+# non-compliance list. Kept here rather than in the API layer because
+# this is the only place that knows what the prompt offers.
+COMPLIANCE_CATEGORIES: dict[str, str] = {
+    "height_work":     "Working at Height",
+    "maintenance":     "Maintenance Activity",
+    "cleaning":        "Cleaning During Trading",
+    "exit_blocked":    "Exit or Walkway Blocked",
+    "housekeeping":    "Housekeeping",
+    "merchandise":     "Merchandise Disarray",
+    "stock_handling":  "Stock Handling on Shop Floor",
+    "staff_area":      "Person in Staff-Only Area",
+    "staff_gathering": "Staff Gathering",
+    "safety_hazard":   "Safety Hazard",
+    "security":        "Security Concern",
+    "unusual":         "Unusual Activity",
+}
 
 _SYSTEM = (
     "You are reviewing a single still frame from a CCTV camera in a Vivo "
@@ -67,8 +86,8 @@ _SYSTEM = (
 _QUESTION = (
     "Does this frame show something the store manager should act on?\n\n"
     "Reply with JSON only, no other text:\n"
-    '{"noteworthy": true or false, "category": "unusual" or "phone", '
-    '"description": "one plain sentence"}\n\n'
+    '{"noteworthy": true or false, "category": "<one of the categories '
+    'below>", "description": "one plain sentence"}\n\n'
     "Use false for ordinary retail activity — customers browsing, "
     "waiting or paying; staff serving, tidying, working at the till or "
     "using the till computer or a phone at the counter; an empty aisle; "
@@ -81,6 +100,23 @@ _QUESTION = (
     "shop fittings are normal parts of a clothing shop. Never report "
     "them, whatever pose they are in and however lifelike they look. "
     "Only report living people.\n\n"
+    # Removing the animal CATEGORY was not enough: the catch-all at the
+    # end of the positive list let dogs back in, twice in two days, and
+    # the model held to "dog" even when offered "crouching person" and
+    # "bag or box" as alternatives. They may well be real -- these are
+    # street-level shops -- but the operator has ruled twice that animal
+    # alerts are not actionable for this estate, so the exclusion has to
+    # be explicit and has to outrank the catch-all.
+    "Never report animals of any kind — dogs, cats, birds — whatever "
+    "they are doing. This rule overrides every category below, "
+    "including the final catch-all.\n\n"
+    # Staff kneel, crouch and bend to unpack stock, especially before
+    # opening. Five frames one morning were reported as someone "lying
+    # on the floor", one of them "appearing to be in distress or
+    # possibly injured", between 05:50 and 08:15 — setup time.
+    "A person crouching, kneeling, squatting or bending down is working, "
+    "not collapsed. Only report someone on the floor if they are lying "
+    "flat and plainly not working.\n\n"
     # Phone use AT the counter stays excluded above and that is
     # deliberate: in Kenya an M-Pesa payment is taken on a handset, so a
     # phone at the till is part of the transaction. Only distraction away
@@ -90,27 +126,57 @@ _QUESTION = (
     "area — holding a phone to their ear or looking at its screen, with "
     "no customer beside them. Phone use at the counter is never "
     "reported.\n\n"
-    "Use true with category \"unusual\" for any of these:\n"
-    "- a ladder, tools, cables being worked on, or any maintenance or "
-    "repair work\n"
-    "- cleaning equipment in use while the store is trading\n"
-    "- a person in a staff-only, stock or back-of-house area\n"
-    "- a child climbing on counters, shelves, displays or furniture\n"
-    "- boxes, stock or equipment blocking a walkway, doorway or exit\n"
-    "- an external door, shutter or gate standing open while the store "
-    "is closed\n"
-    "- a spill, breakage, or anything on the floor that could trip "
-    "someone\n"
-    "- a person carrying large boxes or equipment across the shop floor\n"
-    "- a person sitting or lying on the floor, or on display furniture\n"
-    # Animals removed deliberately. Seven days of AnimalDetector produced
-    # zero alerts, while this line produced a giraffe and a dog that were
-    # both shop props. A stray animal is not a KPI for fashion retail,
-    # and the category cost far more in false positives than it returned.
-    "- a group standing close together who are not shopping\n"
-    "- anything else clearly out of place for a clothing shop\n\n"
+    # Categories map 1:1 onto the operator's non-compliance list, so an
+    # alert can say "Working at Height" instead of "Unusual Activity
+    # Seen" and the Control Room can filter and count by item. The model
+    # was already finding most of these -- ladders, staff areas, clothing
+    # on the floor, cracked flooring -- it just had no way to say which
+    # was which, so every one arrived under the same title.
+    "Otherwise use true and pick the ONE category that fits best:\n"
+    "- \"height_work\": anyone on a ladder, step stool or raised "
+    "platform, or working above head height\n"
+    "- \"maintenance\": tools out, cables being worked on, repair or "
+    "building work in progress\n"
+    "- \"cleaning\": mopping, sweeping, a vacuum or cleaning trolley in "
+    "use while the store is open to customers\n"
+    "- \"exit_blocked\": boxes, stock, rails or equipment in a doorway, "
+    "a walkway, or in front of an exit\n"
+    "- \"housekeeping\": rubbish, packaging, cardboard or loose items "
+    "left on the floor\n"
+    "- \"merchandise\": clothing on the floor, rails pulled apart, or "
+    "stock visibly in disarray\n"
+    "- \"stock_handling\": boxes being unpacked, carried or stacked in "
+    "the customer area during trading hours\n"
+    "- \"staff_area\": a person in a staff-only, stock or "
+    "back-of-house area\n"
+    "- \"staff_gathering\": three or more people standing together who "
+    "are neither serving nor shopping\n"
+    "- \"safety_hazard\": a spill, a broken fixture, damaged flooring, "
+    "or a child climbing on counters, shelves or displays\n"
+    "- \"security\": an external door, shutter or gate open while the "
+    "store is closed, or someone behind a till who is plainly not "
+    "serving a customer\n"
+    "- \"unusual\": clearly out of place for a clothing shop and none "
+    "of the above fits\n\n"
     "Describe only what is visible. Never infer mood, health, intent or "
     "identity — report what a person is doing, not how they seem to feel."
+)
+
+# Animals are excluded in the prompt, but a prompt is a request and the
+# model can decline it — the category was removed on 25 Sep and dogs
+# still arrived on the 12th and the 14th through the catch-all. The
+# operator's instruction is "anything with animals should not appear",
+# which is an absolute, so it is enforced here where it cannot be
+# talked out of rather than only in the wording.
+#
+# Word boundaries matter: "cat" must not match "catalogue", "rat" must
+# not match "crate".
+_ANIMAL_RE = re.compile(
+    r"\b(animal|animals|dog|dogs|puppy|puppies|cat|cats|kitten|kittens|"
+    r"bird|birds|pigeon|pigeons|rat|rats|mouse|mice|rodent|rodents|"
+    r"monkey|monkeys|goat|goats|chicken|chickens|cow|cows|snake|snakes|"
+    r"pet|pets|stray)\b",
+    re.IGNORECASE,
 )
 
 # When the model ignores the schema and writes prose, these are the
@@ -191,6 +257,11 @@ def is_noteworthy(reply: str | None) -> bool:
         return False
     if text.lstrip("*#- ").upper().startswith(_NONE):
         return False
+    # Hard exclusion, not a preference — see _ANIMAL_RE. Checked in
+    # is_noteworthy so it covers BOTH paths: the JSON contract (whose
+    # description is re-checked here) and the prose fallback.
+    if _ANIMAL_RE.search(text):
+        return False
     low = text.lower()
     return not any(phrase in low for phrase in _ALL_CLEAR)
 
@@ -228,14 +299,20 @@ def parse_verdict(reply: str | None) -> tuple[str, str] | None:
             if not is_noteworthy(desc):
                 return None
             cat = str(data.get("category") or "").strip().lower()
-            return ("phone_usage" if cat.startswith("phone")
-                    else "scene_review"), desc
+            if cat.startswith("phone"):
+                return "phone_usage", desc, "phone"
+            # An unrecognised category is still a finding — the
+            # description is what the operator reads. Falling back to
+            # "unusual" keeps the alert rather than discarding it
+            # because the model invented a label.
+            return "scene_review", desc, (cat if cat in COMPLIANCE_CATEGORIES
+                                          else "unusual")
     except (ValueError, TypeError):
         pass
     if is_noteworthy(text):
         # No category survived, so it cannot be attributed to the phone
         # rule; the broader type is the safe default.
-        return "scene_review", " ".join(text.split())
+        return "scene_review", " ".join(text.split()), "unusual"
     return None
 
 
@@ -331,7 +408,7 @@ def scene_review_sweep() -> None:
                 verdict = parse_verdict(reply)
                 if not verdict:
                     continue
-                dtype, note = verdict[0], verdict[1][:500]
+                dtype, note, category = verdict[0], verdict[1][:500], verdict[2]
 
                 flagged += 1
                 log.info("%s%s cam=%s store=%s: %s", dtype,
@@ -346,10 +423,13 @@ def scene_review_sweep() -> None:
                     continue
                 # One alert per camera per dedup window — a ladder that
                 # stays up for an hour is one situation, not twelve.
-                # Keyed per type: a phone note must not suppress a ladder
-                # on the same camera in the same window.
-                if not r.set(f"vg:scene_review:fired:{dtype}:{camera.id}", "1",
-                             nx=True, ex=settings.scene_review_dedup_seconds):
+                # Keyed per CATEGORY, not just per type: a ladder and a
+                # blocked exit on the same camera are two different
+                # problems and the operator needs both. Previously one
+                # scene_review finding locked the camera for 30 minutes
+                # and the second was lost.
+                if not r.set(f"vg:scene_review:fired:{dtype}:{category}:{camera.id}",
+                             "1", nx=True, ex=settings.scene_review_dedup_seconds):
                     continue
 
                 from app.tasks.alerting import _create_info_alert
@@ -357,7 +437,10 @@ def scene_review_sweep() -> None:
                     db, camera_id=int(camera.id), zone_id=None,
                     store_id=camera.store_id,
                     detection_type=dtype, cls="unusual_activity",
-                    extra={"rule": "unusual_activity",
+                    extra={"rule": category,
+                           "category": category,
+                           "category_label": COMPLIANCE_CATEGORIES.get(
+                               category, "Unusual Activity"),
                            "priority": "info" if dtype == "phone_usage" else "high",
                            "description": note,
                            "model": settings.scene_review_model,

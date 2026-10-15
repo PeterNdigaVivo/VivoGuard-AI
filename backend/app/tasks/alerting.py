@@ -2364,6 +2364,7 @@ def after_hours_intrusion_check() -> None:
     immediately, then every 5 min)."""
     if not bool(getattr(settings, "after_hours_snapshot_enabled", True)):
         return
+    from sqlalchemy import func
     from app.database import SessionLocal
     from app.models import Alert, Camera, DetectionEvent, Store
     from app.ai.after_hours_snapshots import save_snapshot
@@ -2390,11 +2391,25 @@ def after_hours_intrusion_check() -> None:
             # Most recent intrusion event across this store's cameras — both
             # the "is someone here right now" signal AND the anchor camera
             # for the alert row (DetectionEvent.camera_id is NOT NULL).
+            # Honour the detector's own verdict. _persist_event ALWAYS
+            # writes the DetectionEvent and only withholds the Alert, so
+            # a row exists even when the inference worker decided this
+            # was staff — `extra.alert_disposition = 'filtered'`. Reading
+            # those rows back and alerting on them anyway is why camera
+            # 86 produced 60 "intrusion" alerts in a week for staff
+            # arriving at 05:19 whom staff_identity had already matched
+            # at staff_level=high. Two paths, one rule, opposite answers.
             recent = (db.query(DetectionEvent)
                         .join(Camera, Camera.id == DetectionEvent.camera_id)
                         .filter(Camera.store_id == store.id,
                                 DetectionEvent.detection_type == "intrusion",
-                                DetectionEvent.timestamp >= present_cutoff)
+                                DetectionEvent.timestamp >= present_cutoff,
+                                # coalesce covers rows written before the
+                                # disposition stamp existed, and those
+                                # created by beat tasks, which never set it.
+                                func.coalesce(
+                                    DetectionEvent.extra["alert_disposition"].as_string(),
+                                    "") != "filtered")
                         .order_by(DetectionEvent.timestamp.desc())
                         .first())
             if recent is None:

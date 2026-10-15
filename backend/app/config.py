@@ -558,6 +558,23 @@ class Settings(BaseSettings):
     recording_source_retention_hours: int = 8
     recording_alert_clip_retention_hours: int = 48
 
+    # Cameras whose SUPPRESSED detections still raise a review_only
+    # alert, so the raw stream can be read by a person. Empty = nothing
+    # changes anywhere, which is the point: this is an audit tool, not a
+    # policy change, and it never touches the suppression rules
+    # themselves.
+    #
+    # Sized deliberately. Fleet-wide this would add ~2,900 alerts a day
+    # against the 73 real ones, at which point the Alerts page shows
+    # nothing but person detections and the operator cannot find the
+    # incident they were looking for. Two busy cameras from two stores
+    # give the same answer at a thousandth of the cost.
+    raw_review_camera_ids: list[int] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("RAW_REVIEW_CAMERA_IDS",
+                                      "raw_review_camera_ids"),
+    )
+
     # Cap on unreviewed uniform crops before the staff_zone harvester
     # stops collecting. Pending rows are already eligible for chain
     # training, so this only needs to stop the pool running away — at

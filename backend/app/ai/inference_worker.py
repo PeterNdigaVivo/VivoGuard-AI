@@ -238,6 +238,12 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     extra["alert_disposition"] = _alert_disposition(
         ev.detection_type, suppress_alert,
     )
+    # Stays 'filtered' — it WAS filtered, and the audit must keep saying
+    # so. This flag records that a review-only copy was raised as well,
+    # so the two can be told apart later.
+    if suppress_alert and camera_id is not None and int(camera_id) in set(
+            getattr(settings, "raw_review_camera_ids", None) or ()):
+        extra["raw_review"] = True
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
@@ -285,8 +291,24 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # DetectionEvent itself is still persisted so the detector activity
     # table and ML-feedback paths see every event.
     alert_id: int | None = None
-    if ev.detection_type not in _SKIP_ALERT_TYPES and not suppress_alert:
-        alert = Alert(event_id=rec.id, status="new")
+    # Raw-review mode: on named cameras ONLY, a suppressed detection still
+    # gets an Alert row, marked review_only. It appears on the Alerts page
+    # for a human to judge but never reaches the live channel or an
+    # audible ping, so the raw stream can be read without an operator
+    # being paged 2,900 times a day.
+    #
+    # Deliberately does NOT cover _SKIP_ALERT_TYPES — heatmap, entry_exit
+    # and the other metric-only detectors are not withheld judgements,
+    # they are counters, and routing them here would bury the thing we
+    # are trying to look at. Only `filtered` events qualify.
+    _raw_review = bool(
+        suppress_alert
+        and ev.detection_type not in _SKIP_ALERT_TYPES
+        and camera_id is not None
+        and int(camera_id) in set(getattr(settings, "raw_review_camera_ids", None) or ())
+    )
+    if ev.detection_type not in _SKIP_ALERT_TYPES and (not suppress_alert or _raw_review):
+        alert = Alert(event_id=rec.id, status="new", review_only=_raw_review)
         db.add(alert)
         db.flush()
         # Quality quarantine keeps the operator-facing record, snapshot and
@@ -294,6 +316,11 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         # published. This is policy plumbing, not detector logic.
         from app.services.alert_quality import apply_quality_control
         apply_quality_control(db, alert, rec)
+        # Re-assert after quality control, which owns review_only for its
+        # own reasons and would otherwise clear ours.
+        if _raw_review and not alert.review_only:
+            alert.review_only = True
+            db.flush()
         # Shadow incident/evidence/outbox projection. A savepoint makes this
         # fail-open in the precise transactional sense: any projection error
         # rolls back only additive rows and leaves the baseline event+alert
@@ -710,6 +737,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 min_px=_minpx, window=_win,
             )
 
+            _static_set = frozenset(_static_ids or ())
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
                 raw_detections=raw, tracks=tracks,
@@ -717,6 +745,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
             static_filtered_ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
@@ -725,6 +754,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
 
             # track_id -> consecutive frames seen: ByteTrack's rolling

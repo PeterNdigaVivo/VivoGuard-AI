@@ -317,7 +317,11 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
         return ("Fitting Rooms Busy" if extra.get("rule") == "fitting_room_congestion"
                 else "Fitting Room Check Recommended")
     if dt == "scene_review":
-        return "Unusual Activity Seen"
+        # The VLM now returns which non-compliance category it saw, so
+        # the card can name it. Operators were getting "Unusual Activity
+        # Seen" for a ladder, a blocked exit and clothing on the floor
+        # alike, with no way to tell them apart or count them.
+        return str(extra.get("category_label") or "Unusual Activity") + " Seen"
     if dt == "phone_usage":
         return "Staff on Phone Away From Till"
     if dt == "uniform_compliance":

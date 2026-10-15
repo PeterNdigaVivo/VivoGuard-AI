@@ -25,6 +25,10 @@ def evaluate(model_id: int, dataset_id: int) -> dict:
     res = yolo.val(data=str(yaml_path),
                    project=str(Path(settings.models_dir) / f"eval_{model_id}_{dataset_id}"),
                    exist_ok=True,
+                   # workers=0 — see chain_training._validate. A Celery
+                   # child cannot spawn DataLoader subprocesses.
+                   workers=int(getattr(settings,
+                                       "training_dataloader_workers", 0)),
                    device=("0" if settings.use_gpu else "cpu"))
 
     out: dict = {}

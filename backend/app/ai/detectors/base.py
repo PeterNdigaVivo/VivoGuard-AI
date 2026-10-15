@@ -43,6 +43,19 @@ class DetectorContext:
     # ShutterDetector luminance heuristic). Inference worker sets this;
     # if absent, pixel-mode detectors fall through.
     frame_bgr: Any = None
+    # Track ids the mannequin filter judged stationary this frame.
+    #
+    # The worker already computes these to build the static-filtered
+    # context, then discards them. Staff and compliance detectors
+    # deliberately receive the UNfiltered context -- a cashier standing
+    # still at a till is a real person they must see -- but some of
+    # their rules are accusations rather than observations, and those
+    # should not fire on something that has never moved. Camera 73
+    # reported "unauthorised person" 58 times in a week from an
+    # identical bounding box pinned to the top of the frame: a pillar.
+    # Carrying the ids lets a detector keep seeing a static track while
+    # declining to accuse it.
+    static_track_ids: frozenset = frozenset()
 
 
 class Detector:
