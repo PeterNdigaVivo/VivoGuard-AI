@@ -155,6 +155,13 @@ x-app-env: &app-env
   SANITIZE_BLUR_THRESHOLD: ${SANITIZE_BLUR_THRESHOLD:-25.0}
   MODEL_GATE_MAX_REGRESSION: ${MODEL_GATE_MAX_REGRESSION:-0.0}
   METRIC_RETENTION_DAYS: ${METRIC_RETENTION_DAYS:-90}
+  # Model-evaluation test set (docs/MODEL_EVALUATION.md). Off by default.
+  EVAL_CAPTURE_RAW_FRAMES: ${EVAL_CAPTURE_RAW_FRAMES:-false}
+  EVAL_DIR: ${EVAL_DIR:-/data/eval}
+  EVAL_TARGET_PER_TYPE: ${EVAL_TARGET_PER_TYPE:-300}
+  EVAL_PEOPLE_TARGET: ${EVAL_PEOPLE_TARGET:-400}
+  EVAL_CLIP_TARGET: ${EVAL_CLIP_TARGET:-100}
+  EVAL_RETENTION_DAYS: ${EVAL_RETENTION_DAYS:-365}
   INCIDENT_FOUNDATIONS_ENABLED: ${INCIDENT_FOUNDATIONS_ENABLED:-false}
   DELIVERY_OUTBOX_ENABLED: ${DELIVERY_OUTBOX_ENABLED:-false}
   # Temporal alert gate — ops runs 4 (10 frames = 5-10s at 1-2 fps).
@@ -205,6 +212,8 @@ services:
       # or reads them — unmounted, this is a per-container layer that the
       # next rebuild deletes, which is how 1000 training samples were lost.
       - ./data/training:/data/training
+      # Model-evaluation test set (images of people; root-only, not in git).
+      - ./data/eval:/data/eval
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
@@ -325,6 +334,8 @@ services:
       - ./data/thumbnails:/data/thumbnails
       # Writes operator-review preview crops alongside each sample.
       - ./data/training:/data/training
+      # Model-evaluation test set (images of people; root-only, not in git).
+      - ./data/eval:/data/eval
       # Read-only shared access lets the frontend health check inspect
       # actual proxy responses instead of reporting an observability gap.
       - nginx_logs:/var/log/nginx:ro
@@ -357,6 +368,8 @@ services:
       # every TrainingSample.frame_path failed Path.exists() here, so
       # both uniform trainers aborted before the first epoch.
       - ./data/training:/data/training
+      # Model-evaluation test set (images of people; root-only, not in git).
+      - ./data/eval:/data/eval
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }

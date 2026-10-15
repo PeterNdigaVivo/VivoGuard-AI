@@ -304,6 +304,21 @@ class Settings(BaseSettings):
     # customer journeys. Runs on the worker via a CPU ResNet18 embedder,
     # only every Nth frame per track — negligible load. Off by default;
     # needs torchvision (present in the CPU worker image).
+    # --- Model evaluation test set (docs/MODEL_EVALUATION.md) ---------
+    # One switch for collecting evaluation data. When on: (1) alerts of the
+    # evaluated types also save the CLEAN frame (no boxes / caption) next
+    # to their snapshot, deleted with it; (2) the eval collector copies
+    # reviewed alerts' clean frames into eval_dir; (3) busy-hour sample
+    # frames are taken for the admins' "click each person" labelling.
+    # Off by default: it stores images of people.
+    eval_capture_raw_frames: bool = False
+    eval_dir: str = "/data/eval"
+    eval_target_per_type: int = Field(default=300, ge=10, le=5000)
+    eval_people_target: int = Field(default=400, ge=10, le=5000)
+    eval_clip_target: int = Field(default=100, ge=0, le=2000)
+    # Test-set images are kept this long (they contain people), then deleted.
+    eval_retention_days: int = Field(default=365, ge=30, le=1095)
+
     reid_enabled: bool = False
     # Cosine-similarity cut-off for "same person". Higher = stricter
     # (fewer false merges, more split identities). 0.70 suits the HSV

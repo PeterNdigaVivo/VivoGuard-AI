@@ -45,12 +45,17 @@ def prune_alerts(retention_days: int = 90) -> None:
                  .filter(DetectionEvent.timestamp < cutoff)
                  .limit(5000).all())
         for alert, ev in old:
-            # Best-effort snapshot file cleanup.
-            if ev.thumbnail_path:
+            # Snapshot file cleanup, plus the clean evaluation frame saved
+            # beside it (eval_capture_raw_frames) — same retention.
+            for path in (ev.thumbnail_path, (ev.extra or {}).get("raw_snapshot_path")):
+                if not path:
+                    continue
                 try:
-                    os.remove(ev.thumbnail_path)
-                except OSError:
+                    os.remove(path)
+                except FileNotFoundError:
                     pass
+                except OSError as exc:
+                    log.warning("prune_alerts: could not delete %s: %s", path, exc)
             db.delete(alert)
             removed += 1
         db.commit()

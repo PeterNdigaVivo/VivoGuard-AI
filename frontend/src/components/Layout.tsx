@@ -18,6 +18,7 @@ const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   { to: '/detectors', label: 'Detectors', systemAdminOnly: true },
   { to: '/users',     label: 'Users', systemAdminOnly: true },
   { to: '/system',    label: 'System Health', systemAdminOnly: true },
+  { to: '/evaluation', label: 'Model Evaluation', systemAdminOnly: true },
 ]
 
 export default function Layout() {

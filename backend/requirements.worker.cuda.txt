@@ -6,3 +6,5 @@ torch>=2.7
 torchvision>=0.22
 tensorrt>=10.0
 onnxruntime-gpu>=1.17
+# GPU load/memory sampling for app.eval (model evaluation). BSD-3.
+nvidia-ml-py==12.575.51

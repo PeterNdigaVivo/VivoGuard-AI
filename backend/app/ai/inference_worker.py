@@ -241,6 +241,15 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
+    # Model-evaluation test set: also keep the CLEAN frame (the snapshot
+    # has boxes + caption burned in). Gated, best-effort, ~5-10 ms.
+    if thumb_path and settings.eval_capture_raw_frames:
+        from app.eval.categories import eval_category
+        if eval_category(ev.detection_type, extra.get("rule")) is not None:
+            from app.eval.raw_frames import save_raw_frame
+            _raw = save_raw_frame(frame_bgr, thumb_path)
+            if _raw:
+                extra["raw_snapshot_path"] = _raw
     rec = DetectionEvent(
         camera_id=camera_id,
         zone_id=ev.zone_id,

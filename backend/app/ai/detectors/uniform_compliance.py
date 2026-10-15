@@ -275,6 +275,41 @@ def uniform_features(frame_bgr, bbox_norm) -> dict | None:
 
 
 
+def has_orange_lanyard_evidence(feats: dict | None) -> bool:
+    """An orange Vivo lanyard on a correct top. The white card is often
+    only a few pixels (or hidden by the counter) in overhead CCTV, so its
+    absence must not create a missing-tag alert."""
+    return bool(feats and feats["top_ok"] and feats.get("orange_share", 0.0) >= 0.002)
+
+
+def classify_by_rules(feats: dict | None) -> str:
+    """The colour rule-based six-state decision tree (no model).
+
+    Shared by the live detector and the model-evaluation scorer
+    (app/eval) so the baseline is measured on exactly the live rules."""
+    if feats is None or feats["confidence"] < 0.25:
+        # Pixels missing or top didn't match anything cleanly — let
+        # the caller skip (no alert) rather than false-alarm. The
+        # 0.25 floor (top_share ≥ ~0.10) lets borderline overhead
+        # shots fall into UNCERTAIN instead of NON_COMPLIANT.
+        return UNCERTAIN
+    if not feats["top_ok"]:
+        # Borderline colour read — a non-trivial fraction matched the
+        # uniform band but didn't cross the top_ok floor. Treat as
+        # UNCERTAIN so we don't fire a violation on someone the camera
+        # can't read reliably (typical for overhead angles + low light).
+        # Only call NON_COMPLIANT when the share is decisively low.
+        if feats.get("top_share", 0.0) >= 0.10:
+            return UNCERTAIN
+        return NON_COMPLIANT
+    if (feats.get("orange_share", 0.0) >= 0.002
+            or (feats["has_lanyard"] and feats["has_nametag"])):
+        return FULL_COMPLIANT
+    if feats["has_lanyard"]:
+        return PARTIAL_COMPLIANT
+    return COLOR_ONLY
+
+
 class UniformComplianceDetector(Detector):
     detection_type = "uniform_compliance"
     needs_tracking = True
@@ -470,11 +505,7 @@ class UniformComplianceDetector(Detector):
         feats = uniform_features(ctx.frame_bgr, det["bbox_norm"])
 
         # Clear physical evidence wins over a stale or under-trained model.
-        # An orange Vivo lanyard carries the staff card; the white rectangle
-        # is often only a few pixels (or hidden by the counter) in overhead
-        # CCTV, so its absence must not create a missing-tag alert.
-        if (feats and feats["top_ok"]
-                and feats.get("orange_share", 0.0) >= 0.002):
+        if has_orange_lanyard_evidence(feats):
             return FULL_COMPLIANT
         # Mode 1: custom model emitting the seven canonical classes
         # OR the legacy four. List of (state, class-name) — was a dict,
@@ -508,28 +539,7 @@ class UniformComplianceDetector(Detector):
             return best_state
 
         # Mode 2: colour rule-based, six-state decision tree.
-        if feats is None or feats["confidence"] < 0.25:
-            # Pixels missing or top didn't match anything cleanly — let
-            # the caller skip (no alert) rather than false-alarm. The
-            # 0.25 floor (top_share ≥ ~0.10) lets borderline overhead
-            # shots fall into UNCERTAIN instead of NON_COMPLIANT.
-            return UNCERTAIN
-        if not feats["top_ok"]:
-            # Borderline colour read — a non-trivial fraction matched
-            # the uniform band but didn't cross the top_ok floor. Treat
-            # as UNCERTAIN so we don't fire a violation on someone the
-            # camera can't read reliably (typical for overhead angles
-            # + low light). Only call NON_COMPLIANT when the share is
-            # decisively low.
-            if feats.get("top_share", 0.0) >= 0.10:
-                return UNCERTAIN
-            return NON_COMPLIANT
-        if (feats.get("orange_share", 0.0) >= 0.002
-                or (feats["has_lanyard"] and feats["has_nametag"])):
-            return FULL_COMPLIANT
-        if feats["has_lanyard"]:
-            return PARTIAL_COMPLIANT
-        return COLOR_ONLY
+        return classify_by_rules(feats)
 
     # ---- alerting --------------------------------------------------
 

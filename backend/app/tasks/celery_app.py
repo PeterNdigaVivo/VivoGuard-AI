@@ -59,6 +59,7 @@ celery_app = Celery(
         "app.tasks.odoo_sync",
         "app.tasks.system_health_report",
         "app.tasks.feedback_absorb",
+        "app.tasks.eval_tasks",
     ],
 )
 celery_app.conf.update(
@@ -143,6 +144,11 @@ celery_app.conf.update(
         # `alerts` mounts the thumbnails + datasets volumes it copies between.
         "feedback.absorb_verdict":            {"queue": "alerts"},
         "feedback.absorb_pending":            {"queue": "beat"},
+        # Model-evaluation test set (alerts worker: thumbnails, recordings
+        # and /data/eval are mounted there).
+        "eval.collect_reviewed":              {"queue": "alerts"},
+        "eval.sample_people":                 {"queue": "alerts"},
+        "eval.prune":                         {"queue": "alerts"},
         "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
@@ -188,6 +194,19 @@ celery_app.conf.update(
         # never delay it.
         # Safety net for verdicts whose training sample never got made
         # (queue down at click time, worker restart, retries spent).
+        # Model-evaluation test set (no-ops unless EVAL_CAPTURE_RAW_FRAMES).
+        "eval-collect-reviewed-every-30min": {
+            "task": "eval.collect_reviewed",
+            "schedule": timedelta(minutes=30),
+        },
+        "eval-sample-people-hourly": {
+            "task": "eval.sample_people",
+            "schedule": timedelta(hours=1),
+        },
+        "eval-prune-daily": {
+            "task": "eval.prune",
+            "schedule": timedelta(days=1),
+        },
         "feedback-absorb-pending-every-15min": {
             "task": "feedback.absorb_pending",
             "schedule": timedelta(minutes=15),

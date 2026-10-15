@@ -24,6 +24,7 @@ const CamerasPage          = lazy(() => import('@/pages/CamerasPage'))
 const AddCameraWizard      = lazy(() => import('@/pages/AddCameraWizard'))
 const LiveViewPage         = lazy(() => import('@/pages/LiveViewPage'))
 const AlertsPage           = lazy(() => import('@/pages/AlertsPage'))
+const EvaluationPage       = lazy(() => import('@/pages/EvaluationPage'))
 const DetectionConfigPage  = lazy(() => import('@/pages/DetectionConfigPage'))
 const TrainingStudioPage   = lazy(() => import('@/pages/TrainingStudioPage'))
 const AnnotationPage       = lazy(() => import('@/pages/AnnotationPage'))
@@ -100,6 +101,7 @@ export default function App() {
               <Route path="/system"                   element={<MissionControlPage />} />
               <Route path="/system-health"            element={<Navigate to="/system" replace />} />
               <Route path="/system/odoo"              element={<OdooAssurancePage />} />
+              <Route path="/evaluation"              element={<EvaluationPage />} />
               <Route path="/odoo-assurance"           element={<Navigate to="/system/odoo" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

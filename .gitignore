@@ -36,11 +36,13 @@ data/models/*
 data/datasets/*
 data/thumbnails/*
 data/training/*
+data/eval/*
 !data/recordings/.gitkeep
 !data/models/.gitkeep
 !data/datasets/.gitkeep
 !data/thumbnails/.gitkeep
 !data/training/.gitkeep
+!data/eval/.gitkeep
 
 # --- Local backups / deployment editor copies ---
 # Database dumps and environment backups can contain production data or

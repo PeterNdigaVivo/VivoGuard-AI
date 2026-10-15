@@ -30,6 +30,7 @@ from app.models.odoo import (
     OdooConversionMetric, OdooPosActivityBucket, OdooPosSession, OdooRosterWindow, OdooStoreMap,
     OdooStoreSalesHourly, OdooSyncState, OdooTillConflict, StoreBusinessHours,
 )
+from app.models.eval_sample import EvalSample
 
 __all__ = [
     "User",
@@ -54,4 +55,5 @@ __all__ = [
     "OdooStoreMap", "StoreBusinessHours", "OdooRosterWindow",
     "OdooPosSession", "OdooTillConflict", "OdooStoreSalesHourly",
     "OdooPosActivityBucket", "OdooConversionMetric", "OdooSyncState",
+    "EvalSample",
 ]
