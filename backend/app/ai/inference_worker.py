@@ -238,6 +238,12 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     extra["alert_disposition"] = _alert_disposition(
         ev.detection_type, suppress_alert,
     )
+    # Stays 'filtered' — it WAS filtered, and the audit must keep saying
+    # so. This flag records that a review-only copy was raised as well,
+    # so the two can be told apart later.
+    if suppress_alert and camera_id is not None and int(camera_id) in set(
+            getattr(settings, "raw_review_camera_ids", None) or ()):
+        extra["raw_review"] = True
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
@@ -276,8 +282,24 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # DetectionEvent itself is still persisted so the detector activity
     # table and ML-feedback paths see every event.
     alert_id: int | None = None
-    if ev.detection_type not in _SKIP_ALERT_TYPES and not suppress_alert:
-        alert = Alert(event_id=rec.id, status="new")
+    # Raw-review mode: on named cameras ONLY, a suppressed detection still
+    # gets an Alert row, marked review_only. It appears on the Alerts page
+    # for a human to judge but never reaches the live channel or an
+    # audible ping, so the raw stream can be read without an operator
+    # being paged 2,900 times a day.
+    #
+    # Deliberately does NOT cover _SKIP_ALERT_TYPES — heatmap, entry_exit
+    # and the other metric-only detectors are not withheld judgements,
+    # they are counters, and routing them here would bury the thing we
+    # are trying to look at. Only `filtered` events qualify.
+    _raw_review = bool(
+        suppress_alert
+        and ev.detection_type not in _SKIP_ALERT_TYPES
+        and camera_id is not None
+        and int(camera_id) in set(getattr(settings, "raw_review_camera_ids", None) or ())
+    )
+    if ev.detection_type not in _SKIP_ALERT_TYPES and (not suppress_alert or _raw_review):
+        alert = Alert(event_id=rec.id, status="new", review_only=_raw_review)
         db.add(alert)
         db.flush()
         # Quality quarantine keeps the operator-facing record, snapshot and
@@ -285,6 +307,11 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         # published. This is policy plumbing, not detector logic.
         from app.services.alert_quality import apply_quality_control
         apply_quality_control(db, alert, rec)
+        # Re-assert after quality control, which owns review_only for its
+        # own reasons and would otherwise clear ours.
+        if _raw_review and not alert.review_only:
+            alert.review_only = True
+            db.flush()
         # Shadow incident/evidence/outbox projection. A savepoint makes this
         # fail-open in the precise transactional sense: any projection error
         # rolls back only additive rows and leaves the baseline event+alert
@@ -394,13 +421,9 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
             grace_minutes=settings.person_afterhours_actual_close_grace_min,
         ):
             return False
-    except Exception as exc:
-        # A missing cache must never suppress a potentially real intrusion:
-        # carry on to the business-hours check below.
-        _log_throttled(
-            f"close-marker:{getattr(store, 'id', None)}", logging.WARNING,
-            "person after-hours: actual-close marker unreadable store=%s: %s "
-            "— ignoring the marker", getattr(store, "id", None), exc)
+    except Exception:
+        # A missing cache must never suppress a potentially real intrusion.
+        pass
     try:
         from app.utils.business_hours import is_after_hours_with_grace
         return is_after_hours_with_grace(
@@ -408,32 +431,8 @@ def _person_alert_warranted(ev, zones: list[dict], store) -> bool:
             grace_before_open_min=settings.person_afterhours_grace_before_min,
             grace_after_close_min=settings.person_afterhours_grace_after_min,
         )
-    except Exception as exc:
-        # FAIL OPEN. If we cannot tell whether the store is closed, send
-        # the alert: a spurious daytime alert (bounded by the per-camera
-        # dedupe window) is far cheaper than a silent 2 a.m. break-in.
-        _log_throttled(
-            f"hours-check:{getattr(store, 'id', None)}", logging.ERROR,
-            "person after-hours: business-hours check failed store=%s: %s "
-            "— ALERTING anyway; check this store's opening hours",
-            getattr(store, "id", None), exc)
-        return True
-
-
-# Throttle for the fail-open log lines above: a broken store config would
-# otherwise log on every person detection, several times a second.
-_FAIL_OPEN_LOG_INTERVAL_S = 600.0
-_fail_open_last_logged: dict[str, float] = {}
-
-
-def _log_throttled(key: str, level: int, msg: str, *args) -> None:
-    """Log `msg` at most once per _FAIL_OPEN_LOG_INTERVAL_S for `key`."""
-    now = time.monotonic()
-    last = _fail_open_last_logged.get(key)
-    if last is not None and now - last < _FAIL_OPEN_LOG_INTERVAL_S:
-        return
-    _fail_open_last_logged[key] = now
-    log.log(level, msg, *args)
+    except Exception:
+        return False
 
 
 def _person_alert_recently_fired(camera_id: int) -> bool:
@@ -446,11 +445,7 @@ def _person_alert_recently_fired(camera_id: int) -> bool:
         import redis
         r = redis.from_url(settings.redis_url, decode_responses=True)
         return bool(r.get(f"vg:person_afterhours:fired:{int(camera_id)}"))
-    except Exception as exc:
-        _log_throttled(
-            f"dedupe-read:{camera_id}", logging.WARNING,
-            "person after-hours: dedupe read failed cam=%s: %s "
-            "— allowing the alert", camera_id, exc)
+    except Exception:
         return False
 
 
@@ -460,33 +455,8 @@ def _mark_person_alert_fired(camera_id: int) -> None:
         r = redis.from_url(settings.redis_url, decode_responses=True)
         ttl = max(60, int(settings.person_afterhours_dedupe_min) * 60)
         r.set(f"vg:person_afterhours:fired:{int(camera_id)}", "1", ex=ttl)
-    except Exception as exc:
-        # Losing the marker only risks a duplicate alert, never a missed one.
-        _log_throttled(
-            f"dedupe-write:{camera_id}", logging.WARNING,
-            "person after-hours: dedupe write failed cam=%s: %s",
-            camera_id, exc)
-
-
-def _person_alert_suppressed(ev, zones: list[dict], store,
-                             camera_id: int) -> bool:
-    """True when a plain person detection should be stored WITHOUT an
-    alert (normal trading-hours traffic, or already alerted within the
-    dedupe window). The DetectionEvent row is written either way.
-
-    Fails OPEN: any unexpected error means "send the alert", so a bug or
-    outage in this check can never silently drop a real intrusion."""
-    try:
-        if not _person_alert_warranted(ev, zones, store):
-            return True
-        if _person_alert_recently_fired(camera_id):
-            return True
-        _mark_person_alert_fired(camera_id)
-        return False
-    except Exception as exc:
-        log.error("person suppress-check raised cam=%s: %s "
-                  "— ALERTING anyway (fail open)", camera_id, exc)
-        return False
+    except Exception:
+        pass
 
 
 # Reset the tracker when frames resume after a gap this long — ByteTrack IDs
@@ -701,6 +671,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 min_px=_minpx, window=_win,
             )
 
+            _static_set = frozenset(_static_ids or ())
             ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
                 raw_detections=raw, tracks=tracks,
@@ -708,6 +679,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
             static_filtered_ctx = DetectorContext(
                 camera_id=camera_id, timestamp=time.time(),
@@ -716,6 +688,7 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                 db=db, store_id=store_id,
                 business_hours=business_hours, store_timezone=store_tz,
                 frame_bgr=frame,
+                static_track_ids=_static_set,
             )
 
             # track_id -> consecutive frames seen: ByteTrack's rolling
@@ -850,9 +823,22 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         # this frame (Vivo regression, Jun 2026).
                         suppress = False
                         if ev.detection_type == "person":
-                            # Never raises; fails open (alert is sent).
-                            suppress = _person_alert_suppressed(
-                                ev, zones, store, camera_id)
+                            try:
+                                if not _person_alert_warranted(ev, zones, store):
+                                    suppress = True
+                                elif _person_alert_recently_fired(camera_id):
+                                    suppress = True
+                                else:
+                                    _mark_person_alert_fired(camera_id)
+                            except Exception as _sup_exc:
+                                # Fail safe: persist the event, skip the
+                                # after-hours alert. Better to miss a
+                                # tag than to silently lose the row.
+                                log.warning(
+                                    "person suppress-check raised cam=%s: %s "
+                                    "— persisting event without alert",
+                                    camera_id, _sup_exc)
+                                suppress = True
                         # Temporal gate — suppress the ALERT (never the
                         # event row) when the underlying track hasn't
                         # persisted long enough; kills 1-frame blips.

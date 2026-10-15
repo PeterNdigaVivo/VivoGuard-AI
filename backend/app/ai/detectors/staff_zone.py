@@ -130,6 +130,21 @@ class StaffZoneDetector(Detector):
             # forever. No staff_zone alert fires for someone seen for less
             # than ten seconds,
             # which protects briefly occluded or passing staff.
+            # A track the mannequin filter judged stationary never gets
+            # accused. Camera 73 raised "unauthorised person" 58 times in
+            # one week from a bounding box that never moved — identical
+            # to four decimal places, pinned to the top edge of the
+            # frame, confidence 1.00. A pillar or door frame, not an
+            # intruder, and it can never resolve to a known uniform so
+            # the elapsed timer just keeps climbing.
+            #
+            # This is checked HERE rather than by adding staff_zone to
+            # _STATIC_PERSON_FILTER_TYPES, because that would hide the
+            # track entirely and a cashier standing still at a till is
+            # someone this detector must still see. An intruder moves;
+            # an accusation can wait for movement. Presence does not.
+            if tid in (ctx.static_track_ids or frozenset()):
+                continue
             if _unauthorised_ready(verdict["level"], elapsed):
                 rule = "unauthorised_person"
                 if now - self._fired.get((tid, rule), 0) >= DEDUP_SECONDS:
