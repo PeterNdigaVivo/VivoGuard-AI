@@ -9,6 +9,8 @@ operator-selectable.
 """
 from __future__ import annotations
 
+import json
+
 ZONE_PURPOSES = {
     "count_entries":     {
         "label": "Count people entering",
@@ -134,8 +136,31 @@ ZONE_TAG_DETECTORS: dict[str, tuple[str, ...]] = {
 }
 
 
-def detector_types_for_zone_tags(tags: list[str] | set[str]) -> set[str]:
-    """Translate semantic zone tags to executable detector types."""
+def detector_types_for_zone_tags(tags: list[str] | set[str] | str) -> set[str]:
+    """Translate semantic zone tags to executable detector types.
+
+    `tags` is normally the zone's detection_types_json list. Some rows
+    hold that list DOUBLE-ENCODED as a JSON string — '["aisle"]'
+    instead of ["aisle"] — written that way by the bulk zone scripts.
+    Iterating a string yields characters, and because an unrecognised
+    tag falls through as its own detector name, every character became
+    a one-character "detector" that matches nothing: the zone drove no
+    detection at all and said nothing about it. 117 zones across 16
+    stores were dead this way (2026-10-19), five stores entirely.
+
+    So parse the string back into a list rather than trusting the
+    column's shape. A tag list is cheap to validate and the failure is
+    otherwise completely silent.
+    """
+    if isinstance(tags, (str, bytes)):
+        try:
+            tags = json.loads(tags)
+        except (ValueError, TypeError):
+            # Not JSON — treat the whole value as a single tag rather
+            # than shredding it into characters.
+            tags = [tags]
+        if isinstance(tags, (str, bytes)):
+            tags = [tags]
     detectors: set[str] = set()
     for tag in tags or []:
         detectors.update(ZONE_TAG_DETECTORS.get(str(tag), (str(tag),)))
