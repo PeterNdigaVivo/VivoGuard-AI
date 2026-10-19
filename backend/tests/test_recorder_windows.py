@@ -14,7 +14,7 @@ from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_stale_camera_recordings, _close_window, _current_window,
     _prune_expired_source_windows, _recording_health_snapshot,
-    _recording_path, _repair_missing_recordings,
+    _recording_path, _repair_missing_recordings, _start_camera, _tracking_ttl,
 )
 
 
@@ -27,6 +27,45 @@ def _at(hour: int, minute: int = 0) -> datetime:
 
 def test_recorder_has_no_daily_coverage_gap() -> None:
     assert all(_current_window(_at(hour, 30)) is not None for hour in range(24))
+
+
+def test_tracking_ttl_outlives_longest_recording_window() -> None:
+    seven_hours = 7 * 60 * 60
+
+    assert _tracking_ttl(seven_hours) == seven_hours + 10 * 60
+    assert _tracking_ttl(seven_hours) > 6 * 60 * 60
+
+
+def test_started_camera_pid_key_outlives_requested_runtime(
+    monkeypatch, tmp_path,
+) -> None:
+    writes = []
+
+    class _Redis:
+        def set(self, key, value, **kwargs):
+            writes.append((key, json.loads(value), kwargs))
+
+    class _Db:
+        def add(self, _row):
+            pass
+
+    monkeypatch.setattr(
+        "app.tasks.recorder._substream_url", lambda _cam: "rtsp://redacted",
+    )
+    monkeypatch.setattr("app.tasks.recorder._clips_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "app.tasks.recorder.subprocess.Popen",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=321),
+    )
+
+    seconds = 7 * 60 * 60
+    camera = SimpleNamespace(id=7, store_id=3)
+    assert _start_camera(_Db(), _Redis(), camera, "window", seconds)
+    assert writes == [(
+        "vg:recording:pid:7",
+        {"pid": 321, "window_id": "window", "path": str(tmp_path / "window" / "3" / "7.mp4")},
+        {"ex": seconds + 10 * 60},
+    )]
 
 
 def test_after_hours_windows_are_bounded_and_date_stamped() -> None:

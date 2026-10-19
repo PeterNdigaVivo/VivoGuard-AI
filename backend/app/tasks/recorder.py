@@ -60,6 +60,19 @@ _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, pat
 _REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
+_TRACKING_TTL_GRACE_SECONDS = 10 * 60
+
+
+def _tracking_ttl(seconds: int) -> int:
+    """Keep recorder ownership alive beyond the process' planned runtime.
+
+    The longest recording windows run for seven hours. A fixed six-hour
+    Redis TTL made their PID and current-window keys disappear while ffmpeg
+    was still running. The next tick then spawned a second full window and
+    could no longer stop the first process at rollover. Deriving the TTL
+    from the requested runtime preserves ownership until normal cleanup.
+    """
+    return max(60, int(seconds)) + _TRACKING_TTL_GRACE_SECONDS
 
 
 def _redis():
@@ -166,7 +179,7 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
     r.set(_PID_KEY_FMT.format(cam=cam.id),
           json.dumps({"pid": proc.pid, "window_id": window_id,
                       "path": str(out_path)}),
-          ex=6 * 3600)
+          ex=_tracking_ttl(seconds))
     db.add(RecordingClip(camera_id=cam.id, store_id=cam.store_id,
                          window_id=window_id, file_path=str(out_path),
                          status="recording"))
@@ -574,7 +587,7 @@ def tick() -> None:
             _close_window(db, prev)
         _start_window(db, r, window_id, seconds)
         _publish_recording_health(db, r, window_id)
-    r.set(_CURRENT_WINDOW_KEY, window_id, ex=6 * 3600)
+    r.set(_CURRENT_WINDOW_KEY, window_id, ex=_tracking_ttl(seconds))
 
 
 # ── Alert clip extraction ─────────────────────────────────────────────────
