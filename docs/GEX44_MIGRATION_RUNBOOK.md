@@ -1,25 +1,33 @@
-# RTX 6000 Ada production migration runbook
+# GEX45-1 production migration runbook
 
 ## Decision and constraints
 
-The approved target is one Hetzner Server Auction host in Falkenstein with
-Ubuntu 24.04 LTS, primary IPv4, 128 GB DDR5 ECC RAM, two 1.92 TB U.2 NVMe
-datacentre SSDs and one NVIDIA RTX 6000 Ada GPU. The complete stack moves
-together so PostgreSQL, Redis, recordings and incident evidence remain on one
-trusted host.
+The provisioned target is a Hetzner GEX45-1 server in HEL1-DC12 with
+Ubuntu 24.04 LTS, primary IPv4, an Intel Core i5-13500, 64 GB DDR4 RAM, two
+512 GB NVMe datacentre SSDs in software RAID 1 and one NVIDIA RTX PRO 4000
+Blackwell SFF GPU with 24 GB VRAM. GEX45-1 is a fixed hardware configuration;
+an operating-system reinstall does not change these components. The complete
+stack moves together so PostgreSQL, Redis, recordings and incident evidence
+remain on one trusted host.
 
-Do not treat the GPU purchase as proof of coverage or 99% accuracy. The
+The RAID layout exposes substantially less usable capacity than the earlier
+1.92 TB migration plan. Before restoring data, record the authoritative backup
+size plus projected evidence growth and confirm that the restored database,
+media, Docker images and rollback workspace fit with operational headroom.
+
+Do not treat the provisioned GPU as proof of coverage or 99% accuracy. The
 current production loop uses long-lived per-camera Celery tasks. Controlled
 distribution and the model-level batch primitive are available, but both stay
 at their backward-compatible defaults until the actual GPU capacity test
-passes. Buying hardware is not permission to guess a concurrency setting.
+passes. Provisioning hardware is not permission to guess a concurrency setting.
 
-## Purchase checkpoint
+## Provisioning record
 
-Before placing the order, record the live monthly price, setup fee, VAT
-treatment, location and stock status. Ordering is a financial commitment and
-requires action-time approval. Do not substitute another server without a
-separate cost and architecture decision.
+The GEX45-1 has already been provisioned externally. Retain its order record,
+monthly price, setup fee, VAT treatment and fixed configuration with the
+migration evidence. Any future replacement or capacity upgrade remains a
+separate cost and architecture decision; ordering it is a financial commitment
+that requires action-time approval.
 
 ## Prepare the host
 

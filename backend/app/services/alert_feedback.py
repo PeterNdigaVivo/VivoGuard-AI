@@ -52,11 +52,23 @@ def record_independent_verdict(
                        AlertReviewDecision.id).all())
     if not prior:
         raise HTTPException(409, "primary review evidence is missing")
+    prior_reviewers = {row.reviewer_id for row in prior}
+    if (len(prior_reviewers) != 1
+            or any((row.classification or "").startswith("independent_")
+                   for row in prior)):
+        raise HTTPException(409, "independent review is already complete")
     if any(row.reviewer_id == user.id for row in prior):
         raise HTTPException(409, "reviewer must be independent")
 
     second = "confirmed" if verdict == "confirm" else "dismissed"
-    first = alert.status
+    # Alert.status is the mutable operational view. Anchor agreement to the
+    # primary reviewer's latest append-only decision so another workflow
+    # cannot change the validation result between the two blind reviews.
+    primary_reviewer_id = prior[0].reviewer_id
+    first = next(
+        row.verdict for row in reversed(prior)
+        if row.reviewer_id == primary_reviewer_id
+    )
     agreed = first == second
     db.add(AlertReviewDecision(
         alert_id=alert.id, reviewer_id=user.id, verdict=second,

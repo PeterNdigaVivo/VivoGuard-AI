@@ -5,3 +5,8 @@ torch>=2.4
 torchvision>=0.19
 tensorrt>=10.0
 onnxruntime-gpu>=1.17
+# Ultralytics requires these when exporting a TensorRT engine. Install them
+# in the immutable worker image so first inference never mutates the runtime
+# or depends on package-index availability.
+onnx>=1.12.0,<2.0.0
+onnxslim>=0.1.82

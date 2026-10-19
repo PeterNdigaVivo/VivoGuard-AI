@@ -235,6 +235,12 @@ def audit_queue(
         AlertReviewDecision.alert_id == Alert.id,
         AlertReviewDecision.reviewer_id == user.id,
     ))
+    reviewer_count = (db.query(func.count(func.distinct(
+        AlertReviewDecision.reviewer_id,
+    )))
+        .filter(AlertReviewDecision.alert_id == Alert.id)
+        .correlate(Alert)
+        .scalar_subquery())
     priority_rank = case(
         (DetectionEvent.detection_type.in_(CRITICAL_REVIEW_TYPES), 0),
         (DetectionEvent.detection_type.in_(HIGH_REVIEW_TYPES), 1),
@@ -250,6 +256,7 @@ def audit_queue(
                   DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
               ))
               .filter(reviewed_by_other)
+              .filter(reviewer_count == 1)
               .filter(~reviewed_by_user))
     if not include_historical:
         rows = rows.filter(

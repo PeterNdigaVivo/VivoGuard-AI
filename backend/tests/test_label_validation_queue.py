@@ -162,3 +162,46 @@ def test_audit_queue_is_blind_and_excludes_the_same_reviewer(tmp_path):
     assert rows[0]["review_reason"] == "blind independent review"
     assert audit_queue(db=db, user=primary, limit=20) == []
     db.close()
+
+
+def test_audit_queue_excludes_alert_after_independent_review(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    primary = User(email="primary-complete@vivo", password_hash="x",
+                   role="operator")
+    independent = User(email="independent-complete@vivo", password_hash="x",
+                       role="operator")
+    third = User(email="third-complete@vivo", password_hash="x",
+                 role="operator")
+    camera = Camera(
+        name="Completed Audit Camera", brand="dahua",
+        connection_type="nvr_dahua", host="127.0.0.1",
+    )
+    db.add_all([primary, independent, third, camera])
+    db.flush()
+    snapshot = tmp_path / "completed-audit.jpg"
+    snapshot.write_bytes(b"jpeg evidence")
+    event = DetectionEvent(
+        camera_id=camera.id, detection_type="intrusion", confidence=.8,
+        bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
+        thumbnail_path=str(snapshot),
+    )
+    db.add(event)
+    db.flush()
+    alert = Alert(event_id=event.id, status="confirmed")
+    db.add(alert)
+    db.flush()
+    db.add_all([
+        AlertReviewDecision(
+            alert_id=alert.id, reviewer_id=primary.id, verdict="confirmed",
+        ),
+        AlertReviewDecision(
+            alert_id=alert.id, reviewer_id=independent.id,
+            verdict="dismissed", classification="independent_disagreement",
+        ),
+    ])
+    db.commit()
+
+    assert audit_queue(db=db, user=third, limit=20) == []
+    db.close()
