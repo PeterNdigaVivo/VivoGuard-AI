@@ -50,10 +50,17 @@ export function Badge({ children, color = 'slate' }: { children: ReactNode; colo
   return <span className={`text-xs px-2 py-0.5 rounded-full ${colors[color]}`}>{children}</span>
 }
 
-export function PageHeader({ title, actions }: { title: string; actions?: ReactNode }) {
+// `aside` renders right next to the title (e.g. the camera setup page's
+// previous/next channel arrows); `actions` stay on the right.
+export function PageHeader({ title, actions, aside }: {
+  title: string; actions?: ReactNode; aside?: ReactNode
+}) {
   return (
-    <div className="flex items-center justify-between mb-6">
-      <h1 className="text-2xl font-semibold text-slate-800 dark:text-slate-100">{title}</h1>
+    <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
+      <div className="flex items-center gap-4 flex-wrap">
+        <h1 className="text-2xl font-semibold text-slate-800 dark:text-slate-100">{title}</h1>
+        {aside}
+      </div>
       <div className="flex gap-2">{actions}</div>
     </div>
   )

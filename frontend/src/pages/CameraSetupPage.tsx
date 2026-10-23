@@ -14,6 +14,13 @@ import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Badge, Button, Card, Input, PageHeader, Select, useToast } from '@/components/ui/Primitives'
 import { api } from '@/api/client'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
+import { stores as storesApi } from '@/api/stores'
+import { ChannelNavigator } from '@/components/ChannelNavigator'
+import {
+  channelNeighbours, nvrCountInStore, positionLabel, type ChannelNav,
+} from '@/lib/channelNav'
+
+const UNSAVED_ZONE_PROMPT = 'You have an unsaved zone on this channel. Leave without saving?'
 
 interface Purpose {
   label: string
@@ -28,14 +35,25 @@ interface ZoneRow {
   polygon_coords_json: [number, number][]
 }
 
+// Each channel gets a FRESH page (keyed by the camera id): React Router
+// otherwise reuses the component when only :id changes, which carried the
+// previous channel's drawing points, zone name, purpose, errors and port
+// results — and its snapshot — over to the next channel.
 export default function CameraSetupPage() {
   const { id } = useParams()
-  const cameraId = Number(id)
+  return <CameraSetup key={id} cameraId={Number(id)} />
+}
+
+function CameraSetup({ cameraId }: { cameraId: number }) {
   const nav = useNavigate()
   const toast = useToast()
 
   const [cam, setCam] = useState<Camera | null>(null)
   const [snap, setSnap] = useState<string | null>(null)
+  const [snapLoading, setSnapLoading] = useState(true)
+  // Previous / next channel (null = hide the arrows).
+  const [channelNav, setChannelNav] = useState<ChannelNav | null>(null)
+  const [channelLabel, setChannelLabel] = useState('')
   const [purposes, setPurposes] = useState<Record<string, Purpose>>({})
   const [zones, setZones] = useState<ZoneRow[]>([])
   const [purposeKey, setPurposeKey] = useState<string>('count_entries')
@@ -89,11 +107,59 @@ export default function CameraSetupPage() {
   }
 
   useEffect(() => {
-    api<Record<string, Purpose>>('/zone-purposes').then(setPurposes).catch(console.error)
-    camsApi.get(cameraId).then(setCam).catch(() => setCam(null))
-    camsApi.snapshot(cameraId).then(s => setSnap(s.jpeg_b64)).catch(() => setSnap(null))
-    camsApi.listZones(cameraId).then(setZones).catch(console.error)
+    // Ignore replies that arrive after the admin has moved to another channel.
+    let alive = true
+    api<Record<string, Purpose>>('/zone-purposes')
+      .then(p => { if (alive) setPurposes(p) }).catch(console.error)
+    camsApi.get(cameraId).then(c => { if (alive) setCam(c) })
+      .catch(e => { console.warn('[camera-setup] camera load failed', e); if (alive) setCam(null) })
+    camsApi.snapshot(cameraId).then(s => { if (alive) setSnap(s.jpeg_b64) })
+      .catch(e => { console.warn('[camera-setup] snapshot failed', e); if (alive) setSnap(null) })
+      .finally(() => { if (alive) setSnapLoading(false) })
+    camsApi.listZones(cameraId).then(z => { if (alive) setZones(z) }).catch(console.error)
+    return () => { alive = false }
   }, [cameraId])
+
+  // Previous / next channel. Any failure just hides the arrows.
+  useEffect(() => {
+    let alive = true
+    Promise.all([camsApi.list(), storesApi.list().catch(e => {
+      console.warn('[camera-setup] store list failed; channel label without store name', e)
+      return []
+    })])
+      .then(([allCams, allStores]) => {
+        if (!alive) return
+        const n = channelNeighbours(allCams, cameraId)
+        setChannelNav(n)
+        if (n) {
+          const storeId = n.current.store_id
+          setChannelLabel(positionLabel(n, {
+            storeName: allStores.find(s => s.id === storeId)?.name ?? null,
+            nvrCountInStore: nvrCountInStore(allCams, storeId),
+          }))
+        }
+      })
+      .catch(e => {
+        console.warn('[camera-setup] camera list failed; hiding channel arrows', e)
+        if (alive) setChannelNav(null)
+      })
+    return () => { alive = false }
+  }, [cameraId])
+
+  // Unsaved work = points drawn but not saved. Our buttons ask first; a
+  // refresh / tab close gets the browser's own "Leave site?" prompt.
+  const hasUnsavedZone = points.length > 0
+  useEffect(() => {
+    if (!hasUnsavedZone) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [hasUnsavedZone])
+
+  function leaveTo(path: string) {
+    if (hasUnsavedZone && !window.confirm(UNSAVED_ZONE_PROMPT)) return
+    nav(path)
+  }
 
   const purpose = purposes[purposeKey]
   const pointsLimit = purpose?.shape === 'line' ? 2 : Infinity
@@ -145,8 +211,12 @@ export default function CameraSetupPage() {
     <div className="p-6">
       <PageHeader
         title="Camera setup"
+        aside={channelNav && (
+          <ChannelNavigator nav={channelNav} label={channelLabel}
+                            onGo={id => leaveTo(`/cameras/${id}/setup`)} />
+        )}
         actions={<>
-          <Button variant="ghost" onClick={() => nav('/cameras')}>Back to cameras</Button>
+          <Button variant="ghost" onClick={() => leaveTo('/cameras')}>Back to cameras</Button>
           <Link to={`/cameras/${cameraId}/detection`}
                 className="text-sm text-slate-500 dark:text-slate-300 hover:underline self-center">Advanced settings →</Link>
         </>}
@@ -188,7 +258,7 @@ export default function CameraSetupPage() {
             </div>
           ) : (
             <div className="bg-slate-200 dark:bg-slate-800 aspect-video rounded flex items-center justify-center text-slate-500 dark:text-slate-300">
-              No snapshot available.
+              {snapLoading ? 'Loading snapshot…' : 'No snapshot available.'}
             </div>
           )}
         </Card>
