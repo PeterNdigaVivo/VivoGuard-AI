@@ -194,11 +194,29 @@ def capable_camera_ids(db, r) -> list[int]:
     from app.utils.crypto import decrypt
     from app.utils.network import build_rtsp_url
 
+    # Probing costs an ffprobe per camera (up to 20s each). Probing all
+    # 113 inline would block the alerts worker for half an hour and let
+    # 2-minute beat runs pile up on top of each other, so the discovery
+    # is spread across sweeps: a cursor walks the fleet a slice at a
+    # time and the set fills in over a few minutes.
+    probe_limit = int(getattr(settings, "audio_probe_per_sweep", 12))
     found: list[int] = []
     rows = db.execute(text("""
         SELECT c.id FROM cameras c
         WHERE NOT c.is_deleted AND c.ai_enabled ORDER BY c.id""")).scalars().all()
-    for cid in rows:
+    try:
+        cursor = int(r.get("vg:audio:probe_cursor") or 0)
+    except Exception:                                       # noqa: BLE001
+        cursor = 0
+    window = rows[cursor:cursor + probe_limit]
+    next_cursor = cursor + probe_limit
+    if next_cursor >= len(rows):
+        next_cursor = 0                      # wrapped: a full pass is done
+    try:
+        r.set("vg:audio:probe_cursor", str(next_cursor), ex=86400)
+    except Exception:                                       # noqa: BLE001
+        pass
+    for cid in window:
         cam = db.query(Camera).filter(Camera.id == cid).first()
         if not cam:
             continue
@@ -224,16 +242,30 @@ def capable_camera_ids(db, r) -> list[int]:
     try:
         if found:
             r.sadd(_CAPABLE_KEY, *found)
-            r.expire(_CAPABLE_KEY, 86400)
+            # Only start the day-long expiry once a full pass has wrapped,
+            # otherwise the set would expire mid-discovery and restart.
+            if next_cursor == 0:
+                r.expire(_CAPABLE_KEY, 86400)
+        known = sorted(int(c) for c in (r.smembers(_CAPABLE_KEY) or []))
     except Exception:                                       # noqa: BLE001
-        pass
-    log.info("audio: %d of %d cameras carry a microphone", len(found), len(rows))
-    return found
+        known = found
+    log.info("audio: probed %d cameras (cursor %d/%d), %d with a microphone "
+             "known so far", len(window), cursor, len(rows), len(known))
+    return known
 
 
 @celery_app.task(name="audio.monitor_sweep")
 def audio_monitor_sweep() -> dict:
-    """Sample every audio-capable camera once and alert on raised voices."""
+    """Sample every audio-capable camera once and alert on raised voices.
+
+    Sampling is serial and each camera costs `audio_sample_seconds` plus
+    connection setup - measured at 179s for 21 cameras. A lock is
+    therefore mandatory, not defensive: without it a slow sweep is still
+    running when the next one starts and they stack until the alerts
+    worker has no free slot. Serial is deliberate too; this host already
+    leaks ffmpeg processes, so firing several at once would make a known
+    problem worse.
+    """
     if not bool(getattr(settings, "audio_monitor_enabled", False)):
         return {"skipped": "disabled"}
 
@@ -249,6 +281,19 @@ def audio_monitor_sweep() -> dict:
     db = SessionLocal()
     r = _redis()
     checked = fired = 0
+
+    # One sweep at a time. The TTL is a dead-man's switch: if a worker is
+    # killed mid-sweep the lock expires on its own rather than silencing
+    # audio monitoring until someone notices.
+    lock_key = "vg:audio:sweep_lock"
+    try:
+        if not r.set(lock_key, "1", nx=True, ex=900):
+            log.info("audio sweep: previous sweep still running, skipping")
+            db.close()
+            return {"skipped": "locked"}
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("audio sweep: lock unavailable (%s) - proceeding", exc)
+
     try:
         for cid in capable_camera_ids(db, r):
             cam = db.query(Camera).filter(Camera.id == cid).first()
@@ -314,5 +359,9 @@ def audio_monitor_sweep() -> dict:
         db.commit()
     finally:
         db.close()
+        try:
+            r.delete(lock_key)
+        except Exception:                                   # noqa: BLE001
+            pass
     log.info("audio sweep: %d cameras sampled, %d alerts", checked, fired)
     return {"checked": checked, "alerts": fired}

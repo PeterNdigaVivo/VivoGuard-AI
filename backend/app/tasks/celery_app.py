@@ -199,9 +199,13 @@ celery_app.conf.update(
         # Model-evaluation test set (no-ops unless EVAL_CAPTURE_RAW_FRAMES).
         # Audio distress sweep. Samples a few seconds per mic'd camera;
         # no-ops entirely unless AUDIO_MONITOR_ENABLED.
-        "audio-monitor-every-2min": {
+        # Every 5 min, not 2: a sweep samples each mic'd camera serially
+        # and measured 179s for 21 cameras, which would overlap a 2-min
+        # schedule. The task also holds a Redis lock, so an overrun skips
+        # rather than stacking.
+        "audio-monitor-every-5min": {
             "task": "audio.monitor_sweep",
-            "schedule": timedelta(minutes=2),
+            "schedule": timedelta(minutes=5),
         },
         "eval-collect-reviewed-every-30min": {
             "task": "eval.collect_reviewed",

@@ -648,6 +648,11 @@ class Settings(BaseSettings):
     # scores high. This - not speech_share - is what separates a shout
     # from a crash on a band-limited microphone.
     audio_flatness_max: float = Field(default=0.45, ge=0.05, le=0.95)
+    # Microphone discovery costs an ffprobe per camera (up to 20s each).
+    # Probing the whole fleet inside one sweep would block an alerts
+    # worker slot for half an hour and let 2-minute beat runs pile up,
+    # so discovery walks the fleet this many cameras at a time.
+    audio_probe_per_sweep: int = Field(default=12, ge=1, le=60)
 
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
