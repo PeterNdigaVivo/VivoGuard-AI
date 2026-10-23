@@ -433,6 +433,13 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Call building security: {security_phone}",
                      "Do not enter the store alone"]
+    elif dt == "audio_distress":
+        # Deliberately opens with looking rather than acting. The mic
+        # hears volume and harmonics, not intent - a cheer, a greeting
+        # across the shop and an argument are the same signal to it.
+        steps = ["Open the live camera and look before acting",
+                 "If it is a confrontation, send a supervisor",
+                 "Mark False Alert if it was ordinary noise"]
     elif dt == "uniform_compliance":
         if (event.extra or {}).get("rule") == "no_lanyard":
             steps = ["Remind the staff member to wear their name tag",
@@ -792,8 +799,11 @@ def _title(event: DetectionEvent, camera: Camera | None,
         # happened". The VLM sentence describing the frame at that moment
         # is what makes it actionable, so it becomes the headline when we
         # have one; the measured loudness is the fallback.
-        desc = " ".join(str(extra.get("vlm_description")
-                            or extra.get("description") or "").split())
+        # Only the VLM sentence earns the "Raised voices — <what was
+        # seen>" form. Falling back to extra.description produced
+        # "Raised voices — Raised voices detected on the microphone…",
+        # which stutters and says nothing twice.
+        desc = " ".join(str(extra.get("vlm_description") or "").split())
         ratio = _extract(extra, "loudness_ratio", default=None)
         if desc:
             short = desc if len(desc) <= 105 else desc[:102].rstrip(" ,.;") + "…"
