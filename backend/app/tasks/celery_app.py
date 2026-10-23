@@ -46,6 +46,7 @@ celery_app = Celery(
         "app.tasks.alerting",
         "app.tasks.fitting_room",
         "app.tasks.scene_review",
+        "app.tasks.audio_monitor",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
@@ -57,6 +58,9 @@ celery_app = Celery(
         "app.tasks.feedback_harvest",
         "app.tasks.operations_assurance",
         "app.tasks.odoo_sync",
+        "app.tasks.system_health_report",
+        "app.tasks.feedback_absorb",
+        "app.tasks.eval_tasks",
     ],
 )
 celery_app.conf.update(
@@ -103,6 +107,7 @@ celery_app.conf.update(
         # mapping that reaches Ollama — and keeping VLM work off the
         # inference queue protects the camera pipeline.
         "scene_review.sweep":                   {"queue": "alerts"},
+        "audio.monitor_sweep":                  {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -132,6 +137,21 @@ celery_app.conf.update(
         "training.harvest_temporal_frames":   {"queue": "alerts"},
         "training.run_shop_opening_specialist": {"queue": "alerts"},
         "training.run_store_specialist":      {"queue": "alerts"},
+        # Status report rides `beat`, which has a DEDICATED 1-slot
+        # runner process (compose: beat-runner inside worker-alerts) —
+        # training jobs filling the alerts pool starved it twice when
+        # beat shared their slots.
+        "system.daily_status_report":         {"queue": "beat"},
+        # True/False verdict → training sample, off the request path.
+        # `alerts` mounts the thumbnails + datasets volumes it copies between.
+        "feedback.absorb_verdict":            {"queue": "alerts"},
+        "feedback.absorb_pending":            {"queue": "beat"},
+        # Model-evaluation test set (alerts worker: thumbnails, recordings
+        # and /data/eval are mounted there).
+        "eval.collect_reviewed":              {"queue": "alerts"},
+        "eval.sample_people":                 {"queue": "alerts"},
+        "eval.prune":                         {"queue": "alerts"},
+        "system.health_daily_report":         {"queue": "beat"},   # legacy alias
         "maintenance.refresh_ddns":           {"queue": "beat"},
         "maintenance.prune_alerts":           {"queue": "beat"},
         "maintenance.prune_metric_snapshots": {"queue": "beat"},
@@ -168,6 +188,40 @@ celery_app.conf.update(
         "refresh-ddns-every-5min": {
             "task": "maintenance.refresh_ddns",
             "schedule": 300.0,
+        },
+        # VivoGuard Status Report — the ONE daily email (11:30 EAT).
+        # 5-min tick + wall-clock gate, sent-marker dedupe AFTER a
+        # successful send, 15-min SMTP retries. Rides `beat`, which
+        # has a dedicated 1-slot runner so heavy `alerts` work can
+        # never delay it.
+        # Safety net for verdicts whose training sample never got made
+        # (queue down at click time, worker restart, retries spent).
+        # Model-evaluation test set (no-ops unless EVAL_CAPTURE_RAW_FRAMES).
+        # Audio distress sweep. Samples a few seconds per mic'd camera;
+        # no-ops entirely unless AUDIO_MONITOR_ENABLED.
+        "audio-monitor-every-2min": {
+            "task": "audio.monitor_sweep",
+            "schedule": timedelta(minutes=2),
+        },
+        "eval-collect-reviewed-every-30min": {
+            "task": "eval.collect_reviewed",
+            "schedule": timedelta(minutes=30),
+        },
+        "eval-sample-people-hourly": {
+            "task": "eval.sample_people",
+            "schedule": timedelta(hours=1),
+        },
+        "eval-prune-daily": {
+            "task": "eval.prune",
+            "schedule": timedelta(days=1),
+        },
+        "feedback-absorb-pending-every-15min": {
+            "task": "feedback.absorb_pending",
+            "schedule": timedelta(minutes=15),
+        },
+        "vivoguard-status-report-every-5min": {
+            "task": "system.daily_status_report",
+            "schedule": timedelta(minutes=5),
         },
         # Reconciles cameras.status from the Redis frame-buffer key so
         # the dashboard health pill matches reality. Also deletes

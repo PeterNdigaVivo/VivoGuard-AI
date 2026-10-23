@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_ttl_minutes: int = 60
     jwt_refresh_ttl_days: int = 30
+    # Failed-login throttling (app/auth/login_throttle.py). Counters live in
+    # Redis; each rule blocks for the rest of its window once reached.
+    # Tight "person" rule = one account from one connection, so staff
+    # sharing a store's internet connection are not blocked by a colleague.
+    login_throttle_enabled: bool = True
+    login_fail_person_limit: int = Field(default=5, ge=1)
+    login_fail_person_window_s: int = Field(default=15 * 60, ge=60)
+    login_fail_account_limit: int = Field(default=20, ge=1)
+    login_fail_account_window_s: int = Field(default=60 * 60, ge=60)
+    login_fail_ip_limit: int = Field(default=100, ge=1)
+    login_fail_ip_window_s: int = Field(default=15 * 60, ge=60)
     # Odoo signs ``<unix timestamp>.<raw body>`` with HMAC-SHA256.
     # An empty secret keeps the service endpoint unavailable, never unsigned.
     odoo_webhook_secret: str = ""
@@ -293,6 +304,21 @@ class Settings(BaseSettings):
     # customer journeys. Runs on the worker via a CPU ResNet18 embedder,
     # only every Nth frame per track — negligible load. Off by default;
     # needs torchvision (present in the CPU worker image).
+    # --- Model evaluation test set (docs/MODEL_EVALUATION.md) ---------
+    # One switch for collecting evaluation data. When on: (1) alerts of the
+    # evaluated types also save the CLEAN frame (no boxes / caption) next
+    # to their snapshot, deleted with it; (2) the eval collector copies
+    # reviewed alerts' clean frames into eval_dir; (3) busy-hour sample
+    # frames are taken for the admins' "click each person" labelling.
+    # Off by default: it stores images of people.
+    eval_capture_raw_frames: bool = False
+    eval_dir: str = "/data/eval"
+    eval_target_per_type: int = Field(default=300, ge=10, le=5000)
+    eval_people_target: int = Field(default=400, ge=10, le=5000)
+    eval_clip_target: int = Field(default=100, ge=0, le=2000)
+    # Test-set images are kept this long (they contain people), then deleted.
+    eval_retention_days: int = Field(default=365, ge=30, le=1095)
+
     reid_enabled: bool = False
     # Cosine-similarity cut-off for "same person". Higher = stricter
     # (fewer false merges, more split identities). 0.70 suits the HSV
@@ -549,6 +575,28 @@ class Settings(BaseSettings):
                                       "raw_review_camera_ids"),
     )
 
+    # Fleet-wide raw review. True = EVERY camera behaves as if it were
+    # listed in raw_review_camera_ids, so no suppressed detection is
+    # withheld from the Alerts page. The operator asked for the raw
+    # stream on human eyes and to decide themselves what to act on,
+    # rather than the pipeline deciding for them.
+    raw_review_all_cameras: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("RAW_REVIEW_ALL_CAMERAS",
+                                      "raw_review_all_cameras"),
+    )
+    # Detector types held back even in raw mode. Measured 2026-10-14:
+    # `person` alone suppressed 2,156 events in a day against 40 for
+    # every other type combined, so this is the one switch that decides
+    # whether the Alerts page stays readable. Empty list = hold nothing
+    # back, which is the deliberate choice while the raw stream is
+    # being assessed.
+    raw_review_exclude_types: list[str] = Field(
+        default_factory=lambda: ["person"],
+        validation_alias=AliasChoices("RAW_REVIEW_EXCLUDE_TYPES",
+                                      "raw_review_exclude_types"),
+    )
+
     # Cap on unreviewed uniform crops before the staff_zone harvester
     # stops collecting. Pending rows are already eligible for chain
     # training, so this only needs to stop the pool running away — at
@@ -579,6 +627,27 @@ class Settings(BaseSettings):
     # that stays up for an hour) should not alert on every sweep.
     scene_review_dedup_seconds: int = Field(default=1800, ge=60)
     scene_review_trading_hours_only: bool = True
+
+    # Audio distress monitoring (app/tasks/audio_monitor.py). Only ~22 of
+    # 97 reachable cameras have a microphone, all on NVR channel 1, and
+    # they are 8 kHz G.711 that rolls off below ~200 Hz - so speech is
+    # detectable and shutter motor hum is not. Never records, never
+    # transcribes: only loudness and band shares leave the sample.
+    audio_monitor_enabled: bool = False
+    audio_sample_seconds: int = Field(default=6, ge=2, le=30)
+    # Loudness relative to the camera's own rolling baseline. Absolute
+    # thresholds are useless: a mall unit beside a food court and a quiet
+    # high-street shop have completely different floors.
+    audio_rms_ratio: float = Field(default=3.0, ge=1.2, le=20.0)
+    # Fraction of spectral energy inside 200-3400 Hz. Required so a
+    # dropped hanger rail or a trolley (broadband) cannot pass as a shout.
+    audio_speech_share_min: float = Field(default=0.45, ge=0.1, le=0.95)
+    audio_cooldown_seconds: float = Field(default=600.0, ge=30.0)
+    # Spectral flatness ceiling. Voice is harmonic and scores low; a
+    # trolley, a shutter or a dropped hanger rail is noise-like and
+    # scores high. This - not speech_share - is what separates a shout
+    # from a crash on a band-limited microphone.
+    audio_flatness_max: float = Field(default=0.45, ge=0.05, le=0.95)
 
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
@@ -614,6 +683,19 @@ class Settings(BaseSettings):
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
 
+# The compiled-in default and the .env.example placeholder.
+_DEFAULT_DB_PASSWORDS = frozenset({"vivoguard", "change-me"})
+
+
+def _effective_db_password(candidate: Settings) -> str:
+    """The password the app will actually connect with: DATABASE_URL's
+    when that override is set, else POSTGRES_PASSWORD."""
+    if not candidate.database_url_override:
+        return candidate.postgres_password
+    from sqlalchemy.engine import make_url
+    return make_url(candidate.database_url_override).password or ""
+
+
 def validate_production_security(candidate: Settings) -> None:
     """Refuse to start production with development authentication defaults.
 
@@ -634,6 +716,9 @@ def validate_production_security(candidate: Settings) -> None:
         errors.append("BOOTSTRAP_ADMIN_PASSWORD must not use the documented default")
     if candidate.app_debug:
         errors.append("APP_DEBUG must be disabled in production")
+    if _effective_db_password(candidate) in _DEFAULT_DB_PASSWORDS:
+        errors.append("the database password (POSTGRES_PASSWORD or the one in "
+                      "DATABASE_URL) must not be a documented default")
     if errors:
         raise RuntimeError("insecure production configuration: " + "; ".join(errors))
 

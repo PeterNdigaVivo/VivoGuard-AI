@@ -113,6 +113,7 @@ _SEVERITY_4: dict[str, str] = {
     # judges a frame worth a manager's attention — it stays silent (NONE)
     # on ordinary retail activity, so a row here is already an exception.
     "scene_review":       "HIGH",
+    "audio_distress":     "CRITICAL",
 
     # Informational — the Store Update feed, not an incident.
     "phone_usage":        "LOW",
@@ -575,6 +576,7 @@ _TITLE_ICONS: dict[str, str] = {
     "staff_present":     "👤",
     "fitting_room":      "👗",
     "scene_review":      "👁️",
+    "audio_distress":    "🔊",
     "phone_usage":       "📱",
     "occupancy":         "📊",
 }
