@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
+from app.ai.detectors import sustained_state
 from app.ai.detectors.base import COCO_PERSON, COCO_VEHICLE, Detector, DetectorContext, DetectionEvent
 from app.ai.zone_logic import bbox_centre, bbox_in_zone, iou, segments_cross, zone_contains
 
@@ -92,25 +93,23 @@ class CrowdDetector(Detector):
                     if key[0] == ctx.camera_id and key[1] not in visible_ids]:
             self._stationary_since.pop(key, None)
 
-        qualified: list[tuple] = []
-        for tr, det in tracked_people:
-            key = (ctx.camera_id, int(tr.track_id))
-            if not self._locally_stationary(tr, max_motion):
-                self._stationary_since.pop(key, None)
-                continue
-            since = self._stationary_since.setdefault(key, now)
-            if now - since >= dwell:
-                qualified.append((tr, det))
+        # Who is locally stationary *in this frame*. Identity is used only
+        # within the frame, so the tracker restarting its ids every slice
+        # cannot corrupt it.
+        qualified = [(tr, det) for tr, det in tracked_people
+                     if self._locally_stationary(tr, max_motion)]
 
-        if len(qualified) < threshold:
-            if ctx.camera_id in self._active_tracks:
-                clear_since = self._clear_since.setdefault(ctx.camera_id, now)
-                if now - clear_since >= rearm:
-                    self._active_tracks.pop(ctx.camera_id, None)
-                    self._clear_since.pop(ctx.camera_id, None)
+        # The dwell is AGGREGATE and lives in Redis: "have >= threshold
+        # people been standing here continuously?". It used to be per-track
+        # and in-memory, which made it unanswerable - run_for_camera()
+        # builds a fresh CrowdDetector every ~15s slice, so the fleet
+        # default of 300s reset about twenty times before it could mature.
+        # That is why this detector had produced zero events fleet-wide.
+        elapsed = sustained_state.held_for(
+            ctx.camera_id, None, "crowd",
+            holding=len(qualified) >= threshold, now=now)
+        if len(qualified) < threshold or elapsed < dwell:
             return []
-
-        self._clear_since.pop(ctx.camera_id, None)
 
         # A staff-only/restricted-area rule is more specific and consequential
         # than a generic crowd rule.  Let StaffZoneDetector/IntrusionDetector
@@ -127,11 +126,14 @@ class CrowdDetector(Detector):
         ):
             return []
 
-        track_ids = {int(tr.track_id) for tr, _ in qualified}
-        if ctx.camera_id in self._active_tracks:
-            self._active_tracks[ctx.camera_id].update(track_ids)
+        # The cooldown must outlive the slice too, or a standing crowd
+        # would re-alert every 15 seconds.
+        if not sustained_state.fire_allowed(
+                ctx.camera_id, None, "crowd",
+                cooldown_seconds=max(rearm, dwell), now=now):
             return []
-        self._active_tracks[ctx.camera_id] = set(track_ids)
+
+        track_ids = {int(tr.track_id) for tr, _ in qualified}
 
         # Use the spatial centroid of qualified people for the thumbnail.
         people = [det for _tr, det in qualified]
