@@ -787,6 +787,21 @@ def _title(event: DetectionEvent, camera: Camera | None,
             short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
             return f"{icon} {short} — {cam}"
         return f"{icon} Unusual activity seen — {cam}"
+    if dt == "audio_distress":
+        # The microphone can only say "something loud and voice-like
+        # happened". The VLM sentence describing the frame at that moment
+        # is what makes it actionable, so it becomes the headline when we
+        # have one; the measured loudness is the fallback.
+        desc = " ".join(str(extra.get("vlm_description")
+                            or extra.get("description") or "").split())
+        ratio = _extract(extra, "loudness_ratio", default=None)
+        if desc:
+            short = desc if len(desc) <= 105 else desc[:102].rstrip(" ,.;") + "…"
+            return f"{icon} Raised voices — {short} — {cam}"
+        if ratio is not None:
+            return (f"{icon} Raised voices heard, {float(ratio):.0f}x normal "
+                    f"level — {cam}")
+        return f"{icon} Raised voices heard — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -897,6 +912,30 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return (f"On {where}, the AI describes: \"{desc}\"\n\n"
                 f"This is an automatic reading of the snapshot below. "
                 f"Check the footage before acting on it.")
+    if dt == "audio_distress":
+        where = extra.get("camera_name") or "a camera"
+        ratio = extra.get("loudness_ratio")
+        vlm = " ".join(str(extra.get("vlm_description") or "").split())
+        loud = (f"about {float(ratio):.0f} times louder than this room's "
+                f"normal level" if ratio else
+                "well above this room's normal level")
+        lines = [f"The microphone on {where} picked up a sound {loud}, with "
+                 f"the harmonic character of a raised voice rather than a "
+                 f"bang or a trolley."]
+        if vlm:
+            lines.append("Looking at the camera at that moment, the AI "
+                         "describes: " + chr(34) + vlm + chr(34))
+        else:
+            lines.append("No description of the picture was available, so "
+                         "open the live camera to see what is happening.")
+        # Said plainly because an operator will reasonably wonder, and
+        # because the answer is the reason this detector is allowed to
+        # exist at all.
+        lines.append("Nothing was recorded and no speech was transcribed — "
+                     "only loudness and frequency were measured. Check the "
+                     "camera before treating this as a confrontation; a "
+                     "cheer or a raised greeting reads the same way.")
+        return (chr(10) + chr(10)).join(lines)
     if dt == "fitting_room":
         n = extra.get("occupancy")
         if extra.get("rule") == "fitting_room_congestion":

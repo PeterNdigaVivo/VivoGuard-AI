@@ -254,6 +254,81 @@ def capable_camera_ids(db, r) -> list[int]:
     return known
 
 
+_VLM_SYSTEM = (
+    "You describe retail CCTV frames for a control-room operator in one "
+    "plain sentence. State only what is visibly happening: how many people, "
+    "where they are, what they appear to be doing. Do not speculate about "
+    "motives, emotions or what anyone is saying. If the frame shows nothing "
+    "but an empty shop, say so plainly."
+)
+
+
+def describe_scene(camera_id: int, camera_name: str, store_name: str | None,
+                   ratio: float) -> tuple[str | None, bytes | None]:
+    """Ask the VLM what the camera SEES, to pair with what the mic HEARD.
+
+    The microphone can only report that something loud and voice-like
+    happened; it cannot say who or what. On its own that leaves an
+    operator opening a live view to find out. One VLM call on the frame
+    captured at that moment turns "Audio Distress" into something
+    actionable before anyone clicks.
+
+    Note what is and is not analysed here: the VIDEO frame, which is
+    already covered by existing CCTV use. The audio itself is never sent
+    anywhere, never stored and never transcribed - only the loudness
+    figure reaches this function.
+
+    Best effort. A VLM that is slow, down or unhelpful must never cost us
+    the alert, so every failure returns None and the alert still fires
+    with its measured numbers.
+    """
+    import base64
+    try:
+        from app.services.alert_verifier import _post_json
+        from app.stream.frame_buffer import FrameBuffer
+
+        jpeg = FrameBuffer().latest_jpeg(int(camera_id), prefer_overlay=False)
+        if not jpeg:
+            return None, None
+        where = f"{store_name}, {camera_name}" if store_name else camera_name
+        base = str(getattr(settings, "verifier_ollama_url",
+                           "http://host.docker.internal:11434")).rstrip("/")
+        data = _post_json(
+            base + "/api/chat", headers={},
+            payload={
+                "model": settings.scene_review_model,
+                "stream": False,
+                "format": "json",
+                "options": {"num_predict": 120, "temperature": 0.1},
+                "messages": [
+                    {"role": "system", "content": _VLM_SYSTEM},
+                    {"role": "user",
+                     "content": (
+                         f"Camera: {where}. The microphone just picked up a "
+                         f"sound about {ratio:.0f} times louder than this "
+                         f"room's normal level, with the harmonic character "
+                         f"of a raised voice. Describe what is visible in "
+                         f"this frame. Reply as JSON: "
+                         f'{{"description": "<one sentence>"}}'),
+                     "images": [base64.b64encode(jpeg).decode()]},
+                ],
+            },
+            timeout=float(getattr(settings, "scene_review_timeout_seconds", 90)))
+        raw = str((data.get("message") or {}).get("content") or "").strip()
+        if not raw:
+            return None, jpeg
+        import json as _json
+        try:
+            desc = str(_json.loads(raw).get("description") or "").strip()
+        except (ValueError, AttributeError):
+            desc = raw
+        desc = " ".join(desc.split())
+        return (desc or None), jpeg
+    except Exception as exc:                                # noqa: BLE001
+        log.info("audio: scene description unavailable (%s)", exc)
+        return None, None
+
+
 @celery_app.task(name="audio.monitor_sweep")
 def audio_monitor_sweep() -> dict:
     """Sample every audio-capable camera once and alert on raised voices.
@@ -336,16 +411,36 @@ def audio_monitor_sweep() -> dict:
             if not sustained_state.fire_allowed(
                     cid, None, "audio_distress", cooldown_seconds=cooldown):
                 continue
+            store_name = None
+            try:
+                from app.models import Store
+                st = db.query(Store).filter(Store.id == cam.store_id).first()
+                store_name = st.name if st else None
+            except Exception:                               # noqa: BLE001
+                pass
+            vlm_desc, jpeg = describe_scene(cid, cam.name, store_name, ratio)
+            thumb = None
+            if jpeg:
+                try:
+                    from app.tasks.scene_review import _save_frame
+                    thumb = _save_frame(int(cid), jpeg)
+                except Exception:                           # noqa: BLE001
+                    thumb = None
+
+            headline = (vlm_desc or
+                        f"Raised voices heard at {cam.name}.")
             _create_info_alert(
                 db, camera_id=int(cid), zone_id=None, store_id=cam.store_id,
                 detection_type="audio_distress", cls="raised_voice",
+                thumbnail_path=thumb,
                 extra={
                     "priority": "high",
-                    "description": (
-                        "Raised voices detected on the microphone at "
-                        f"{cam.name}. No recording is kept and nothing is "
-                        "transcribed — only loudness and frequency were "
-                        "measured."),
+                    "description": headline,
+                    "vlm_description": vlm_desc,
+                    "audio_note": (
+                        "Detected on the microphone. No recording is kept "
+                        "and nothing is transcribed — only loudness and "
+                        "frequency were measured."),
                     "loudness_ratio": round(ratio, 2),
                     "speech_share": round(feat["speech_share"], 3),
                     "flatness": round(feat.get("flatness", 1.0), 3),
