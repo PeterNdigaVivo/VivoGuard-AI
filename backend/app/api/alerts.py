@@ -1811,10 +1811,20 @@ def dismiss(alert_id: int, payload: DismissIn | None = None,
     # the job, the reason is the bonus.
     out = record_verdict(db, alert_id, "dismiss", user)
     reason = payload.reason if payload else None
-    if reason and reason in DISMISS_REASONS:
+    comment = (payload.comment or "").strip() if payload else ""
+    if (reason and reason in DISMISS_REASONS) or comment:
         a = db.get(Alert, alert_id)
         if a is not None:
-            a.dismiss_reason = reason
+            if reason and reason in DISMISS_REASONS:
+                a.dismiss_reason = reason
+            if comment:
+                # Same stamped format as POST /{id}/note, appended to the
+                # same field, so a dismissal comment joins the existing
+                # investigation trail chronologically rather than starting
+                # a second place to look.
+                when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                line = f"[{when}] {user.email}: {comment}"
+                a.notes = (a.notes + chr(10) + line) if a.notes else line
             db.commit()
     return out
 

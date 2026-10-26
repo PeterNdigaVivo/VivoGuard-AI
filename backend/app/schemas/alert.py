@@ -125,5 +125,11 @@ class DismissIn(BaseModel):
     Optional on purpose: the verdict is the operator's job and must
     succeed with or without a reason. The reason is a bonus we are
     trying to make cheap enough that it actually gets given.
+
+    `reason` is the countable token; `comment` is the prose that explains
+    the case the five categories could not. They answer different
+    questions - "how often is camera 73 a reflection" versus "what
+    exactly was going on here" - so both are kept.
     """
     reason: str | None = None
+    comment: str | None = None

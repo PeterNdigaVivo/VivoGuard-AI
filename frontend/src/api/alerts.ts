@@ -108,10 +108,10 @@ export const alerts = {
     }>(`/alerts/summary${storeId ? `?store_id=${storeId}` : ''}`),
   confirm: (id: number) => api<{ id: number; status: string }>(`/alerts/${id}/confirm`, { method: 'POST' }),
   // `reason` is optional: the verdict must succeed with or without it.
-  dismiss: (id: number, reason?: string) =>
+  dismiss: (id: number, reason?: string, comment?: string) =>
     api<{ id: number; status: string }>(`/alerts/${id}/dismiss`, {
       method: 'POST',
-      body: JSON.stringify({ reason: reason ?? null }),
+      body: JSON.stringify({ reason: reason ?? null, comment: comment ?? null }),
     }),
   // Mark as acknowledged — drives the Generated → Acknowledged →
   // Resolved progress bar on the alert card. Idempotent.

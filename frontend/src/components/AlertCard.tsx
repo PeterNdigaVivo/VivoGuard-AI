@@ -497,6 +497,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [filmIdx, setFilmIdx] = useState<number | null>(null)
   const [clipModal, setClipModal] = useState(false)
   const [askReason, setAskReason] = useState(false)
+  const [reasonComment, setReasonComment] = useState('')
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
@@ -654,11 +655,13 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
   async function dismissWithReason(reason: string | undefined) {
+    const comment = reasonComment.trim()
     setAskReason(false)
+    setReasonComment('')
     await saveOutcome({
       optimistic: { status: 'dismissed', resolved_at: null,
                     acknowledged_at: new Date().toISOString() },
-      request: () => alertsApi.dismiss(alert.id, reason),
+      request: () => alertsApi.dismiss(alert.id, reason, comment || undefined),
       action: 'dismiss',
       failure: 'Could not mark False.',
     })
@@ -909,6 +912,21 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                   <span className="text-xs font-semibold text-slate-600">
                     Why was this wrong?
                   </span>
+                  {/* Optional detail. Sits ABOVE the chips because the
+                      chip is what submits: type if you have something to
+                      add, then tap a reason. Anyone with nothing to add
+                      still gets the original one-tap path. */}
+                  <textarea
+                    value={reasonComment}
+                    onChange={e => setReasonComment(e.target.value)}
+                    disabled={busy}
+                    rows={2}
+                    maxLength={500}
+                    placeholder="Add a comment (optional) — what did you actually see?"
+                    className="w-full text-xs rounded border border-slate-300 px-2 py-1
+                               focus:outline-none focus:ring-1 focus:ring-slate-400
+                               disabled:opacity-50"
+                  />
                   <div className="flex flex-wrap gap-1">
                     {DISMISS_REASONS.map(r => (
                       <button
