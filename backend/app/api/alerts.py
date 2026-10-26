@@ -21,9 +21,38 @@ from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
-from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
+from app.schemas.alert import (AlertActionOut, AlertNoteIn, AlertOut,
+                               DismissIn)
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+# Why an alert was wrong, as a token that can be COUNTED rather than
+# prose nobody writes. Deliberately short: every extra option is another
+# decision for someone clearing a busy feed, and a list long enough to be
+# precise is a list nobody reads. These five cover what operators have
+# actually been escalating - reflections and mannequins (camera 73's
+# pillar), staff mistaken for customers, ordinary activity called an
+# incident, and cameras that cannot see (camera 100's blank view).
+# "something_else" exists so the other four stay honest: if it dominates,
+# the list is wrong and should be rewritten from the data.
+DISMISS_REASONS: dict[str, str] = {
+    "not_a_person":    "Not a person (mannequin, reflection, poster)",
+    "staff_member":    "That is a staff member",
+    "normal_activity": "Normal activity, not an incident",
+    "camera_problem":  "Camera problem (blocked, dark, misaimed)",
+    "something_else":  "Something else",
+}
+
+
+# Declared HERE, above GET /{alert_id}. FastAPI matches in declaration
+# order, so further down the file this literal path would be captured by
+# the alert_id route and 422 on "dismiss-reasons" not being an integer.
+@router.get("/dismiss-reasons")
+def dismiss_reasons():
+    """The reason buttons the operator sees. Served from the backend so
+    the wording and the stored codes cannot drift apart."""
+    return [{"code": k, "label": v} for k, v in DISMISS_REASONS.items()]
+
 
 
 def _operator_alert_filter():
@@ -1773,10 +1802,21 @@ def confirm(alert_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/{alert_id}/dismiss", response_model=AlertActionOut)
-def dismiss(alert_id: int, db: Session = Depends(get_db),
+def dismiss(alert_id: int, payload: DismissIn | None = None,
+            db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
     from app.services.alert_feedback import record_verdict
-    return record_verdict(db, alert_id, "dismiss", user)
+    # Verdict first, reason second. An unrecognised or missing reason
+    # must never cost the operator their dismissal: clearing the feed is
+    # the job, the reason is the bonus.
+    out = record_verdict(db, alert_id, "dismiss", user)
+    reason = payload.reason if payload else None
+    if reason and reason in DISMISS_REASONS:
+        a = db.get(Alert, alert_id)
+        if a is not None:
+            a.dismiss_reason = reason
+            db.commit()
+    return out
 
 
 @router.post("/{alert_id}/resolve", response_model=AlertActionOut)

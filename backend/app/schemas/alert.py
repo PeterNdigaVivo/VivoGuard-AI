@@ -117,3 +117,13 @@ class AlertNoteIn(BaseModel):
     """Body for POST /alerts/{id}/note. We APPEND to the notes field
     so investigation history isn't lost."""
     note: str
+
+
+class DismissIn(BaseModel):
+    """Optional body on POST /alerts/{id}/dismiss.
+
+    Optional on purpose: the verdict is the operator's job and must
+    succeed with or without a reason. The reason is a bonus we are
+    trying to make cheap enough that it actually gets given.
+    """
+    reason: str | None = None
