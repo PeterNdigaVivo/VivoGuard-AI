@@ -46,6 +46,7 @@ celery_app = Celery(
         "app.tasks.alerting",
         "app.tasks.fitting_room",
         "app.tasks.scene_review",
+        "app.tasks.audio_monitor",
         "app.tasks.shutter_training",
         "app.tasks.uniform_training",
         "app.tasks.chain_training",
@@ -106,6 +107,7 @@ celery_app.conf.update(
         # mapping that reaches Ollama — and keeping VLM work off the
         # inference queue protects the camera pipeline.
         "scene_review.sweep":                   {"queue": "alerts"},
+        "audio.monitor_sweep":                  {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -195,6 +197,16 @@ celery_app.conf.update(
         # Safety net for verdicts whose training sample never got made
         # (queue down at click time, worker restart, retries spent).
         # Model-evaluation test set (no-ops unless EVAL_CAPTURE_RAW_FRAMES).
+        # Audio distress sweep. Samples a few seconds per mic'd camera;
+        # no-ops entirely unless AUDIO_MONITOR_ENABLED.
+        # Every 5 min, not 2: a sweep samples each mic'd camera serially
+        # and measured 179s for 21 cameras, which would overlap a 2-min
+        # schedule. The task also holds a Redis lock, so an overrun skips
+        # rather than stacking.
+        "audio-monitor-every-5min": {
+            "task": "audio.monitor_sweep",
+            "schedule": timedelta(minutes=5),
+        },
         "eval-collect-reviewed-every-30min": {
             "task": "eval.collect_reviewed",
             "schedule": timedelta(minutes=30),

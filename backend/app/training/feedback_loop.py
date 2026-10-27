@@ -138,6 +138,17 @@ NON_TRAINABLE_TYPES = frozenset({
     "scene_review", "phone_usage",
     "store_intelligence", "sales_floor_insight", "positive_operational",
     "system_health", "camera_offline", "shop_open_close",
+    # Count- and sound-based judgements. These have no visual target a
+    # detector could be trained against, and feeding them in teaches the
+    # model nonsense about whole frames:
+    #   audio_distress - fires on a MICROPHONE. Its bbox is [0,0,1,1]
+    #     because sound has no location, so a "false" verdict would train
+    #     YOLO that an entire shop floor is not-a-thing.
+    #   crowd - the bbox is a synthetic +/-0.1 box around the centroid of
+    #     several people, not the boundary of any object. The judgement is
+    #     "how many people, for how long", which is arithmetic, not
+    #     appearance.
+    "audio_distress", "crowd",
 })
 
 

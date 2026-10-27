@@ -34,6 +34,16 @@ class Alert(Base):
     # Free-text investigation notes the operator adds via "📋 Add Note".
     # Accumulates over time — the UI appends rather than overwrites.
     notes:            Mapped[str | None]    = mapped_column(Text, nullable=True)
+    # One-tap structured reason recorded when an operator presses False
+    # Alert. Separate from `notes` on purpose: notes are prose for a human
+    # to read later, this is a token meant to be COUNTED - "how often has
+    # camera 73 been dismissed as a reflection" is the question the
+    # prompt-memory and threshold-calibration loops ask. Free text could
+    # not answer it, and in practice was almost never filled in: 509
+    # dismissals in a fortnight carried 4 notes between them.
+    # Nullable - a dismissal without a reason is still a dismissal, and an
+    # operator clearing a busy feed must never be blocked.
+    dismiss_reason:   Mapped[str | None]    = mapped_column(String(32), nullable=True)
     # Set only when the operator hits "✅ Resolved" — distinct from
     # `acknowledged_at` (also bumped on dismiss) so we can report on
     # how quickly real incidents were resolved.

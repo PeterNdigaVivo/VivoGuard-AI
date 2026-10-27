@@ -21,6 +21,18 @@ SNAPSHOT_TYPES: set[str] = {
     "uniform_compliance", "intrusion", "shutter", "fight", "crowd",
     "trespass", "shrinkage", "fall", "abandoned_object", "weapon",
     "weapon_brandished", "staff_present", "staff_zone",
+    # person / dwell were omitted while person detections were almost
+    # always suppressed - there was no operator-facing alert to
+    # illustrate. That stopped being true: "Person Detected Before
+    # Hours" is an URGENT operator alert, and one went out at 04:31 with
+    # no picture at all. The operator's own words on dismissing it:
+    # "no Snap Shot Captured, so cant really define the incident". An
+    # urgent alert nobody can judge is worse than no alert.
+    #
+    # Cheap, because the caller only captures when the alert is NOT
+    # suppressed: that is ~4 person and ~18 dwell alerts a day, not the
+    # 2,809 review-only ones raw mode produces.
+    "person", "dwell",
 }
 
 # Plain-English titles, mirrored on the frontend. Kept here so the
