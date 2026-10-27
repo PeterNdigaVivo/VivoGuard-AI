@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import { api } from '@/api/client'
 import {
   alertOutcome, groupSummaryText, nextOpenAlert, summarizeGroup, type AlertOutcome,
 } from '@/lib/alertGroups'
@@ -42,8 +43,13 @@ function useSnapshot(alertId: number, url: string | null) {
     }
     let cancelled = false
     let created: string | null = null
-    const tok = localStorage.getItem('vg_access_token') ?? ''
-    fetch(url, { headers: { Authorization: `Bearer ${tok}` } })
+    // Goes through api() rather than a bare fetch so an expired access
+    // token is refreshed and retried. With a bare fetch the image 401s
+    // the moment the 60-minute token lapses and never recovers, while
+    // the alert feed keeps working - which is exactly how an operator
+    // ends up reading "Incident snapshot unavailable" for a snapshot
+    // that is sitting on disk.
+    api<Response>(url.replace(/^\/api/, ''), { raw: true })
       .then(r => r.ok ? r.blob() : null)
       .then(blob => {
         if (cancelled || !blob) {
@@ -78,8 +84,9 @@ function useClip(alertId: number, url: string | null, enabled: boolean) {
     let cancelled = false
     let created: string | null = null
     setLoading(true); setFailed(false)
-    const tok = localStorage.getItem('vg_access_token') ?? ''
-    fetch(url, { headers: { Authorization: `Bearer ${tok}` } })
+    // Same token-expiry trap as the snapshots: api() refreshes, fetch
+    // does not. A clip that 401s looks identical to a pruned clip.
+    api<Response>(url.replace(/^\/api/, ''), { raw: true })
       .then(r => (r.ok ? r.blob() : null))
       .then(blob => {
         if (cancelled) return
@@ -168,9 +175,9 @@ function useFilmstripSrc(alertId: number, idx: number) {
     if (_filmstripCache.has(key)) { setSrc(_filmstripCache.get(key)!); setFailed(false); return }
     let cancelled = false
     setSrc(null); setFailed(false)
-    const tok = localStorage.getItem('vg_access_token') ?? ''
-    fetch(`/api/alerts/${alertId}/snapshot/${idx}`,
-          { headers: { Authorization: `Bearer ${tok}` } })
+    // Same reason as useSnapshot: api() refreshes an expired token,
+    // a bare fetch just 401s and leaves a grey box.
+    api<Response>(`/alerts/${alertId}/snapshot/${idx}`, { raw: true })
       .then(r => (r.ok ? r.blob() : null))
       .then(blob => {
         if (cancelled || !blob) { if (!cancelled) setFailed(true); return }
