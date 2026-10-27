@@ -18,6 +18,7 @@ import logging
 import time
 from datetime import date
 
+from app.ai.detectors import sustained_state
 from app.ai.detectors.base import (
     COCO_PERSON, Detector, DetectorContext, DetectionEvent,
 )
@@ -150,9 +151,21 @@ class QueueDetector(Detector):
                                     camera_id=ctx.camera_id, store_id=ctx.store_id,
                                     zone_id=z["id"], aggregator="avg")
 
-            # Alert promotion — dedup per zone, every 60s max.
-            if count >= threshold and now - self._fired.get(z["id"], 0) > 60:
-                self._fired[z["id"]] = now
+            # Alert promotion. Two changes from the original:
+            #  - optional `sustain_seconds` (config extra) so a queue must
+            #    PERSIST rather than spike for a single frame; 0 keeps the
+            #    historical behaviour.
+            #  - the dedup cooldown moved to Redis. In memory it reset with
+            #    every ~15s slice, so a standing queue could re-alert four
+            #    times a minute despite the "60s max" the comment promised.
+            sustain = float((cfg.get("extra") or {}).get("sustain_seconds") or 0.0)
+            held = sustained_state.held_for(
+                ctx.camera_id, z["id"], "queue",
+                holding=count >= threshold, now=now)
+            if (count >= threshold and (sustain <= 0.0 or held >= sustain)
+                    and sustained_state.fire_allowed(
+                        ctx.camera_id, z["id"], "queue",
+                        cooldown_seconds=60.0, now=now)):
                 # Use the densest person's bbox as the alert thumbnail target.
                 anchor = max(in_zone, key=lambda p: p["conf"])
                 out.append(DetectionEvent(
@@ -160,6 +173,8 @@ class QueueDetector(Detector):
                     confidence=min(1.0, count / max(threshold, 1)),
                     bbox_norm=anchor["bbox_norm"], zone_id=z["id"],
                     extra={"count": count, "threshold": threshold,
+                           "sustained_seconds": round(held, 1),
+                           "sustain_required": sustain,
                            "avg_wait_seconds": round(avg_wait, 1)},
                 ))
 

@@ -462,6 +462,17 @@ export interface AlertCardProps {
   onChanged?: () => void
 }
 
+// Mirrors DISMISS_REASONS in backend/app/api/alerts.py. Short on
+// purpose: every extra option is another decision for someone clearing a
+// busy feed, and a list long enough to be precise is one nobody reads.
+const DISMISS_REASONS: { code: string; label: string }[] = [
+  { code: 'not_a_person',    label: 'Not a person (mannequin, reflection)' },
+  { code: 'staff_member',    label: 'That is a staff member' },
+  { code: 'normal_activity', label: 'Normal activity, not an incident' },
+  { code: 'camera_problem',  label: 'Camera problem (blocked, dark)' },
+  { code: 'something_else',  label: 'Something else' },
+]
+
 export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresolvedCount,
   groupSiblings, highlightCount, onChanged }: AlertCardProps) {
   // Local copy of the alert so we can reflect a resolve / dismiss
@@ -485,6 +496,9 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // Filmstrip lightbox — null = closed, otherwise the open snapshot index.
   const [filmIdx, setFilmIdx] = useState<number | null>(null)
   const [clipModal, setClipModal] = useState(false)
+  const [askReason, setAskReason] = useState(false)
+  const [reasonComment, setReasonComment] = useState('')
+  const [reasonCode, setReasonCode] = useState<string | undefined>(undefined)
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
@@ -624,20 +638,48 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
 
-  async function markFalse() {
-    // ❌ False Alert — the AI was wrong. Hard-negative training sample
-    // via /alerts/{id}/dismiss (made in the background on the server).
-    const prompt = isCalibration
-      ? 'Mark this calibration alert as FALSE? It will remain quarantined until independent review.'
-      : 'Mark this alert as FALSE? It will be added to AI training as a negative example.'
-    if (savingRef.current || !window.confirm(prompt)) return
+  // ❌ False Alert now asks WHY, as one tap rather than a text box.
+  // The old flow was a window.confirm and nothing else, so the reason
+  // died with the click: 509 dismissals in a fortnight produced 4 notes.
+  // Every learning loop we want — feeding corrections into the VLM
+  // prompt, calibrating thresholds, learning per-camera suppression —
+  // needs the reason, so it has to cost one tap, not a sentence.
+  //
+  // Codes are duplicated from DISMISS_REASONS in backend/app/api/alerts.py
+  // rather than fetched, to keep the button working when the catalog
+  // request fails. The backend validates and silently drops anything it
+  // does not recognise, so a drift here loses the reason, never the
+  // verdict.
+  function markFalse() {
+    if (savingRef.current) return
+    setAskReason(true)
+  }
+
+  // The comment is REQUIRED. An operator marking something false knows
+  // something the system does not, and that sentence is the only record
+  // of it — "no snapshot captured, so cannot define the incident" tells
+  // us more than any category could. Enter submits so it costs one
+  // keystroke more than the old blind click.
+  async function submitFalse() {
+    const comment = reasonComment.trim()
+    if (!comment || savingRef.current) return
+    const reason = reasonCode
+    setAskReason(false)
+    setReasonComment('')
+    setReasonCode(undefined)
     await saveOutcome({
       optimistic: { status: 'dismissed', resolved_at: null,
                     acknowledged_at: new Date().toISOString() },
-      request: () => alertsApi.dismiss(alert.id),
+      request: () => alertsApi.dismiss(alert.id, reason, comment),
       action: 'dismiss',
       failure: 'Could not mark False.',
     })
+  }
+
+  function cancelFalse() {
+    setAskReason(false)
+    setReasonComment('')
+    setReasonCode(undefined)
   }
 
 
@@ -882,6 +924,88 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                 </span>
               )
             ) : alert.status === 'new' ? (
+              askReason ? (
+                /* The comment is REQUIRED. An operator marking something
+                   false knows something the system does not, and that
+                   sentence is the only record of it - "no snapshot
+                   captured, so cannot define the incident" tells us more
+                   than any category could. Enter submits, so it costs one
+                   keystroke more than the old blind click. */
+                <div className="flex flex-col gap-1 w-full">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Why was this wrong? (required)
+                  </span>
+                  <textarea
+                    autoFocus
+                    value={reasonComment}
+                    onChange={e => setReasonComment(e.target.value)}
+                    onKeyDown={e => {
+                      // Enter sends, Shift+Enter makes a new line, Escape
+                      // backs out - the conventions people already expect
+                      // from every chat box they use.
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        void submitFalse()
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        cancelFalse()
+                      }
+                    }}
+                    disabled={busy}
+                    rows={2}
+                    maxLength={500}
+                    placeholder="What did you actually see? (Enter to save)"
+                    className="w-full text-xs rounded border border-slate-300 px-2 py-1
+                               focus:outline-none focus:ring-1 focus:ring-slate-400
+                               disabled:opacity-50"
+                  />
+                  {/* Optional category. Tapping only TAGS the dismissal now -
+                      it no longer submits, because the comment is the part
+                      we actually need and a chip must not bypass it. */}
+                  <div className="flex flex-wrap gap-1 items-center">
+                    {DISMISS_REASONS.map(r => (
+                      <button
+                        key={r.code}
+                        onClick={() => setReasonCode(
+                          reasonCode === r.code ? undefined : r.code)}
+                        disabled={busy}
+                        className={'px-2 py-1 rounded text-xs font-medium border '
+                          + (reasonCode === r.code
+                              ? 'border-slate-700 bg-slate-700 text-white'
+                              : 'border-slate-300 bg-white hover:bg-slate-100')
+                          + ' disabled:opacity-50'}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2 items-center pt-0.5">
+                    <button
+                      onClick={() => void submitFalse()}
+                      disabled={busy || !reasonComment.trim()}
+                      className="px-3 py-1.5 rounded font-bold text-white bg-red-600
+                                 hover:bg-red-700 disabled:opacity-40
+                                 disabled:cursor-not-allowed"
+                    >
+                      ❌ Mark False &amp; save
+                    </button>
+                    <button
+                      onClick={cancelFalse}
+                      disabled={busy}
+                      className="px-2 py-1 rounded text-xs font-medium
+                                 text-slate-500 hover:bg-slate-100
+                                 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    {!reasonComment.trim() && (
+                      <span className="text-xs text-slate-400">
+                        Type what you saw to enable
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ) : (
               <>
                 <FeedbackBtn onClick={markTrue} tone="green" disabled={busy}>
                   ✅ True Alert
@@ -890,6 +1014,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                   ❌ False Alert
                 </FeedbackBtn>
               </>
+              )
             ) : (
               <span className={'px-3 py-1.5 rounded font-bold text-white '
                                 + (isDismissed ? 'bg-red-600'

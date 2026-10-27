@@ -197,6 +197,33 @@ _STATIC_PERSON_FILTER_TYPES: set[str] = {
 }
 
 
+def _raw_review_applies(detection_type: str, camera_id: int | None) -> bool:
+    """True when a SUPPRESSED detection should still raise a review_only
+    Alert, so the raw stream reaches human eyes.
+
+    Fleet-wide when raw_review_all_cameras is set, otherwise only the
+    cameras named in raw_review_camera_ids. raw_review_exclude_types
+    holds back the few types whose sheer volume would bury everything
+    else. Metric-only detectors in _SKIP_ALERT_TYPES are never routed
+    here: they are counters, not withheld judgements.
+
+    Single source of truth on purpose. This rule is read in two places
+    (the extra["raw_review"] audit stamp and the Alert-row gate) and the
+    two drifting apart would silently mislabel the audit trail.
+    """
+    if detection_type in _SKIP_ALERT_TYPES:
+        return False
+    if detection_type in set(
+            getattr(settings, "raw_review_exclude_types", None) or ()):
+        return False
+    if bool(getattr(settings, "raw_review_all_cameras", False)):
+        return True
+    if camera_id is None:
+        return False
+    return int(camera_id) in set(
+        getattr(settings, "raw_review_camera_ids", None) or ())
+
+
 def _alert_disposition(detection_type: str, suppress_alert: bool) -> str:
     """Explain whether a persisted detection was promoted to an alert."""
     if detection_type in _SKIP_ALERT_TYPES:
@@ -241,8 +268,7 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # Stays 'filtered' — it WAS filtered, and the audit must keep saying
     # so. This flag records that a review-only copy was raised as well,
     # so the two can be told apart later.
-    if suppress_alert and camera_id is not None and int(camera_id) in set(
-            getattr(settings, "raw_review_camera_ids", None) or ()):
+    if suppress_alert and _raw_review_applies(ev.detection_type, camera_id):
         extra["raw_review"] = True
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
@@ -303,9 +329,7 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     # are trying to look at. Only `filtered` events qualify.
     _raw_review = bool(
         suppress_alert
-        and ev.detection_type not in _SKIP_ALERT_TYPES
-        and camera_id is not None
-        and int(camera_id) in set(getattr(settings, "raw_review_camera_ids", None) or ())
+        and _raw_review_applies(ev.detection_type, camera_id)
     )
     if ev.detection_type not in _SKIP_ALERT_TYPES and (not suppress_alert or _raw_review):
         alert = Alert(event_id=rec.id, status="new", review_only=_raw_review)

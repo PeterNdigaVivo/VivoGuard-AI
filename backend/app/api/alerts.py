@@ -7,6 +7,7 @@ made the chain /alerts page and the per-store feed render
 inconsistently) and just renders what we send.
 """
 from __future__ import annotations
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -21,9 +22,38 @@ from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
-from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
+from app.schemas.alert import (AlertActionOut, AlertNoteIn, AlertOut,
+                               DismissIn)
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+# Why an alert was wrong, as a token that can be COUNTED rather than
+# prose nobody writes. Deliberately short: every extra option is another
+# decision for someone clearing a busy feed, and a list long enough to be
+# precise is a list nobody reads. These five cover what operators have
+# actually been escalating - reflections and mannequins (camera 73's
+# pillar), staff mistaken for customers, ordinary activity called an
+# incident, and cameras that cannot see (camera 100's blank view).
+# "something_else" exists so the other four stay honest: if it dominates,
+# the list is wrong and should be rewritten from the data.
+DISMISS_REASONS: dict[str, str] = {
+    "not_a_person":    "Not a person (mannequin, reflection, poster)",
+    "staff_member":    "That is a staff member",
+    "normal_activity": "Normal activity, not an incident",
+    "camera_problem":  "Camera problem (blocked, dark, misaimed)",
+    "something_else":  "Something else",
+}
+
+
+# Declared HERE, above GET /{alert_id}. FastAPI matches in declaration
+# order, so further down the file this literal path would be captured by
+# the alert_id route and 422 on "dismiss-reasons" not being an integer.
+@router.get("/dismiss-reasons")
+def dismiss_reasons():
+    """The reason buttons the operator sees. Served from the backend so
+    the wording and the stored codes cannot drift apart."""
+    return [{"code": k, "label": v} for k, v in DISMISS_REASONS.items()]
+
 
 
 def _operator_alert_filter():
@@ -113,6 +143,7 @@ _SEVERITY_4: dict[str, str] = {
     # judges a frame worth a manager's attention — it stays silent (NONE)
     # on ordinary retail activity, so a row here is already an exception.
     "scene_review":       "HIGH",
+    "audio_distress":     "CRITICAL",
 
     # Informational — the Store Update feed, not an incident.
     "phone_usage":        "LOW",
@@ -432,6 +463,13 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
             steps = ["Check the live camera now",
                      "Call building security: {security_phone}",
                      "Do not enter the store alone"]
+    elif dt == "audio_distress":
+        # Deliberately opens with looking rather than acting. The mic
+        # hears volume and harmonics, not intent - a cheer, a greeting
+        # across the shop and an argument are the same signal to it.
+        steps = ["Open the live camera and look before acting",
+                 "If it is a confrontation, send a supervisor",
+                 "Mark False Alert if it was ordinary noise"]
     elif dt == "uniform_compliance":
         if (event.extra or {}).get("rule") == "no_lanyard":
             steps = ["Remind the staff member to wear their name tag",
@@ -540,12 +578,31 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         return ["Check the live camera",
                 "Decide whether action is needed",
                 "Mark resolved when handled"]
+    # When a number is not configured we must NOT substitute a word for
+    # it. The old fallbacks turned "Call building security:
+    # {security_phone}" into "Call building security: building security"
+    # - which is what an operator actually saw at 4:31am on an URGENT
+    # before-hours alert, where the instruction that matters most is the
+    # one telling them who to ring. Nothing is configured today: all
+    # three settings are empty and 0 of 26 stores has a manager_phone.
+    #
+    # So an unknown number collapses to empty and the dangling "label: "
+    # is trimmed off, leaving "Call building security" - still the right
+    # instruction, without pretending a number is present.
     store_phone = (getattr(store, "manager_phone", None)
-                   or getattr(settings, "store_default_phone", "") or "the store")
-    security_phone = getattr(settings, "security_phone", "") or "building security"
-    it_phone = getattr(settings, "it_support_phone", "") or "IT support"
-    return [s.format(store_phone=store_phone, security_phone=security_phone,
-                     it_phone=it_phone) for s in steps]
+                   or getattr(settings, "store_default_phone", "") or "")
+    security_phone = getattr(settings, "security_phone", "") or ""
+    it_phone = getattr(settings, "it_support_phone", "") or ""
+    out: list[str] = []
+    for step in steps:
+        text = step.format(store_phone=store_phone,
+                           security_phone=security_phone,
+                           it_phone=it_phone)
+        # Trim a trailing colon (and any space before it) left behind by
+        # an empty number, e.g. "Call the store: " -> "Call the store".
+        text = re.sub(r"\s*:\s*$", "", text).strip()
+        out.append(text)
+    return out
 
 
 # Per-type emoji prefix for the title — the spec called these out
@@ -575,6 +632,7 @@ _TITLE_ICONS: dict[str, str] = {
     "staff_present":     "👤",
     "fitting_room":      "👗",
     "scene_review":      "👁️",
+    "audio_distress":    "🔊",
     "phone_usage":       "📱",
     "occupancy":         "📊",
 }
@@ -785,6 +843,24 @@ def _title(event: DetectionEvent, camera: Camera | None,
             short = desc if len(desc) <= 110 else desc[:107].rstrip(" ,.;") + "…"
             return f"{icon} {short} — {cam}"
         return f"{icon} Unusual activity seen — {cam}"
+    if dt == "audio_distress":
+        # The microphone can only say "something loud and voice-like
+        # happened". The VLM sentence describing the frame at that moment
+        # is what makes it actionable, so it becomes the headline when we
+        # have one; the measured loudness is the fallback.
+        # Only the VLM sentence earns the "Raised voices — <what was
+        # seen>" form. Falling back to extra.description produced
+        # "Raised voices — Raised voices detected on the microphone…",
+        # which stutters and says nothing twice.
+        desc = " ".join(str(extra.get("vlm_description") or "").split())
+        ratio = _extract(extra, "loudness_ratio", default=None)
+        if desc:
+            short = desc if len(desc) <= 105 else desc[:102].rstrip(" ,.;") + "…"
+            return f"{icon} Raised voices — {short} — {cam}"
+        if ratio is not None:
+            return (f"{icon} Raised voices heard, {float(ratio):.0f}x normal "
+                    f"level — {cam}")
+        return f"{icon} Raised voices heard — {cam}"
     if dt == "trespass":
         return f"{icon} Unauthorised person in restricted zone — {cam}"
     if dt == "fight":
@@ -895,6 +971,30 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
         return (f"On {where}, the AI describes: \"{desc}\"\n\n"
                 f"This is an automatic reading of the snapshot below. "
                 f"Check the footage before acting on it.")
+    if dt == "audio_distress":
+        where = extra.get("camera_name") or "a camera"
+        ratio = extra.get("loudness_ratio")
+        vlm = " ".join(str(extra.get("vlm_description") or "").split())
+        loud = (f"about {float(ratio):.0f} times louder than this room's "
+                f"normal level" if ratio else
+                "well above this room's normal level")
+        lines = [f"The microphone on {where} picked up a sound {loud}, with "
+                 f"the harmonic character of a raised voice rather than a "
+                 f"bang or a trolley."]
+        if vlm:
+            lines.append("Looking at the camera at that moment, the AI "
+                         "describes: " + chr(34) + vlm + chr(34))
+        else:
+            lines.append("No description of the picture was available, so "
+                         "open the live camera to see what is happening.")
+        # Said plainly because an operator will reasonably wonder, and
+        # because the answer is the reason this detector is allowed to
+        # exist at all.
+        lines.append("Nothing was recorded and no speech was transcribed — "
+                     "only loudness and frequency were measured. Check the "
+                     "camera before treating this as a confrontation; a "
+                     "cheer or a raised greeting reads the same way.")
+        return (chr(10) + chr(10)).join(lines)
     if dt == "fitting_room":
         n = extra.get("occupancy")
         if extra.get("rule") == "fitting_room_congestion":
@@ -1722,10 +1822,31 @@ def confirm(alert_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/{alert_id}/dismiss", response_model=AlertActionOut)
-def dismiss(alert_id: int, db: Session = Depends(get_db),
+def dismiss(alert_id: int, payload: DismissIn | None = None,
+            db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
     from app.services.alert_feedback import record_verdict
-    return record_verdict(db, alert_id, "dismiss", user)
+    # Verdict first, reason second. An unrecognised or missing reason
+    # must never cost the operator their dismissal: clearing the feed is
+    # the job, the reason is the bonus.
+    out = record_verdict(db, alert_id, "dismiss", user)
+    reason = payload.reason if payload else None
+    comment = (payload.comment or "").strip() if payload else ""
+    if (reason and reason in DISMISS_REASONS) or comment:
+        a = db.get(Alert, alert_id)
+        if a is not None:
+            if reason and reason in DISMISS_REASONS:
+                a.dismiss_reason = reason
+            if comment:
+                # Same stamped format as POST /{id}/note, appended to the
+                # same field, so a dismissal comment joins the existing
+                # investigation trail chronologically rather than starting
+                # a second place to look.
+                when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                line = f"[{when}] {user.email}: {comment}"
+                a.notes = (a.notes + chr(10) + line) if a.notes else line
+            db.commit()
+    return out
 
 
 @router.post("/{alert_id}/resolve", response_model=AlertActionOut)

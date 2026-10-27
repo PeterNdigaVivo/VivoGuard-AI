@@ -575,6 +575,28 @@ class Settings(BaseSettings):
                                       "raw_review_camera_ids"),
     )
 
+    # Fleet-wide raw review. True = EVERY camera behaves as if it were
+    # listed in raw_review_camera_ids, so no suppressed detection is
+    # withheld from the Alerts page. The operator asked for the raw
+    # stream on human eyes and to decide themselves what to act on,
+    # rather than the pipeline deciding for them.
+    raw_review_all_cameras: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("RAW_REVIEW_ALL_CAMERAS",
+                                      "raw_review_all_cameras"),
+    )
+    # Detector types held back even in raw mode. Measured 2026-10-14:
+    # `person` alone suppressed 2,156 events in a day against 40 for
+    # every other type combined, so this is the one switch that decides
+    # whether the Alerts page stays readable. Empty list = hold nothing
+    # back, which is the deliberate choice while the raw stream is
+    # being assessed.
+    raw_review_exclude_types: list[str] = Field(
+        default_factory=lambda: ["person"],
+        validation_alias=AliasChoices("RAW_REVIEW_EXCLUDE_TYPES",
+                                      "raw_review_exclude_types"),
+    )
+
     # Cap on unreviewed uniform crops before the staff_zone harvester
     # stops collecting. Pending rows are already eligible for chain
     # training, so this only needs to stop the pool running away — at
@@ -605,6 +627,32 @@ class Settings(BaseSettings):
     # that stays up for an hour) should not alert on every sweep.
     scene_review_dedup_seconds: int = Field(default=1800, ge=60)
     scene_review_trading_hours_only: bool = True
+
+    # Audio distress monitoring (app/tasks/audio_monitor.py). Only ~22 of
+    # 97 reachable cameras have a microphone, all on NVR channel 1, and
+    # they are 8 kHz G.711 that rolls off below ~200 Hz - so speech is
+    # detectable and shutter motor hum is not. Never records, never
+    # transcribes: only loudness and band shares leave the sample.
+    audio_monitor_enabled: bool = False
+    audio_sample_seconds: int = Field(default=6, ge=2, le=30)
+    # Loudness relative to the camera's own rolling baseline. Absolute
+    # thresholds are useless: a mall unit beside a food court and a quiet
+    # high-street shop have completely different floors.
+    audio_rms_ratio: float = Field(default=3.0, ge=1.2, le=20.0)
+    # Fraction of spectral energy inside 200-3400 Hz. Required so a
+    # dropped hanger rail or a trolley (broadband) cannot pass as a shout.
+    audio_speech_share_min: float = Field(default=0.45, ge=0.1, le=0.95)
+    audio_cooldown_seconds: float = Field(default=600.0, ge=30.0)
+    # Spectral flatness ceiling. Voice is harmonic and scores low; a
+    # trolley, a shutter or a dropped hanger rail is noise-like and
+    # scores high. This - not speech_share - is what separates a shout
+    # from a crash on a band-limited microphone.
+    audio_flatness_max: float = Field(default=0.45, ge=0.05, le=0.95)
+    # Microphone discovery costs an ffprobe per camera (up to 20s each).
+    # Probing the whole fleet inside one sweep would block an alerts
+    # worker slot for half an hour and let 2-minute beat runs pile up,
+    # so discovery walks the fleet this many cameras at a time.
+    audio_probe_per_sweep: int = Field(default=12, ge=1, le=60)
 
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"
