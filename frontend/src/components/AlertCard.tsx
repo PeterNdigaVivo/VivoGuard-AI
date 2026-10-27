@@ -498,6 +498,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [clipModal, setClipModal] = useState(false)
   const [askReason, setAskReason] = useState(false)
   const [reasonComment, setReasonComment] = useState('')
+  const [reasonCode, setReasonCode] = useState<string | undefined>(undefined)
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
@@ -654,17 +655,31 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
     setAskReason(true)
   }
 
-  async function dismissWithReason(reason: string | undefined) {
+  // The comment is REQUIRED. An operator marking something false knows
+  // something the system does not, and that sentence is the only record
+  // of it — "no snapshot captured, so cannot define the incident" tells
+  // us more than any category could. Enter submits so it costs one
+  // keystroke more than the old blind click.
+  async function submitFalse() {
     const comment = reasonComment.trim()
+    if (!comment || savingRef.current) return
+    const reason = reasonCode
     setAskReason(false)
     setReasonComment('')
+    setReasonCode(undefined)
     await saveOutcome({
       optimistic: { status: 'dismissed', resolved_at: null,
                     acknowledged_at: new Date().toISOString() },
-      request: () => alertsApi.dismiss(alert.id, reason, comment || undefined),
+      request: () => alertsApi.dismiss(alert.id, reason, comment),
       action: 'dismiss',
       failure: 'Could not mark False.',
     })
+  }
+
+  function cancelFalse() {
+    setAskReason(false)
+    setReasonComment('')
+    setReasonCode(undefined)
   }
 
 
@@ -905,52 +920,72 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               )
             ) : alert.status === 'new' ? (
               askReason ? (
-                /* One tap, no typing. "Skip" is deliberately offered: an
-                   operator who cannot categorise it must still be able to
-                   clear the alert, otherwise they stop using the button. */
+                /* The comment is REQUIRED. An operator marking something
+                   false knows something the system does not, and that
+                   sentence is the only record of it - "no snapshot
+                   captured, so cannot define the incident" tells us more
+                   than any category could. Enter submits, so it costs one
+                   keystroke more than the old blind click. */
                 <div className="flex flex-col gap-1 w-full">
                   <span className="text-xs font-semibold text-slate-600">
-                    Why was this wrong?
+                    Why was this wrong? (required)
                   </span>
-                  {/* Optional detail. Sits ABOVE the chips because the
-                      chip is what submits: type if you have something to
-                      add, then tap a reason. Anyone with nothing to add
-                      still gets the original one-tap path. */}
                   <textarea
+                    autoFocus
                     value={reasonComment}
                     onChange={e => setReasonComment(e.target.value)}
+                    onKeyDown={e => {
+                      // Enter sends, Shift+Enter makes a new line, Escape
+                      // backs out - the conventions people already expect
+                      // from every chat box they use.
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        void submitFalse()
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        cancelFalse()
+                      }
+                    }}
                     disabled={busy}
                     rows={2}
                     maxLength={500}
-                    placeholder="Add a comment (optional) — what did you actually see?"
+                    placeholder="What did you actually see? (Enter to save)"
                     className="w-full text-xs rounded border border-slate-300 px-2 py-1
                                focus:outline-none focus:ring-1 focus:ring-slate-400
                                disabled:opacity-50"
                   />
-                  <div className="flex flex-wrap gap-1">
+                  {/* Optional category. Tapping only TAGS the dismissal now -
+                      it no longer submits, because the comment is the part
+                      we actually need and a chip must not bypass it. */}
+                  <div className="flex flex-wrap gap-1 items-center">
                     {DISMISS_REASONS.map(r => (
                       <button
                         key={r.code}
-                        onClick={() => dismissWithReason(r.code)}
+                        onClick={() => setReasonCode(
+                          reasonCode === r.code ? undefined : r.code)}
                         disabled={busy}
-                        className="px-2 py-1 rounded text-xs font-medium border
-                                   border-slate-300 bg-white hover:bg-slate-100
-                                   disabled:opacity-50"
+                        className={'px-2 py-1 rounded text-xs font-medium border '
+                          + (reasonCode === r.code
+                              ? 'border-slate-700 bg-slate-700 text-white'
+                              : 'border-slate-300 bg-white hover:bg-slate-100')
+                          + ' disabled:opacity-50'}
                       >
                         {r.label}
                       </button>
                     ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2 items-center pt-0.5">
                     <button
-                      onClick={() => dismissWithReason(undefined)}
-                      disabled={busy}
-                      className="px-2 py-1 rounded text-xs font-medium
-                                 text-slate-500 hover:bg-slate-100
-                                 disabled:opacity-50"
+                      onClick={() => void submitFalse()}
+                      disabled={busy || !reasonComment.trim()}
+                      className="px-3 py-1.5 rounded font-bold text-white bg-red-600
+                                 hover:bg-red-700 disabled:opacity-40
+                                 disabled:cursor-not-allowed"
                     >
-                      Skip
+                      ❌ Mark False &amp; save
                     </button>
                     <button
-                      onClick={() => setAskReason(false)}
+                      onClick={cancelFalse}
                       disabled={busy}
                       className="px-2 py-1 rounded text-xs font-medium
                                  text-slate-500 hover:bg-slate-100
@@ -958,6 +993,11 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                     >
                       Cancel
                     </button>
+                    {!reasonComment.trim() && (
+                      <span className="text-xs text-slate-400">
+                        Type what you saw to enable
+                      </span>
+                    )}
                   </div>
                 </div>
               ) : (
