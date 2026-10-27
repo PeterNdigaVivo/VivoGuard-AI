@@ -462,17 +462,6 @@ export interface AlertCardProps {
   onChanged?: () => void
 }
 
-// Mirrors DISMISS_REASONS in backend/app/api/alerts.py. Short on
-// purpose: every extra option is another decision for someone clearing a
-// busy feed, and a list long enough to be precise is one nobody reads.
-const DISMISS_REASONS: { code: string; label: string }[] = [
-  { code: 'not_a_person',    label: 'Not a person (mannequin, reflection)' },
-  { code: 'staff_member',    label: 'That is a staff member' },
-  { code: 'normal_activity', label: 'Normal activity, not an incident' },
-  { code: 'camera_problem',  label: 'Camera problem (blocked, dark)' },
-  { code: 'something_else',  label: 'Something else' },
-]
-
 export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresolvedCount,
   groupSiblings, highlightCount, onChanged }: AlertCardProps) {
   // Local copy of the alert so we can reflect a resolve / dismiss
@@ -498,7 +487,6 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [clipModal, setClipModal] = useState(false)
   const [askReason, setAskReason] = useState(false)
   const [reasonComment, setReasonComment] = useState('')
-  const [reasonCode, setReasonCode] = useState<string | undefined>(undefined)
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [groupExpanded, setGroupExpanded] = useState(false)
@@ -638,18 +626,15 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
 
-  // ❌ False Alert now asks WHY, as one tap rather than a text box.
-  // The old flow was a window.confirm and nothing else, so the reason
-  // died with the click: 509 dismissals in a fortnight produced 4 notes.
-  // Every learning loop we want — feeding corrections into the VLM
-  // prompt, calibrating thresholds, learning per-camera suppression —
-  // needs the reason, so it has to cost one tap, not a sentence.
+  // ❌ False Alert asks WHY before it saves. The old flow was a
+  // window.confirm and nothing else, so the reason died with the click:
+  // 509 dismissals in a fortnight produced 4 notes. Every learning loop
+  // we want — feeding corrections into the VLM prompt, calibrating
+  // thresholds, learning per-camera suppression — needs the reason.
   //
-  // Codes are duplicated from DISMISS_REASONS in backend/app/api/alerts.py
-  // rather than fetched, to keep the button working when the catalog
-  // request fails. The backend validates and silently drops anything it
-  // does not recognise, so a drift here loses the reason, never the
-  // verdict.
+  // Fixed categories were offered alongside the box and removed: a chip
+  // records which bucket the operator picked, never what they saw, and
+  // the sentence is the part the learning loop can actually read.
   function markFalse() {
     if (savingRef.current) return
     setAskReason(true)
@@ -663,14 +648,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   async function submitFalse() {
     const comment = reasonComment.trim()
     if (!comment || savingRef.current) return
-    const reason = reasonCode
     setAskReason(false)
     setReasonComment('')
-    setReasonCode(undefined)
     await saveOutcome({
       optimistic: { status: 'dismissed', resolved_at: null,
                     acknowledged_at: new Date().toISOString() },
-      request: () => alertsApi.dismiss(alert.id, reason, comment),
+      request: () => alertsApi.dismiss(alert.id, undefined, comment),
       action: 'dismiss',
       failure: 'Could not mark False.',
     })
@@ -679,7 +662,6 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   function cancelFalse() {
     setAskReason(false)
     setReasonComment('')
-    setReasonCode(undefined)
   }
 
 
@@ -959,26 +941,6 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                                focus:outline-none focus:ring-1 focus:ring-slate-400
                                disabled:opacity-50"
                   />
-                  {/* Optional category. Tapping only TAGS the dismissal now -
-                      it no longer submits, because the comment is the part
-                      we actually need and a chip must not bypass it. */}
-                  <div className="flex flex-wrap gap-1 items-center">
-                    {DISMISS_REASONS.map(r => (
-                      <button
-                        key={r.code}
-                        onClick={() => setReasonCode(
-                          reasonCode === r.code ? undefined : r.code)}
-                        disabled={busy}
-                        className={'px-2 py-1 rounded text-xs font-medium border '
-                          + (reasonCode === r.code
-                              ? 'border-slate-700 bg-slate-700 text-white'
-                              : 'border-slate-300 bg-white hover:bg-slate-100')
-                          + ' disabled:opacity-50'}
-                      >
-                        {r.label}
-                      </button>
-                    ))}
-                  </div>
                   <div className="flex flex-wrap gap-2 items-center pt-0.5">
                     <button
                       onClick={() => void submitFalse()}
