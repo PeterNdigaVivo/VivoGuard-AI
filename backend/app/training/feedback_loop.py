@@ -111,6 +111,13 @@ def _build_source_extra(db: Session, ev: DetectionEvent,
         "bbox_norm":        ev.bbox_json,
         "timestamp_iso":    ts.isoformat() if ts else None,
         "model_id":         ev.model_id,
+        # What the operator TYPED, carried next to what they clicked.
+        # A "false" verdict on its own says the frame was wrong; the
+        # note is the only place the reason survives ("reflection in
+        # the glass", "that's the cleaner"), and it is what a curator
+        # or a VLM prompt revision can actually act on. Travels with
+        # the sample so neither has to re-join back to the alert.
+        "operator_note":    (alert.notes or "").strip() or None,
         # DetectionEvent.extra already carries detector-specific
         # context (person_count, tracking_ids, queue_length, …) —
         # carry it through unchanged so curators can dedup/filter
@@ -150,6 +157,23 @@ NON_TRAINABLE_TYPES = frozenset({
     #     appearance.
     "audio_distress", "crowd",
 })
+
+
+def _abandon(alert, db: Session, reason: str) -> None:
+    """Mark a verdict as handled when no training sample can ever be
+    built from it.
+
+    The operator's verdict still stands — this only closes the training
+    side. Stamping is the whole point: `feedback.absorb_pending` selects
+    on `feedback_used_for_training is False`, so an alert that returns
+    here unstamped is re-queued every 15 minutes for as long as it sits
+    inside the 7-day sweep window. Use ONLY for failures that retrying
+    cannot fix; transient errors must raise so the task retries.
+    """
+    alert.feedback_used_for_training = True
+    db.commit()
+    log.warning("feedback: alert %s verdict kept, no training sample — %s",
+                alert.id, reason)
 
 
 def _skip_non_trainable(db: Session, alert, detection_type: str) -> bool:
@@ -266,6 +290,11 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         return
     ev = db.get(DetectionEvent, a.event_id)
     if not ev or not ev.thumbnail_path:
+        # Stamp, like absorb_dismissed already does. Returning without
+        # stamping left the alert permanently "pending a sample", and
+        # feedback.absorb_pending re-enqueued the same rows every 15
+        # minutes forever (29 of them, every sweep, for days).
+        _abandon(a, db, "no snapshot was saved for the event")
         return
     cls = ev.detection_type
     if _skip_non_trainable(db, a, cls):
@@ -279,8 +308,19 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     )
     file_path = _persist_feedback_image(ds.id, a.id, ev.thumbnail_path)
     if not file_path:
-        log.warning("feedback: confirmed alert %s source image is unavailable",
-                    alert_id)
+        # The path was recorded but the file is gone (pruned, or the
+        # write failed). Nothing will bring it back, so stamp instead of
+        # leaving it for the sweep to retry until the end of time.
+        _abandon(a, db, "the snapshot file is no longer on disk")
+        return
+    # A confirmed alert with no usable box cannot become a positive
+    # sample: the unpack below would raise, the Celery task would retry
+    # five times and the sweep would then retry it forever. Detectors
+    # that legitimately have no box are handled by NON_TRAINABLE_TYPES
+    # above, so reaching here means the event row itself is malformed.
+    bbox = list(ev.bbox_json or [])
+    if len(bbox) != 4:
+        _abandon(a, db, f"event bbox is unusable ({ev.bbox_json!r})")
         return
     source_extra = _build_source_extra(db, ev, a, "correct")
     source_extra["source_thumbnail_path"] = ev.thumbnail_path
@@ -296,7 +336,7 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     )
     db.add(img); db.flush()
     # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
-    x1, y1, x2, y2 = ev.bbox_json
+    x1, y1, x2, y2 = bbox
     cx = (x1 + x2) / 2
     cy = (y1 + y2) / 2
     w  = max(0.0, x2 - x1)

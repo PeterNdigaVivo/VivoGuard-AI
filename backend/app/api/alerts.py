@@ -1887,7 +1887,13 @@ def resolve(alert_id: int, db: Session = Depends(get_db),
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
-    a.status = "confirmed"     # reuse the bucket — frontend treats as resolved
+    # Its OWN status, deliberately not "confirmed". Sharing that bucket
+    # made "I dealt with this" indistinguishable from "the detector was
+    # right": 569 of 574 confirmed intrusion alerts in one week came
+    # through here and resolve-all, so every precision figure measured
+    # off `status='confirmed'` was really measuring how often operators
+    # cleared the feed. The frontend has always treated both as closed.
+    a.status = "resolved"
     a.assigned_to = user.id
     a.acknowledged_at = datetime.now(timezone.utc)
     a.resolved_at = datetime.now(timezone.utc)
@@ -1918,7 +1924,7 @@ def resolve_all(db: Session = Depends(get_db),
     now = datetime.now(timezone.utc)
     n = 0
     for a in q.all():
-        a.status = "confirmed"   # same bucket the per-alert /resolve uses
+        a.status = "resolved"    # same bucket the per-alert /resolve uses
         a.assigned_to = user.id
         a.acknowledged_at = now
         a.resolved_at = now

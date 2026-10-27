@@ -724,10 +724,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // still need clearing, otherwise the tab count only ever grows. /resolve
   // closes without feeding a training sample.
   async function closeUpdate() {
-    // The server stores status "confirmed" plus resolved_at for /resolve.
+    // The server stores status "resolved" plus resolved_at for /resolve.
+    // It used to store "confirmed", which made closing an update look
+    // like a True Alert verdict in every training and precision figure.
     const now = new Date().toISOString()
     await saveOutcome({
-      optimistic: { status: 'confirmed', resolved_at: now, acknowledged_at: now },
+      optimistic: { status: 'resolved', resolved_at: now, acknowledged_at: now },
       request: () => alertsApi.resolve(alert.id),
       action: 'resolve',
       failure: 'Could not close this update.',
