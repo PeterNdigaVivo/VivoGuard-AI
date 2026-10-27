@@ -62,7 +62,7 @@ export default function TrainingDashboardPage() {
     <div className="p-6">
       <PageHeader
         title={`Training Job #${id}`}
-        actions={<Link to="/training" className="text-sky-600 hover:underline">Back to studio</Link>}
+        actions={<Link to="/training" className="text-sky-600 dark:text-sky-300 hover:underline">Back to studio</Link>}
       />
 
       <Card className="p-4 mb-4">
@@ -83,7 +83,7 @@ export default function TrainingDashboardPage() {
           <div className="h-2 bg-sky-600 rounded" style={{ width: `${pct}%` }} />
         </div>
         {job?.error_message && (
-          <div className="text-red-600 text-sm mt-2">{job.error_message}</div>
+          <div className="text-red-600 dark:text-red-300 text-sm mt-2">{job.error_message}</div>
         )}
       </Card>
 

@@ -25,8 +25,8 @@ export default function AlertNotificationBell() {
           <Toggle label="Browser notifications" checked={settings.browserNotif}
                   onChange={v => { setSetting('browserNotif', v); if (v) requestPermission() }} />
           <div className="mt-2 flex items-center justify-between">
-            <button onClick={testSound} className="text-xs text-sky-600 hover:underline">Test sound</button>
-            <button onClick={() => setOpen(false)} className="text-xs text-slate-400 hover:text-slate-600">Close</button>
+            <button onClick={testSound} className="text-xs text-sky-600 dark:text-sky-300 hover:underline">Test sound</button>
+            <button onClick={() => setOpen(false)} className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-white">Close</button>
           </div>
         </div>
       )}

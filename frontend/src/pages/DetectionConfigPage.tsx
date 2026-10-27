@@ -206,7 +206,7 @@ export default function DetectionConfigPage() {
                     {(z.detection_types_json || []).map((t: string) => <Badge key={t} color="sky">{t}</Badge>)}
                   </span>
                 </div>
-                <button className="text-red-600 hover:underline" onClick={() => deleteZone(z.id)}>×</button>
+                <button className="text-red-600 dark:text-red-300 hover:underline" onClick={() => deleteZone(z.id)}>×</button>
               </div>
             ))}
           </div>

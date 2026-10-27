@@ -51,7 +51,7 @@ export default function TrainingStudioPage() {
             {busy ? 'Creating…' : 'Create dataset'}
           </Button>
         </div>
-        {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
+        {error && <div className="text-red-600 dark:text-red-300 text-sm mt-2">{error}</div>}
       </Card>
 
       {/* Dataset list */}
@@ -80,7 +80,7 @@ export default function TrainingStudioPage() {
                 </td>
                 <td className="p-3 text-right">
                   <Link to={`/training/datasets/${d.id}`}
-                        className="text-sky-600 hover:underline">Open</Link>
+                        className="text-sky-600 dark:text-sky-300 hover:underline">Open</Link>
                 </td>
               </tr>
             ))}

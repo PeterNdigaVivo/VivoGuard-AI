@@ -36,16 +36,22 @@ export function Select(p: SelectHTMLAttributes<HTMLSelectElement>) {
 }
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`bg-white rounded-lg shadow-sm border border-slate-200 dark:bg-slate-900 dark:border-slate-800 ${className}`}>{children}</div>
+  // A caller's own dark background/border (e.g. a red-tinted error card)
+  // replaces the default: Tailwind emits dark:bg-slate-900 after the
+  // coloured dark:bg-*-950 classes, so both together would always be slate.
+  const darkBg = /(^|\s)dark:bg-/.test(className) ? '' : 'dark:bg-slate-900'
+  const darkBorder = /(^|\s)dark:border-/.test(className) ? '' : 'dark:border-slate-800'
+  return <div className={`bg-white rounded-lg shadow-sm border border-slate-200 ${darkBg} ${darkBorder} ${className}`}>{children}</div>
 }
 
 export function Badge({ children, color = 'slate' }: { children: ReactNode; color?: 'green' | 'red' | 'amber' | 'slate' | 'sky' }) {
+  // Light pills in both themes (vg-on-light keeps their text dark).
   const colors = {
-    green: 'bg-green-100 text-green-700',
-    red:   'bg-red-100 text-red-700',
-    amber: 'bg-amber-100 text-amber-700',
-    sky:   'bg-sky-100 text-sky-700',
-    slate: 'bg-slate-100 text-slate-700',
+    green: 'vg-on-light bg-green-100 text-green-700',
+    red:   'vg-on-light bg-red-100 text-red-700',
+    amber: 'vg-on-light bg-amber-100 text-amber-700',
+    sky:   'vg-on-light bg-sky-100 text-sky-700',
+    slate: 'vg-on-light bg-slate-100 text-slate-700',
   }
   return <span className={`text-xs px-2 py-0.5 rounded-full ${colors[color]}`}>{children}</span>
 }
@@ -130,8 +136,8 @@ export function Trend({ direction, deltaPct }:
     return <span className="text-xs text-slate-400">no comparison</span>
   }
   const symbol = direction === 'up' ? '↑' : direction === 'down' ? '↓' : '→'
-  const color  = direction === 'up' ? 'text-emerald-600'
-               : direction === 'down' ? 'text-red-600' : 'text-slate-500'
+  const color  = direction === 'up' ? 'text-emerald-600 dark:text-emerald-300'
+               : direction === 'down' ? 'text-red-600 dark:text-red-300' : 'text-slate-500 dark:text-slate-300'
   return (
     <span className={`text-xs ${color}`}>{symbol} {Math.abs(deltaPct).toFixed(1)}% vs yesterday</span>
   )

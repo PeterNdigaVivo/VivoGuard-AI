@@ -290,7 +290,7 @@ function CameraSetup({ cameraId }: { cameraId: number }) {
                 Reset
               </Button>
             </div>
-            {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
+            {error && <div className="text-red-600 dark:text-red-300 text-sm mt-2">{error}</div>}
           </Card>
 
           {/* Transport switch — surfaces the RTSP↔HTTP-snapshot toggle
@@ -346,12 +346,12 @@ function CameraSetup({ cameraId }: { cameraId: number }) {
                 {tryingPorts ? 'Probing ports…' : '🔄 Try alternate ports'}
               </Button>
               {portResult && (
-                <div className={'mt-2 text-xs ' + (portResult.ok ? 'text-emerald-700' : 'text-red-600')}>
+                <div className={'mt-2 text-xs ' + (portResult.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-600 dark:text-red-300')}>
                   {portResult.summary}
                   {portResult.attempts && (
                     <ul className="mt-1 ml-2 space-y-0.5">
                       {portResult.attempts.map((a: any, i: number) => (
-                        <li key={i} className={a.ok ? 'text-emerald-700' : 'text-slate-500 dark:text-slate-300'}>
+                        <li key={i} className={a.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-300'}>
                           {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
                         </li>
                       ))}
@@ -371,7 +371,7 @@ function CameraSetup({ cameraId }: { cameraId: number }) {
                   <div className="font-medium">{z.name}</div>
                   <div className="text-xs text-slate-500 dark:text-slate-300">{purposeLabelOf(z.detection_types_json)}</div>
                 </div>
-                <button className="text-red-600 hover:underline text-xs"
+                <button className="text-red-600 dark:text-red-300 hover:underline text-xs"
                         onClick={() => deleteZone(z.id)}>Remove</button>
               </div>
             ))}

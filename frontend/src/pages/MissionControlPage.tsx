@@ -114,7 +114,7 @@ export default function MissionControlPage() {
       </div>
 
       {error && (
-        <Card className="p-4 text-red-600">Failed to load: {error}</Card>
+        <Card className="p-4 text-red-600 dark:text-red-300">Failed to load: {error}</Card>
       )}
       {data && (data.collection_errors?.length ?? 0) > 0 && (
         <Card className="p-3 text-sm text-amber-700 dark:text-amber-400">
@@ -178,7 +178,7 @@ export default function MissionControlPage() {
                 alert clips {num(data.storage.alert_clips_gb, 1)} GB
               </div>
               {pct != null && pct > 80 && (
-                <div className="mt-1 text-xs font-semibold text-red-600">
+                <div className="mt-1 text-xs font-semibold text-red-600 dark:text-red-300">
                   ⚠ Above 80% — prune recordings or expand the volume.
                 </div>
               )}

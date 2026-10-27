@@ -205,17 +205,17 @@ function _factorEmoji(ok: 'good' | 'warn' | 'bad' | 'none'): string {
        : ok === 'good' ? '✅' : ok === 'warn' ? '⚠️' : '🔴'
 }
 function _bandColor(band: StoreHealthScore['band']): string {
-  return band === 'great' ? 'text-emerald-600'
-       : band === 'good'  ? 'text-yellow-600'
-       : band === 'needs_work' ? 'text-orange-600'
-       : 'text-red-600'
+  return band === 'great' ? 'text-emerald-600 dark:text-emerald-300'
+       : band === 'good'  ? 'text-yellow-600 dark:text-yellow-300'
+       : band === 'needs_work' ? 'text-orange-600 dark:text-orange-300'
+       : 'text-red-600 dark:text-red-300'
 }
 
 export function StoreHealthCard({ health }: { health: StoreHealthScore }) {
   const trend = health.vsYesterdayPts
   return (
-    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4 dark:bg-slate-900 dark:border-slate-800">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
         Store Health Score
       </div>
       <div className="flex items-baseline gap-3 mb-1">
@@ -226,7 +226,7 @@ export function StoreHealthCard({ health }: { health: StoreHealthScore }) {
           {health.bandEmoji} {health.bandLabel}
         </div>
       </div>
-      <div className="text-xs text-slate-500 mb-3">
+      <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
         {health.bandCopy}
         {health.measuredOf.measured < health.measuredOf.total && (
           <> · scored from {health.measuredOf.measured} of {health.measuredOf.total} signals</>
@@ -236,7 +236,7 @@ export function StoreHealthCard({ health }: { health: StoreHealthScore }) {
         {health.factors.map(f => (
           <li key={f.key} className="flex items-baseline gap-2">
             <span>{_factorEmoji(f.ok)}</span>
-            <span className={f.ok === 'none' ? 'text-slate-400' : 'text-slate-700'}>
+            <span className={f.ok === 'none' ? 'text-slate-400' : 'text-slate-700 dark:text-white'}>
               {f.detail}
             </span>
             <span className="ml-auto text-xs text-slate-400 tabular-nums">
@@ -250,8 +250,8 @@ export function StoreHealthCard({ health }: { health: StoreHealthScore }) {
       {trend != null && (
         <div className="mt-3 text-xs">
           vs Yesterday:{' '}
-          <span className={trend > 0 ? 'text-emerald-600'
-                          : trend < 0 ? 'text-red-600' : 'text-slate-500'}>
+          <span className={trend > 0 ? 'text-emerald-600 dark:text-emerald-300'
+                          : trend < 0 ? 'text-red-600 dark:text-red-300' : 'text-slate-500 dark:text-slate-300'}>
             {trend > 0 ? '↑' : trend < 0 ? '↓' : '→'} {trend > 0 ? '+' : ''}{trend} points
             {trend > 0 ? ' improvement' : trend < 0 ? ' decline' : ''}
           </span>
@@ -342,12 +342,12 @@ export function TodayPlainEnglishPanel({ tiles }: { tiles: Tiles }) {
   }
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4 dark:bg-slate-900 dark:border-slate-800">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-2">
         What's Happening in Your Store Today
       </div>
       {items.length === 0 ? (
-        <div className="text-sm text-slate-500">
+        <div className="text-sm text-slate-500 dark:text-slate-300">
           Store data is still being collected.
           Check back after 9:00 AM.
         </div>
@@ -356,7 +356,7 @@ export function TodayPlainEnglishPanel({ tiles }: { tiles: Tiles }) {
           {items.map((it, i) => (
             <li key={i} className="flex items-baseline gap-2">
               <span>{it.emoji}</span>
-              <span className="text-slate-700">{it.text}</span>
+              <span className="text-slate-700 dark:text-white">{it.text}</span>
             </li>
           ))}
         </ul>
@@ -389,11 +389,11 @@ export function AiNarrative({ storeName, tiles }: {
 
   if (visitors == null && peak == null && staff == null && browseSec == null) {
     return (
-      <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-        <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+      <section className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:bg-slate-900 dark:border-slate-800">
+        <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
           Today at {storeName}
         </div>
-        <p className="text-sm text-slate-600">
+        <p className="text-sm text-slate-600 dark:text-white">
           Store data is still being collected.
           Check back after 9:00 AM.
         </p>
@@ -444,11 +444,11 @@ export function AiNarrative({ storeName, tiles }: {
   }
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+    <section className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:bg-slate-900 dark:border-slate-800">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-1">
         Today at {storeName}
       </div>
-      <p className="text-sm text-slate-700 leading-relaxed">
+      <p className="text-sm text-slate-700 dark:text-white leading-relaxed">
         {sentences.join(' ')}
       </p>
     </section>
@@ -507,8 +507,8 @@ export function StaffPerformancePanel({ tiles, todayAlertHandledPct }: {
   if (!bars.length) return null
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm p-4 dark:bg-slate-900 dark:border-slate-800">
+      <div className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300 mb-2">
         Staff Performance Today
       </div>
       <ul className="space-y-3">
@@ -519,20 +519,20 @@ export function StaffPerformancePanel({ tiles, todayAlertHandledPct }: {
           return (
             <li key={b.label}>
               <div className="flex items-baseline justify-between text-sm">
-                <span className="text-slate-700">{b.label}</span>
-                <span className="tabular-nums text-slate-600">
+                <span className="text-slate-700 dark:text-white">{b.label}</span>
+                <span className="tabular-nums text-slate-600 dark:text-white">
                   {Math.round(b.pct)}%
                   {b.trend != null && Math.abs(b.trend) >= 1 && (
-                    <span className={'ml-2 text-xs ' + (b.trend > 0 ? 'text-emerald-600' : 'text-red-600')}>
+                    <span className={'ml-2 text-xs ' + (b.trend > 0 ? 'text-emerald-600 dark:text-emerald-300' : 'text-red-600 dark:text-red-300')}>
                       {b.trend > 0 ? '↑' : '↓'} {Math.abs(Math.round(b.trend))}% vs yesterday
                     </span>
                   )}
                 </span>
               </div>
-              <div className="mt-1 h-2 rounded bg-slate-100 overflow-hidden">
+              <div className="mt-1 h-2 rounded bg-slate-100 overflow-hidden dark:bg-slate-800">
                 <div className={'h-full ' + tone} style={{ width: `${b.pct}%` }} />
               </div>
-              <div className="mt-1 text-xs text-slate-500">{b.copy}</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-300">{b.copy}</div>
             </li>
           )
         })}

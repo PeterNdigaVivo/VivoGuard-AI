@@ -279,7 +279,7 @@ export default function StoreForm({
         </div>
       </div>
 
-      {error && <div className="text-red-600 text-sm mt-3">{error}</div>}
+      {error && <div className="text-red-600 dark:text-red-300 text-sm mt-3">{error}</div>}
 
       <div className="mt-6 flex justify-end gap-2">
         {onCancel && <Button variant="ghost" onClick={onCancel}>Cancel</Button>}

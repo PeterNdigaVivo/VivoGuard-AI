@@ -92,7 +92,7 @@ export default function MissedEventForm({ onClose }: { onClose: () => void }) {
             Use this when a real incident was seen by a person but VivoGuard did not alert correctly. This creates recall evidence; it does not automatically train or accuse anyone.
           </div>
         </div>
-        <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-900">Close</button>
+        <button type="button" onClick={onClose} className="text-sm text-slate-500 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white">Close</button>
       </div>
 
       <form onSubmit={submit} className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -122,13 +122,13 @@ export default function MissedEventForm({ onClose }: { onClose: () => void }) {
         </label>
         <div className="md:col-span-2 flex items-center gap-3">
           <Button type="submit" disabled={busy}>{busy ? 'Recording…' : 'Create missed-event case'}</Button>
-          <span className="text-xs text-slate-500">Evidence remains quarantined until independently verified.</span>
+          <span className="text-xs text-slate-500 dark:text-slate-300">Evidence remains quarantined until independently verified.</span>
         </div>
       </form>
 
-      {error && <div className="mt-3 text-sm text-red-700">{error}</div>}
+      {error && <div className="mt-3 text-sm text-red-700 dark:text-red-300">{error}</div>}
       {result && (
-        <div className="mt-3 rounded border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900">
+        <div className="vg-on-light mt-3 rounded border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900">
           Case #{result.case_id} created · root cause: {result.root_cause.replaceAll('_', ' ')} · {result.training_status.replaceAll('_', ' ')}
         </div>
       )}
@@ -136,16 +136,16 @@ export default function MissedEventForm({ onClose }: { onClose: () => void }) {
       <div className="mt-4 border-t border-amber-200 pt-3">
         <div className="text-sm font-semibold mb-2">Recent missed-event cases</div>
         {cases.length === 0 ? (
-          <div className="text-sm text-slate-500">No missed incidents have been recorded yet.</div>
+          <div className="text-sm text-slate-500 dark:text-slate-300">No missed incidents have been recorded yet.</div>
         ) : (
           <div className="space-y-2 max-h-56 overflow-y-auto">
             {cases.map(item => (
               <div key={item.id} className="rounded border border-slate-200 bg-white p-2 text-sm dark:bg-slate-800 dark:border-slate-700">
                 <div className="flex justify-between gap-3">
                   <span className="font-medium">Case #{item.id} · {item.title}</span>
-                  <span className="text-xs uppercase text-slate-500">{item.status}</span>
+                  <span className="text-xs uppercase text-slate-500 dark:text-slate-300">{item.status}</span>
                 </div>
-                <div className="text-xs text-slate-500 mt-1">
+                <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">
                   {stores.find(store => store.id === item.store_id)?.name ?? 'Store not mapped'}
                   {' · '}{(item.root_cause ?? 'pending investigation').replaceAll('_', ' ')}
                   {' · '}{(item.training_status ?? 'not assessed').replaceAll('_', ' ')}

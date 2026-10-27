@@ -270,7 +270,7 @@ export default function ShutterTrainingPage() {
           <Card className="p-3">
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Store</span>
-              <select className="border rounded px-2 py-1 text-sm"
+              <select className="border rounded px-2 py-1 text-sm dark:bg-slate-800 dark:border-slate-600"
                       value={storeFilter}
                       onChange={e => pickFirstInStore(e.target.value)}>
                 <option value="">All stores</option>
@@ -280,7 +280,7 @@ export default function ShutterTrainingPage() {
               </select>
 
               <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Camera</span>
-              <select className="border rounded px-2 py-1 text-sm min-w-[220px]"
+              <select className="border rounded px-2 py-1 text-sm min-w-[220px] dark:bg-slate-800 dark:border-slate-600"
                       value={selected ?? ''}
                       onChange={e => selectCamera(Number(e.target.value))}>
                 {grouped.map(([storeName, cams]) => (
@@ -306,8 +306,8 @@ export default function ShutterTrainingPage() {
             {current && (
               <div className={'mt-2 text-xs rounded px-2 py-1 inline-block ' +
                 (current.has_shutter_zone
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-amber-50 text-amber-700')}>
+                  ? 'vg-on-light bg-emerald-50 text-emerald-700'
+                  : 'vg-on-light bg-amber-50 text-amber-700')}>
                 {current.has_shutter_zone
                   ? '✅ Shutter zone configured — ready to detect once a model is deployed.'
                   : '⚠️ No shutter zone yet — remember to draw a “shutter” zone on this camera after training.'}
@@ -332,7 +332,7 @@ export default function ShutterTrainingPage() {
                   return (
                     <button key={id} onClick={() => selectCamera(id)}
                             className={'rounded px-2 py-1 border ' +
-                              (id === selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200')}>
+                              (id === selected ? 'vg-on-light border-blue-400 bg-blue-50' : 'border-slate-200')}>
                       <span className="font-medium">{cam.camera_name}</span>
                       {': '}{tot}/{MIN_PER_CLASS} {done ? '✅' : '🔄'}
                     </button>
@@ -409,7 +409,7 @@ export default function ShutterTrainingPage() {
                     <div key={l}>
                       <div className="flex justify-between text-xs mb-0.5">
                         <span className="capitalize">{l}</span>
-                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
+                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-300'}>
                           {n} / {MIN_PER_CLASS}
                         </span>
                       </div>
@@ -422,7 +422,7 @@ export default function ShutterTrainingPage() {
                 })}
               </div>
               <div className={'mt-3 text-sm rounded px-3 py-2 ' +
-                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300')}>
+                (ready ? 'vg-on-light bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300')}>
                 {ready
                   ? '✅ Enough frames to train.'
                   : `Collect at least ${MIN_PER_CLASS} frames per class to enable training.`}
@@ -451,7 +451,7 @@ export default function ShutterTrainingPage() {
                 ) : null}
 
                 {train.state === 'failed' && (
-                  <div className="text-xs text-red-600 mt-2">{train.message}</div>
+                  <div className="text-xs text-red-600 dark:text-red-300 mt-2">{train.message}</div>
                 )}
 
                 {train.state === 'done' && train.report && (

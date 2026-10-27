@@ -64,7 +64,7 @@ export default function DetectorsPage() {
                 </td>
                 <td className="p-3">
                   {v.needs_zone && v.purpose_label
-                    ? <>Draw a zone — <Link to="/cameras" className="text-sky-600 hover:underline">pick a camera</Link>,
+                    ? <>Draw a zone — <Link to="/cameras" className="text-sky-600 dark:text-sky-300 hover:underline">pick a camera</Link>,
                        choose <em>"{v.purpose_label}"</em></>
                     : v.status === 'active'
                       ? 'None — runs automatically'

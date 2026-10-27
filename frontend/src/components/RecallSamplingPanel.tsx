@@ -137,7 +137,7 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
         <div className="rounded border border-slate-200 dark:border-slate-700 p-2">
           <div className="font-medium">99% evidence gate</div>
           <div className={progress.measured > 0 && progress.passed === progress.measured
-            ? 'text-emerald-700' : 'text-amber-700'}>
+            ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}>
             {progress.passed}/{progress.measured} measured active camera-detector slices pass both bounds
           </div>
         </div>
@@ -154,15 +154,15 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
           <div>{queues.unavailable} samples excluded from review and training</div>
         </div>
       </div>
-      <p className="text-xs text-slate-500 mb-3">
+      <p className="text-xs text-slate-500 dark:text-slate-300 mb-3">
         Totals are workload indicators, not an accuracy claim. Each approved material camera-detector slice must pass its own precision and recall confidence bounds.
       </p>
-      {qualityError && <div className="text-xs text-amber-700 mb-3">
+      {qualityError && <div className="text-xs text-amber-700 dark:text-amber-300 mb-3">
         Quality metrics are temporarily unavailable; review queues remain usable.
       </div>}
-      {error && <div className="text-sm text-red-700 mb-3">{error}</div>}
-      {cases === null && <div className="text-sm text-slate-500">Loading samples…</div>}
-      {cases && reviewableCases.length === 0 && <div className="text-sm text-slate-500">
+      {error && <div className="text-sm text-red-700 dark:text-red-300 mb-3">{error}</div>}
+      {cases === null && <div className="text-sm text-slate-500 dark:text-slate-300">Loading samples…</div>}
+      {cases && reviewableCases.length === 0 && <div className="text-sm text-slate-500 dark:text-slate-300">
         No samples are currently assigned to you. Fleet work shown above may require a different independent reviewer.
       </div>}
       {reviewableCases.length > 0 && (
@@ -174,7 +174,7 @@ export default function RecallSamplingPanel({ onClose }: { onClose: () => void }
                   (selectedId === row.id ? 'border-emerald-500 bg-emerald-50 dark:bg-slate-800'
                     : 'border-slate-200 dark:border-slate-700')}>
                 <div className="font-medium">Sample #{row.id} · Camera #{row.camera_id ?? '—'}</div>
-                <div className="text-slate-500">{row.status.replaceAll('_', ' ')}</div>
+                <div className="text-slate-500 dark:text-slate-300">{row.status.replaceAll('_', ' ')}</div>
               </button>
             ))}
           </div>

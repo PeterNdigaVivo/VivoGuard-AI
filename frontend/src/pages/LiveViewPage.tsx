@@ -356,7 +356,7 @@ export default function LiveViewPage() {
           <Card key={cam.id} className="p-1">
             <div className="flex items-center justify-between mb-1 text-xs">
               <button onClick={() => setFullscreenId(cam.id)}
-                      className="truncate hover:underline text-left flex-1 text-sky-700"
+                      className="truncate hover:underline text-left flex-1 text-sky-700 dark:text-sky-300"
                       title="Click to view full screen">
                 {cam.name}
               </button>
@@ -560,7 +560,7 @@ function Tile({ cameraId, overlays, dets }: {
                 {portProbe && !portProbe.result ? 'Trying ports…' : '🔄 Try alternate ports'}
               </button>
               <button
-                className="mt-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black text-[11px] font-medium"
+                className="vg-on-light mt-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black text-[11px] font-medium"
                 onClick={(e) => { e.stopPropagation(); openDiagnose(true) }}
                 disabled={diagBusy}>
                 {diagBusy ? 'Probing…' : '🛠 Diagnose'}
@@ -796,7 +796,7 @@ function ActivityGrid({ onPickFullscreen }: {
         </span>
       </div>
       {err && (
-        <Card className="p-4 text-sm text-red-600">
+        <Card className="p-4 text-sm text-red-600 dark:text-red-300">
           Could not load activity. {err}
         </Card>
       )}

@@ -203,8 +203,8 @@ export default function ChainTrainingPage() {
         ))}
       </div>
 
-      {err && <div className="text-red-600 text-sm mb-3">{err}</div>}
-      {info && <div className="text-emerald-700 text-sm mb-3">{info}</div>}
+      {err && <div className="text-red-600 dark:text-red-300 text-sm mb-3">{err}</div>}
+      {info && <div className="text-emerald-700 dark:text-emerald-300 text-sm mb-3">{info}</div>}
 
       {/* Dataset overview */}
       <Card className="p-4 mb-4">
@@ -244,11 +244,11 @@ export default function ChainTrainingPage() {
                   const ok = n >= cur.min_per_label
                   return (
                     <div key={l} className={`p-3 rounded border ${
-                      ok ? 'border-emerald-200 bg-emerald-50'
-                         : 'border-amber-200 bg-amber-50'}`}>
-                      <div className="text-xs text-slate-600">{LABEL_TEXT[l] ?? l}</div>
+                      ok ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950'
+                         : 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950'}`}>
+                      <div className="text-xs text-slate-600 dark:text-slate-300">{LABEL_TEXT[l] ?? l}</div>
                       <div className="text-lg font-semibold">{n}</div>
-                      {!ok && <div className="text-xs text-amber-700">
+                      {!ok && <div className="text-xs text-amber-700 dark:text-amber-300">
                         need {cur.min_per_label - n} more
                       </div>}
                     </div>
@@ -294,7 +294,7 @@ export default function ChainTrainingPage() {
                 Refresh
               </Button>
               {!cur.ready_to_train && (
-                <span className="text-xs text-amber-700">
+                <span className="text-xs text-amber-700 dark:text-amber-300">
                   Collect more frames for: {Object.keys(cur.short_labels).join(', ')}
                 </span>
               )}
@@ -331,7 +331,7 @@ export default function ChainTrainingPage() {
               <Stat label="Recall"    value={fmtPct(status.report.recall_macro)} />
               <Stat label="Samples"   value={String(status.sample_count ?? '—')} />
               {status.report.warning && (
-                <div className="col-span-full text-xs text-amber-700">
+                <div className="col-span-full text-xs text-amber-700 dark:text-amber-300">
                   ⚠️ {status.report.warning}
                 </div>
               )}

@@ -349,7 +349,7 @@ export default function AddCameraWizard() {
             {TYPES.map(t => (
               <label key={t.value}
                      className={'p-3 rounded border cursor-pointer ' +
-                       (type.value === t.value ? 'border-sky-500 bg-sky-50' : 'border-slate-200 dark:border-slate-800')}>
+                       (type.value === t.value ? 'vg-on-light border-sky-500 bg-sky-50' : 'border-slate-200 dark:border-slate-800')}>
                 <input type="radio" name="type" className="mr-2"
                        checked={type.value === t.value}
                        onChange={() => setType(t)} />
@@ -424,12 +424,12 @@ export default function AddCameraWizard() {
               {/* RTSP probe result */}
               {rtspProbe && (
                 <div className="col-span-2 w-full mt-1 text-xs border dark:border-slate-800 rounded p-2">
-                  <div className={'font-medium ' + (rtspProbe.ok ? 'text-emerald-700' : 'text-red-600')}>
+                  <div className={'font-medium ' + (rtspProbe.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-600 dark:text-red-300')}>
                     {rtspProbe.summary}
                   </div>
                   <div className="mt-1 space-y-0.5">
                     {rtspProbe.attempts.map((a, i) => (
-                      <div key={i} className={a.ok ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
+                      <div key={i} className={a.ok ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-300'}>
                         {a.ok ? '✅' : '❌'} port {a.port} ({a.transport}) — {a.reason}
                       </div>
                     ))}
@@ -445,23 +445,23 @@ export default function AddCameraWizard() {
               {probe && (
                 <div className="mt-2 text-xs">
                   {probe.rtsp_candidates.length > 0 && (
-                    <div className="text-emerald-700">
+                    <div className="text-emerald-700 dark:text-emerald-300">
                       ✓ RTSP responded on: {probe.rtsp_candidates.join(', ')}
                     </div>
                   )}
                   {probe.http_candidates.length > 0 && (
-                    <div className="text-emerald-700">
+                    <div className="text-emerald-700 dark:text-emerald-300">
                       ✓ HTTP snapshot responded on: {probe.http_candidates.join(', ')}
                     </div>
                   )}
                   {!probe.rtsp_candidates.length && !probe.http_candidates.length && (
-                    <div className="text-red-600">
+                    <div className="text-red-600 dark:text-red-300">
                       ✗ Nothing answered. Verify the host is reachable and the router
                       forwards at least one of the common ports.
                     </div>
                   )}
                   {probe.recommended_transport === 'http_snapshot' && (
-                    <div className="text-amber-700 mt-1">
+                    <div className="text-amber-700 dark:text-amber-300 mt-1">
                       RTSP is blocked but HTTP works — this camera will auto-switch
                       to HTTP snapshot polling after save.
                     </div>
@@ -522,7 +522,7 @@ export default function AddCameraWizard() {
         <Card className="p-4">
           <div className="font-medium mb-3">4. Test result</div>
           {busy && <div className="text-slate-500 dark:text-slate-300">Probing…</div>}
-          {error && <div className="text-red-600">{error}</div>}
+          {error && <div className="text-red-600 dark:text-red-300">{error}</div>}
           {test && (
             <>
               <div className="mb-3">
@@ -540,7 +540,7 @@ export default function AddCameraWizard() {
                   {test.rtsp_url}
                 </div>
               )}
-              {!test.ok && test.error && <div className="text-red-600 text-sm mt-2">{test.error}</div>}
+              {!test.ok && test.error && <div className="text-red-600 dark:text-red-300 text-sm mt-2">{test.error}</div>}
             </>
           )}
           <div className="mt-4 flex justify-between">
@@ -553,7 +553,7 @@ export default function AddCameraWizard() {
         <Card className="p-4">
           <div className="font-medium mb-3">4. NVR channels</div>
           {busy && <div className="text-slate-500 dark:text-slate-300">Connecting…</div>}
-          {error && <div className="text-red-600">{error}</div>}
+          {error && <div className="text-red-600 dark:text-red-300">{error}</div>}
           {nvrChannels && (
             <div className="space-y-1 max-h-96 overflow-auto">
               {nvrChannels.map(c => (
@@ -588,7 +588,7 @@ export default function AddCameraWizard() {
 function Field({ label, children, full }: { label: string; children: React.ReactNode; full?: boolean }) {
   return (
     <label className={'block ' + (full ? 'col-span-2' : '')}>
-      <div className="text-xs text-slate-600 mb-1">{label}</div>
+      <div className="text-xs text-slate-600 dark:text-slate-300 mb-1">{label}</div>
       {children}
     </label>
   )

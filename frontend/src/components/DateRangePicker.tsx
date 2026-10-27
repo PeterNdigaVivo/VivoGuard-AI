@@ -207,7 +207,7 @@ export default function DateRangePicker({ value, onChange }: {
                    setCustomSince(e.target.value)
                    onChange(rangeFor('custom', e.target.value, customUntil))
                  }} />
-          <span className="text-xs text-slate-500">→</span>
+          <span className="text-xs text-slate-500 dark:text-slate-300">→</span>
           <Input type="datetime-local" value={customUntil}
                  onChange={e => {
                    setCustomUntil(e.target.value)

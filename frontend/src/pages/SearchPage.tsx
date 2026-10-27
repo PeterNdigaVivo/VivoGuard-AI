@@ -65,10 +65,10 @@ export default function SearchPage() {
         <div className="text-xs text-slate-500 dark:text-slate-300 mt-3">
           Try: {EXAMPLES.map(s => (
             <button key={s} onClick={() => run(s)}
-                    className="mr-2 mb-1 inline-block text-sky-600 hover:underline">"{s}"</button>
+                    className="mr-2 mb-1 inline-block text-sky-600 dark:text-sky-300 hover:underline">"{s}"</button>
           ))}
         </div>
-        {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
+        {error && <div className="text-red-600 dark:text-red-300 text-sm mt-2">{error}</div>}
       </Card>
 
       {data && (

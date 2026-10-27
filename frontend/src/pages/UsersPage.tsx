@@ -107,7 +107,7 @@ export default function UsersPage() {
         <Button onClick={() => setAdding(true)}>+ Add user</Button>
       } />
 
-      {error && <div className="text-red-600 mb-2">{error}</div>}
+      {error && <div className="text-red-600 dark:text-red-300 mb-2">{error}</div>}
 
       {adding && (
         <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">
@@ -172,15 +172,15 @@ export default function UsersPage() {
                   {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'never'}
                 </td>
                 <td className="p-3 text-right whitespace-nowrap space-x-2">
-                  <button onClick={() => setResetFor(u)} className="text-sky-600 hover:underline text-xs">
+                  <button onClick={() => setResetFor(u)} className="text-sky-600 dark:text-sky-300 hover:underline text-xs">
                     Reset password
                   </button>
                   {u.id !== me?.id && (
                     <>
-                      <button onClick={() => toggleActive(u)} className="text-amber-600 hover:underline text-xs">
+                      <button onClick={() => toggleActive(u)} className="text-amber-600 dark:text-amber-300 hover:underline text-xs">
                         {u.is_active ? 'Disable' : 'Enable'}
                       </button>
-                      <button onClick={() => remove(u)} className="text-red-600 hover:underline text-xs">
+                      <button onClick={() => remove(u)} className="text-red-600 dark:text-red-300 hover:underline text-xs">
                         Delete
                       </button>
                     </>

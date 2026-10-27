@@ -301,7 +301,7 @@ function StoreIntelCard({ si }: { si: NonNullable<Alert['store_intel']> }) {
   ]
   return (
     <div className="mt-2">
-      <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+      <div className="text-xs text-slate-500 mb-2">
         {[si.store_name, si.city, si.time_eat && `${si.time_eat} EAT`]
           .filter(Boolean).join(' · ')}
       </div>
@@ -676,11 +676,16 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [clipPlayError, setClipPlayError] = useState(false)
   useEffect(() => { setClipPlayError(false) }, [clipSrc])
 
+  // The card stays white in dark mode too (vg-on-light keeps any text
+  // without its own colour dark). Closed cards are dimmed only in light
+  // mode: at 60% opacity over the dark page a white card turns mid-grey
+  // and its text becomes unreadable; the grey bar and badge still mark
+  // the card as closed.
   return (
-    <div className={'relative bg-white rounded border overflow-hidden transition-opacity '
+    <div className={'vg-on-light relative bg-white rounded border overflow-hidden transition-opacity '
                     + (isPositive ? 'border-emerald-200 '
                       : isCalibration ? 'border-violet-200 ' : 'border-slate-200 ')
-                    + (isClosed && !isPositive ? 'opacity-60 ' : '')
+                    + (isClosed && !isPositive ? 'opacity-60 dark:opacity-100 ' : '')
                     + (swapping ? 'vg-card-swap' : '')}>
       {/* Severity colour bar — greyed when resolved/dismissed. */}
       <div className={'absolute left-0 top-0 bottom-0 w-1 '
@@ -757,7 +762,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           ) : alert.body ? (
             <div className={isSceneReview
                 ? 'text-sm font-bold text-black mt-1'                   // same in both themes (card stays bg-white)
-                : 'text-sm text-slate-600 dark:text-slate-300 mt-1'}>
+                : 'text-sm text-slate-600 mt-1'}>
               {alert.body}
             </div>
           ) : null}
@@ -789,7 +794,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
           )}
           {/* AI verification detail lines (annotate-only). */}
           {(alert.ai_outcome || alert.ai_reason) && (
-            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300 space-y-0.5">
+            <div className="mt-1 text-xs text-slate-600 space-y-0.5">
               {alert.ai_outcome && <div>Likely outcome: {alert.ai_outcome}</div>}
               {alert.ai_reason && <div>AI reason: {alert.ai_reason}</div>}
             </div>

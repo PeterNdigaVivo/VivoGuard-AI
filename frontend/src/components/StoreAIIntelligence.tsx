@@ -35,11 +35,11 @@ export function AnomaliesPanel({ storeId, range }: { storeId: number; range?: Ra
   }, [storeId, range?.since, range?.until])
   if (!data || data.anomalies.length === 0) return null
   return (
-    <Card className="p-4 bg-amber-50 border-amber-200">
-      <div className="text-sm font-semibold text-amber-900 mb-2">
+    <Card className="p-4 bg-amber-50 border-amber-200 dark:bg-amber-950 dark:border-amber-900">
+      <div className="text-sm font-semibold text-amber-900 dark:text-amber-300 mb-2">
         ⚠️ Anomalies detected today
       </div>
-      <div className="space-y-1 text-xs text-amber-900">
+      <div className="space-y-1 text-xs text-amber-900 dark:text-amber-300">
         {data.anomalies.slice(0, 5).map((a, i) => (
           <div key={i}>{a.headline}</div>
         ))}
@@ -116,14 +116,14 @@ export function HealthScorePanel({ storeId, range }: { storeId: number; range?: 
     <Card className="p-4">
       <div className="flex items-baseline gap-3">
         <div className={'text-4xl font-semibold ' +
-          (rag === 'emerald' ? 'text-emerald-600' :
-           rag === 'amber'   ? 'text-amber-600' : 'text-red-600')}>
+          (rag === 'emerald' ? 'text-emerald-600 dark:text-emerald-300' :
+           rag === 'amber'   ? 'text-amber-600 dark:text-amber-300' : 'text-red-600 dark:text-red-300')}>
           {data.score}<span className="text-base text-slate-400 dark:text-slate-400">/100</span>
         </div>
         <div className="text-sm text-slate-600 dark:text-slate-300">
           Store health score{' '}
-          <span className={data.delta > 0 ? 'text-emerald-600' :
-                            data.delta < 0 ? 'text-red-600' : 'text-slate-400'}>
+          <span className={data.delta > 0 ? 'text-emerald-600 dark:text-emerald-300' :
+                            data.delta < 0 ? 'text-red-600 dark:text-red-300' : 'text-slate-400'}>
             ({data.delta > 0 ? '↑' : data.delta < 0 ? '↓' : '→'}{' '}
              from {data.last_week_score} last week)
           </span>
@@ -206,8 +206,8 @@ export function BehaviourTrendsPanel({ storeId, range }: { storeId: number; rang
           Avg visit duration:{' '}
           <strong>{Math.floor((v.this_week || 0) / 60)}m {(v.this_week || 0) % 60}s</strong>
           {v.delta_pct !== null && (
-            <span className={(v.delta_pct ?? 0) > 0 ? ' text-emerald-600' :
-                              (v.delta_pct ?? 0) < 0 ? ' text-red-600' : ' text-slate-400'}>
+            <span className={(v.delta_pct ?? 0) > 0 ? ' text-emerald-600 dark:text-emerald-300' :
+                              (v.delta_pct ?? 0) < 0 ? ' text-red-600 dark:text-red-300' : ' text-slate-400'}>
               {' '}({(v.delta_pct ?? 0) > 0 ? '↑' : (v.delta_pct ?? 0) < 0 ? '↓' : '→'}{' '}
               {Math.abs(v.delta_pct ?? 0)}% vs last week)
             </span>

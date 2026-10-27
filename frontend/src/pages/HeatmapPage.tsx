@@ -320,7 +320,7 @@ export default function HeatmapPage() {
               <div className="text-sm font-medium">
                 {cameraName ?? `Camera ${cameraId}`}
               </div>
-              <div className="text-xs text-slate-500">
+              <div className="text-xs text-slate-500 dark:text-slate-300">
                 Snapshot unavailable — heatmap still updating
               </div>
             </div>

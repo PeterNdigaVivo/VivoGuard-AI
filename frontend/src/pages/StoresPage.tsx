@@ -160,7 +160,7 @@ function TabBtn({ active, onClick, children }: {
     <button onClick={onClick}
             className={'px-3 py-2 text-sm border-b-2 -mb-px '
               + (active
-                  ? 'border-sky-600 text-sky-700 font-semibold'
+                  ? 'border-sky-600 text-sky-700 dark:text-sky-300 font-semibold'
                   : 'border-transparent text-slate-500 dark:text-slate-300 hover:text-slate-700 dark:hover:text-slate-200')}>
       {children}
     </button>
@@ -257,7 +257,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
                     {s.capacity && <div>👥 capacity: {s.capacity}</div>}
                   </div>
                   <div className="mt-4 flex items-center justify-between text-sm">
-                    <span className="text-sky-600 hover:underline">Open dashboard →</span>
+                    <span className="text-sky-600 dark:text-sky-300 hover:underline">Open dashboard →</span>
                     {/* Card is one big <Link>; stop the click from bubbling into it. */}
                     <button
                       onClick={e => {
@@ -266,7 +266,7 @@ function StoresGrid({ list, filtered, query, setQuery, healthByStoreId,
                         nav(`/stores/${s.id}/cameras`)
                       }}
                       title="Multi-camera view"
-                      className="text-sky-600 hover:underline">
+                      className="text-sky-600 dark:text-sky-300 hover:underline">
                       📹 Multi-cam
                     </button>
                   </div>
@@ -320,7 +320,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
         </span>
       </div>
 
-      {error && <Card className="p-3 text-rose-700">Failed to load: {error}</Card>}
+      {error && <Card className="p-3 text-rose-700 dark:text-rose-300">Failed to load: {error}</Card>}
 
       {!sorted && loading && (
         <div className="space-y-2">{[1, 2, 3].map(i =>
@@ -360,7 +360,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
                   <td className="px-3 py-2 text-slate-600 dark:text-slate-300 tabular-nums">
                     {r.cameras_online}/{r.cameras_total}
                     {r.cameras_offline > 0 && (
-                      <span className="ml-1 text-rose-600">
+                      <span className="ml-1 text-rose-600 dark:text-rose-300">
                         ({r.cameras_offline} off)
                       </span>
                     )}
@@ -370,7 +370,7 @@ function ZoneHealthTab({ health, loading, error, onRefresh }: {
                   </td>
                   <td className="px-3 py-2 text-right">
                     <button onClick={() => setDrawerFor(r)}
-                            className="text-sky-600 text-sm hover:underline">
+                            className="text-sky-600 dark:text-sky-300 text-sm hover:underline">
                       Fix this store →
                     </button>
                   </td>
@@ -414,7 +414,7 @@ function Th({ children, className = '', title }: {
 function Cell({ ok }: { ok: boolean }) {
   return (
     <td className="px-3 py-2 text-center">
-      <span className={ok ? 'text-emerald-600' : 'text-rose-500'}>
+      <span className={ok ? 'text-emerald-600 dark:text-emerald-300' : 'text-rose-500'}>
         {ok ? '✅' : '❌'}
       </span>
     </td>
@@ -426,10 +426,10 @@ function ScorePill({ score, badge }: {
   score: number; badge: ZoneHealthRow['badge']
 }) {
   const cls = badge === 'healthy'
-    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    ? 'vg-on-light bg-emerald-50 text-emerald-700 border-emerald-200'
     : badge === 'warn'
-      ? 'bg-amber-50 text-amber-700 border-amber-200'
-      : 'bg-rose-50 text-rose-700 border-rose-200'
+      ? 'vg-on-light bg-amber-50 text-amber-700 border-amber-200'
+      : 'vg-on-light bg-rose-50 text-rose-700 border-rose-200'
   return (
     <span className={'inline-block min-w-[2.75rem] text-center text-xs '
                      + 'border rounded px-1.5 py-0.5 font-semibold ' + cls}>
@@ -503,7 +503,7 @@ function FixDrawer({ row, onClose }: {
                   </div>
                 </div>
                 <Link to={`/cameras?addZone=${i.tag}&store=${row.store_id}`}
-                      className="text-sm text-sky-600 hover:underline">
+                      className="text-sm text-sky-600 dark:text-sky-300 hover:underline">
                   Add zone →
                 </Link>
               </div>
@@ -526,7 +526,7 @@ function FixDrawer({ row, onClose }: {
                   </div>
                 </div>
                 <Link to={`/cameras/${i.camera_id}?filter=${i.tag}`}
-                      className="text-sm text-sky-600 hover:underline">
+                      className="text-sm text-sky-600 dark:text-sky-300 hover:underline">
                   Review →
                 </Link>
               </div>
@@ -547,11 +547,11 @@ function FixDrawer({ row, onClose }: {
                       rename before they click. */}
                   <div className="text-slate-600 dark:text-slate-300">
                     Rename:{' '}
-                    <span className="font-mono bg-rose-50 px-1 rounded text-rose-700">
+                    <span className="vg-on-light font-mono bg-rose-50 px-1 rounded text-rose-700">
                       “{i.current_name}”
                     </span>
                     {' → '}
-                    <span className="font-mono bg-emerald-50 px-1 rounded text-emerald-700">
+                    <span className="vg-on-light font-mono bg-emerald-50 px-1 rounded text-emerald-700">
                       “{i.suggested_name}”
                     </span>
                   </div>
@@ -560,7 +560,7 @@ function FixDrawer({ row, onClose }: {
                   </div>
                 </div>
                 <Link to={`/cameras/${i.camera_id}?renameZone=${i.zone_id}&to=${encodeURIComponent(i.suggested_name || '')}`}
-                      className="text-sm text-sky-600 hover:underline whitespace-nowrap">
+                      className="text-sm text-sky-600 dark:text-sky-300 hover:underline whitespace-nowrap">
                   Rename →
                 </Link>
               </div>
@@ -582,7 +582,7 @@ function FixDrawer({ row, onClose }: {
                   </div>
                 </div>
                 <Link to={`/cameras/${i.camera_id}`}
-                      className="text-sm text-sky-600 hover:underline">
+                      className="text-sm text-sky-600 dark:text-sky-300 hover:underline">
                   Open →
                 </Link>
               </div>
@@ -591,7 +591,7 @@ function FixDrawer({ row, onClose }: {
         )}
 
         {row.issues.length === 0 && (
-          <Card className="p-4 text-center text-emerald-700 bg-emerald-50 border-emerald-200">
+          <Card className="p-4 text-center text-emerald-700 bg-emerald-50 border-emerald-200 dark:bg-emerald-950 dark:border-emerald-900 dark:text-emerald-200">
             ✅ No issues — this store is fully configured.
           </Card>
         )}

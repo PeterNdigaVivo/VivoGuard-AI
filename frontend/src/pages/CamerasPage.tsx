@@ -289,7 +289,7 @@ export default function CamerasPage() {
           <Link to="/cameras/add"><Button>+ Add camera</Button></Link>
         </>}
       />
-      {error && <div className="text-red-600 mb-2">{error}</div>}
+      {error && <div className="text-red-600 dark:text-red-300 mb-2">{error}</div>}
 
       {/* Search — filters the loaded camera list by store name OR
           camera name. Client-side only, no API call. Empty groups
@@ -305,7 +305,7 @@ export default function CamerasPage() {
           {search && (
             <>
               <button onClick={() => setSearch('')}
-                      className="text-xs text-sky-600 hover:underline">
+                      className="text-xs text-sky-600 dark:text-sky-300 hover:underline">
                 clear
               </button>
               <span className="text-xs text-slate-500 dark:text-slate-300">
@@ -329,7 +329,7 @@ export default function CamerasPage() {
                  value={bulkHost}
                  onChange={e => setBulkHost(e.target.value)} />
           <span>→ port</span>
-          <select className="border rounded px-2 py-1 text-sm"
+          <select className="border rounded px-2 py-1 text-sm dark:bg-slate-800 dark:border-slate-600"
                   value={bulkPort}
                   onChange={e => setBulkPort(Number(e.target.value))}>
             {[7000, 554, 80, 800, 8000, 8080].map(p => (
@@ -395,11 +395,11 @@ export default function CamerasPage() {
                     </Select>
                   </td>
                   <td className="p-3 text-right whitespace-nowrap">
-                    <Link className="text-sky-600 hover:underline mr-3"
+                    <Link className="text-sky-600 dark:text-sky-300 hover:underline mr-3"
                           to={`/cameras/${c.id}/setup`}>Set up</Link>
                     <Link className="text-slate-500 dark:text-slate-300 hover:underline text-xs mr-3"
                           to={`/cameras/${c.id}/detection`}>advanced</Link>
-                    <button className="text-red-600 hover:underline"
+                    <button className="text-red-600 dark:text-red-300 hover:underline"
                             onClick={() => remove(c)}>Remove</button>
                   </td>
                 </tr>
@@ -414,18 +414,18 @@ export default function CamerasPage() {
           No cameras match "<strong>{search}</strong>".
           {' '}
           <button onClick={() => setSearch('')}
-                  className="text-sky-600 hover:underline">Clear search</button>
+                  className="text-sky-600 dark:text-sky-300 hover:underline">Clear search</button>
         </Card>
       )}
 
       {cams.length === 0 && !error && (
         <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
-          No cameras yet — click <Link to="/cameras/add" className="text-sky-600 underline">Add camera</Link>.
+          No cameras yet — click <Link to="/cameras/add" className="text-sky-600 dark:text-sky-300 underline">Add camera</Link>.
         </Card>
       )}
 
       {cams.length > 0 && stores.length === 0 && (
-        <Card className="p-4 text-amber-700 bg-amber-50 border-amber-200">
+        <Card className="p-4 text-amber-700 bg-amber-50 border-amber-200 dark:bg-amber-950 dark:border-amber-900 dark:text-amber-200">
           You have cameras but no stores yet. <Link to="/stores" className="underline">Create a store</Link> so you can attach them.
         </Card>
       )}

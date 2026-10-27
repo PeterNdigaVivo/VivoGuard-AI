@@ -534,7 +534,7 @@ export default function AlertsPage() {
           Refreshing today’s alert counts…
         </Card>
       ) : summaryError ? (
-        <Card className="p-3 mb-3 text-sm text-red-800 bg-red-50 border-red-200">
+        <Card className="p-3 mb-3 text-sm text-red-800 bg-red-50 border-red-200 dark:bg-red-950 dark:border-red-900 dark:text-red-200">
           <div role="alert">
             <strong>Alert counts are unavailable — this does not mean zero alerts.</strong>
             <div className="text-xs mt-1 break-words">{summaryError}</div>
@@ -549,11 +549,11 @@ export default function AlertsPage() {
           card-style bar above. */}
       {!summaryLoading && !summaryError && (
         <div className="text-xs text-slate-500 dark:text-slate-300 mb-3">
-          Today: <strong className="text-red-600">{summary.urgent} urgent</strong>
-          {' · '}<strong className="text-amber-600">{summary.attention} need attention</strong>
-          {' · '}<strong className="text-emerald-600">{summary.resolved_today} resolved</strong>
+          Today: <strong className="text-red-600 dark:text-red-300">{summary.urgent} urgent</strong>
+          {' · '}<strong className="text-amber-600 dark:text-amber-300">{summary.attention} need attention</strong>
+          {' · '}<strong className="text-emerald-600 dark:text-emerald-300">{summary.resolved_today} resolved</strong>
           {' · '}<strong className="text-slate-600 dark:text-slate-300">{summary.dismissed_today} dismissed</strong>
-          {' · '}<strong className="text-violet-700">{summary.calibration_today} calibration-only</strong>
+          {' · '}<strong className="text-violet-700 dark:text-violet-300">{summary.calibration_today} calibration-only</strong>
         </div>
       )}
 
@@ -584,13 +584,13 @@ export default function AlertsPage() {
           📋 All ({shownCount(counts.all)})
         </QuickBtn>
 
-        <select className="border rounded px-2 py-1 text-sm ml-2"
+        <select className="border rounded px-2 py-1 text-sm ml-2 dark:bg-slate-800 dark:border-slate-600"
                 value={storeId} onChange={e => setStoreId(e.target.value)}>
           <option value="">All Stores</option>
           {stores.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
         </select>
 
-        <select className="border rounded px-2 py-1 text-sm"
+        <select className="border rounded px-2 py-1 text-sm dark:bg-slate-800 dark:border-slate-600"
                 title="AI verification filter (annotate-only; All shows every alert)"
                 value={aiVerdict} onChange={e => setAiVerdict(e.target.value)}>
           <option value="">AI: All</option>
@@ -613,6 +613,7 @@ export default function AlertsPage() {
 
       {!loading && refreshError && (
         <Card className="p-2 mb-2 text-xs text-amber-900 bg-amber-50 border-amber-200
+                         dark:bg-amber-950 dark:border-amber-900 dark:text-amber-100
                          flex items-center gap-2">
           <span role="status">
             Couldn’t refresh just now — showing the alerts already loaded. ({refreshError})
@@ -626,13 +627,14 @@ export default function AlertsPage() {
 
       {!loading && gapNotice && (
         <Card className="p-2 mb-2 text-xs text-sky-900 bg-sky-50 border-sky-200
+                         dark:bg-sky-950 dark:border-sky-900 dark:text-sky-100
                          flex items-center gap-2">
           <span role="status">
             More than {PAGE_SIZE} alerts arrived at once — showing the newest {PAGE_SIZE}.
             Use “Load next” below for older ones.
           </span>
           <button type="button" onClick={() => setGapNotice(false)}
-                  aria-label="Dismiss" className="ml-auto px-1 text-sky-700">×</button>
+                  aria-label="Dismiss" className="ml-auto px-1 text-sky-700 dark:text-sky-300">×</button>
         </Card>
       )}
 
@@ -675,7 +677,7 @@ export default function AlertsPage() {
             <div role="status">Loading alerts…</div>
           </Card>
         ) : loadError && items.length === 0 ? (
-          <Card className="p-8 text-center text-red-700 bg-red-50 border-red-200">
+          <Card className="p-8 text-center text-red-700 bg-red-50 border-red-200 dark:bg-red-950 dark:border-red-900 dark:text-red-200">
             <div className="font-medium">Alerts could not be loaded.</div>
             <div className="text-xs mt-1 break-words">{loadError}</div>
             <button type="button" onClick={reload}
@@ -709,7 +711,7 @@ export default function AlertsPage() {
       </div>
 
       {!loading && loadError && items.length > 0 && (
-        <Card className="p-3 mt-3 text-sm text-red-700 bg-red-50 border-red-200">
+        <Card className="p-3 mt-3 text-sm text-red-700 bg-red-50 border-red-200 dark:bg-red-950 dark:border-red-900 dark:text-red-200">
           More alerts could not be loaded: {loadError}
         </Card>
       )}
@@ -738,10 +740,10 @@ export default function AlertsPage() {
 
 function ProofOfLifeCard({ proof }: { proof: ProofOfLife }) {
   const colour = proof.state === 'active'
-    ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
+    ? 'border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100'
     : proof.state === 'degraded'
-      ? 'border-amber-300 bg-amber-50 text-amber-950'
-      : 'border-red-300 bg-red-50 text-red-950'
+      ? 'border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100'
+      : 'border-red-300 bg-red-50 text-red-950 dark:border-red-800 dark:bg-red-950 dark:text-red-100'
   const title = proof.state === 'active'
     ? 'Monitoring active'
     : proof.state === 'degraded'
@@ -786,10 +788,10 @@ function QuickBtn({ active, onClick, children, tone = 'default' }: {
     : tone === 'green'
       ? (active
           ? 'bg-emerald-700 text-white font-bold hover:bg-emerald-800'
-          : 'bg-emerald-100 text-emerald-800 font-bold hover:bg-emerald-200')
+          : 'vg-on-light bg-emerald-100 text-emerald-800 font-bold hover:bg-emerald-200')
     : (active
         ? 'bg-slate-800 text-white font-medium'
-        : 'bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')
+        : 'vg-on-light bg-slate-100 text-slate-700 font-medium hover:bg-slate-200')
   return (
     <button onClick={onClick}
             className={'px-3 py-1.5 rounded text-sm ' + palette}>
@@ -830,10 +832,10 @@ function ExecutiveSummaryBar({ summary }: {
     : trend > 0 ? `📈 Alerts up ${trend}% vs yesterday`
       : trend < 0 ? `📉 Alerts down ${Math.abs(trend)}% vs yesterday`
       : '➡️ Same volume as yesterday'
-  const trendColor = trend == null ? 'text-slate-500'
-    : trend > 0 ? 'text-red-600'
-    : trend < 0 ? 'text-emerald-600'
-    : 'text-slate-500'
+  const trendColor = trend == null ? 'text-slate-500 dark:text-slate-300'
+    : trend > 0 ? 'text-red-600 dark:text-red-300'
+    : trend < 0 ? 'text-emerald-600 dark:text-emerald-300'
+    : 'text-slate-500 dark:text-slate-300'
 
   return (
     <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm
@@ -843,21 +845,21 @@ function ExecutiveSummaryBar({ summary }: {
       </div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
         <SevPill label="Critical" emoji="🔴" count={summary.critical_today}
-                 tone="text-red-700 bg-red-50 border-red-200" />
+                 tone="vg-on-light text-red-700 bg-red-50 border-red-200" />
         <SevPill label="High"     emoji="🟠" count={summary.high_today}
-                 tone="text-orange-700 bg-orange-50 border-orange-200" />
+                 tone="vg-on-light text-orange-700 bg-orange-50 border-orange-200" />
         <SevPill label="Medium"   emoji="🟡" count={summary.medium_today}
-                 tone="text-yellow-700 bg-yellow-50 border-yellow-200" />
+                 tone="vg-on-light text-yellow-700 bg-yellow-50 border-yellow-200" />
         <SevPill label="Low"      emoji="🔵" count={summary.low_today}
-                 tone="text-blue-700 bg-blue-50 border-blue-200" />
+                 tone="vg-on-light text-blue-700 bg-blue-50 border-blue-200" />
         <SevPill label="Calibration" emoji="🧪" count={summary.calibration_today}
-                 tone="text-violet-700 bg-violet-50 border-violet-200" />
+                 tone="vg-on-light text-violet-700 bg-violet-50 border-violet-200" />
         <span className="text-xs text-slate-500 dark:text-slate-300 ml-2"
               title="AI verification counts (annotate-only)">
           AI: {summary.ai_true_today ?? 0} real / {summary.ai_false_today ?? 0} likely false / {summary.ai_uncertain_today ?? 0} uncertain / {summary.ai_pending_today ?? 0} pending
         </span>
         <span className="text-slate-300">|</span>
-        <span className="text-emerald-700">
+        <span className="text-emerald-700 dark:text-emerald-300">
           ✅ <strong className="tabular-nums">{summary.resolved_today}</strong> Resolved
         </span>
         <span className="text-slate-600 dark:text-slate-300">

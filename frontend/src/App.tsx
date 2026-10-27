@@ -49,7 +49,7 @@ const OdooAssurancePage    = lazy(() => import('@/pages/OdooAssurancePage'))
 function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth()
   const loc = useLocation()
-  if (loading) return <div className="p-8 text-slate-500">Loading…</div>
+  if (loading) return <div className="p-8 text-slate-500 dark:text-slate-300">Loading…</div>
   if (!user) return <Navigate to="/login" state={{ from: loc.pathname }} replace />
   return <>{children}</>
 }

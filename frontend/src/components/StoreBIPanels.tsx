@@ -322,7 +322,7 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
           <span className="tabular-nums">{Math.round(todayTotal)}</span></span>
         {peakHasData && (
           <span>
-            <span className="text-orange-600">●</span>{' '}
+            <span className="text-orange-600 dark:text-orange-300">●</span>{' '}
             <strong>Peak:</strong>{' '}
             {series[peakIdx].label}–{series[peakIdx].hour + 1}:00
             {' · '}{series[peakIdx].visitors} visitors
@@ -334,8 +334,8 @@ function SimpleLineChart({ payload }: { payload: HourlyPayload }) {
             <span className="tabular-nums">{Math.round(yestTotal)}</span>
             {payload.trend_delta_pct !== null && payload.trend_delta_pct !== undefined && (
               <span className={'ml-1 ' + (payload.trend_delta_pct > 0
-                ? 'text-emerald-600' : payload.trend_delta_pct < 0
-                ? 'text-red-600' : 'text-slate-500')}>
+                ? 'text-emerald-600 dark:text-emerald-300' : payload.trend_delta_pct < 0
+                ? 'text-red-600 dark:text-red-300' : 'text-slate-500 dark:text-slate-300')}>
                 ({payload.trend_delta_pct > 0 ? '▲' : payload.trend_delta_pct < 0 ? '▼' : '▶'}
                 {' '}{Math.abs(payload.trend_delta_pct)}% vs yesterday)
               </span>
@@ -492,7 +492,7 @@ function JourneyChart({ payload }: { payload: BehaviourPayload }) {
               {labels.map((label, j) => (
                 <span key={j} className="flex items-center gap-1">
                   <span className={'px-2 py-1 rounded text-xs ' +
-                    (completed ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700')}>
+                    (completed ? 'vg-on-light bg-emerald-100 text-emerald-800' : 'vg-on-light bg-slate-100 text-slate-700')}>
                     {label}
                   </span>
                   {j < labels.length - 1 && (
@@ -664,8 +664,8 @@ function UniformCompliance({ pct, rag, violations, count }: {
   violations: { time: string | null }[]
   count: number
 }) {
-  const tone = rag === 'green' ? 'text-emerald-600'
-             : rag === 'amber' ? 'text-amber-600' : 'text-red-600'
+  const tone = rag === 'green' ? 'text-emerald-600 dark:text-emerald-300'
+             : rag === 'amber' ? 'text-amber-600 dark:text-amber-300' : 'text-red-600 dark:text-red-300'
   const dot = rag === 'green' ? 'bg-emerald-500'
             : rag === 'amber' ? 'bg-amber-500' : 'bg-red-500'
   return (
@@ -699,9 +699,9 @@ function ComplianceSummary({ uniformPct, nametagViolations, unauthorisedAccess, 
   unauthorisedAccess: number
   verdict: 'Good' | 'Needs attention' | 'Poor'
 }) {
-  const tone = verdict === 'Good' ? 'text-emerald-700 bg-emerald-50'
-             : verdict === 'Needs attention' ? 'text-amber-800 bg-amber-50'
-             : 'text-red-800 bg-red-50'
+  const tone = verdict === 'Good' ? 'vg-on-light text-emerald-700 bg-emerald-50'
+             : verdict === 'Needs attention' ? 'vg-on-light text-amber-800 bg-amber-50'
+             : 'vg-on-light text-red-800 bg-red-50'
   const emoji = verdict === 'Good' ? '✅'
               : verdict === 'Needs attention' ? '⚠️' : '🔴'
   return (
@@ -1060,8 +1060,8 @@ export function ScorecardPanel({ storeId, range }: { storeId: number; range?: Ra
                   <div className="mt-3 flex items-center gap-2 border-t border-slate-100 dark:border-slate-800 pt-2">
                     <RagDot rag={rag} big />
                     <div className={'text-sm font-semibold ' +
-                      (dir === 'better' ? 'text-emerald-700' :
-                       dir === 'worse'  ? 'text-red-700' :
+                      (dir === 'better' ? 'text-emerald-700 dark:text-emerald-300' :
+                       dir === 'worse'  ? 'text-red-700 dark:text-red-300' :
                                           'text-slate-700 dark:text-slate-200')}>
                       vs yesterday:{' '}
                       {dir === 'better' ? '▲ Better overall'
@@ -1097,10 +1097,10 @@ function ChangeCell({ row }: { row: ScorecardRow }) {
   const better = higher ? pct > 0.5 : pct < -0.5
   const worse  = higher ? pct < -0.5 : pct > 0.5
   if (better) {
-    return <span className="text-emerald-600 font-medium">▲ {Math.abs(pct)}%</span>
+    return <span className="text-emerald-600 dark:text-emerald-300 font-medium">▲ {Math.abs(pct)}%</span>
   }
   if (worse) {
-    return <span className="text-red-600 font-medium">▼ {Math.abs(pct)}%</span>
+    return <span className="text-red-600 dark:text-red-300 font-medium">▼ {Math.abs(pct)}%</span>
   }
   return <span className="text-slate-400 dark:text-slate-400">→ 0%</span>
 }
@@ -1110,24 +1110,24 @@ function ChangeCell({ row }: { row: ScorecardRow }) {
 // plus the confidence badge and the spec's footnote.
 function VisitorIntelligenceBand({ vi }: { vi: VisitorIntelligencePayload }) {
   const confidenceColour = vi.confidence === 'high'
-    ? 'bg-emerald-100 text-emerald-800'
+    ? 'vg-on-light bg-emerald-100 text-emerald-800'
     : vi.confidence === 'estimated'
-      ? 'bg-amber-100 text-amber-800'
-      : 'bg-slate-100 text-slate-600'
+      ? 'vg-on-light bg-amber-100 text-amber-800'
+      : 'vg-on-light bg-slate-100 text-slate-600'
   return (
-    <div className="mb-3 rounded border border-sky-100 bg-sky-50 p-3">
+    <div className="vg-on-light mb-3 rounded border border-sky-100 bg-sky-50 p-3">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
         <div>
-          <span className="text-slate-500">Total persons:</span>{' '}
+          <span className="vg-on-light text-slate-500">Total persons:</span>{' '}
           <strong className="tabular-nums">{vi.total_persons}</strong>
         </div>
         <div>
-          <span className="text-slate-500">Staff tracks:</span>{' '}
-          <strong className="tabular-nums text-amber-700">{vi.staff_tracks}</strong>
+          <span className="vg-on-light text-slate-500">Staff tracks:</span>{' '}
+          <strong className="vg-on-light tabular-nums text-amber-700">{vi.staff_tracks}</strong>
         </div>
         <div>
-          <span className="text-slate-500">Estimated customers:</span>{' '}
-          <strong className="tabular-nums text-emerald-700">{vi.estimated_customers}</strong>
+          <span className="vg-on-light text-slate-500">Estimated customers:</span>{' '}
+          <strong className="vg-on-light tabular-nums text-emerald-700">{vi.estimated_customers}</strong>
         </div>
         <div className="ml-auto">
           <span className={'text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ' + confidenceColour}>
@@ -1137,13 +1137,13 @@ function VisitorIntelligenceBand({ vi }: { vi: VisitorIntelligencePayload }) {
         </div>
       </div>
       {vi.total_zones > 0 && (
-        <div className="text-xs text-slate-600 mt-1.5">
+        <div className="vg-on-light text-xs text-slate-600 mt-1.5">
           Average customer visited <strong>{vi.zones_visited_avg.toFixed(1)}</strong> of {vi.total_zones} zones, spent{' '}
           <strong>{Math.floor(vi.avg_dwell_seconds / 60)}m {Math.round(vi.avg_dwell_seconds % 60)}s</strong>{' '}
           in product areas. Visit quality score: <strong>{vi.visit_quality_score}</strong>
         </div>
       )}
-      <div className="text-[11px] text-slate-500 mt-1 italic">
+      <div className="vg-on-light text-[11px] text-slate-500 mt-1 italic">
         {vi.footnote || 'Staff identified by counter presence >10 min'}
       </div>
     </div>
@@ -1214,9 +1214,9 @@ function mmss(seconds: number): string {
 }
 
 const STATUS_BG: Record<'GREEN'|'AMBER'|'RED', string> = {
-  GREEN: 'bg-emerald-100 text-emerald-800',
-  AMBER: 'bg-amber-100 text-amber-800',
-  RED:   'bg-red-100 text-red-800',
+  GREEN: 'vg-on-light bg-emerald-100 text-emerald-800',
+  AMBER: 'vg-on-light bg-amber-100 text-amber-800',
+  RED:   'vg-on-light bg-red-100 text-red-800',
 }
 // Plain-English status labels — operators see these, not GREEN/AMBER/RED.
 const STATUS_DOT: Record<'GREEN'|'AMBER'|'RED', string> = {
@@ -1294,9 +1294,9 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
             {snap.summary.sla_target && <span>Target: under <strong>{snap.summary.sla_target}</strong></span>}
             {intel?.sla?.status && (
               <span className={
-                intel.sla.status === 'OK' ? 'text-emerald-700'
-                : intel.sla.status === 'AT RISK' ? 'text-amber-700'
-                : 'text-red-700'}>
+                intel.sla.status === 'OK' ? 'text-emerald-700 dark:text-emerald-300'
+                : intel.sla.status === 'AT RISK' ? 'text-amber-700 dark:text-amber-300'
+                : 'text-red-700 dark:text-red-300'}>
                 {SLA_BADGE[intel.sla.status]}
               </span>
             )}
@@ -1357,7 +1357,7 @@ export function QueueIntelligencePanel({ storeId, range }: { storeId: number; ra
           )}
 
           {intel.staffing_recommendation && (
-            <div className="bg-amber-50 text-amber-800 rounded px-3 py-2 text-sm">
+            <div className="vg-on-light bg-amber-50 text-amber-800 rounded px-3 py-2 text-sm">
               📋 Add one more staff member at checkout between{' '}
               <strong>{intel.staffing_recommendation}</strong>.
             </div>
@@ -1440,7 +1440,7 @@ function HourlyWaitBars({ hours, sla, busiest }: {
             </div>
             <span className="w-14 text-right tabular-nums">{mmss(h.avg_wait)}</span>
             <span className="w-5 text-center">{emoji}</span>
-            {isBusiest && <span className="text-red-600 font-semibold">← BUSIEST</span>}
+            {isBusiest && <span className="text-red-600 dark:text-red-300 font-semibold">← BUSIEST</span>}
           </div>
         )
       })}

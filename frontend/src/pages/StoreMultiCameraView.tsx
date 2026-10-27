@@ -43,7 +43,7 @@ export default function StoreMultiCameraView() {
 
   if (err) return (
     <div className="p-6"><PageHeader title="Multi-Camera View" />
-      <Card className="p-6 text-sm text-red-600">Could not load. {err}</Card></div>
+      <Card className="p-6 text-sm text-red-600 dark:text-red-300">Could not load. {err}</Card></div>
   )
   if (!data) return (
     <div className="p-6"><PageHeader title="Multi-Camera View" />
@@ -61,7 +61,7 @@ export default function StoreMultiCameraView() {
         title={`${data.store_name} — Multi-Camera View`}
         actions={
           <Link to={`/stores/${data.store_id}`}
-                className="text-sm text-sky-600 hover:underline">← Store</Link>
+                className="text-sm text-sky-600 dark:text-sky-300 hover:underline">← Store</Link>
         }
       />
 
@@ -69,8 +69,8 @@ export default function StoreMultiCameraView() {
       <Card className="p-4 mb-4 flex flex-wrap items-center gap-x-6 gap-y-2">
         <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">
           Total Footfall today:
-          <span className="text-emerald-600"> {data.totals.in} in</span>
-          {' / '}<span className="text-amber-600">{data.totals.out} out</span>
+          <span className="text-emerald-600 dark:text-emerald-300"> {data.totals.in} in</span>
+          {' / '}<span className="text-amber-600 dark:text-amber-300">{data.totals.out} out</span>
         </div>
         <div className="text-sm text-slate-700 dark:text-slate-200">
           Net: <strong>{data.totals.net} visitors</strong>
@@ -121,7 +121,7 @@ function CamTile({ cam, dets }: {
         <div className="truncate flex-1 font-medium text-slate-800 dark:text-slate-100">
           {cam.name}
           {cam.entrance && (
-            <span className="ml-1 text-[10px] text-sky-600">entrance</span>
+            <span className="ml-1 text-[10px] text-sky-600 dark:text-sky-300">entrance</span>
           )}
         </div>
         <Badge color={cam.status === 'online' ? 'green' : 'amber'}>{cam.status}</Badge>
@@ -134,8 +134,8 @@ function CamTile({ cam, dets }: {
         <DetBoxes dets={dets} />
       </div>
       <div className="mt-1.5 text-xs text-slate-600 dark:text-slate-300 flex gap-4">
-        <span>In: <strong className="text-emerald-600">{cam.in}</strong></span>
-        <span>Out: <strong className="text-amber-600">{cam.out}</strong></span>
+        <span>In: <strong className="text-emerald-600 dark:text-emerald-300">{cam.in}</strong></span>
+        <span>Out: <strong className="text-amber-600 dark:text-amber-300">{cam.out}</strong></span>
         <span>Current: <strong>{cam.occupancy}</strong></span>
       </div>
     </Card>

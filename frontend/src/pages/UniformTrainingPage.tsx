@@ -250,7 +250,7 @@ export default function UniformTrainingPage() {
       />
 
       {/* Capture tips */}
-      <Card className="p-3 bg-sky-50 border-sky-200 text-sm text-sky-900">
+      <Card className="p-3 bg-sky-50 border-sky-200 text-sm text-sky-900 dark:bg-sky-950 dark:border-sky-900 dark:text-sky-100">
         📸 <strong>Tips for good training data:</strong>
         <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
           <li>Capture staff at the counter from the camera's angle.</li>
@@ -289,13 +289,13 @@ export default function UniformTrainingPage() {
           <Card className="p-3">
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Store</span>
-              <select className="border rounded px-2 py-1 text-sm"
+              <select className="border rounded px-2 py-1 text-sm dark:bg-slate-800 dark:border-slate-600"
                       value={storeFilter} onChange={e => pickFirstInStore(e.target.value)}>
                 <option value="">All stores</option>
                 {storeOptions.map(([id, name]) => <option key={id} value={String(id)}>{name}</option>)}
               </select>
               <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-300">Camera</span>
-              <select className="border rounded px-2 py-1 text-sm min-w-[220px]"
+              <select className="border rounded px-2 py-1 text-sm min-w-[220px] dark:bg-slate-800 dark:border-slate-600"
                       value={selected ?? ''} onChange={e => selectCamera(Number(e.target.value))}>
                 {grouped.map(([storeName, cams]) => (
                   <optgroup key={storeName} label={storeName}>
@@ -315,7 +315,7 @@ export default function UniformTrainingPage() {
             </div>
             {current && (
               <div className={'mt-2 text-xs rounded px-2 py-1 inline-block ' +
-                (current.has_counter_zone ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700')}>
+                (current.has_counter_zone ? 'vg-on-light bg-emerald-50 text-emerald-700' : 'vg-on-light bg-amber-50 text-amber-700')}>
                 {current.has_counter_zone
                   ? '✅ Counter zone configured — compliance will be scored here.'
                   : '⚠️ No counter/staff zone — draw one so the detector knows where staff stand.'}
@@ -335,7 +335,7 @@ export default function UniformTrainingPage() {
                   return (
                     <button key={id} onClick={() => selectCamera(id)}
                             className={'rounded px-2 py-1 border ' +
-                              (id === selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200 dark:border-slate-800')}>
+                              (id === selected ? 'vg-on-light border-blue-400 bg-blue-50' : 'border-slate-200 dark:border-slate-800')}>
                       <span className="font-medium">{cam.camera_name}</span>{': '}{tot}/{MIN_PER_CLASS} {done ? '✅' : '🔄'}
                     </button>
                   )
@@ -408,7 +408,7 @@ export default function UniformTrainingPage() {
                     <div key={l}>
                       <div className="flex justify-between text-xs mb-0.5">
                         <span>{LABEL_TEXT[l]}</span>
-                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600' : 'text-slate-500 dark:text-slate-300'}>
+                        <span className={n >= MIN_PER_CLASS ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-300'}>
                           {n} / {MIN_PER_CLASS}
                         </span>
                       </div>
@@ -421,7 +421,7 @@ export default function UniformTrainingPage() {
                 })}
               </div>
               <div className={'mt-3 text-sm rounded px-3 py-2 ' +
-                (ready ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300')}>
+                (ready ? 'vg-on-light bg-emerald-50 text-emerald-800' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300')}>
                 {ready ? '✅ Enough frames to train.'
                        : `Collect at least ${MIN_PER_CLASS} frames per class to enable training.`}
               </div>
@@ -443,7 +443,7 @@ export default function UniformTrainingPage() {
                          style={{ width: `${Math.max(2, ((train.epoch ?? 0) / train.total_epochs) * 100)}%` }} />
                   </div>
                 ) : null}
-                {train.state === 'failed' && <div className="text-xs text-red-600 mt-2">{train.message}</div>}
+                {train.state === 'failed' && <div className="text-xs text-red-600 dark:text-red-300 mt-2">{train.message}</div>}
                 {train.state === 'done' && train.report && (
                   <div className="mt-3 text-sm bg-slate-50 dark:bg-slate-800 rounded p-3">
                     <div className="font-medium mb-1">Training complete</div>
@@ -520,11 +520,11 @@ function UploadDropZone({ busy, onDrop }: {
         if (!busy && e.dataTransfer.files.length) onDrop(lastLabel, e.dataTransfer.files)
       }}
       className={'rounded border-2 border-dashed px-3 py-4 text-center text-xs transition-colors '
-                 + (dragging ? 'border-blue-400 bg-blue-50 text-blue-700'
+                 + (dragging ? 'vg-on-light border-blue-400 bg-blue-50 text-blue-700'
                              : 'border-slate-300 dark:border-slate-800 text-slate-500 dark:text-slate-300')}>
       📥 Drop images here — they'll be saved as{' '}
       <select value={lastLabel} onChange={e => setLastLabel(e.target.value as Label)}
-              className="border rounded px-1 py-0.5 text-xs">
+              className="border rounded px-1 py-0.5 text-xs dark:bg-slate-800 dark:border-slate-600">
         {LABELS.map(l => <option key={l} value={l}>{LABEL_TEXT[l]}</option>)}
       </select>
     </div>

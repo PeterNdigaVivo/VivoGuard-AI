@@ -137,7 +137,7 @@ export default function StoreDashboardPage() {
   }, [storeId, range.since, range.until])
 
   if (loading && !data) return <DashboardSkeleton />
-  if (error)  return <div className="p-6 text-red-600">Error: {error}</div>
+  if (error)  return <div className="p-6 text-red-600 dark:text-red-300">Error: {error}</div>
   if (!data)  return <DashboardSkeleton />
 
   // Freshness pill — green <30s, amber 30–60s, red >60s. The pill
@@ -149,9 +149,9 @@ export default function StoreDashboardPage() {
                  : ageSec < 60 ? 'amber' : 'red'
   const freshness = (
     <span className={'inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full ' +
-      (ageColor === 'green' ? 'bg-emerald-50 text-emerald-700' :
-       ageColor === 'amber' ? 'bg-amber-50 text-amber-700' :
-       ageColor === 'red'   ? 'bg-red-50 text-red-700' :
+      (ageColor === 'green' ? 'vg-on-light bg-emerald-50 text-emerald-700' :
+       ageColor === 'amber' ? 'vg-on-light bg-amber-50 text-amber-700' :
+       ageColor === 'red'   ? 'vg-on-light bg-red-50 text-red-700' :
                               'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300')}>
       <span className={'w-2 h-2 rounded-full ' +
         (ageColor === 'green' ? 'bg-emerald-500 animate-pulse' :
@@ -172,7 +172,7 @@ export default function StoreDashboardPage() {
         <PageHeader title={data.store_name} actions={freshness} />
         <Card className="p-8 text-center text-slate-500 dark:text-slate-300">
           No cameras attached to this store yet.{' '}
-          <Link to="/cameras" className="text-sky-600 underline">Attach one</Link>{' '}
+          <Link to="/cameras" className="text-sky-600 dark:text-sky-300 underline">Attach one</Link>{' '}
           to start collecting data.
         </Card>
       </div>
@@ -237,8 +237,8 @@ export default function StoreDashboardPage() {
       {banner && (
         <div className={'rounded-md border px-3 py-2 text-sm ' +
           (banner.tone === 'red'
-            ? 'bg-red-50 border-red-200 text-red-800'
-            : 'bg-amber-50 border-amber-200 text-amber-800')}>
+            ? 'vg-on-light bg-red-50 border-red-200 text-red-800'
+            : 'vg-on-light bg-amber-50 border-amber-200 text-amber-800')}>
           {banner.text}
         </div>
       )}
@@ -426,7 +426,7 @@ function PeakPredictionBanner({ storeId }: { storeId: number }) {
   }, [storeId])
   if (!pred || !pred.label) return null
   return (
-    <div className="rounded-md border border-sky-200 bg-sky-50 text-sky-800 px-3 py-2 text-sm">
+    <div className="vg-on-light rounded-md border border-sky-200 bg-sky-50 text-sky-800 px-3 py-2 text-sm">
       🔮 {pred.headline}
     </div>
   )
@@ -584,7 +584,7 @@ function StatusStrip({ data, rangeLabel }: { data: LiveResponse; rangeLabel: str
                     text-slate-500 dark:text-slate-300">
       <span className={'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-medium '
         + (data.is_open
-            ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+            ? 'vg-on-light bg-emerald-50 border-emerald-200 text-emerald-700'
             : 'bg-slate-100 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300')}>
         <span className={'w-1.5 h-1.5 rounded-full ' + (data.is_open ? 'bg-emerald-500' : 'bg-slate-400')} />
         {data.is_open ? 'Open now' : 'Closed'}
@@ -593,7 +593,7 @@ function StatusStrip({ data, rangeLabel }: { data: LiveResponse; rangeLabel: str
       {data.hours_label && <span>· {data.hours_label}</span>}
       {(data.high_alert_count ?? 0) > 0 && (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border
-                         bg-red-50 border-red-200 text-red-800 text-[11px] font-medium">
+                         vg-on-light bg-red-50 border-red-200 text-red-800 text-[11px] font-medium">
           🔴 {data.high_alert_count} high-priority
         </span>
       )}
@@ -603,7 +603,7 @@ function StatusStrip({ data, rangeLabel }: { data: LiveResponse; rangeLabel: str
       {/* Only surfaced when something is actually wrong. */}
       {camFault && (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border
-                         bg-amber-50 border-amber-200 text-amber-800 text-[11px] font-medium">
+                         vg-on-light bg-amber-50 border-amber-200 text-amber-800 text-[11px] font-medium">
           ⚠ {total - online} of {total} cameras offline
         </span>
       )}
@@ -627,7 +627,7 @@ function SystemDiagnostics({ data }: { data: LiveResponse }) {
         <div>
           <dt className="text-xs text-slate-500 dark:text-slate-400">Cameras streaming</dt>
           <dd className={'font-semibold tabular-nums '
-            + (online === 0 ? 'text-red-600' : online < total ? 'text-amber-600' : 'text-emerald-700')}>
+            + (online === 0 ? 'text-red-600 dark:text-red-300' : online < total ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300')}>
             {online}/{total}
           </dd>
         </div>
@@ -666,8 +666,8 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
   badge?: { text: string; tone: 'emerald' | 'slate' | 'amber' } | null
 }) {
   const badgeCls =
-    badge?.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-    badge?.tone === 'amber'   ? 'bg-amber-50  text-amber-700  border-amber-200' :
+    badge?.tone === 'emerald' ? 'vg-on-light bg-emerald-50 text-emerald-700 border-emerald-200' :
+    badge?.tone === 'amber'   ? 'vg-on-light bg-amber-50  text-amber-700  border-amber-200' :
                                  'bg-slate-50  text-slate-600  border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-800'
   // A tile with no measurement is greyed and says so, rather than
   // sitting at the same visual weight as a real number. Trend pills are
@@ -681,7 +681,7 @@ function Kpi({ label, value, big, sub, trendDir, trendPct, dimmed, badge }: {
                        + (noData ? 'text-slate-300 dark:text-slate-600'
                                  : dimmed ? 'text-slate-400' : '')}>{value}</div>
       {noData && (
-        <div className="text-xs text-slate-400 dark:text-slate-500 mt-1">Not measured</div>
+        <div className="text-xs text-slate-400 dark:text-slate-400 mt-1">Not measured</div>
       )}
       {sub && !noData && <div className="text-xs text-slate-500 dark:text-slate-300 mt-1">{sub}</div>}
       {!noData && trendDir && trendPct !== undefined && (
@@ -814,8 +814,8 @@ function WeekSection({ storeId }: { storeId: number }) {
                 <td className="text-right py-1">{row.events_week}</td>
                 <td className="py-1">
                   {row.status === 'active'
-                    ? <span className="text-emerald-600 text-xs">✅ Active</span>
-                    : <span className="text-amber-600 text-xs">⚙️ Needs zone</span>}
+                    ? <span className="text-emerald-600 dark:text-emerald-300 text-xs">✅ Active</span>
+                    : <span className="text-amber-600 dark:text-amber-300 text-xs">⚙️ Needs zone</span>}
                 </td>
               </tr>
             ))}
@@ -867,7 +867,7 @@ function AlertsFeedSection({ storeId }: { storeId: number }) {
             <div className="text-xs text-slate-400 mt-1">
               If you expect alerts but see none, check that detectors are
               enabled on each camera under{' '}
-              <Link to="/detectors" className="text-sky-600 hover:underline">Detectors</Link>{' '}
+              <Link to="/detectors" className="text-sky-600 dark:text-sky-300 hover:underline">Detectors</Link>{' '}
               and that detection_events are being written. From the host:
               <pre className="bg-slate-50 dark:bg-slate-800 rounded p-2 mt-1 text-[11px] font-mono">{`docker compose exec postgres psql -U $POSTGRES_USER $POSTGRES_DB \\
   -c "SELECT COUNT(*) FROM detection_events

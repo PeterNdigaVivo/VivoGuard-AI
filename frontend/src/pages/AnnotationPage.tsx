@@ -212,7 +212,7 @@ export default function AnnotationPage() {
               {cameras.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </Select>
           </label>
-          <label className="text-sm bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded cursor-pointer">
+          <label className="vg-on-light text-sm bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded cursor-pointer">
             Upload images
             <input type="file" multiple accept="image/*" hidden
                    onChange={e => uploadFiles(e.target.files)} />
@@ -237,7 +237,7 @@ export default function AnnotationPage() {
                   {currentImage.review_state.replaceAll('_', ' ')}
                 </Badge>
                 {!currentImage.eligible_for_training &&
-                  <span className="text-amber-700">Excluded from training until review is complete.</span>}
+                  <span className="text-amber-700 dark:text-amber-300">Excluded from training until review is complete.</span>}
               </div>
             )}
             <div ref={containerRef} className="relative bg-slate-200 dark:bg-slate-800 select-none"
@@ -288,9 +288,9 @@ export default function AnnotationPage() {
                       disabled={idx >= images.length - 1}>Next (N)</Button>
             </div>
             {isLiveSimulationEvidence && currentImage.review_state === 'pending_independent_review' && (
-              <div className="mt-4 rounded border border-sky-200 bg-sky-50 p-3">
-                <div className="font-medium text-sm text-sky-900">Independent review</div>
-                <div className="text-xs text-sky-800 mt-1">
+              <div className="mt-4 rounded border border-sky-200 bg-sky-50 p-3 dark:border-sky-900 dark:bg-sky-950">
+                <div className="font-medium text-sm text-sky-900 dark:text-sky-300">Independent review</div>
+                <div className="text-xs text-sky-800 dark:text-sky-300 mt-1">
                   A different operator must compare the real frame with the boxes. Approval never applies to synthetic scenarios.
                 </div>
                 <Input className="mt-2" value={reviewRationale}
@@ -302,7 +302,7 @@ export default function AnnotationPage() {
                 </div>
               </div>
             )}
-            {actionMessage && <div className="mt-3 text-sm text-slate-700">{actionMessage}</div>}
+            {actionMessage && <div className="mt-3 text-sm text-slate-700 dark:text-white">{actionMessage}</div>}
           </Card>
         </div>
 
@@ -315,9 +315,9 @@ export default function AnnotationPage() {
               <div key={i}
                    onClick={() => setSelectedBox(i)}
                    className={'flex items-center justify-between text-sm py-1 px-2 rounded cursor-pointer ' +
-                              (selectedBox === i ? 'bg-amber-50' : '')}>
+                              (selectedBox === i ? 'bg-amber-50 dark:bg-amber-950' : '')}>
                 <span><Badge color={b.auto ? 'sky' : 'green'}>{b.class_label}</Badge></span>
-                <button className="text-red-600 hover:underline"
+                <button className="text-red-600 dark:text-red-300 hover:underline"
                         onClick={(e) => { e.stopPropagation(); setBoxes(bs => bs.filter((_, j) => j !== i)) }}>×</button>
               </div>
             ))}

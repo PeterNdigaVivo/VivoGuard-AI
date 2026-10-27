@@ -36,7 +36,7 @@ export default function EvaluationPage() {
     <div className="p-6 space-y-4">
       <PageHeader title="Model evaluation" />
       {error && (
-        <Card className="p-3 text-sm text-red-800 bg-red-50 border-red-200">
+        <Card className="p-3 text-sm text-red-800 bg-red-50 border-red-200 dark:bg-red-950 dark:border-red-900 dark:text-red-200">
           Could not load the test set: {error}
         </Card>
       )}
@@ -45,7 +45,7 @@ export default function EvaluationPage() {
         {(['people', 'clip'] as LabelKind[]).map(k => (
           <button key={k} type="button" onClick={() => setTab(k)}
                   className={'px-3 py-1.5 rounded text-sm font-medium '
-                    + (tab === k ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200')}>
+                    + (tab === k ? 'bg-slate-800 text-white' : 'vg-on-light bg-slate-100 text-slate-700 hover:bg-slate-200')}>
             {k === 'people' ? 'Label people' : 'Count people in clips'}
           </button>
         ))}
@@ -60,14 +60,14 @@ function SummaryCard({ summary }: { summary: EvalSummary }) {
   return (
     <Card className="p-4 text-sm space-y-3">
       {!summary.collection_enabled && (
-        <div className="rounded border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2">
+        <div className="vg-on-light rounded border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2">
           Collection is switched off (EVAL_CAPTURE_RAW_FRAMES=false), so the test set is not growing.
         </div>
       )}
       <div>
-        <div className="font-semibold text-slate-800 mb-1">Reviewed alerts (labelled by operators)</div>
+        <div className="font-semibold text-slate-800 dark:text-white mb-1">Reviewed alerts (labelled by operators)</div>
         <table className="text-left">
-          <thead className="text-xs text-slate-500">
+          <thead className="text-xs text-slate-500 dark:text-slate-300">
             <tr><th className="pr-6">Alert type</th><th className="pr-6">Samples</th>
                 <th className="pr-6">Marked True</th><th>Marked False</th></tr>
           </thead>
@@ -86,11 +86,11 @@ function SummaryCard({ summary }: { summary: EvalSummary }) {
           </tbody>
         </table>
       </div>
-      <div className="text-slate-700">
+      <div className="text-slate-700 dark:text-white">
         People frames: {progressText(summary.people, t.people)}<br />
         Clips: {progressText(summary.clips, t.clips)}
       </div>
-      <div className="text-xs text-slate-500">
+      <div className="text-xs text-slate-500 dark:text-white">
         Test images are kept on the server for {summary.retention_days} days, visible to system admins only.
       </div>
     </Card>
@@ -139,10 +139,10 @@ function Labeller({ kind, onSaved }: { kind: LabelKind; onSaved: () => void }) {
     }
   }
 
-  if (sample === undefined) return <Card className="p-6 text-sm text-slate-500">Loading…</Card>
+  if (sample === undefined) return <Card className="p-6 text-sm text-slate-500 dark:text-slate-300">Loading…</Card>
   if (sample === null) {
     return (
-      <Card className="p-6 text-sm text-slate-600">
+      <Card className="p-6 text-sm text-slate-600 dark:text-white">
         Nothing waiting to be labelled. New {kind === 'people' ? 'frames' : 'clips'} arrive
         automatically while collection is switched on.
       </Card>
@@ -154,13 +154,13 @@ function Labeller({ kind, onSaved }: { kind: LabelKind; onSaved: () => void }) {
 
   return (
     <Card className="p-4 space-y-3">
-      <div className="text-sm text-slate-700">
+      <div className="text-sm text-slate-700 dark:text-white">
         {kind === 'people'
           ? <>Click once on <strong>every person</strong> you can see — including people partly hidden or at the edge. Click nothing if the frame is empty.</>
           : <>Watch the clip and enter how many <strong>different people</strong> appear in it.</>}
-        <span className="ml-2 text-xs text-slate-500">Camera {sample.camera_id ?? '—'}</span>
+        <span className="ml-2 text-xs text-slate-500 dark:text-slate-300">Camera {sample.camera_id ?? '—'}</span>
       </div>
-      {error && <div className="text-sm text-red-700" role="alert">{error}</div>}
+      {error && <div className="text-sm text-red-700 dark:text-red-300" role="alert">{error}</div>}
 
       {kind === 'people' && url && (
         <div className="relative inline-block max-w-full select-none">
@@ -180,11 +180,11 @@ function Labeller({ kind, onSaved }: { kind: LabelKind; onSaved: () => void }) {
       <div className="flex flex-wrap items-center gap-2">
         {kind === 'people' ? (
           <>
-            <span className="text-sm font-medium text-slate-800 tabular-nums">
+            <span className="text-sm font-medium text-slate-800 dark:text-white tabular-nums">
               {points.length} {points.length === 1 ? 'person' : 'people'} marked
             </span>
             <button type="button" disabled={!points.length || busy} onClick={() => setPoints(ps => ps.slice(0, -1))}
-                    className="px-3 py-1.5 rounded bg-slate-100 text-slate-700 text-sm hover:bg-slate-200 disabled:opacity-50">
+                    className="vg-on-light px-3 py-1.5 rounded bg-slate-100 text-slate-700 text-sm hover:bg-slate-200 disabled:opacity-50">
               Undo last
             </button>
             <button type="button" disabled={busy} onClick={() => save({ points })}
@@ -194,7 +194,7 @@ function Labeller({ kind, onSaved }: { kind: LabelKind; onSaved: () => void }) {
           </>
         ) : (
           <>
-            <label className="text-sm text-slate-800">
+            <label className="text-sm text-slate-800 dark:text-white">
               People in clip{' '}
               <input type="number" min={0} max={200} value={count} onChange={e => setCount(e.target.value)}
                      className="ml-1 w-20 border rounded px-2 py-1 text-sm" />
@@ -206,7 +206,7 @@ function Labeller({ kind, onSaved }: { kind: LabelKind; onSaved: () => void }) {
           </>
         )}
         <button type="button" disabled={busy} onClick={() => save({ skip: true })}
-                className="px-3 py-1.5 rounded bg-slate-100 text-slate-700 text-sm hover:bg-slate-200 disabled:opacity-50"
+                className="vg-on-light px-3 py-1.5 rounded bg-slate-100 text-slate-700 text-sm hover:bg-slate-200 disabled:opacity-50"
                 title="Unclear picture — leave it out of the test set">
           Skip
         </button>

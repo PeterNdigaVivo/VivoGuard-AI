@@ -60,7 +60,7 @@ export default function StoreHeatmapsPage() {
           <Button variant={mode === 'flow' ? 'primary' : 'ghost'}
                   onClick={() => setMode('flow')}>🧭 Customer flow</Button>
           <Link to={`/stores/${storeId}`}
-                className="text-sky-600 hover:underline self-center ml-2">← Store dashboard</Link>
+                className="text-sky-600 dark:text-sky-300 hover:underline self-center ml-2">← Store dashboard</Link>
         </>}
       />
 
@@ -158,7 +158,7 @@ function HeatmapCard({ c }: { c: CameraHeatmap }) {
                className="absolute inset-0 w-full h-full pointer-events-none mix-blend-screen" />
         )}
         {!snapshot && !heatmap && (
-          <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-sm">
+          <div className="absolute inset-0 flex items-center justify-center text-slate-500 dark:text-slate-300 text-sm">
             Loading…
           </div>
         )}
@@ -169,7 +169,7 @@ function HeatmapCard({ c }: { c: CameraHeatmap }) {
                  top:  `${c.hotspot.norm_y * 100}%`,
                  transform: 'translate(-50%, -100%)',
                }}>
-            <div className="bg-amber-400 text-black text-xs px-2 py-0.5 rounded shadow whitespace-nowrap">
+            <div className="vg-on-light bg-amber-400 text-black text-xs px-2 py-0.5 rounded shadow whitespace-nowrap">
               {c.rank_label ?? 'Hotspot'}
             </div>
           </div>
@@ -181,11 +181,11 @@ function HeatmapCard({ c }: { c: CameraHeatmap }) {
         </span>
         <button onClick={download}
                 disabled={!heatmap}
-                className="text-sky-600 hover:underline disabled:text-slate-400 disabled:no-underline disabled:cursor-not-allowed">
+                className="text-sky-600 dark:text-sky-300 hover:underline disabled:text-slate-400 disabled:no-underline disabled:cursor-not-allowed">
           Download PNG
         </button>
       </div>
-      {error && <div className="text-red-600 text-xs mt-1">{error}</div>}
+      {error && <div className="text-red-600 dark:text-red-300 text-xs mt-1">{error}</div>}
     </Card>
   )
 }

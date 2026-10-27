@@ -64,10 +64,10 @@ export default function DisagreementAdjudicationPanel({ onClose }: {
         <Button variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {error && <div className="mb-3 text-sm text-red-700">{error}</div>}
-      {cases === null && <div className="text-sm text-slate-500">Loading disagreements…</div>}
+      {error && <div className="mb-3 text-sm text-red-700 dark:text-red-300">{error}</div>}
+      {cases === null && <div className="text-sm text-slate-500 dark:text-slate-300">Loading disagreements…</div>}
       {cases?.length === 0 && (
-        <div className="text-sm text-emerald-700">No disagreements require adjudication.</div>
+        <div className="text-sm text-emerald-700 dark:text-emerald-300">No disagreements require adjudication.</div>
       )}
       {cases && cases.length > 0 && (
         <div className="grid md:grid-cols-[17rem_1fr] gap-4">
@@ -79,7 +79,7 @@ export default function DisagreementAdjudicationPanel({ onClose }: {
                     ? 'border-violet-500 bg-violet-50 dark:bg-slate-800'
                     : 'border-slate-200 dark:border-slate-700')}>
                 <div className="font-medium">Case #{row.id} · Alert #{row.alert_id ?? '—'}</div>
-                <div className="text-slate-500">{row.title}</div>
+                <div className="text-slate-500 dark:text-slate-300">{row.title}</div>
               </button>
             ))}
           </div>
@@ -91,7 +91,7 @@ export default function DisagreementAdjudicationPanel({ onClose }: {
                 {String(selected.evidence?.independent_verdict ?? 'unknown')}
               </div>
               {selected.alert_id && (
-                <a className="text-sm text-sky-600 hover:underline"
+                <a className="text-sm text-sky-600 dark:text-sky-300 hover:underline"
                   href={`/alerts?search=${selected.alert_id}`} target="_blank" rel="noreferrer">
                   Open alert evidence ↗
                 </a>
@@ -107,7 +107,7 @@ export default function DisagreementAdjudicationPanel({ onClose }: {
                 <Button variant="ghost" disabled={busy || rationale.trim().length < 8}
                   onClick={() => adjudicate('unclear')}>Evidence unclear</Button>
               </div>
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-300">
                 If this camera-detector pair is quality-controlled, adjudication will not bypass that quarantine.
               </p>
             </div>

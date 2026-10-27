@@ -27,6 +27,12 @@ body {
   transition: color 200ms ease;
 }
 html.dark body { color: #e2e8f0; }          /* slate-200 */
+/* Areas that stay light in dark mode (alert cards, light badges and
+   warning boxes) carry `vg-on-light`: text inside them that has no colour
+   of its own stays dark instead of inheriting the light body colour.
+   :where() gives the rule zero specificity, so an element's own text
+   colour class (e.g. text-amber-800) always wins. See lib/darkModeLint.ts. */
+:where(html.dark .vg-on-light) { color: #0f172a; }  /* slate-900 */
 @media (prefers-reduced-motion: reduce) {
   html { transition: none; }
 }

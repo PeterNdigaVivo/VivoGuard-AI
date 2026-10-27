@@ -73,7 +73,7 @@ export default function StoreDetailPage() {
     return () => clearInterval(t)
   }, [storeId])
 
-  if (error) return <div className="p-6 text-red-600">Error: {error}</div>
+  if (error) return <div className="p-6 text-red-600 dark:text-red-300">Error: {error}</div>
   if (!store || cams === null) {
     return (
       <div className="p-6 space-y-4">
@@ -97,7 +97,7 @@ export default function StoreDetailPage() {
         </div>
         <div className="flex items-center gap-3">
           {live?.status_light && <StatusLight value={live.status_light} />}
-          <Link to={`/stores/${storeId}/analytics`} className="text-sky-600 hover:underline">
+          <Link to={`/stores/${storeId}/analytics`} className="text-sky-600 dark:text-sky-300 hover:underline">
             Full analytics →
           </Link>
           <Link to="/stores">
@@ -161,7 +161,7 @@ export default function StoreDetailPage() {
           </div>
           <div className="text-xs text-slate-500 dark:text-slate-300 mt-2">
             Updated {new Date(live.as_of).toLocaleTimeString()}.
-            See the <Link to={`/stores/${storeId}/analytics`} className="text-sky-600 hover:underline">full analytics</Link>.
+            See the <Link to={`/stores/${storeId}/analytics`} className="text-sky-600 dark:text-sky-300 hover:underline">full analytics</Link>.
           </div>
         </section>
       )}
@@ -200,7 +200,7 @@ function CameraCard({ cam }: { cam: CameraWithZones }) {
       </div>
       <div className="mt-3 flex justify-between">
         <Link to={`/cameras/${cam.id}/setup`}
-              className="text-sm text-sky-600 hover:underline">
+              className="text-sm text-sky-600 dark:text-sky-300 hover:underline">
           {configured ? 'Edit zones' : 'Configure AI'}
         </Link>
         <Link to={`/cameras/${cam.id}/heatmap`}

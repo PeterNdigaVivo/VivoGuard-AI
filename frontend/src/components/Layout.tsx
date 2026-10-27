@@ -108,7 +108,7 @@ export default function Layout() {
             <span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
           <div className="truncate">{user?.email}</div>
-          <div className="text-slate-500 mb-2 capitalize">{user?.role}</div>
+          <div className="text-slate-500 dark:text-slate-300 mb-2 capitalize">{user?.role}</div>
           <button onClick={() => { logout(); nav('/login') }}
                   className="text-sky-400 hover:underline">Sign out</button>
         </div>
@@ -212,7 +212,7 @@ function UrgentRibbon({ urgent, critical, onElement }: {
       <span className="text-sm font-semibold flex-1 truncate">{message}</span>
       <button
         onClick={() => nav('/alerts')}
-        className="px-3 py-1 rounded bg-white text-red-700 text-xs font-semibold hover:bg-red-50">
+        className="vg-on-light px-3 py-1 rounded bg-white text-red-700 text-xs font-semibold hover:bg-red-50">
         View Alerts
       </button>
       <button
