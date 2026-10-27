@@ -7,6 +7,7 @@ made the chain /alerts page and the per-store feed render
 inconsistently) and just renders what we send.
 """
 from __future__ import annotations
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -577,12 +578,31 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
         return ["Check the live camera",
                 "Decide whether action is needed",
                 "Mark resolved when handled"]
+    # When a number is not configured we must NOT substitute a word for
+    # it. The old fallbacks turned "Call building security:
+    # {security_phone}" into "Call building security: building security"
+    # - which is what an operator actually saw at 4:31am on an URGENT
+    # before-hours alert, where the instruction that matters most is the
+    # one telling them who to ring. Nothing is configured today: all
+    # three settings are empty and 0 of 26 stores has a manager_phone.
+    #
+    # So an unknown number collapses to empty and the dangling "label: "
+    # is trimmed off, leaving "Call building security" - still the right
+    # instruction, without pretending a number is present.
     store_phone = (getattr(store, "manager_phone", None)
-                   or getattr(settings, "store_default_phone", "") or "the store")
-    security_phone = getattr(settings, "security_phone", "") or "building security"
-    it_phone = getattr(settings, "it_support_phone", "") or "IT support"
-    return [s.format(store_phone=store_phone, security_phone=security_phone,
-                     it_phone=it_phone) for s in steps]
+                   or getattr(settings, "store_default_phone", "") or "")
+    security_phone = getattr(settings, "security_phone", "") or ""
+    it_phone = getattr(settings, "it_support_phone", "") or ""
+    out: list[str] = []
+    for step in steps:
+        text = step.format(store_phone=store_phone,
+                           security_phone=security_phone,
+                           it_phone=it_phone)
+        # Trim a trailing colon (and any space before it) left behind by
+        # an empty number, e.g. "Call the store: " -> "Call the store".
+        text = re.sub(r"\s*:\s*$", "", text).strip()
+        out.append(text)
+    return out
 
 
 # Per-type emoji prefix for the title — the spec called these out
