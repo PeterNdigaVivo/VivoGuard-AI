@@ -464,12 +464,21 @@ def _what_to_do(event: DetectionEvent, store, zone: Zone | None = None) -> list[
                      "Call building security: {security_phone}",
                      "Do not enter the store alone"]
     elif dt == "audio_distress":
-        # Deliberately opens with looking rather than acting. The mic
+        # Deliberately opens with checking rather than acting. The mic
         # hears volume and harmonics, not intent - a cheer, a greeting
         # across the shop and an argument are the same signal to it.
-        steps = ["Open the live camera and look before acting",
-                 "If it is a confrontation, send a supervisor",
-                 "Mark False Alert if it was ordinary noise"]
+        # When the sample was kept, listening settles that in seconds
+        # and comes first; otherwise the live camera is the only check
+        # available and the moment itself is already gone.
+        if (event.extra or {}).get("audio_clip_path"):
+            steps = ["Play the sound — was it a confrontation or a cheer?",
+                     "If it is a confrontation, open the live camera and "
+                     "send a supervisor",
+                     "Mark False Alert if it was ordinary noise"]
+        else:
+            steps = ["Open the live camera and look before acting",
+                     "If it is a confrontation, send a supervisor",
+                     "Mark False Alert if it was ordinary noise"]
     elif dt == "uniform_compliance":
         if (event.extra or {}).get("rule") == "no_lanyard":
             steps = ["Remind the staff member to wear their name tag",
@@ -989,11 +998,22 @@ def _body(event: DetectionEvent, zone: Zone | None, store=None) -> str:
                          "open the live camera to see what is happening.")
         # Said plainly because an operator will reasonably wonder, and
         # because the answer is the reason this detector is allowed to
-        # exist at all.
-        lines.append("Nothing was recorded and no speech was transcribed — "
-                     "only loudness and frequency were measured. Check the "
-                     "camera before treating this as a confrontation; a "
-                     "cheer or a raised greeting reads the same way.")
+        # exist at all. The wording tracks what was actually kept — a
+        # card that promises "nothing was recorded" beside a play button
+        # is worse than no promise at all.
+        if extra.get("audio_clip_path"):
+            secs = extra.get("audio_clip_seconds")
+            how_long = f"{float(secs):.0f}-second" if secs else "short"
+            lines.append(f"Press play to hear the {how_long} sample that "
+                         f"set this off — a cheer or a raised greeting "
+                         f"measures the same as a confrontation, so listen "
+                         f"before you act. Nothing was transcribed, and the "
+                         f"sample is deleted after 48 hours.")
+        else:
+            lines.append("Nothing was recorded and no speech was transcribed "
+                         "— only loudness and frequency were measured. Check "
+                         "the camera before treating this as a confrontation; "
+                         "a cheer or a raised greeting reads the same way.")
         return (chr(10) + chr(10)).join(lines)
     if dt == "fitting_room":
         n = extra.get("occupancy")
@@ -1344,6 +1364,13 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
         item.clip_status = (
             "pending" if age_seconds is not None and age_seconds <= 180
             else "unavailable")
+    # Audio sample for audio_distress alerts. Like the clip, only the
+    # URL is exposed — the path stays server-side. No "pending" state:
+    # the sample is written synchronously with the alert, so its absence
+    # is final rather than a race.
+    has_audio = bool(extra.get("audio_clip_path"))
+    item.audio_clip_url = f"/api/alerts/{alert.id}/audio" if has_audio else None
+    item.audio_clip_seconds = extra.get("audio_clip_seconds") if has_audio else None
     # VLM scene description lives in the event's extra JSON (written
     # async by the vlm.analyse_alert_scene task). Surface just that
     # one field — never the whole extra blob.
@@ -1994,3 +2021,26 @@ def alert_clip(alert_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "clip not available")
     return FileResponse(path, media_type="video/mp4",
                         filename=f"alert_{alert_id}.mp4")
+
+
+@router.get("/{alert_id}/audio")
+def alert_audio(alert_id: int, db: Session = Depends(get_db),
+                _u: User = Depends(get_current_user)):
+    """Stream the audio sample that triggered an audio_distress alert.
+
+    This is a recording of people speaking, so it is behind the same
+    auth as everything else and is never exposed by path. 404 once the
+    48h retention window has passed (audio.prune_clips) or when audio
+    capture is disabled.
+    """
+    from fastapi.responses import FileResponse
+    import os
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    ev = db.get(DetectionEvent, a.event_id)
+    path = (ev.extra or {}).get("audio_clip_path") if ev else None
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "audio not available")
+    return FileResponse(path, media_type="audio/mp4",
+                        filename=f"alert_{alert_id}.m4a")

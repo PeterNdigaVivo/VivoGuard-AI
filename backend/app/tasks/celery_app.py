@@ -108,6 +108,7 @@ celery_app.conf.update(
         # inference queue protects the camera pipeline.
         "scene_review.sweep":                   {"queue": "alerts"},
         "audio.monitor_sweep":                  {"queue": "alerts"},
+        "audio.prune_clips":                    {"queue": "alerts"},
         "alerting.queue_escalation_check":      {"queue": "alerts"},
         "alerting.checkout_long_session_check": {"queue": "alerts"},
         "alerting.prune_checkout_snapshots":    {"queue": "alerts"},
@@ -206,6 +207,13 @@ celery_app.conf.update(
         "audio-monitor-every-5min": {
             "task": "audio.monitor_sweep",
             "schedule": timedelta(minutes=5),
+        },
+        # Voice samples age out on a clock, so the clock has to actually
+        # run — an hourly sweep keeps the worst-case overshoot at 1h on
+        # top of the 48h window.
+        "audio-prune-clips-hourly": {
+            "task": "audio.prune_clips",
+            "schedule": 60 * 60.0,
         },
         "eval-collect-reviewed-every-30min": {
             "task": "eval.collect_reviewed",
