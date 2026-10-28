@@ -1,4 +1,5 @@
 import shlex
+from unittest.mock import Mock
 
 from app.stream.ffmpeg_worker import (
     FFmpegWorker,
@@ -40,6 +41,29 @@ def test_ffmpeg_thread_cap_never_accepts_zero() -> None:
     command = _build_cmd("rtsp://example.test/stream", fps=1, threads=0)
 
     assert command.count("-threads 1") == 2
+
+
+def test_stop_kills_active_ffmpeg_to_unblock_worker() -> None:
+    worker = FFmpegWorker(1, "rtsp://camera/stream")
+    proc = Mock()
+    proc.poll.return_value = None
+    worker._own_proc(proc)
+
+    worker.stop()
+
+    proc.kill.assert_called_once_with()
+    assert worker._stop.is_set()
+
+
+def test_proc_spawned_after_stop_is_killed_immediately() -> None:
+    worker = FFmpegWorker(1, "rtsp://camera/stream")
+    proc = Mock()
+    proc.poll.return_value = None
+    worker.stop()
+
+    worker._own_proc(proc)
+
+    proc.kill.assert_called_once_with()
 
 
 def test_unavailable_preferred_substream_falls_back_to_saved_mainstream() -> None:
