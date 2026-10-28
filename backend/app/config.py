@@ -653,6 +653,20 @@ class Settings(BaseSettings):
     # worker slot for half an hour and let 2-minute beat runs pile up,
     # so discovery walks the fleet this many cameras at a time.
     audio_probe_per_sweep: int = Field(default=12, ge=1, le=60)
+    # Evidence sample. The 6-second buffer that ALREADY triggered an
+    # alert is kept so an operator can hear whether it was a
+    # confrontation or a cheer — the one question the numbers cannot
+    # answer and the reason operators kept opening live views too late.
+    # Nothing else changes: no rolling buffer, no capture after the fact,
+    # no transcription, and nothing kept for cameras that never fired.
+    # Set False to return to the measure-and-discard posture without a
+    # code change.
+    audio_clip_enabled: bool = True
+    # Deliberately shorter-lived than video evidence, and NOT exempted
+    # for open alerts the way recorder.prune_alert_clips exempts them:
+    # voice is personal data, so it ages out on a clock rather than on
+    # whether somebody remembered to resolve the alert.
+    audio_clip_retention_hours: int = Field(default=48, ge=1, le=720)
 
     # --- Storage paths (inside container) ---
     recordings_dir: str = "/data/recordings"

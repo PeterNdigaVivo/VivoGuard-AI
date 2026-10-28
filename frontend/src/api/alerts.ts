@@ -59,6 +59,12 @@ export interface Alert {
   // the snapshot thumbnail/filmstrip).
   clip_url: string | null
   clip_status: 'ready' | 'pending' | 'unavailable'
+  // The ~6s microphone sample that triggered an audio_distress alert.
+  // NULL for every other type, when capture is disabled, and after the
+  // 48h retention window. No 'pending' state — it is written with the
+  // alert, so absence is final.
+  audio_clip_url: string | null
+  audio_clip_seconds: number | null
   // VLM scene description (Sprint 2.1). NULL until the async analysis
   // task writes it, or when VLM is disabled / type ineligible.
   vlm_scene: string | null

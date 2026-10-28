@@ -26,14 +26,39 @@ Voice is personal data under Kenya's DPA 2019, Uganda's DPPA 2019 and
 Rwanda's Law 058/2021, and audio is treated more strictly than video in
 all three. So this module:
 
-  * never writes audio to disk — PCM is piped from ffmpeg, reduced to a
-    handful of floats, and the buffer is dropped;
+  * never runs a rolling recorder — PCM is piped from ffmpeg only during
+    the sweep sample, reduced to a handful of floats, and the buffer is
+    dropped the moment the camera does not alert;
   * never transcribes, and holds no speech-recognition code path;
   * stores only derived numbers (loudness ratio, band shares) on the
     event.
 
 It answers "someone is shouting", never "someone said X". That boundary
 is what makes it defensible, so keep it.
+
+The one thing that IS written (2026-10-28)
+------------------------------------------
+When — and only when — a sample crosses the threshold and fires an
+alert, that same 6-second buffer is encoded to a small AAC file and
+attached to the alert. Operators could see the still frame but not hear
+the sound, so every audio alert ended in "open the live camera", by
+which time the moment had passed; a cheer and a confrontation are
+indistinguishable from loudness and flatness alone.
+
+Note what this is NOT, because the distinction is the whole defence:
+
+  * it is the audio that already triggered an alert, not a buffer kept
+    on the chance something happens;
+  * it is 6 seconds, not 30 — nothing is captured after detection, so
+    this is the incident rather than its aftermath;
+  * cameras that never fire leave nothing behind at all;
+  * it still is not transcribed, and it ages out on a 48h clock
+    (`audio_clip_retention_hours`) regardless of alert status.
+
+`audio_clip_enabled = False` restores the previous measure-and-discard
+behaviour without a code change. If you turn it on, the staff notice and
+signage obligations under the three DPAs above are yours to meet — this
+module stores voice now, and the alert card says so.
 
 Only ~22 of 97 reachable cameras have a microphone at all, and every one
 observed is NVR channel 1, so coverage is roughly one camera per store.
@@ -42,6 +67,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from app.config import settings
@@ -72,6 +99,53 @@ def _pcm(url: str, seconds: int) -> bytes:
     except Exception as exc:                                # noqa: BLE001
         log.debug("audio: ffmpeg failed (%s)", exc)
         return b""
+
+
+def _save_audio_sample(camera_id: int, pcm: bytes) -> str | None:
+    """Persist the sample that fired an alert as a small AAC file.
+
+    This is the ONLY place this module writes audio, and it writes only
+    a buffer that has already crossed the alert threshold. Callers must
+    not reach for it speculatively — see the module docstring.
+
+    6 seconds of 8 kHz mono at 32 kbps is roughly 24 KB, so a fleet-wide
+    day of alerts costs a few megabytes and the 48h retention window is
+    free in practice.
+
+    Best-effort by design: a sample that fails to encode must never cost
+    us the alert, because the alert is still correct without it.
+    """
+    if not bool(getattr(settings, "audio_clip_enabled", True)) or not pcm:
+        return None
+    path = None
+    try:
+        root = (Path(settings.recordings_dir) / "audio_clips"
+                / datetime.now().strftime("%Y-%m-%d"))
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / ("audio_cam%d_%s.m4a"
+                       % (camera_id, datetime.now().strftime("%H%M%S_%f")))
+        # Re-encoded rather than dumped as WAV: raw s16le would be ~94 KB
+        # for the same 6 seconds and no browser plays it from a blob
+        # without a container.
+        res = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "quiet", "-y",
+             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+             "-i", "pipe:0",
+             "-c:a", "aac", "-b:a", "32k",
+             "-movflags", "+faststart", str(path)],
+            input=pcm, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=60)
+        if res.returncode == 0 and path.exists() and path.stat().st_size > 0:
+            return str(path)
+        path.unlink(missing_ok=True)
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("audio: sample save failed cam=%s: %s", camera_id, e)
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:                               # noqa: BLE001
+                pass
+    return None
 
 
 def analyse(pcm: bytes) -> dict[str, float] | None:
@@ -382,27 +456,37 @@ def audio_monitor_sweep() -> dict:
                                  port=cam.rtsp_port or 554,
                                  username=cam.username, password=pw,
                                  channel=cam.channel_number or 1, subtype=0)
-            feat = analyse(_pcm(url, seconds))
+            # The buffer is held past analyse() only so a sample that
+            # fires can be attached to its alert. Every path that does
+            # not alert drops it explicitly below rather than relying on
+            # the next iteration to rebind the name.
+            pcm = _pcm(url, seconds)
+            feat = analyse(pcm)
             if not feat:
+                pcm = b""
                 continue
             checked += 1
 
             base = _baseline(r, cid, feat["rms"], update=True)
             raised, ratio = is_raised_voice(feat, base)
             if not raised:
-                # Near-miss logging. The flatness ceiling is calibrated
+                # Near-miss logging. The flatness ceiling was calibrated
                 # against ambient only (measured 0.67-0.90 on live
-                # cameras); no recording of an actual shout exists yet,
-                # so the cut-off is an estimate. Logging loud-but-
-                # rejected samples shows where real events actually fall
+                # cameras), so the cut-off is still an estimate. Logging
+                # loud-but-rejected samples shows where real events fall
                 # and turns the threshold into a measurement instead of
-                # a second guess.
+                # a second guess. Near misses are logged as NUMBERS, not
+                # kept as audio: only a sample that alerts is written.
+                # Confirmed alerts now carry their sound, so the ceiling
+                # can finally be checked against shouts operators have
+                # actually marked true.
                 if ratio >= float(getattr(settings, "audio_rms_ratio", 3.0)):
                     log.info("audio near-miss camera=%s ratio=%.1f "
                              "speech=%.2f flatness=%.3f (ceiling %.2f)",
                              cid, ratio, feat["speech_share"],
                              feat.get("flatness", 1.0),
                              float(getattr(settings, "audio_flatness_max", 0.45)))
+                pcm = b""
                 continue
             # Recompute the baseline WITHOUT this sample so a sustained
             # incident cannot normalise itself away.
@@ -410,6 +494,7 @@ def audio_monitor_sweep() -> dict:
 
             if not sustained_state.fire_allowed(
                     cid, None, "audio_distress", cooldown_seconds=cooldown):
+                pcm = b""
                 continue
             store_name = None
             try:
@@ -427,6 +512,12 @@ def audio_monitor_sweep() -> dict:
                 except Exception:                           # noqa: BLE001
                     thumb = None
 
+            # The sample is encoded only now, on the far side of every
+            # threshold and cooldown check, so nothing is written for a
+            # camera that did not alert. Dropped immediately after.
+            audio_clip = _save_audio_sample(int(cid), pcm)
+            pcm = b""
+
             headline = (vlm_desc or
                         f"Raised voices heard at {cam.name}.")
             _create_info_alert(
@@ -437,7 +528,17 @@ def audio_monitor_sweep() -> dict:
                     "priority": "high",
                     "description": headline,
                     "vlm_description": vlm_desc,
+                    # Server-internal path, like thumbnail_path and
+                    # alert_clip_path. The API exposes a URL, never this.
+                    "audio_clip_path": audio_clip,
+                    "audio_clip_seconds": (round(feat["seconds"], 1)
+                                           if audio_clip else None),
                     "audio_note": (
+                        ("Detected on the microphone. The sample that "
+                         "triggered this alert is kept for 48 hours so it "
+                         "can be heard; nothing else is recorded and "
+                         "nothing is transcribed.")
+                        if audio_clip else
                         "Detected on the microphone. No recording is kept "
                         "and nothing is transcribed — only loudness and "
                         "frequency were measured."),
@@ -460,3 +561,85 @@ def audio_monitor_sweep() -> dict:
             pass
     log.info("audio sweep: %d cameras sampled, %d alerts", checked, fired)
     return {"checked": checked, "alerts": fired}
+
+
+@celery_app.task(name="audio.prune_clips", ignore_result=True)
+def prune_audio_clips() -> dict:
+    """Delete audio samples past their retention window and clear the path.
+
+    Deliberately simpler than recorder.prune_alert_clips, which exempts
+    open and escalated alerts from pruning so video evidence survives an
+    investigation. Voice gets no such exemption: an alert nobody got
+    round to resolving is not a lawful basis for keeping a recording of
+    staff speaking, so this prunes purely on age.
+
+    Also sweeps orphaned files — a sample whose encode succeeded but
+    whose alert insert then failed would otherwise sit on disk forever
+    with no row pointing at it.
+    """
+    from app.database import SessionLocal
+    from app.models import DetectionEvent
+
+    hours = int(getattr(settings, "audio_clip_retention_hours", 48))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cleared = 0
+    with SessionLocal() as db:
+        rows = (db.query(DetectionEvent)
+                  .filter(DetectionEvent.detection_type == "audio_distress",
+                          DetectionEvent.timestamp < cutoff)
+                  .all())
+        for ev in rows:
+            p = (ev.extra or {}).get("audio_clip_path")
+            if not p:
+                continue
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception:                               # noqa: BLE001
+                pass
+            ev.extra = {k: v for k, v in (ev.extra or {}).items()
+                        if k not in ("audio_clip_path", "audio_clip_seconds")}
+            cleared += 1
+        if cleared:
+            db.commit()
+
+    orphans = _prune_orphaned_audio_dirs(cutoff)
+    if cleared or orphans:
+        log.info("audio: pruned %d samples, %d orphaned files",
+                 cleared, orphans)
+    return {"pruned": cleared, "orphans": orphans}
+
+
+def _prune_orphaned_audio_dirs(cutoff: datetime) -> int:
+    """Remove audio files older than the cutoff by mtime, then drop any
+    day directory left empty. Dated directories make this cheap: only
+    folders older than the window are walked at all."""
+    removed = 0
+    try:
+        root = Path(settings.recordings_dir) / "audio_clips"
+        if not root.is_dir():
+            return 0
+        for day_dir in root.iterdir():
+            if not day_dir.is_dir():
+                continue
+            try:
+                day = datetime.strptime(day_dir.name, "%Y-%m-%d")
+            except ValueError:
+                continue
+            # Strictly before the cutoff DAY: everything inside is then
+            # unambiguously past retention, and today's folder — which a
+            # sweep may be writing into right now — is never touched.
+            if day.date() >= cutoff.date():
+                continue
+            for f in day_dir.glob("*.m4a"):
+                try:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+                except Exception:                           # noqa: BLE001
+                    pass
+            try:
+                day_dir.rmdir()
+            except OSError:
+                pass
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("audio: orphan prune failed (%s)", e)
+    return removed

@@ -105,6 +105,44 @@ function useClip(alertId: number, url: string | null, enabled: boolean) {
   return { src, loading, failed }
 }
 
+// Audio sample for audio_distress alerts. Same bearer-header problem as
+// snapshots and clips (a bare <audio src> can't send the JWT → 401), so
+// it goes through api() and becomes a blob URL.
+//
+// Fetched only once the operator presses play, never on render: the feed
+// shows many cards at once and most audio alerts are never listened to.
+// At ~24 KB each that is a small saving per card, but it also means we
+// are not pulling recordings of people talking across the network until
+// somebody has actually chosen to hear one.
+function useAudioClip(alertId: number, url: string | null, enabled: boolean) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!enabled || !url) return
+    let cancelled = false
+    let created: string | null = null
+    setLoading(true); setFailed(false)
+    api<Response>(url.replace(/^\/api/, ''), { raw: true })
+      .then(r => (r.ok ? r.blob() : null))
+      .then(blob => {
+        if (cancelled) return
+        if (!blob) { setFailed(true); setLoading(false); return }
+        created = URL.createObjectURL(blob)
+        setSrc(created); setLoading(false)
+      })
+      .catch(() => { if (!cancelled) { setFailed(true); setLoading(false) } })
+    return () => {
+      cancelled = true
+      if (created) URL.revokeObjectURL(created)
+      setSrc(null)
+    }
+  }, [alertId, url, enabled])
+
+  return { src, loading, failed }
+}
+
 // Clip extraction happens asynchronously after an alert is first delivered.
 // The alert feed itself is event-driven, so a quiet period may leave an old
 // list item saying "pending" even though the recorder has finished. Resolve
@@ -492,6 +530,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // Filmstrip lightbox — null = closed, otherwise the open snapshot index.
   const [filmIdx, setFilmIdx] = useState<number | null>(null)
   const [clipModal, setClipModal] = useState(false)
+  // Audio sample (audio_distress only), collapsed until asked for.
+  // `audioOpen` is one-way — once expanded the player stays available
+  // for a replay — so it must NOT be what pins the card, or the card
+  // would never re-sync again. `audioPlaying` is the real guard.
+  const [audioOpen, setAudioOpen] = useState(false)
+  const [audioPlaying, setAudioPlaying] = useState(false)
   const [askReason, setAskReason] = useState(false)
   const [reasonComment, setReasonComment] = useState('')
   const [noteOpen, setNoteOpen] = useState(false)
@@ -557,7 +601,10 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // verdict cannot land on an alert they have not seen and their result
   // does not vanish. Only re-sync when the source object actually changed,
   // so an unchanged row never overwrites an optimistic local update.
+  // audioPlaying counts: a group card that re-syncs mid-playback would
+  // leave them hearing one alert while reading another's text.
   const interacting = noteOpen || lightbox || filmIdx !== null || clipModal
+    || audioPlaying
   const pinned = interacting || heldId === alert.id
   const lastSource = useRef<Alert | null>(null)
   useEffect(() => {
@@ -707,6 +754,17 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   const [clipPlayError, setClipPlayError] = useState(false)
   useEffect(() => { setClipPlayError(false) }, [clipSrc])
 
+  // Loads the authenticated audio blob only once `audioOpen` is set —
+  // see useAudioClip on why we don't prefetch. The state itself is
+  // declared with the other interaction flags above, because it has to
+  // be in scope for `interacting`.
+  const { src: audioSrc, loading: audioLoading, failed: audioFailed } =
+    useAudioClip(alert.id, alert.audio_clip_url, audioOpen)
+  // The blob URL is revoked and nulled on cleanup, which fires no
+  // onPause — without this the card could stay pinned on a stale
+  // "playing" flag forever.
+  useEffect(() => { setAudioPlaying(false) }, [audioSrc])
+
   // The card stays white in dark mode too (vg-on-light keeps any text
   // without its own colour dark). Closed cards are dimmed only in light
   // mode: at 60% opacity over the dark page a white card turns mid-grey
@@ -797,6 +855,60 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               {alert.body}
             </div>
           ) : null}
+
+          {/* Audio sample — the ~6s that triggered an audio_distress
+              alert. Sits directly under the body because listening IS
+              the first step for this type: loudness and harmonics can't
+              tell a cheer from a confrontation, and by the time anyone
+              opens the live camera the moment has gone. */}
+          {alert.audio_clip_url && (
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5
+                            dark:border-amber-900/60 dark:bg-amber-950/30">
+              {!audioOpen ? (
+                <button
+                  onClick={() => setAudioOpen(true)}
+                  className="flex w-full items-center gap-2 text-xs font-semibold
+                             text-amber-900 hover:text-amber-700
+                             dark:text-amber-200 dark:hover:text-amber-100">
+                  <span aria-hidden="true">🔊</span>
+                  <span>
+                    Play the sound that triggered this
+                    {alert.audio_clip_seconds
+                      ? ` (${Math.round(alert.audio_clip_seconds)}s)`
+                      : ''}
+                  </span>
+                </button>
+              ) : audioFailed ? (
+                <div className="text-xs text-amber-900 dark:text-amber-200">
+                  Couldn’t load the sound — it may have expired (samples are
+                  kept 48h).
+                </div>
+              ) : !audioSrc ? (
+                <div className="text-xs text-amber-900 dark:text-amber-200">
+                  {audioLoading ? 'Loading sound…' : 'Preparing…'}
+                </div>
+              ) : (
+                <>
+                  {/* autoPlay because the operator already pressed a
+                      button that said "play" — a second click to start
+                      it would be a bug, not caution. */}
+                  <audio
+                    controls
+                    autoPlay
+                    src={audioSrc}
+                    className="w-full"
+                    aria-label="Microphone sample that triggered this alert"
+                    onPlay={() => setAudioPlaying(true)}
+                    onPause={() => setAudioPlaying(false)}
+                    onEnded={() => setAudioPlaying(false)}
+                  />
+                  <div className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">
+                    Nothing was transcribed. This sample is deleted after 48 hours.
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {isCalibration && (
             <div className="mt-2 rounded border border-violet-200 bg-violet-50 px-2 py-1.5 text-xs text-violet-900">

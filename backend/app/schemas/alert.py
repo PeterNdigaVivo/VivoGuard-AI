@@ -96,6 +96,14 @@ class AlertOut(BaseModel):
     # from being presented to operators as a permanent evidence failure.
     clip_status: str = "unavailable"  # ready | pending | unavailable
 
+    # Audio sample that triggered an audio_distress alert, served by
+    # GET /alerts/{id}/audio. NULL for every other alert type, when
+    # audio_clip_enabled is off, and once the 48h window has passed.
+    # Shorter than the video clip on purpose — this is the ~6s that
+    # fired the detector, not a window around it.
+    audio_clip_url: str | None = None
+    audio_clip_seconds: float | None = None
+
     # VLM scene description (Sprint 2.1) — written async into
     # DetectionEvent.extra["vlm_scene"]. NULL until the analysis task
     # completes (the card shows "Analysing scene…" meanwhile) or when
