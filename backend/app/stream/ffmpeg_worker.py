@@ -125,9 +125,39 @@ class FFmpegWorker(threading.Thread):
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
         self._stop = threading.Event()
+        self._proc_lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
 
     def stop(self) -> None:
         self._stop.set()
+        # A worker can be blocked indefinitely in ``stdout.read()`` while an
+        # RTSP connection is alive but producing no JPEGs. Setting the event
+        # alone cannot wake that read, so a reconcile that replaces the worker
+        # would leave its FFmpeg child running beside the replacement.
+        with self._proc_lock:
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                # The process may exit between poll() and kill().
+                pass
+
+    def _own_proc(self, proc: subprocess.Popen) -> None:
+        """Publish the active child and close the stop/spawn race."""
+        with self._proc_lock:
+            self._proc = proc
+            stopped = self._stop.is_set()
+        if stopped and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _release_proc(self, proc: subprocess.Popen) -> None:
+        with self._proc_lock:
+            if self._proc is proc:
+                self._proc = None
 
     @staticmethod
     def _iter_jpegs(stream):
@@ -214,6 +244,7 @@ class FFmpegWorker(threading.Thread):
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     bufsize=0,
                 )
+                self._own_proc(proc)
             except Exception as e:
                 log.exception("camera %s: ffmpeg spawn failed: %s", self.camera_id, e)
                 self.buffer.update_health(self.camera_id, fps=0, error=str(e))
@@ -248,8 +279,12 @@ class FFmpegWorker(threading.Thread):
                     err = (proc.stderr.read() or b"").decode(errors="ignore")
                 except Exception:
                     pass
-                proc.kill()
-                proc.wait(timeout=3)
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=3)
+                finally:
+                    self._release_proc(proc)
 
             if self._stop.is_set():
                 return
