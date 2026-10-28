@@ -5,6 +5,7 @@ from app.stream.ffmpeg_worker import (
     FFmpegWorker,
     _build_cmd,
     _retry_url_after_failure,
+    _spawn_ffmpeg,
     _stream_has_stalled,
 )
 
@@ -27,6 +28,25 @@ def test_ffmpeg_command_caps_decode_filter_and_encode_threads() -> None:
     assert args[thread_indexes[0] + 1] == "1"
     assert args[thread_indexes[1] + 1] == "1"
     assert args[args.index("-filter_threads") + 1] == "1"
+
+
+def test_ffmpeg_is_spawned_directly_without_orphaning_shell(monkeypatch) -> None:
+    popen = Mock(return_value=Mock())
+    monkeypatch.setattr("app.stream.ffmpeg_worker.subprocess.Popen", popen)
+    command = _build_cmd(
+        "rtsp://user:password@example.test:554/path with space",
+        fps=3,
+    )
+
+    result = _spawn_ffmpeg(command)
+
+    assert result is popen.return_value
+    argv = popen.call_args.args[0]
+    assert argv[0] == "ffmpeg"
+    assert argv[argv.index("-i") + 1] == (
+        "rtsp://user:password@example.test:554/path with space"
+    )
+    assert popen.call_args.kwargs["shell"] is False
 
 
 def test_ffmpeg_worker_uses_configurable_thread_cap(monkeypatch) -> None:

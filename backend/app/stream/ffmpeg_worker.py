@@ -67,6 +67,22 @@ def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
     )
 
 
+def _spawn_ffmpeg(cmd: str) -> subprocess.Popen:
+    """Start FFmpeg directly so the worker owns the process it must stop.
+
+    ``shell=True`` makes ``Popen`` track an intermediate shell. Killing that
+    shell can leave FFmpeg running and holding its pipes, so repeated worker
+    replacement slowly grows an orphan process fleet. The command contains no
+    shell operators; splitting it into argv preserves quoted URLs and gives us
+    direct lifecycle ownership of FFmpeg.
+    """
+    return subprocess.Popen(
+        shlex.split(cmd), shell=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+
+
 def _retry_url_after_failure(
     *, active_url: str, preferred_url: str,
     fallback_url: str, frames_received: int,
@@ -239,11 +255,7 @@ class FFmpegWorker(threading.Thread):
             started_at = time.time()
             frames_this_run = 0
             try:
-                proc = subprocess.Popen(
-                    cmd, shell=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    bufsize=0,
-                )
+                proc = _spawn_ffmpeg(cmd)
                 self._own_proc(proc)
             except Exception as e:
                 log.exception("camera %s: ffmpeg spawn failed: %s", self.camera_id, e)
