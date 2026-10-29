@@ -383,27 +383,33 @@ const SEVERITY_BAR: Record<'critical' | 'warning' | 'info' | 'default', string> 
   info:     'bg-sky-500',
   default:  'bg-slate-300',
 }
-// AI verification badge (annotate-only): renders the verdict written
-// next to the alert. It never hides or moves the alert itself.
+// AI badge (annotate-only): it never hides or moves the alert.
+//
+// It no longer renders a verdict either. "AI: likely false (95%)" in red
+// beside the title read as a ruling, and a ruling is the one thing this
+// badge must not be: the operator's True/False click is the only verdict
+// that feeds training, and a card that has already announced the answer
+// invites them to skip it. The model's job here is to say what it SEES
+// so the human can decide faster — so the badge now says that it looked,
+// and the reading itself is in the card body and the hover text.
+//
+// ai_verdict and ai_confidence are still stored and still returned by
+// the API; they are how verifier precision gets measured against real
+// operator verdicts later. They are simply not shown as a conclusion.
 function AiVerdictBadge({ alert }: { alert: Alert }) {
-  const pct = alert.ai_confidence != null
-    ? ` (${Math.round(alert.ai_confidence * 100)}%)` : ''
-  if (alert.ai_verdict === 'true_alert') {
-    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800"
-                 title={alert.ai_reason ?? undefined}>AI: real{pct}</span>
-  }
-  if (alert.ai_verdict === 'false_alert') {
-    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-red-100 text-red-800"
-                 title={alert.ai_reason ?? undefined}>AI: likely false{pct}</span>
-  }
-  if (alert.ai_verdict === 'uncertain') {
-    return <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-slate-200 text-slate-700"
-                 title={alert.ai_reason ?? undefined}>AI: uncertain</span>
+  const base = 'text-[10px] px-1.5 py-0.5 rounded'
+  if (alert.ai_verdict) {
+    return (
+      <span className={base + ' font-semibold bg-sky-100 text-sky-800'}
+            title={alert.ai_reason ?? undefined}>
+        AI looked{alert.ai_reason ? ' — hover for what it saw' : ''}
+      </span>
+    )
   }
   if (!alert.ai_enabled) {
-    return <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">AI: off</span>
+    return <span className={base + ' bg-slate-100 text-slate-500'}>AI: off</span>
   }
-  return <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 animate-pulse">AI: checking...</span>
+  return <span className={base + ' bg-slate-100 text-slate-500 animate-pulse'}>AI: checking...</span>
 }
 
 const SEVERITY_BADGE: Record<'critical' | 'warning' | 'info' | 'default', string> = {
@@ -937,11 +943,22 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               </ol>
             </div>
           )}
-          {/* AI verification detail lines (annotate-only). */}
+          {/* What the AI saw (annotate-only). This is the part that
+              earns its place: a description the operator can check
+              against the picture in a second. It is deliberately framed
+              as an observation, not a ruling — the verdict is theirs,
+              and only their click trains anything. */}
           {(alert.ai_outcome || alert.ai_reason) && (
-            <div className="mt-1 text-xs text-slate-600 space-y-0.5">
-              {alert.ai_outcome && <div>Likely outcome: {alert.ai_outcome}</div>}
-              {alert.ai_reason && <div>AI reason: {alert.ai_reason}</div>}
+            <div className="mt-2 rounded border border-sky-200 bg-sky-50 px-2 py-1.5
+                            text-xs text-slate-700 space-y-0.5
+                            dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-slate-200">
+              <div className="font-semibold text-sky-900 dark:text-sky-200">
+                What the AI sees — you decide
+              </div>
+              {alert.ai_outcome && <div>{alert.ai_outcome}</div>}
+              {alert.ai_reason && <div className="text-slate-600 dark:text-slate-300">
+                {alert.ai_reason}
+              </div>}
             </div>
           )}
           {/* When-it-happened line. Server-rendered in the camera's
