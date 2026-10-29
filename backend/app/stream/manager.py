@@ -96,7 +96,8 @@ class StreamManager:
         for cam_id in list(self.workers):
             if cam_id not in desired_by_id:
                 log.info("stopping worker for camera %s", cam_id)
-                self.workers[cam_id].stop()       # both worker classes expose stop()
+                # both worker classes expose stop()
+                self._retire(cam_id, self.workers[cam_id])
                 self.workers.pop(cam_id, None)
                 self.specs.pop(cam_id, None)
 
@@ -108,11 +109,30 @@ class StreamManager:
                     and self.workers[cam_id].is_alive()):
                 continue
             if cam_id in self.workers:
-                self.workers[cam_id].stop()
+                self._retire(cam_id, self.workers[cam_id])
             w = self._spawn_worker(spec)
             w.start()
             self.workers[cam_id] = w
             self.specs[cam_id]   = spec
+
+    def _retire(self, cam_id: int, worker) -> None:
+        """Stop a worker and confirm it actually went away.
+
+        Replacing a worker without waiting was how FFmpeg children piled
+        up: ``stop()`` returns immediately, the reference was dropped,
+        and nothing ever noticed a thread that stayed parked on a dead
+        pipe with a live child beside the replacement. The join is
+        bounded — a worker that will not die is logged rather than
+        blocking reconcile for every other camera.
+        """
+        worker.stop()
+        join = getattr(worker, "join", None)
+        if join is None:
+            return
+        join(timeout=5)
+        if worker.is_alive():
+            log.error("camera %s: worker did not stop within 5s; its ffmpeg "
+                      "child may still be running", cam_id)
 
     def stop_all(self) -> None:
         for w in self.workers.values():

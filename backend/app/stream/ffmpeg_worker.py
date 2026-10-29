@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -52,19 +53,58 @@ def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
       'udp'  — lower latency on clean networks; not for the open
                internet.
     """
+    return shlex.join(_build_argv(
+        rtsp_url, fps=fps, width=width,
+        rtsp_transport=rtsp_transport, threads=threads))
+
+
+def _build_argv(rtsp_url: str, *, fps: int, width: int = 640,
+                rtsp_transport: str = "tcp", threads: int = 1) -> list[str]:
+    """The same command as an argv list, which is what we actually spawn.
+
+    Popen(shell=True) put a /bin/sh between us and ffmpeg. Whether that
+    shell `exec`s away or stays as a parent depends on the shell and on
+    the exact command, so `proc.kill()` sometimes signalled the shell and
+    left ffmpeg running — holding an RTSP connection and a CPU core with
+    no owner. Spawning argv directly removes the question entirely.
+    """
     if rtsp_transport not in ("tcp", "http", "udp"):
         rtsp_transport = "tcp"
     threads = max(1, int(threads))
-    return (
-        "ffmpeg -hide_banner -loglevel warning "
-        f"-rtsp_transport {rtsp_transport} "
-        "-timeout 5000000 -fflags nobuffer -flags low_delay "
-        f"-threads {threads} -filter_threads {threads} "
-        f"-i {shlex.quote(rtsp_url)} "
-        f"-vf scale={width}:-2,fps={fps} "
-        f"-threads {threads} "
-        "-f mjpeg -q:v 6 pipe:1"
-    )
+    t = str(threads)
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-rtsp_transport", rtsp_transport,
+        "-timeout", "5000000", "-fflags", "nobuffer", "-flags", "low_delay",
+        "-threads", t, "-filter_threads", t,
+        "-i", rtsp_url,
+        "-vf", f"scale={width}:-2,fps={fps}",
+        "-threads", t,
+        "-f", "mjpeg", "-q:v", "6", "pipe:1",
+    ]
+
+
+def _kill_tree(proc) -> None:
+    """Kill the child AND anything it spawned, then fall back to the
+    plain kill.
+
+    The worker spawns with ``start_new_session=True``, so the child leads
+    its own process group and one killpg reaches every descendant. The
+    group call is best-effort: it is skipped for a pid we cannot resolve
+    (already reaped, or a test double), and ``proc.kill()`` still runs so
+    a single child is always signalled exactly once.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        # Already dead, never started, not a real pid, or a platform
+        # without process groups — proc.kill() below is the fallback.
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        # The process may exit between poll() and kill().
+        pass
 
 
 def _retry_url_after_failure(
@@ -137,11 +177,7 @@ class FFmpegWorker(threading.Thread):
         with self._proc_lock:
             proc = self._proc
         if proc is not None and proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                # The process may exit between poll() and kill().
-                pass
+            _kill_tree(proc)
 
     def _own_proc(self, proc: subprocess.Popen) -> None:
         """Publish the active child and close the stop/spawn race."""
@@ -149,10 +185,7 @@ class FFmpegWorker(threading.Thread):
             self._proc = proc
             stopped = self._stop.is_set()
         if stopped and proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            _kill_tree(proc)
 
     def _release_proc(self, proc: subprocess.Popen) -> None:
         with self._proc_lock:
@@ -179,6 +212,27 @@ class FFmpegWorker(threading.Thread):
                     break
                 yield buf[start:end + 2]
                 buf = buf[end + 2:]
+
+    @staticmethod
+    def _drain_stderr(proc: subprocess.Popen, into: list[bytes]) -> None:
+        """Read ffmpeg's stderr until EOF, keeping only the last 64 KiB.
+
+        Runs for the life of the child so the pipe buffer can never fill
+        and wedge ffmpeg, and so the teardown has the diagnostics already
+        in hand rather than having to block for them.
+        """
+        try:
+            while True:
+                chunk = proc.stderr.read(8192)
+                if not chunk:
+                    return
+                into.append(chunk)
+                if len(into) > 8:
+                    del into[:-8]
+        except Exception:
+            # Pipe closed under us during teardown — the caller only
+            # wants whatever was collected before that.
+            return
 
     def _hb_thread(self, proc: subprocess.Popen, started_at: float) -> None:
         """Heartbeat thread. While ffmpeg is alive AND no real frame has
@@ -207,7 +261,9 @@ class FFmpegWorker(threading.Thread):
                     "camera %s: no frame for %.1fs; restarting ffmpeg",
                     self.camera_id, now - last_frame_at,
                 )
-                proc.kill()
+                # A stalled ffmpeg is exactly the case that used to leak:
+                # kill the whole group, not just the process we can see.
+                _kill_tree(proc)
                 return
             if last_frame_at >= started_at:
                 continue
@@ -228,7 +284,7 @@ class FFmpegWorker(threading.Thread):
             # 'Streamer not yet attempting' for tens of seconds.
             self.buffer.update_health(self.camera_id, fps=0,
                                       error="Starting ffmpeg…")
-            cmd = _build_cmd(
+            argv = _build_argv(
                 active_url,
                 fps=self.fps,
                 width=self.width,
@@ -239,10 +295,13 @@ class FFmpegWorker(threading.Thread):
             started_at = time.time()
             frames_this_run = 0
             try:
+                # No shell, and its own process group: one killpg then
+                # reaches ffmpeg and anything it spawned, whatever the
+                # platform's shell would have done with the command.
                 proc = subprocess.Popen(
-                    cmd, shell=True,
+                    argv,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    bufsize=0,
+                    bufsize=0, start_new_session=True,
                 )
                 self._own_proc(proc)
             except Exception as e:
@@ -259,6 +318,21 @@ class FFmpegWorker(threading.Thread):
                                   daemon=True, name=f"hb-{self.camera_id}")
             hb.start()
 
+            # Drain stderr continuously instead of reading it at the end.
+            # `proc.stderr.read()` returns only at EOF, i.e. when ffmpeg
+            # exits — so reading it BEFORE killing (which is what the
+            # teardown below used to do) blocked forever whenever ffmpeg
+            # closed stdout but stayed alive. The worker thread parked
+            # there holding a live child, the manager still saw the thread
+            # as alive so never replaced it, and the children stacked up:
+            # 260 of them on one host, 442% of CPU, until the dashboard
+            # could not answer a request inside 8 seconds.
+            err_chunks: list[bytes] = []
+            drain = threading.Thread(
+                target=self._drain_stderr, args=(proc, err_chunks),
+                daemon=True, name=f"err-{self.camera_id}")
+            drain.start()
+
             try:
                 for jpeg in self._iter_jpegs(proc.stdout):
                     if self._stop.is_set():
@@ -274,17 +348,22 @@ class FFmpegWorker(threading.Thread):
                         last_emit = now
                     self.backoff.succeed()
             finally:
-                err = ""
-                try:
-                    err = (proc.stderr.read() or b"").decode(errors="ignore")
-                except Exception:
-                    pass
+                # Kill FIRST, collect diagnostics after. The order is the
+                # fix: nothing in this block may wait on a process we have
+                # not yet signalled.
                 try:
                     if proc.poll() is None:
-                        proc.kill()
-                    proc.wait(timeout=3)
+                        _kill_tree(proc)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        log.error("camera %s: ffmpeg pid %s ignored SIGKILL",
+                                  self.camera_id, proc.pid)
                 finally:
                     self._release_proc(proc)
+                # The drain thread ends at EOF, which the kill guarantees.
+                drain.join(timeout=5)
+                err = b"".join(err_chunks).decode(errors="ignore")
 
             if self._stop.is_set():
                 return
