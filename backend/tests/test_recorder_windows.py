@@ -1,7 +1,9 @@
 """Recorder coverage and evidence retention."""
 import json
 import os
+import signal
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -13,8 +15,10 @@ from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
     _close_stale_camera_recordings, _close_window, _current_window,
-    _prune_expired_source_windows, _recording_health_snapshot,
-    _recording_path, _repair_missing_recordings, _start_camera, _tracking_ttl,
+    _owned_recorder_pids, _prune_expired_source_windows,
+    _recording_health_snapshot,
+    _recording_path, _repair_missing_recordings, _start_camera, _stop_all,
+    _tracking_ttl,
 )
 
 
@@ -66,6 +70,57 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         {"pid": 321, "window_id": "window", "path": str(tmp_path / "window" / "3" / "7.mp4")},
         {"ex": seconds + 10 * 60},
     )]
+
+
+def test_owned_recorder_pid_discovery_excludes_alert_extractors(
+    monkeypatch, tmp_path,
+) -> None:
+    proc = tmp_path / "proc"
+    source = proc / "101"
+    extract = proc / "202"
+    unrelated = proc / "303"
+    for directory in (source, extract, unrelated):
+        directory.mkdir(parents=True)
+    (source / "cmdline").write_bytes(
+        b"ffmpeg\0-i\0rtsp://redacted\0-c\0copy\0-movflags\0"
+        b"+frag_keyframe+empty_moov\0/source.mp4\0"
+    )
+    (extract / "cmdline").write_bytes(
+        b"ffmpeg\0-i\0/source.mp4\0-c:v\0libx264\0-movflags\0"
+        b"+faststart\0/alert.mp4\0"
+    )
+    (unrelated / "cmdline").write_bytes(b"sleep\060\0")
+    monkeypatch.setattr("app.tasks.recorder.Path", lambda value: (
+        proc if value == "/proc" else Path(value)
+    ))
+
+    assert _owned_recorder_pids() == {101}
+
+
+def test_stop_all_terminates_untracked_owned_recorders(monkeypatch) -> None:
+    signals = []
+
+    class _Redis:
+        def scan_iter(self, *, match: str, count: int):
+            assert match == "vg:recording:pid:*"
+            assert count == 200
+            return iter(())
+
+    monkeypatch.setattr(
+        "app.tasks.recorder._owned_recorder_pids", lambda: {101},
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder.os.kill",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder.signal.SIGKILL", 9, raising=False,
+    )
+    monkeypatch.setattr("app.tasks.recorder.time.sleep", lambda _seconds: None)
+
+    _stop_all(_Redis())
+
+    assert signals == [(101, signal.SIGTERM), (101, 9)]
 
 
 def test_after_hours_windows_are_bounded_and_date_stamped() -> None:

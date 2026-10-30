@@ -314,6 +314,35 @@ def _pid_is_ffmpeg(pid: int) -> bool:
         return False
 
 
+def _owned_recorder_pids() -> set[int]:
+    """Return every live source-recorder ffmpeg, including untracked ones.
+
+    Older releases could let Redis ownership keys expire before a long
+    recording window ended.  Once a key was lost or overwritten, rollover
+    could no longer stop that process.  Identify only the source-recorder
+    command signature; alert-clip extraction also uses ffmpeg in this
+    container and must never be interrupted by recorder reconciliation.
+    """
+    pids: set[int] = set()
+    proc_root = Path("/proc")
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().split(b"\0")
+            if (cmdline and Path(os.fsdecode(cmdline[0])).name == "ffmpeg"
+                    and b"+frag_keyframe+empty_moov" in cmdline
+                    and b"copy" in cmdline):
+                pids.add(int(entry.name))
+        except (OSError, ValueError):
+            continue
+    return pids
+
+
 def _any_recording_alive(r) -> bool:
     """True if at least one tracked ffmpeg recorder is still running."""
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
@@ -381,17 +410,20 @@ def _publish_recording_health(db, r, window_id: str | None) -> None:
 
 
 def _stop_all(r) -> None:
-    """SIGTERM every tracked ffmpeg, then SIGKILL survivors after a grace.
-    Only signals PIDs verified to be ffmpeg (a stale key after a restart
-    could otherwise name a reused, unrelated PID)."""
-    pids: list[int] = []
+    """Stop tracked and signature-owned source recorders after a grace.
+
+    Tracked PIDs are verified as ffmpeg to avoid PID-reuse accidents. The
+    source-recorder signature also recovers processes orphaned by old Redis
+    TTL behaviour without touching alert-clip extraction ffmpeg jobs.
+    """
+    pids = _owned_recorder_pids()
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
             pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
         except Exception:
             pid = 0
         if pid and _pid_is_ffmpeg(pid):
-            pids.append(pid)
+            pids.add(pid)
         r.delete(key)
     for pid in pids:
         try: os.kill(pid, signal.SIGTERM)
