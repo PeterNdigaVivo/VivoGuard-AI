@@ -436,7 +436,7 @@ def _any_recording_alive(r) -> bool:
 
 def _live_recording_ids(r, window_id: str,
                         expected_ids: set[int]) -> set[int]:
-    """Return expected cameras with a live recorder in the current window."""
+    """Return expected cameras whose live recorder has written evidence."""
     active_ids: set[int] = set()
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
@@ -444,11 +444,25 @@ def _live_recording_ids(r, window_id: str,
             camera_id = int(str(key).rsplit(":", 1)[-1])
             if (camera_id in expected_ids
                     and str(item.get("window_id") or "") == window_id
-                    and _pid_is_ffmpeg(int(item.get("pid") or 0))):
+                    and _pid_is_ffmpeg(int(item.get("pid") or 0))
+                    and _recording_output_has_data(
+                        str(item.get("path") or ""),
+                    )):
                 active_ids.add(camera_id)
         except Exception:
             continue
     return active_ids
+
+
+def _recording_output_has_data(path: str) -> bool:
+    """Return whether the current recorder has created non-empty evidence."""
+    if not path:
+        return False
+    try:
+        output = Path(path)
+        return output.is_file() and output.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _recording_health_snapshot(db, r, window_id: str | None, *,

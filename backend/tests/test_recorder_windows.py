@@ -18,7 +18,8 @@ from app.tasks.recorder import (
     _close_stale_camera_recordings, _close_window, _current_window,
     _owned_recorder_pids, _prune_expired_source_windows,
     _recording_health_snapshot,
-    _recording_path, _repair_missing_recordings, _start_camera, _stop_all,
+    _recording_output_has_data, _recording_path, _repair_missing_recordings,
+    _start_camera, _stop_all,
     _tracking_ttl, _watch_recorder_exit,
 )
 
@@ -211,16 +212,16 @@ class _RecorderHealthRedis:
     def __init__(self):
         self.values = {
             "vg:recording:pid:1": json.dumps({
-                "pid": 101, "window_id": "current",
+                "pid": 101, "window_id": "current", "path": "/clips/1.mp4",
             }),
             "vg:recording:pid:2": json.dumps({
-                "pid": 102, "window_id": "current",
+                "pid": 102, "window_id": "current", "path": "/clips/2.mp4",
             }),
             "vg:recording:pid:3": json.dumps({
-                "pid": 103, "window_id": "previous",
+                "pid": 103, "window_id": "previous", "path": "/clips/3.mp4",
             }),
             "vg:recording:pid:99": json.dumps({
-                "pid": 199, "window_id": "current",
+                "pid": 199, "window_id": "current", "path": "/clips/99.mp4",
             }),
         }
 
@@ -246,6 +247,10 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
     monkeypatch.setattr(
         "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid in {101, 199},
     )
+    monkeypatch.setattr(
+        "app.tasks.recorder._recording_output_has_data",
+        lambda path: path in {"/clips/1.mp4", "/clips/99.mp4"},
+    )
 
     result = _recording_health_snapshot(
         object(), _RecorderHealthRedis(), "current", now=1_000.0,
@@ -268,6 +273,19 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
     assert "camera_ids" not in result
 
 
+def test_recording_output_requires_non_empty_evidence(tmp_path) -> None:
+    missing = tmp_path / "missing.mp4"
+    empty = tmp_path / "empty.mp4"
+    evidence = tmp_path / "evidence.mp4"
+    empty.touch()
+    evidence.write_bytes(b"fragment")
+
+    assert not _recording_output_has_data("")
+    assert not _recording_output_has_data(str(missing))
+    assert not _recording_output_has_data(str(empty))
+    assert _recording_output_has_data(str(evidence))
+
+
 def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     expected_cameras = [
         SimpleNamespace(id=camera_id) for camera_id in range(1, 4)
@@ -277,6 +295,10 @@ def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid == 101,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._recording_output_has_data",
+        lambda path: path == "/clips/1.mp4",
     )
     redis = _RecorderHealthRedis()
     redis.values["vg:recording:failure:2"] = "connection_timeout"
@@ -341,6 +363,10 @@ def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid == 101,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._recording_output_has_data",
+        lambda path: path == "/clips/1.mp4",
     )
     monkeypatch.setattr(
         "app.tasks.recorder._close_stale_camera_recordings",
