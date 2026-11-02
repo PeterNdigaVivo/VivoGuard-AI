@@ -35,6 +35,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,54 @@ def _substream_url(cam) -> str | None:
         return None
 
 
+def _classify_ffmpeg_exit(stderr: bytes) -> str:
+    """Return a credential-safe reason for a recorder ffmpeg failure.
+
+    ffmpeg often repeats the full RTSP URL in stderr.  Never log or persist
+    that text; reduce it to a small operational category instead.
+    """
+    message = stderr.decode("utf-8", errors="replace").lower()
+    if "401 unauthorized" in message or "authentication failed" in message:
+        return "authentication_failed"
+    if "403 forbidden" in message:
+        return "access_forbidden"
+    if "connection refused" in message:
+        return "connection_refused"
+    if "timed out" in message or "timeout" in message:
+        return "connection_timeout"
+    if "453 not enough bandwidth" in message or "too many connections" in message:
+        return "connection_limit"
+    if "404 not found" in message:
+        return "stream_not_found"
+    if "invalid data found" in message:
+        return "invalid_stream_data"
+    return "unclassified"
+
+
+def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int) -> None:
+    """Reap a recorder child and emit only credential-safe diagnostics."""
+    try:
+        _, stderr = proc.communicate()
+    except Exception:
+        log.exception("recorder: could not reap ffmpeg cam=%s", camera_id)
+        return
+    if proc.returncode and proc.returncode > 0:
+        reason = _classify_ffmpeg_exit(stderr or b"")
+        log.warning(
+            "recorder: ffmpeg exited cam=%s code=%s reason=%s",
+            camera_id, proc.returncode, reason,
+        )
+
+
+def _start_exit_watcher(proc: subprocess.Popen, camera_id: int) -> None:
+    threading.Thread(
+        target=_watch_recorder_exit,
+        args=(proc, camera_id),
+        daemon=True,
+        name=f"recorder-reaper-{camera_id}",
+    ).start()
+
+
 def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
     """Start one non-destructive recorder segment without committing."""
     from app.models import RecordingClip
@@ -172,10 +221,11 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
         # 2nd connection, ffmpeg exits quickly and the file stays tiny -
         # inference always keeps priority (we never touch the streamer).
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
+                                stderr=subprocess.PIPE, start_new_session=True)
     except Exception as e:
         log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
         return False
+    _start_exit_watcher(proc, cam.id)
     r.set(_PID_KEY_FMT.format(cam=cam.id),
           json.dumps({"pid": proc.pid, "window_id": window_id,
                       "path": str(out_path)}),

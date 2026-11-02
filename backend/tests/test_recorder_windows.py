@@ -14,11 +14,12 @@ from app.config import settings
 from app.database import Base
 from app.models import RecordingClip
 from app.tasks.recorder import (
+    _classify_ffmpeg_exit,
     _close_stale_camera_recordings, _close_window, _current_window,
     _owned_recorder_pids, _prune_expired_source_windows,
     _recording_health_snapshot,
     _recording_path, _repair_missing_recordings, _start_camera, _stop_all,
-    _tracking_ttl,
+    _tracking_ttl, _watch_recorder_exit,
 )
 
 
@@ -61,6 +62,7 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         "app.tasks.recorder.subprocess.Popen",
         lambda *_args, **_kwargs: SimpleNamespace(pid=321),
     )
+    monkeypatch.setattr("app.tasks.recorder._start_exit_watcher", lambda *_args: None)
 
     seconds = 7 * 60 * 60
     camera = SimpleNamespace(id=7, store_id=3)
@@ -70,6 +72,38 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         {"pid": 321, "window_id": "window", "path": str(tmp_path / "window" / "3" / "7.mp4")},
         {"ex": seconds + 10 * 60},
     )]
+
+
+def test_ffmpeg_exit_reason_never_contains_rtsp_credentials() -> None:
+    stderr = (
+        b"[rtsp] method DESCRIBE failed: 401 Unauthorized\n"
+        b"rtsp://operator:super-secret@camera.internal/Streaming/Channels/102"
+    )
+
+    assert _classify_ffmpeg_exit(stderr) == "authentication_failed"
+
+
+def test_ffmpeg_exit_reason_classifies_connection_limit() -> None:
+    assert _classify_ffmpeg_exit(b"RTSP/1.0 453 Not Enough Bandwidth") == (
+        "connection_limit"
+    )
+
+
+def test_ffmpeg_exit_log_never_exposes_rtsp_credentials(caplog) -> None:
+    proc = SimpleNamespace(
+        returncode=1,
+        communicate=lambda: (
+            b"",
+            b"rtsp://operator:super-secret@camera.internal failed: "
+            b"401 Unauthorized",
+        ),
+    )
+
+    _watch_recorder_exit(proc, camera_id=7)
+
+    assert "reason=authentication_failed" in caplog.text
+    assert "super-secret" not in caplog.text
+    assert "camera.internal" not in caplog.text
 
 
 def test_owned_recorder_pid_discovery_excludes_alert_extractors(
