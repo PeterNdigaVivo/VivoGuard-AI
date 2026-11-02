@@ -174,7 +174,7 @@ class _RecorderHealthRedis:
         return self.values.get(key)
 
     def exists(self, key: str) -> bool:
-        return int(key.rsplit(":", 1)[-1]) in {1, 2}
+        return int(key.rsplit(":", 1)[-1]) in {2, 3}
 
 
 def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None:
@@ -198,9 +198,10 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "cameras_expected": 3,
         "cameras_recording": 1,
         "cameras_missing": 2,
-        "cameras_feed_live": 2,
-        "cameras_feed_missing": 1,
-        "recorders_missing_with_live_feed": 1,
+        "cameras_frame_fresh": 2,
+        "cameras_frame_stale": 1,
+        "recorders_missing_with_fresh_frame": 2,
+        "recorders_active_without_fresh_frame": 1,
         "status": "degraded",
     }
     assert "camera_ids" not in result

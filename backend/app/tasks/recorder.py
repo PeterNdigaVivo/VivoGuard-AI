@@ -383,7 +383,10 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         _live_recording_ids(r, window_id, expected_ids)
         if window_id else set()
     )
-    feed_live_ids = (
+    # A vg:frame key proves fresh pixels reached the streamer within its
+    # short TTL. Its absence does not prove the camera/NVR feed is offline:
+    # an independent recorder process can still be receiving that feed.
+    frame_fresh_ids = (
         {
             camera_id for camera_id in expected_ids
             if r.exists(f"vg:frame:{camera_id}")
@@ -393,19 +396,25 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
     expected = len(expected_ids)
     active = len(active_ids)
     missing = len(expected_ids - active_ids)
-    feed_missing = len(expected_ids - feed_live_ids)
-    recorder_missing_with_live_feed = len(
-        (expected_ids - active_ids) & feed_live_ids,
+    frame_stale = len(expected_ids - frame_fresh_ids)
+    recorder_missing_with_fresh_frame = len(
+        (expected_ids - active_ids) & frame_fresh_ids,
     )
+    recorder_active_without_fresh_frame = len(active_ids - frame_fresh_ids)
     return {
         "last_run_ts": float(now if now is not None else time.time()),
         "window_active": bool(window_id),
         "cameras_expected": expected,
         "cameras_recording": active,
         "cameras_missing": missing,
-        "cameras_feed_live": len(feed_live_ids),
-        "cameras_feed_missing": feed_missing,
-        "recorders_missing_with_live_feed": recorder_missing_with_live_feed,
+        "cameras_frame_fresh": len(frame_fresh_ids),
+        "cameras_frame_stale": frame_stale,
+        "recorders_missing_with_fresh_frame": (
+            recorder_missing_with_fresh_frame
+        ),
+        "recorders_active_without_fresh_frame": (
+            recorder_active_without_fresh_frame
+        ),
         "status": (
             "inactive" if not window_id
             else "healthy" if expected > 0 and missing == 0
