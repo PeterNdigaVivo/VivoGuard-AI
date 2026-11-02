@@ -62,6 +62,7 @@ _REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
 _TRACKING_TTL_GRACE_SECONDS = 10 * 60
+_REPAIR_SETTLE_SECONDS = 5
 
 
 def _tracking_ttl(seconds: int) -> int:
@@ -592,7 +593,14 @@ def _repair_missing_recordings(db, r, window_id: str,
             repaired += 1
     db.commit()
     if repaired:
-        log.warning("recorder: repaired %d missing camera recorder(s)", repaired)
+        log.warning(
+            "recorder: started %d missing camera recorder repair(s)", repaired,
+        )
+        # A refused second RTSP connection normally exits within a few
+        # seconds.  Let those attempts settle before the caller publishes
+        # health, otherwise freshly spawned-but-doomed PIDs temporarily make
+        # coverage look healthy even though no evidence is being recorded.
+        time.sleep(_REPAIR_SETTLE_SECONDS)
     return repaired
 
 

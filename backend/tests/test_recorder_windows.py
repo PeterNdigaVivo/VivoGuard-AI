@@ -274,6 +274,7 @@ def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> No
     redis = _RepairRedis()
     closed = []
     started = []
+    sleeps = []
 
     class _Db:
         commits = 0
@@ -300,15 +301,20 @@ def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> No
             (camera.id, window_id, seconds),
         ) or True,
     )
+    monkeypatch.setattr(
+        "app.tasks.recorder.time.sleep", lambda seconds: sleeps.append(seconds),
+    )
 
     assert _repair_missing_recordings(db, redis, "current", 600) == 2
     assert started == [(2, "current", 600), (3, "current", 600)]
     assert closed == [(2, "current"), (3, "current")]
     assert "vg:recording:pid:1" not in redis.deleted
     assert db.commits == 1
+    assert sleeps == [5]
 
     assert _repair_missing_recordings(db, redis, "current", 600) == 0
     assert db.commits == 2
+    assert sleeps == [5]
 
 
 def test_dead_recorder_row_ends_at_last_provable_file_write(tmp_path) -> None:
