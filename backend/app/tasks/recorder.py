@@ -384,12 +384,19 @@ def _clip_source_matches_event(db, ev, clip) -> bool:
 
 
 def _pid_is_ffmpeg(pid: int) -> bool:
-    """True if `pid` is alive AND is one of our ffmpeg recorders. Guards
+    """True if `pid` is alive AND is one of our source recorders. Guards
     against acting on a PID that a stale Redis key names but which, after a
-    container restart, now belongs to an unrelated (reused) process."""
+    container restart, now belongs to an unrelated or clip-extractor process.
+    """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return b"ffmpeg" in fh.read()
+            cmdline = fh.read().split(b"\0")
+        return bool(
+            cmdline
+            and Path(os.fsdecode(cmdline[0])).name == "ffmpeg"
+            and b"+frag_keyframe+empty_moov" in cmdline
+            and b"copy" in cmdline
+        )
     except Exception:
         return False
 
@@ -470,6 +477,37 @@ def _recording_output_has_data(path: str, *, now: float | None = None) -> bool:
         )
     except OSError:
         return False
+
+
+def _stop_tracked_camera_recorder(r, camera_id: int) -> bool:
+    """Stop a tracked live ffmpeg before replacing its stale evidence stream."""
+    key = _PID_KEY_FMT.format(cam=camera_id)
+    try:
+        pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
+    except Exception:
+        pid = 0
+    stopped = bool(pid and _pid_is_ffmpeg(pid))
+    if stopped:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            stopped = False
+        except OSError:
+            log.exception("recorder: could not stop stale ffmpeg cam=%s", camera_id)
+        if stopped:
+            time.sleep(0.5)
+            if _pid_is_ffmpeg(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    log.exception(
+                        "recorder: could not kill stale ffmpeg cam=%s",
+                        camera_id,
+                    )
+    r.delete(key)
+    return stopped
 
 
 def _recording_health_snapshot(db, r, window_id: str | None, *,
@@ -651,7 +689,7 @@ def _repair_missing_recordings(db, r, window_id: str,
         if not r.set(_REPAIR_KEY_FMT.format(cam=camera_id), "1",
                      nx=True, ex=300):
             continue
-        r.delete(_PID_KEY_FMT.format(cam=camera_id))
+        _stop_tracked_camera_recorder(r, camera_id)
         _close_stale_camera_recordings(db, camera_id, window_id)
         if _start_camera(db, r, cameras[camera_id], window_id, seconds):
             repaired += 1

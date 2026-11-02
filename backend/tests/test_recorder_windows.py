@@ -1,4 +1,5 @@
 """Recorder coverage and evidence retention."""
+import io
 import json
 import os
 import signal
@@ -16,10 +17,10 @@ from app.models import RecordingClip
 from app.tasks.recorder import (
     _classify_ffmpeg_exit,
     _close_stale_camera_recordings, _close_window, _current_window,
-    _owned_recorder_pids, _prune_expired_source_windows,
+    _owned_recorder_pids, _pid_is_ffmpeg, _prune_expired_source_windows,
     _recording_health_snapshot,
     _recording_output_has_data, _recording_path, _repair_missing_recordings,
-    _start_camera, _stop_all,
+    _start_camera, _stop_all, _stop_tracked_camera_recorder,
     _tracking_ttl, _watch_recorder_exit,
 )
 
@@ -155,6 +156,27 @@ def test_owned_recorder_pid_discovery_excludes_alert_extractors(
     ))
 
     assert _owned_recorder_pids() == {101}
+
+
+def test_pid_check_excludes_alert_clip_ffmpeg(monkeypatch) -> None:
+    source = (
+        b"/usr/bin/ffmpeg\0-i\0rtsp://redacted\0-c\0copy\0-movflags\0"
+        b"+frag_keyframe+empty_moov\0/source.mp4\0"
+    )
+    alert_clip = (
+        b"/usr/bin/ffmpeg\0-i\0/source.mp4\0-c:v\0libx264\0"
+        b"-movflags\0+faststart\0/alert.mp4\0"
+    )
+    payload = source
+
+    def _open(_path, _mode):
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr("builtins.open", _open)
+    assert _pid_is_ffmpeg(101)
+
+    payload = alert_clip
+    assert not _pid_is_ffmpeg(202)
 
 
 def test_stop_all_terminates_untracked_owned_recorders(monkeypatch) -> None:
@@ -297,6 +319,36 @@ def test_recording_output_must_still_be_growing(tmp_path) -> None:
     assert not _recording_output_has_data(
         str(evidence), now=modified_at + 181,
     )
+
+
+def test_stalled_recorder_is_terminated_before_repair(monkeypatch) -> None:
+    signals = []
+    sleeps = []
+
+    class _Redis:
+        deleted = []
+
+        def get(self, key):
+            assert key == "vg:recording:pid:7"
+            return json.dumps({"pid": 707})
+
+        def delete(self, key):
+            self.deleted.append(key)
+
+    redis = _Redis()
+    monkeypatch.setattr("app.tasks.recorder._pid_is_ffmpeg", lambda _pid: True)
+    monkeypatch.setattr(
+        "app.tasks.recorder.os.kill",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder.time.sleep", lambda seconds: sleeps.append(seconds),
+    )
+
+    assert _stop_tracked_camera_recorder(redis, 7)
+    assert signals == [(707, signal.SIGTERM), (707, signal.SIGKILL)]
+    assert sleeps == [0.5]
+    assert redis.deleted == ["vg:recording:pid:7"]
 
 
 def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
