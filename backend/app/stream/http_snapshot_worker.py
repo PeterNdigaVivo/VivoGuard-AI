@@ -53,7 +53,8 @@ class HttpSnapshotWorker(threading.Thread):
         self.fps = max(1, min(int(fps), 5))
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
-        self._stop = threading.Event()
+        # Preserve Thread._stop(), which join()/is_alive() call after exit.
+        self._stop_event = threading.Event()
         # Persistent client so we reuse the TCP+TLS connection between
         # polls. The previous version constructed a fresh client every
         # GET, which at 5fps × 40 cameras is 200 socket setups/sec.
@@ -66,7 +67,7 @@ class HttpSnapshotWorker(threading.Thread):
             self._auth = httpx.DigestAuth(self.username, self.password)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         # Close the keep-alive client so we don't leak sockets when
         # the StreamManager rebuilds workers during reconciliation.
         c = self._client
@@ -105,7 +106,7 @@ class HttpSnapshotWorker(threading.Thread):
         sleep_s = 1.0 / self.fps
         last_emit = time.time()
         frames_in_window = 0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 jpeg = self._get_jpeg()
                 self.buffer.push_frame(self.camera_id, jpeg)
@@ -126,16 +127,16 @@ class HttpSnapshotWorker(threading.Thread):
                 # Refresh the health row every 5s during backoff so the
                 # UI tile counts down instead of going silent.
                 deadline = time.time() + wait
-                while not self._stop.is_set() and time.time() < deadline:
+                while not self._stop_event.is_set() and time.time() < deadline:
                     remaining = max(0, int(deadline - time.time()))
                     self.buffer.update_health(
                         self.camera_id, fps=0,
                         error=f"Retrying in {remaining}s (last: {msg[:140]})",
                     )
-                    if self._stop.wait(min(5, remaining + 0.1)):
+                    if self._stop_event.wait(min(5, remaining + 0.1)):
                         return
                 continue
-            if self._stop.wait(sleep_s):
+            if self._stop_event.wait(sleep_s):
                 return
 
     def _redacted_url(self) -> str:

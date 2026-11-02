@@ -8,6 +8,7 @@ from app.stream.ffmpeg_worker import (
     _spawn_ffmpeg,
     _stream_has_stalled,
 )
+from app.stream.http_snapshot_worker import HttpSnapshotWorker
 
 
 def test_ffmpeg_command_caps_decode_filter_and_encode_threads() -> None:
@@ -72,7 +73,19 @@ def test_stop_kills_active_ffmpeg_to_unblock_worker() -> None:
     worker.stop()
 
     proc.kill.assert_called_once_with()
-    assert worker._stop.is_set()
+    assert worker._stop_event.is_set()
+
+
+def test_completed_workers_preserve_thread_lifecycle_methods() -> None:
+    workers = [
+        FFmpegWorker(1, "rtsp://camera/stream"),
+        HttpSnapshotWorker(2, "http://camera/snapshot"),
+    ]
+    for worker in workers:
+        worker.run = lambda: None
+        worker.start()
+        worker.join(timeout=1)
+        assert not worker.is_alive()
 
 
 def test_proc_spawned_after_stop_is_killed_immediately() -> None:

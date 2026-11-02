@@ -143,12 +143,15 @@ class FFmpegWorker(threading.Thread):
         )))
         self.buffer = buffer or FrameBuffer()
         self.backoff = Backoff()
-        self._stop = threading.Event()
+        # ``threading.Thread`` owns a private ``_stop()`` lifecycle method.
+        # Shadowing it with an Event makes ``is_alive()``/``join()`` raise
+        # ``TypeError: 'Event' object is not callable`` after this worker exits.
+        self._stop_event = threading.Event()
         self._proc_lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         # A worker can be blocked indefinitely in ``stdout.read()`` while an
         # RTSP connection is alive but producing no JPEGs. Setting the event
         # alone cannot wake that read, so a reconcile that replaces the worker
@@ -166,7 +169,7 @@ class FFmpegWorker(threading.Thread):
         """Publish the active child and close the stop/spawn race."""
         with self._proc_lock:
             self._proc = proc
-            stopped = self._stop.is_set()
+            stopped = self._stop_event.is_set()
         if stopped and proc.poll() is None:
             try:
                 proc.kill()
@@ -203,9 +206,9 @@ class FFmpegWorker(threading.Thread):
         """Heartbeat thread. While ffmpeg is alive AND no real frame has
         landed since `started_at`, push a 'Connecting to RTSP…' status
         every 5s. Stops when ffmpeg dies OR a frame arrives."""
-        while not self._stop.is_set() and proc.poll() is None:
+        while not self._stop_event.is_set() and proc.poll() is None:
             time.sleep(5)
-            if self._stop.is_set() or proc.poll() is not None:
+            if self._stop_event.is_set() or proc.poll() is not None:
                 break
             health = self.buffer.health(self.camera_id) or {}
             # `last_frame_at` is bumped only by push_frame() — so any
@@ -240,7 +243,7 @@ class FFmpegWorker(threading.Thread):
         last_emit = time.time()
         frames_in_window = 0
         active_url = self.rtsp_url
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             # Mark the camera as "attempting" the moment we enter the
             # loop. Without this, a hang in Popen / RTSP negotiation
             # left no Redis health key, and the UI tile said
@@ -263,7 +266,7 @@ class FFmpegWorker(threading.Thread):
             except Exception as e:
                 log.exception("camera %s: ffmpeg spawn failed: %s", self.camera_id, e)
                 self.buffer.update_health(self.camera_id, fps=0, error=str(e))
-                if self._stop.wait(self.backoff.fail()):
+                if self._stop_event.wait(self.backoff.fail()):
                     return
                 continue
 
@@ -276,7 +279,7 @@ class FFmpegWorker(threading.Thread):
 
             try:
                 for jpeg in self._iter_jpegs(proc.stdout):
-                    if self._stop.is_set():
+                    if self._stop_event.is_set():
                         break
                     self.buffer.push_frame(self.camera_id, jpeg)
                     frames_in_window += 1
@@ -301,7 +304,7 @@ class FFmpegWorker(threading.Thread):
                 finally:
                     self._release_proc(proc)
 
-            if self._stop.is_set():
+            if self._stop_event.is_set():
                 return
             retry_url = _retry_url_after_failure(
                 active_url=active_url,
@@ -330,11 +333,11 @@ class FFmpegWorker(threading.Thread):
             # this, long waits (40s, 80s, 5min) make the Live View tile
             # appear to forget what was happening.
             deadline = time.time() + wait
-            while not self._stop.is_set() and time.time() < deadline:
+            while not self._stop_event.is_set() and time.time() < deadline:
                 remaining = max(0, int(deadline - time.time()))
                 self.buffer.update_health(
                     self.camera_id, fps=0,
                     error=f"Retrying in {remaining}s (last error: {err_msg[:150]})",
                 )
-                if self._stop.wait(min(5, remaining + 0.1)):
+                if self._stop_event.wait(min(5, remaining + 0.1)):
                     return
