@@ -108,11 +108,14 @@ def _stream_has_stalled(
     *, last_frame_at: float, started_at: float,
     now: float, stall_seconds: float,
 ) -> bool:
-    """Return true only after this FFmpeg run produced, then stopped, frames."""
-    return (
-        last_frame_at >= started_at
-        and now - last_frame_at >= max(5.0, float(stall_seconds))
-    )
+    """Return true when a run has not produced a frame within its SLA.
+
+    A process can stay alive indefinitely after negotiating RTSP while never
+    emitting a JPEG. Treat startup silence and post-frame silence alike so the
+    worker can restart or fall back instead of reporting "connecting" forever.
+    """
+    reference = last_frame_at if last_frame_at >= started_at else started_at
+    return now - reference >= max(5.0, float(stall_seconds))
 
 
 class FFmpegWorker(threading.Thread):

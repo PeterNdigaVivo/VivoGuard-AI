@@ -104,9 +104,12 @@ def test_preferred_substream_exit_falls_back_even_after_receiving_frames() -> No
     ) == "rtsp://camera/main"
 
 
-def test_stall_requires_a_frame_from_the_current_run() -> None:
+def test_stall_covers_startup_silence_and_post_frame_silence() -> None:
     assert not _stream_has_stalled(
-        last_frame_at=99, started_at=100, now=140, stall_seconds=20,
+        last_frame_at=99, started_at=100, now=119, stall_seconds=20,
+    )
+    assert _stream_has_stalled(
+        last_frame_at=99, started_at=100, now=120, stall_seconds=20,
     )
     assert not _stream_has_stalled(
         last_frame_at=125, started_at=100, now=140, stall_seconds=20,
