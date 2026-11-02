@@ -61,6 +61,18 @@ _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, pat
 _REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
+_FAILURE_KEY_FMT = "vg:recording:failure:{cam}"
+_FAILURE_TTL_SECONDS = 24 * 3600
+_FFMPEG_FAILURE_REASONS = {
+    "authentication_failed",
+    "access_forbidden",
+    "connection_refused",
+    "connection_timeout",
+    "connection_limit",
+    "stream_not_found",
+    "invalid_stream_data",
+    "unclassified",
+}
 _TRACKING_TTL_GRACE_SECONDS = 10 * 60
 _REPAIR_SETTLE_SECONDS = 5
 
@@ -175,7 +187,7 @@ def _classify_ffmpeg_exit(stderr: bytes) -> str:
     return "unclassified"
 
 
-def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int) -> None:
+def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int, r=None) -> None:
     """Reap a recorder child and emit only credential-safe diagnostics."""
     try:
         _, stderr = proc.communicate()
@@ -184,16 +196,28 @@ def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int) -> None:
         return
     if proc.returncode and proc.returncode > 0:
         reason = _classify_ffmpeg_exit(stderr or b"")
+        if r is not None:
+            try:
+                r.set(
+                    _FAILURE_KEY_FMT.format(cam=camera_id),
+                    reason,
+                    ex=_FAILURE_TTL_SECONDS,
+                )
+            except Exception:
+                log.exception(
+                    "recorder: could not persist failure reason cam=%s",
+                    camera_id,
+                )
         log.warning(
             "recorder: ffmpeg exited cam=%s code=%s reason=%s",
             camera_id, proc.returncode, reason,
         )
 
 
-def _start_exit_watcher(proc: subprocess.Popen, camera_id: int) -> None:
+def _start_exit_watcher(proc: subprocess.Popen, camera_id: int, r) -> None:
     threading.Thread(
         target=_watch_recorder_exit,
-        args=(proc, camera_id),
+        args=(proc, camera_id, r),
         daemon=True,
         name=f"recorder-reaper-{camera_id}",
     ).start()
@@ -226,7 +250,11 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
     except Exception as e:
         log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
         return False
-    _start_exit_watcher(proc, cam.id)
+    try:
+        r.delete(_FAILURE_KEY_FMT.format(cam=cam.id))
+    except Exception:
+        log.exception("recorder: could not clear failure reason cam=%s", cam.id)
+    _start_exit_watcher(proc, cam.id, r)
     r.set(_PID_KEY_FMT.format(cam=cam.id),
           json.dumps({"pid": proc.pid, "window_id": window_id,
                       "path": str(out_path)}),
@@ -446,12 +474,23 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
     )
     expected = len(expected_ids)
     active = len(active_ids)
-    missing = len(expected_ids - active_ids)
+    missing_ids = expected_ids - active_ids
+    missing = len(missing_ids)
     frame_stale = len(expected_ids - frame_fresh_ids)
-    recorder_missing_with_fresh_frame = len(
-        (expected_ids - active_ids) & frame_fresh_ids,
-    )
+    recorder_missing_with_fresh_frame = len(missing_ids & frame_fresh_ids)
     recorder_active_without_fresh_frame = len(active_ids - frame_fresh_ids)
+    failure_reasons: dict[str, int] = {}
+    missing_without_failure_reason = 0
+    for camera_id in missing_ids:
+        reason = r.get(_FAILURE_KEY_FMT.format(cam=camera_id))
+        if not reason:
+            missing_without_failure_reason += 1
+            continue
+        safe_reason = (
+            str(reason) if str(reason) in _FFMPEG_FAILURE_REASONS
+            else "unclassified"
+        )
+        failure_reasons[safe_reason] = failure_reasons.get(safe_reason, 0) + 1
     return {
         "last_run_ts": float(now if now is not None else time.time()),
         "window_active": bool(window_id),
@@ -465,6 +504,10 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         ),
         "recorders_active_without_fresh_frame": (
             recorder_active_without_fresh_frame
+        ),
+        "recorder_failure_reasons": failure_reasons,
+        "recorders_missing_without_failure_reason": (
+            missing_without_failure_reason
         ),
         "status": (
             "inactive" if not window_id

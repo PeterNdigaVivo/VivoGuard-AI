@@ -106,6 +106,31 @@ def test_ffmpeg_exit_log_never_exposes_rtsp_credentials(caplog) -> None:
     assert "camera.internal" not in caplog.text
 
 
+def test_ffmpeg_exit_persists_only_safe_failure_category() -> None:
+    writes = []
+
+    class _Redis:
+        def set(self, key, value, **kwargs):
+            writes.append((key, value, kwargs))
+
+    proc = SimpleNamespace(
+        returncode=1,
+        communicate=lambda: (
+            b"",
+            b"rtsp://operator:super-secret@camera.internal failed: "
+            b"401 Unauthorized",
+        ),
+    )
+
+    _watch_recorder_exit(proc, camera_id=7, r=_Redis())
+
+    assert writes == [(
+        "vg:recording:failure:7",
+        "authentication_failed",
+        {"ex": 24 * 3600},
+    )]
+
+
 def test_owned_recorder_pid_discovery_excludes_alert_extractors(
     monkeypatch, tmp_path,
 ) -> None:
@@ -236,9 +261,37 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "cameras_frame_stale": 1,
         "recorders_missing_with_fresh_frame": 2,
         "recorders_active_without_fresh_frame": 1,
+        "recorder_failure_reasons": {},
+        "recorders_missing_without_failure_reason": 2,
         "status": "degraded",
     }
     assert "camera_ids" not in result
+
+
+def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
+    expected_cameras = [
+        SimpleNamespace(id=camera_id) for camera_id in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        "app.tasks.recorder._key_cameras", lambda _db: expected_cameras,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid == 101,
+    )
+    redis = _RecorderHealthRedis()
+    redis.values["vg:recording:failure:2"] = "connection_timeout"
+    redis.values["vg:recording:failure:3"] = "rtsp://should-never-be-exposed"
+
+    result = _recording_health_snapshot(
+        object(), redis, "current", now=1_000.0,
+    )
+
+    assert result["recorder_failure_reasons"] == {
+        "connection_timeout": 1,
+        "unclassified": 1,
+    }
+    assert result["recorders_missing_without_failure_reason"] == 0
+    assert "rtsp" not in json.dumps(result)
 
 
 class _RepairRedis(_RecorderHealthRedis):
