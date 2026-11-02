@@ -286,6 +286,19 @@ def test_recording_output_requires_non_empty_evidence(tmp_path) -> None:
     assert _recording_output_has_data(str(evidence))
 
 
+def test_recording_output_must_still_be_growing(tmp_path) -> None:
+    evidence = tmp_path / "evidence.mp4"
+    evidence.write_bytes(b"fragment")
+    modified_at = evidence.stat().st_mtime
+
+    assert _recording_output_has_data(
+        str(evidence), now=modified_at + 180,
+    )
+    assert not _recording_output_has_data(
+        str(evidence), now=modified_at + 181,
+    )
+
+
 def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     expected_cameras = [
         SimpleNamespace(id=camera_id) for camera_id in range(1, 4)

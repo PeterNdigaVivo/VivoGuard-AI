@@ -75,6 +75,7 @@ _FFMPEG_FAILURE_REASONS = {
 }
 _TRACKING_TTL_GRACE_SECONDS = 10 * 60
 _REPAIR_SETTLE_SECONDS = 5
+_RECORDING_OUTPUT_MAX_STALE_SECONDS = 180
 
 
 def _tracking_ttl(seconds: int) -> int:
@@ -454,13 +455,19 @@ def _live_recording_ids(r, window_id: str,
     return active_ids
 
 
-def _recording_output_has_data(path: str) -> bool:
-    """Return whether the current recorder has created non-empty evidence."""
+def _recording_output_has_data(path: str, *, now: float | None = None) -> bool:
+    """Return whether the current recorder is writing fresh evidence."""
     if not path:
         return False
     try:
         output = Path(path)
-        return output.is_file() and output.stat().st_size > 0
+        stat = output.stat()
+        observed_at = time.time() if now is None else float(now)
+        return (
+            output.is_file()
+            and stat.st_size > 0
+            and observed_at - stat.st_mtime <= _RECORDING_OUTPUT_MAX_STALE_SECONDS
+        )
     except OSError:
         return False
 
