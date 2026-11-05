@@ -93,6 +93,44 @@ CRITICAL_DETECTION_TYPES = frozenset({
     "fire", "smoke", "staff_zone", "stockroom_access",
 })
 
+# ---- Phase-0 heatmap-state experiment (TEMPORARY) ----------------------
+# Cameras granted a long inference slice so the in-memory detector state in
+# stateful.py (heatmap grids, per-track dwell sessions) lives long enough to
+# accumulate something meaningful.
+#
+# Why this is needed at all: those grids exist only in process memory and are
+# never rehydrated from Redis, so a 120s slice caps every heatmap window --
+# including "day" and "week" -- at 120s of data. The three cameras below are
+# the measurement sample; the rest of the fleet keeps RUN_SECONDS.
+#
+# Chosen for: online, ai_enabled, several drawn zones, real traffic, and
+# NOT latency-critical -- the critical tier is checked first in
+# _task_profile(), so a camera carrying entry_exit/intrusion/etc. would
+# silently ignore this map. Camera 63 (Moi Avenue Ch7) is deliberately left
+# out as a same-store control on the standard 120s slice.
+#
+# Remove this block once the durable-accumulation work lands.
+EXPERIMENTAL_SLICE_CAMERAS: dict[int, int] = {
+    61: 3600,   # Moi Avenue - Channel 5      (5 zones, busiest eligible)
+    30: 3600,   # Mama Ngina - Channel 6      (9 zones)
+    89: 3600,   # Safari Zoya - Channel 1     (6 zones, separate store)
+}
+
+
+def _ttls_for(slice_seconds: int) -> tuple[int, int]:
+    """Return ``(lock_ttl, hb_ttl)`` for a task of the given slice length.
+
+    Preserves the invariant the stale-lock sweep's correctness argument
+    rests on: ``hb_ttl > lock_ttl > slice_seconds``. Reusing the
+    module-level LOCK_TTL/HB_TTL for a camera with a longer slice would
+    expire its lock mid-run, and the supervisor would then reserve and
+    publish the same camera again while the first task is still reading
+    frames -- two inference loops overwriting one camera's Redis keys.
+    """
+    s = max(1, int(slice_seconds))
+    return s + 30, s + 60
+
+
 _CLAIM_LUA = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
   redis.call('expire', KEYS[1], tonumber(ARGV[2]))
@@ -209,6 +247,16 @@ def _task_profile(camera) -> tuple[int, int]:
         # Kombu's Redis transport checks the priority-0 list before priority-9
         # (RabbitMQ uses the inverse convention). This service uses Redis.
         return int(CRITICAL_RUN_SECONDS), 0
+    # Experiment override is deliberately checked *after* the critical tier:
+    # a latency-critical camera must keep its short slice and priority 0
+    # even if someone adds it to the experiment set by mistake.
+    # getattr, not camera.id: the reservation tests pass lightweight stubs
+    # that carry only detection_configs and zones.
+    cam_id = getattr(camera, "id", None)
+    override = (EXPERIMENTAL_SLICE_CAMERAS.get(int(cam_id))
+                if cam_id is not None else None)
+    if override:
+        return int(override), 9
     return int(RUN_SECONDS), 9
 
 
@@ -430,10 +478,16 @@ def _standard_gap_health(
 
 def _claim_reserved_task(
     r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
+    lock_ttl: int = LOCK_TTL, hb_ttl: int = HB_TTL,
 ) -> bool:
-    """Atomically convert this task's pending reservation to an active lock."""
+    """Atomically convert this task's pending reservation to an active lock.
+
+    ``lock_ttl``/``hb_ttl`` default to the fleet-wide values so existing
+    callers are unaffected; a camera running a non-default slice passes its
+    own pair so the lock cannot expire before the task finishes.
+    """
     return bool(r.eval(
-        _CLAIM_LUA, 2, lock, heartbeat, task_id, LOCK_TTL, HB_TTL,
+        _CLAIM_LUA, 2, lock, heartbeat, task_id, int(lock_ttl), int(hb_ttl),
     ))
 
 
@@ -729,8 +783,10 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
         # Old/duplicate broker messages must never run.  Only the exact task
         # id recorded by the supervisor may convert the pending reservation
         # into an active lock and heartbeat.
+        lock_ttl, hb_ttl = _ttls_for(max_seconds)
         claimed = _claim_reserved_task(
             r, lock=lock, heartbeat=hb, task_id=task_id,
+            lock_ttl=lock_ttl, hb_ttl=hb_ttl,
         )
         if not claimed:
             log.warning(
