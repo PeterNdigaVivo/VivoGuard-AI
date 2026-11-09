@@ -64,7 +64,8 @@ const alert = (id, type, sev4, title, extra = {}) => ({
   body: 'The till area has been unattended for 6 minutes.',
   what_to_do: ['Call the store', 'Check the till camera'], time_range: '🕒 Detected at 12:23 PM',
   snapshot_url: null, snapshot_paths: null, snapshot_count: null, clip_url: null,
-  clip_status: 'unavailable', vlm_scene: null, store_intel: null, ...extra,
+  clip_status: 'unavailable', vlm_scene: null, store_intel: null,
+  audio_clip_url: null, audio_clip_seconds: null, ...extra,
 })
 
 const FIXTURES = [
@@ -86,7 +87,8 @@ const FIXTURES = [
     alert(1, 'till_unattended', 'HIGH', 'Till Unattended'),
     alert(2, 'unusual_activity', 'CRITICAL', 'Unusual Activity Seen', {
       vlm_scene: 'A person is standing behind the counter after closing time.' }),
-    alert(3, 'staff_uniform', 'MEDIUM', 'Staff Not in Uniform', { ai_verdict: 'uncertain' }),
+    alert(3, 'staff_uniform', 'MEDIUM', 'Staff Not in Uniform', { ai_verdict: 'uncertain',
+      audio_clip_url: '/api/alerts/3/audio', audio_clip_seconds: 6 }),
     alert(4, 'queue_long', 'LOW', 'Long Queue', { status: 'resolved', resolved_at: iso(3) }),
   ]],
   [/^\/eval\/summary$/, {

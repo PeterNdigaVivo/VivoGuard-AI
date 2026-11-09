@@ -870,14 +870,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               tell a cheer from a confrontation, and by the time anyone
               opens the live camera the moment has gone. */}
           {alert.audio_clip_url && (
-            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5
-                            dark:border-amber-900/60 dark:bg-amber-950/30">
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5">
               {!audioOpen ? (
                 <button
                   onClick={() => setAudioOpen(true)}
                   className="flex w-full items-center gap-2 text-xs font-semibold
-                             text-amber-900 hover:text-amber-700
-                             dark:text-amber-200 dark:hover:text-amber-100">
+                             text-amber-900 hover:text-amber-700">
                   <span aria-hidden="true">🔊</span>
                   <span>
                     Play the sound that triggered this
@@ -887,12 +885,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                   </span>
                 </button>
               ) : audioFailed ? (
-                <div className="text-xs text-amber-900 dark:text-amber-200">
+                <div className="text-xs text-amber-900">
                   Couldn’t load the sound — it may have expired (samples are
                   kept 48h).
                 </div>
               ) : !audioSrc ? (
-                <div className="text-xs text-amber-900 dark:text-amber-200">
+                <div className="text-xs text-amber-900">
                   {audioLoading ? 'Loading sound…' : 'Preparing…'}
                 </div>
               ) : (
@@ -910,7 +908,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                     onPause={() => setAudioPlaying(false)}
                     onEnded={() => setAudioPlaying(false)}
                   />
-                  <div className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">
+                  <div className="mt-1 text-[11px] text-amber-800">
                     Nothing was transcribed. This sample is deleted after 48 hours.
                   </div>
                 </>
@@ -949,14 +947,15 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
               as an observation, not a ruling — the verdict is theirs,
               and only their click trains anything. */}
           {(alert.ai_outcome || alert.ai_reason) && (
+            // The card is white in both themes, so the box keeps its light
+            // blue in dark mode too; its text turns black there for contrast.
             <div className="mt-2 rounded border border-sky-200 bg-sky-50 px-2 py-1.5
-                            text-xs text-slate-700 space-y-0.5
-                            dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-slate-200">
-              <div className="font-semibold text-sky-900 dark:text-sky-200">
+                            text-xs text-slate-700 space-y-0.5 dark:text-black">
+              <div className="font-semibold text-sky-900 dark:text-black">
                 What the AI sees — you decide
               </div>
               {alert.ai_outcome && <div>{alert.ai_outcome}</div>}
-              {alert.ai_reason && <div className="text-slate-600 dark:text-slate-300">
+              {alert.ai_reason && <div className="text-slate-600 dark:text-black">
                 {alert.ai_reason}
               </div>}
             </div>

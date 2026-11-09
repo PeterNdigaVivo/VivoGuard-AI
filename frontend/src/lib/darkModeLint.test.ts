@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { EXEMPT_FILES, findDarkTextIssues, formatIssues } from './darkModeLint'
+import { EXEMPT_FILES, findDarkTextIssues, findOnWhiteCardIssues, formatIssues } from './darkModeLint'
 
 const lint = (src: string, file = 'pages/X.tsx') => findDarkTextIssues(file, src)
 
@@ -44,5 +44,33 @@ describe('findDarkTextIssues', () => {
     expect(text).toContain('pages/X.tsx:1  text-slate-700')
     expect(text).toContain('dark:text-white')
     expect(text).toContain('vg-on-light')
+  })
+})
+
+describe('findOnWhiteCardIssues', () => {
+  const card = 'components/AlertCard.tsx'
+  const lint = (src: string, file = card) => findOnWhiteCardIssues(file, src)
+
+  it('flags light dark:text and dark dark:bg colours inside the white card', () => {
+    const issues = lint(`
+      <div className="bg-sky-50 dark:bg-sky-950/30 text-slate-700 dark:text-slate-200">
+      <span className='text-sky-900 dark:text-sky-200 dark:hover:text-white' />`)
+    expect(issues.map(i => [i.line, i.classes])).toEqual([
+      [2, ['dark:text-slate-200', 'dark:bg-sky-950/30']],
+      [3, ['dark:text-sky-200', 'dark:hover:text-white']],
+    ])
+  })
+
+  it('accepts light-mode colours and dark:text-black', () => {
+    expect(lint(`<div className="bg-sky-50 text-sky-900 dark:text-black dark:border-sky-200" />`)).toEqual([])
+    expect(lint(`<div className="dark:text-amber-300 dark:bg-amber-100" />`)).toEqual([])
+  })
+
+  it('only applies to always-white files', () => {
+    expect(lint(`<div className="dark:bg-slate-900 dark:text-white" />`, 'pages/X.tsx')).toEqual([])
+  })
+
+  it('skips listed dark insets', () => {
+    expect(lint(`<div className="rounded-lg border bg-slate-50 dark:bg-slate-800 p-2 text-center" />`)).toEqual([])
   })
 })

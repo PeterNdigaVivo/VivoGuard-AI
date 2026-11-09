@@ -3,7 +3,9 @@
 // (see darkModeLint.ts for the rule and the exemption mechanism).
 import { describe, expect, it } from 'vitest'
 
-import { findDarkTextIssues, formatIssues } from './darkModeLint'
+import {
+  findDarkTextIssues, findOnWhiteCardIssues, formatIssues, formatOnWhiteCardIssues,
+} from './darkModeLint'
 
 const sources = import.meta.glob(['/src/**/*.{ts,tsx}', '!/src/**/*.test.{ts,tsx}'], {
   query: '?raw', import: 'default', eager: true,
@@ -18,5 +20,11 @@ describe('dark-mode text colours', () => {
     const issues = Object.entries(sources).flatMap(([path, src]) =>
       findDarkTextIssues(path.replace(/^\/src\//, ''), src))
     expect(issues, formatIssues(issues)).toEqual([])
+  })
+
+  it('always-white cards use no dark-card colours (light dark:text, dark dark:bg)', () => {
+    const issues = Object.entries(sources).flatMap(([path, src]) =>
+      findOnWhiteCardIssues(path.replace(/^\/src\//, ''), src))
+    expect(issues, formatOnWhiteCardIssues(issues)).toEqual([])
   })
 })

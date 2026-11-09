@@ -68,3 +68,63 @@ export function formatIssues(issues: DarkTextIssue[]): string {
     + ' dark:text-red-300), or, if the element sits on a background that stays light in'
     + ` dark mode, add the marker class "${ON_LIGHT_MARKER}".`
 }
+
+// ── Always-white cards ───────────────────────────────────────────────
+// The alert card is white in BOTH themes (vg-on-light), so inside it a
+// dark-mode colour written for a dark card backfires: a light
+// `dark:text-…` (white, slate/gray/sky 50–400) is pale-on-white and a
+// dark `dark:bg-…` turns a light box murky under its own dark text.
+// Keep light-mode colours there, or `dark:text-black` for more contrast.
+
+/** Files whose cards stay white in dark mode. */
+export const ALWAYS_WHITE_FILES: Record<string, string> = {
+  'components/AlertCard.tsx': 'alert cards are bg-white in both themes',
+}
+
+/** Deliberate dark insets inside a white card that read fine on their own
+ *  (the class string sets a dark background AND light text, or frames
+ *  media). Matched by a distinctive piece of the class string. */
+export const ALWAYS_WHITE_EXEMPT: { file: string; contains: string; reason: string }[] = [
+  { file: 'components/AlertCard.tsx', contains: 'bg-slate-100 dark:bg-slate-800 border border-slate-300',
+    reason: 'snapshot placeholder frame: a dark media slot, its caption is light-on-dark' },
+  { file: 'components/AlertCard.tsx', contains: 'bg-slate-50 dark:bg-slate-800 p-2 text-center',
+    reason: 'Store Intelligence tile: dark tile with light text, readable as a unit' },
+  { file: 'components/AlertCard.tsx', contains: 'text-slate-800 dark:text-slate-100 capitalize truncate',
+    reason: 'value inside the dark Store Intelligence tile above' },
+  { file: 'components/AlertCard.tsx', contains: 'bg-blue-50 text-blue-900 dark:bg-slate-800 dark:text-slate-200',
+    reason: 'Store Intelligence AI summary: dark inset with light text' },
+  { file: 'components/AlertCard.tsx', contains: 'bg-emerald-50 text-emerald-900 dark:bg-slate-800 dark:text-emerald-300',
+    reason: 'Store Intelligence recommendation: dark inset with light text' },
+]
+
+const LIGHT_DARK_TEXT = /(?<![\w-])dark:(?:[\w-]+:)?text-(?:white|(?:slate|gray|sky)-(?:50|100|200|300|400))(?![\w-])/g
+const DARK_DARK_BG = new RegExp(
+  `(?<![\\w-])dark:(?:[\\w-]+:)?bg-(?:black|(?:${GREYS}|${COLOURS})-(?:600|700|800|900|950))(?:\\/\\d+)?(?![\\w-])`, 'g')
+
+/** Class strings in an always-white card that use dark-card colours. */
+export function findOnWhiteCardIssues(file: string, source: string): DarkTextIssue[] {
+  if (!(file in ALWAYS_WHITE_FILES)) return []
+  const exempt = ALWAYS_WHITE_EXEMPT.filter(e => e.file === file)
+  const issues: DarkTextIssue[] = []
+  for (const m of source.matchAll(STRING_LITERAL)) {
+    const literal = m[0]
+    const classes = [...literal.matchAll(LIGHT_DARK_TEXT), ...literal.matchAll(DARK_DARK_BG)].map(x => x[0])
+    if (classes.length === 0) continue
+    const flat = literal.replace(/\s+/g, ' ')
+    if (exempt.some(e => flat.includes(e.contains))) continue
+    issues.push({
+      file,
+      line: source.slice(0, m.index ?? 0).split('\n').length,
+      classes,
+      snippet: flat.slice(0, 120),
+    })
+  }
+  return issues
+}
+
+export function formatOnWhiteCardIssues(issues: DarkTextIssue[]): string {
+  return issues.map(i => `  ${i.file}:${i.line}  ${i.classes.join(' ')}  ← ${i.snippet}`).join('\n')
+    + '\n\nThis card stays white in dark mode: drop the dark-card colour and keep the'
+    + ' light-mode one (or use dark:text-black). A deliberate dark inset that reads'
+    + ' on its own can be listed in ALWAYS_WHITE_EXEMPT with a reason.'
+}
