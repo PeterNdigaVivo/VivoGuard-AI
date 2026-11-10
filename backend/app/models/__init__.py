@@ -23,6 +23,7 @@ from app.models.operations import (
     AssuranceCase, CriticalZoneRequirement, GovernanceAuditLog,
     OperationalEvent, RiskReview,
 )
+from app.models.analytics import ZoneVisit, SalesAICorrelation
 
 __all__ = [
     "User",
@@ -43,4 +44,5 @@ __all__ = [
     "RecordingClip", "RECORDING_CLIP_STATUSES",
     "AssuranceCase", "CriticalZoneRequirement", "GovernanceAuditLog",
     "OperationalEvent", "RiskReview",
+    "ZoneVisit", "SalesAICorrelation",
 ]

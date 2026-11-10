@@ -281,6 +281,14 @@ class Settings(BaseSettings):
     # crashed-worker safety net. Env: INFERENCE_RUN_SECONDS.
     inference_run_seconds: int = 120
 
+    # --- Odoo sales-attribution webhook ---
+    # Odoo signs each sale-confirmed POST as HMAC-SHA256 over
+    # "<unix timestamp>.<raw body>" with this shared secret
+    # (X-Odoo-Timestamp / X-Odoo-Signature headers). Empty secret =
+    # endpoint answers 503 — never unsigned. Secret lives in .env only.
+    odoo_webhook_secret: str = ""
+    odoo_webhook_max_age_seconds: int = 300
+
     # --- Notifications ---
     smtp_host: str = ""
     smtp_port: int = 587

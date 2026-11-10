@@ -57,6 +57,43 @@ LOCK_KEY_PREFIX = "vg:inference-lock:"
 # racing a still-starting task whose hb hasn't landed yet.
 SWEEP_TTL_THRESHOLD_S = 30
 
+# Phase 0 experiment — long-lived inference slices on three cameras so
+# the durable-heatmap work can be validated against both slice lengths
+# without touching the fleet: Junction Ch8 (8), Capital Centre Ch1 (9),
+# Moi Ave Ch4 (60). Everything that scales with the slice (lock TTL,
+# heartbeat TTL) derives from _slice_for_camera(), never from the
+# module constants, so the invariant hb_ttl > lock_ttl > slice holds
+# per camera.
+# TODO: Replace with DB-driven config after Phase 0 validation.
+EXPERIMENTAL_LONG_SLICE_CAMERA_IDS = {8, 9, 60}
+EXPERIMENTAL_SLICE_SECONDS = 3600
+STANDARD_PRIORITY = 9
+
+
+def _slice_for_camera(camera_id: int) -> tuple[int, int]:
+    """(max_seconds, priority) for one camera's inference slice.
+
+    Experimental override: cameras in EXPERIMENTAL_LONG_SLICE_CAMERA_IDS
+    run 1-hour slices at standard priority; everyone else keeps the
+    existing RUN_SECONDS tier. The priority is carried through to
+    apply_async; it only takes effect if the broker is configured with
+    priority steps (inert today, future-proof for the tiered rollout).
+    # TODO: Replace with DB-driven config after Phase 0 validation.
+    """
+    if camera_id in EXPERIMENTAL_LONG_SLICE_CAMERA_IDS:
+        return (EXPERIMENTAL_SLICE_SECONDS, STANDARD_PRIORITY)
+    return (RUN_SECONDS, STANDARD_PRIORITY)
+
+
+def _lock_ttl_for(max_seconds: int) -> int:
+    """Lock must outlive its slice by the same +30s margin as before."""
+    return max_seconds + 30
+
+
+def _hb_ttl_for(max_seconds: int) -> int:
+    """Heartbeat TTL must exceed the lock TTL (sweep invariant)."""
+    return _lock_ttl_for(max_seconds) + 30
+
 
 def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url)
@@ -149,18 +186,21 @@ def supervise_all() -> None:
         cams = db.query(Camera).filter(Camera.ai_enabled == True).all()  # noqa: E712
     for cam in cams:
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
+        slice_seconds, priority = _slice_for_camera(cam.id)
+        lock_ttl = _lock_ttl_for(slice_seconds)
         # SET NX with TTL — atomic acquire. Value is a placeholder until
         # we know the real task_id; stamped below.
         placeholder = f"pending:{int(time.time())}"
-        if r.set(lock, placeholder, ex=LOCK_TTL, nx=True):
+        if r.set(lock, placeholder, ex=lock_ttl, nx=True):
             try:
                 ar = run_camera_inference.apply_async(
                     args=[cam.id],
-                    kwargs={"max_seconds": RUN_SECONDS},
+                    kwargs={"max_seconds": slice_seconds},
                     queue="inference",
+                    priority=priority,
                 )
                 # Stamp the lock with the real task_id (refresh TTL).
-                r.set(lock, ar.id, ex=LOCK_TTL)
+                r.set(lock, ar.id, ex=lock_ttl)
                 enqueued.append(cam.id)
             except Exception as e:
                 # apply_async failed (broker hiccup). Release the lock
@@ -200,9 +240,12 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
     started = time.time()
     try:
         # Heartbeat — set BEFORE any heavy work so the sweep can use
-        # its presence as proof the task is alive. HB_TTL > LOCK_TTL
-        # so a missing hb on a live lock is unambiguous.
-        r.set(hb, int(started), ex=HB_TTL)
+        # its presence as proof the task is alive. TTL scales with this
+        # slice's length so the per-camera invariant hb_ttl > lock_ttl
+        # > max_seconds holds for the 1-hour experimental slices too
+        # (a fixed 180s hb would expire mid-slice and let the sweep
+        # misread a live hour-long task as dead).
+        r.set(hb, int(started), ex=_hb_ttl_for(max_seconds))
         run_for_camera(camera_id, max_seconds=max_seconds)
     except Exception as e:
         log.exception("inference.run_camera camera=%s failed: %s", camera_id, e)
