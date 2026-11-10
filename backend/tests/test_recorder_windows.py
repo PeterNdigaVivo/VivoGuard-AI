@@ -461,6 +461,45 @@ def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> No
     assert sleeps == [5]
 
 
+def test_repairs_proven_recorder_without_streamer_frame(monkeypatch) -> None:
+    cameras = [
+        SimpleNamespace(id=camera_id, store_id=1) for camera_id in range(1, 4)
+    ]
+    redis = _RepairRedis()
+    redis.live_frames = set()
+    redis.values["vg:recording:proven:2"] = "current"
+    started = []
+
+    class _Db:
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(
+        "app.tasks.recorder._key_cameras", lambda _db: cameras,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid == 101,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._recording_output_has_data",
+        lambda path: path == "/clips/1.mp4",
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._close_stale_camera_recordings",
+        lambda *_args: 1,
+    )
+    monkeypatch.setattr(
+        "app.tasks.recorder._start_camera",
+        lambda _db, _r, camera, window_id, seconds: started.append(
+            (camera.id, window_id, seconds),
+        ) or True,
+    )
+    monkeypatch.setattr("app.tasks.recorder.time.sleep", lambda _seconds: None)
+
+    assert _repair_missing_recordings(_Db(), redis, "current", 600) == 1
+    assert started == [(2, "current", 600)]
+
+
 def test_dead_recorder_row_ends_at_last_provable_file_write(tmp_path) -> None:
     db = _session()
     now = datetime(2026, 10, 2, 6, 30, tzinfo=timezone.utc)

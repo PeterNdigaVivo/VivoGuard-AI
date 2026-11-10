@@ -59,10 +59,12 @@ _WINDOWS = [
 
 _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, path}
 _REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
+_PROVEN_KEY_FMT = "vg:recording:proven:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
 _FAILURE_KEY_FMT = "vg:recording:failure:{cam}"
 _FAILURE_TTL_SECONDS = 24 * 3600
+_PROVEN_TTL_SECONDS = 24 * 3600
 _FFMPEG_FAILURE_REASONS = {
     "authentication_failed",
     "access_forbidden",
@@ -459,6 +461,22 @@ def _live_recording_ids(r, window_id: str,
                 active_ids.add(camera_id)
         except Exception:
             continue
+    # Preserve evidence that these independent recorders worked in the
+    # current window.  A streamer frame is sufficient proof for an initial
+    # repair, but its absence does not prove the recorder feed is unavailable.
+    # Mark after SCAN iteration so Redis-like test doubles and alternate
+    # clients cannot invalidate an in-progress key iterator.
+    for camera_id in active_ids:
+        try:
+            r.set(
+                _PROVEN_KEY_FMT.format(cam=camera_id),
+                window_id,
+                ex=_PROVEN_TTL_SECONDS,
+            )
+        except Exception:
+            # Health collection must remain read-safe even when Redis is
+            # briefly unable to persist the recovery hint.
+            pass
     return active_ids
 
 
@@ -684,7 +702,11 @@ def _repair_missing_recordings(db, r, window_id: str,
         # Do not create futile rows for an offline feed, and do not retry a
         # camera more than once per five minutes when a second RTSP connection
         # is refused. The authoritative streamer remains untouched.
-        if not r.exists(f"vg:frame:{camera_id}"):
+        recorder_was_proven = (
+            r.get(_PROVEN_KEY_FMT.format(cam=camera_id)) == window_id
+        )
+        if (not r.exists(f"vg:frame:{camera_id}")
+                and not recorder_was_proven):
             continue
         if not r.set(_REPAIR_KEY_FMT.format(cam=camera_id), "1",
                      nx=True, ex=300):
