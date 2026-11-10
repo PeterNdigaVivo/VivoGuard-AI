@@ -516,11 +516,33 @@ class HeatmapDetector(Detector):
         self.anchors: dict[int, dict[str, tuple]] = {}
         self._last_publish: dict[int, float] = {}
 
+        # Delta publishing (Approach B): snapshot of each layer as it
+        # was at the LAST successful publish, so each publish sends
+        # only the change since then. camera_id -> {window ->
+        # {"traffic": grid, "engagement": grid, "congestion": grid,
+        #  "paths": edges-dict}}. A fresh process starts at zeros,
+        # which is exactly right: it has accumulated nothing yet, so
+        # its first delta is just its own new counts.
+        self._last_published_grids: dict[int, dict[str, dict]] = {}
+        # Windows whose period anchor rolled over since the last
+        # publish — their durable accumulation hashes are deleted on
+        # the next publish (belt-and-braces alongside the TTL).
+        self._rollover: dict[int, set[str]] = {}
+        # Cells with a person in them RIGHT NOW — consumed at render
+        # time by the live-activity boost. The boost is presentational
+        # only and must never leak into the durable accumulators.
+        self._live_cells: dict[int, set] = {}
+
         # Per-track session state — keyed by (camera_id, track_id).
         # Tracks the cell + zone the track is currently sitting in,
         # when it arrived, and which zones the session has already
         # visited (for repeat-visit weighting).
         self._sessions: dict[tuple[int, int], dict] = {}
+
+        # Counter-zone presence sessions for the zone_visits table
+        # (Odoo sales attribution). Keyed (camera_id, zone_id):
+        # {"visit_id", "entered_at", "empty_since"}.
+        self._counter_presence: dict[tuple[int, int], dict] = {}
 
     @staticmethod
     def _period_anchor(window: str, ts: datetime | None = None) -> tuple:
@@ -555,18 +577,120 @@ class HeatmapDetector(Detector):
         cam_paths       = self.paths.setdefault(camera_id, {})
         cam_anchors     = self.anchors.setdefault(camera_id, {})
         anchor = self._period_anchor(window, datetime.now())
-        if cam_anchors.get(window) != anchor:
+        prev_anchor = cam_anchors.get(window)
+        if prev_anchor != anchor:
             cam_grids[window]      = [[0]   * self.GRID for _ in range(self.GRID)]
             cam_engagement[window] = [[0.0] * self.GRID for _ in range(self.GRID)]
             cam_congestion[window] = [[0.0] * self.GRID for _ in range(self.GRID)]
             cam_paths[window]      = {}
             cam_anchors[window]    = anchor
+            # The delta baseline must roll over WITH the grids, or the
+            # first publish of the new period would send huge negative
+            # deltas (0 - yesterday).
+            self._last_published_grids.setdefault(camera_id, {}).pop(window, None)
+            # Only a REAL period transition (observed by a live
+            # process) purges the durable accumulators — the TTL
+            # normally expires them at the boundary; the delete covers
+            # clock drift. First-sight after a process restart
+            # (prev_anchor is None) must NOT purge: the whole point of
+            # delta publishing is that restarts inherit the existing
+            # accumulation.
+            if prev_anchor is not None:
+                self._rollover.setdefault(camera_id, set()).add(window)
         return cam_grids[window]
 
+    # ---- Durable delta-publishing plumbing (Approach B) ------------
+
+    # Accumulation hashes — the durable source of truth that survives
+    # slice restarts and deployments. Field "gy:gx" (grids) or
+    # "fy:fx:ty:tx" (path edges); values accumulate via HINCRBY(FLOAT).
+    ACC_KEY_FMT = "vg:heatmap:acc:{layer}:{window}:{camera_id}"
+
+    @classmethod
+    def _acc_key(cls, layer: str, window: str, camera_id: int) -> str:
+        return cls.ACC_KEY_FMT.format(layer=layer, window=window,
+                                      camera_id=camera_id)
+
+    @staticmethod
+    def _window_expiry_ts(window: str) -> int:
+        """Unix timestamp when this window's accumulators expire —
+        computed in Africa/Nairobi (EAT) so 'day' really means the
+        store's trading day and 'week' ends Sunday night:
+
+          3h   -> the next 3-hour boundary
+          day  -> next midnight EAT
+          week -> next Monday 00:00 EAT (end of the ISO week)
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Africa/Nairobi"))
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if window == "3h":
+            boundary = midnight + timedelta(hours=(now.hour // 3) * 3 + 3)
+        elif window == "week":
+            boundary = midnight + timedelta(days=8 - now.isoweekday())
+        else:   # day
+            boundary = midnight + timedelta(days=1)
+        return int(boundary.timestamp())
+
+    @staticmethod
+    def _grid_delta_fields(current, last) -> list[tuple[str, float]]:
+        """Non-zero per-cell differences as (field, delta) pairs."""
+        out: list[tuple[str, float]] = []
+        for gy, row in enumerate(current or []):
+            last_row = last[gy] if last and gy < len(last) else None
+            for gx, val in enumerate(row):
+                prev = last_row[gx] if last_row else 0
+                diff = val - prev
+                if diff:
+                    out.append((f"{gy}:{gx}", diff))
+        return out
+
+    @staticmethod
+    def _hash_to_grid(raw: dict, size: int, *, as_int: bool) -> list[list]:
+        grid = [[0 if as_int else 0.0] * size for _ in range(size)]
+        for field, val in (raw or {}).items():
+            try:
+                f = field.decode() if isinstance(field, bytes) else field
+                gy, gx = (int(p) for p in f.split(":"))
+                v = float(val)
+                if 0 <= gy < size and 0 <= gx < size:
+                    grid[gy][gx] = int(round(v)) if as_int else round(v, 3)
+            except Exception:
+                continue
+        return grid
+
     def _publish(self, camera_id: int) -> None:
+        """Delta-publish to durable Redis storage (Approach B).
+
+        The in-memory grids only live as long as this inference slice
+        (~RUN_SECONDS), so overwriting the day/week keys with them —
+        the old behaviour — reset the long-window heatmaps to
+        sub-slice data on every process restart. Instead:
+
+          1. compute the DELTA of every layer since the last publish,
+          2. atomically HINCRBY(FLOAT) those deltas into per-window
+             accumulation hashes (vg:heatmap:acc:...), each TTL'd to
+             the end of its EAT window (day → midnight, week → Sunday
+             night, 3h → next 3h boundary),
+          3. re-render the EXISTING JSON keys from the hashes, so
+             heatmap_archive.py and the analytics API keep reading
+             the exact payloads they always have — now monotonically
+             accumulating across restarts.
+
+        _last_published_grids only advances after step 2 succeeds, so
+        a failed publish is retried (same delta) on the next cycle.
+        Concurrency: celery prefork gives each worker process its own
+        detector instances, and the per-camera inference lock ensures
+        one slice per camera, so no two processes delta-publish the
+        same camera.
+        Failure: log and return — never crash the detector chain.
+        """
+        import json
+        import logging as _l
+        import time as _t
+        log_ = _l.getLogger(__name__)
         try:
-            import json
-            import time as _t
             import redis
             from app.config import settings
             r = redis.from_url(settings.redis_url)
@@ -575,48 +699,141 @@ class HeatmapDetector(Detector):
             cam_engagement  = self.engagement.get(camera_id, {})
             cam_congestion  = self.congestion.get(camera_id, {})
             cam_paths       = self.paths.get(camera_id, {})
-            for window in self.WINDOWS:
-                grid = cam_grids.get(window) or []
-                payload = {
-                    "grid": grid, "size": self.GRID,
-                    "window": window,
-                    "updated_at": now_ts,
-                }
-                r.set(f"vg:heatmap:{window}:{camera_id}",
-                      json.dumps(payload), ex=24 * 3600)
+            last = self._last_published_grids.setdefault(camera_id, {})
 
-                eng = cam_engagement.get(window) or []
-                r.set(f"vg:heatmap:engagement:{window}:{camera_id}",
-                      json.dumps({"grid": eng, "size": self.GRID,
-                                  "window": window, "updated_at": now_ts}),
-                      ex=24 * 3600)
-                con = cam_congestion.get(window) or []
-                r.set(f"vg:heatmap:congestion:{window}:{camera_id}",
-                      json.dumps({"grid": con, "size": self.GRID,
-                                  "window": window, "updated_at": now_ts}),
-                      ex=24 * 3600)
-                edges = cam_paths.get(window) or {}
-                edge_list = [
-                    {"from": [k[0], k[1]], "to": [k[2], k[3]], "count": v}
-                    for k, v in edges.items() if v > 0
-                ]
+            # ---- 1 + 2: increment the durable accumulators ----------
+            pipe = r.pipeline(transaction=False)
+            rolled = self._rollover.get(camera_id) or set()
+            for window in rolled:
+                for layer in ("traffic", "engagement", "congestion",
+                              "paths"):
+                    pipe.delete(self._acc_key(layer, window, camera_id))
+            snapshots: dict[str, dict] = {}
+            for window in self.WINDOWS:
+                expiry = self._window_expiry_ts(window)
+                prev = last.get(window) or {}
+                layer_grids = (
+                    ("traffic",    cam_grids.get(window),      True),
+                    ("engagement", cam_engagement.get(window), False),
+                    ("congestion", cam_congestion.get(window), False),
+                )
+                for layer, cur, is_int in layer_grids:
+                    key = self._acc_key(layer, window, camera_id)
+                    for field, diff in self._grid_delta_fields(
+                            cur, prev.get(layer)):
+                        if is_int:
+                            pipe.hincrby(key, field, int(diff))
+                        else:
+                            pipe.hincrbyfloat(key, field, round(diff, 4))
+                    pipe.expireat(key, expiry)
+                # Path edges — same delta idea, integer counts.
+                pkey = self._acc_key("paths", window, camera_id)
+                cur_edges = cam_paths.get(window) or {}
+                prev_edges = prev.get("paths") or {}
+                for ek in set(cur_edges) | set(prev_edges):
+                    diff = cur_edges.get(ek, 0) - prev_edges.get(ek, 0)
+                    if diff:
+                        pipe.hincrby(
+                            pkey, f"{ek[0]}:{ek[1]}:{ek[2]}:{ek[3]}",
+                            int(diff))
+                pipe.expireat(pkey, expiry)
+                snapshots[window] = {
+                    "traffic":    [row[:] for row in
+                                   (cam_grids.get(window) or [])],
+                    "engagement": [row[:] for row in
+                                   (cam_engagement.get(window) or [])],
+                    "congestion": [row[:] for row in
+                                   (cam_congestion.get(window) or [])],
+                    "paths":      dict(cur_edges),
+                }
+            pipe.execute()
+            # Increments landed: advance the baseline and clear the
+            # rollover flags. A render failure below only affects the
+            # display keys, which are rewritten on the next cycle.
+            last.update(snapshots)
+            self._rollover.pop(camera_id, None)
+        except Exception as e:
+            log_.error("heatmap delta-publish failed cam=%s: %s "
+                       "(will retry next cycle)", camera_id, e)
+            return
+
+        # ---- 3: render the read keys from the durable hashes --------
+        try:
+            read_pipe = r.pipeline(transaction=False)
+            for window in self.WINDOWS:
+                for layer in ("traffic", "engagement", "congestion",
+                              "paths"):
+                    read_pipe.hgetall(
+                        self._acc_key(layer, window, camera_id))
+            raws = read_pipe.execute()
+            live_cells = self._live_cells.get(camera_id) or set()
+            write_pipe = r.pipeline(transaction=False)
+            day_traffic: list[list[int]] = []
+            idx = 0
+            for window in self.WINDOWS:
+                traffic = self._hash_to_grid(raws[idx], self.GRID,
+                                             as_int=True)
+                eng     = self._hash_to_grid(raws[idx + 1], self.GRID,
+                                             as_int=False)
+                con     = self._hash_to_grid(raws[idx + 2], self.GRID,
+                                             as_int=False)
+                paths_raw = raws[idx + 3]
+                idx += 4
+                if window == "day":
+                    day_traffic = traffic
+                # Live-activity boost is applied to the RENDERED
+                # engagement grid only — presentational, never written
+                # into the accumulators (a max()-style boost inside an
+                # additive store would compound forever).
+                self._apply_live_boost(eng, live_cells)
+                write_pipe.set(
+                    f"vg:heatmap:{window}:{camera_id}",
+                    json.dumps({"grid": traffic, "size": self.GRID,
+                                "window": window, "updated_at": now_ts}),
+                    ex=24 * 3600)
+                write_pipe.set(
+                    f"vg:heatmap:engagement:{window}:{camera_id}",
+                    json.dumps({"grid": eng, "size": self.GRID,
+                                "window": window, "updated_at": now_ts}),
+                    ex=24 * 3600)
+                write_pipe.set(
+                    f"vg:heatmap:congestion:{window}:{camera_id}",
+                    json.dumps({"grid": con, "size": self.GRID,
+                                "window": window, "updated_at": now_ts}),
+                    ex=24 * 3600)
+                edge_list = []
+                for field, val in (paths_raw or {}).items():
+                    try:
+                        f = (field.decode() if isinstance(field, bytes)
+                             else field)
+                        fy, fx, ty, tx = (int(p) for p in f.split(":"))
+                        cnt = int(float(val))
+                        if cnt > 0:
+                            edge_list.append({"from": [fy, fx],
+                                              "to": [ty, tx],
+                                              "count": cnt})
+                    except Exception:
+                        continue
                 edge_list.sort(key=lambda e: -e["count"])
-                r.set(f"vg:heatmap:paths:{window}:{camera_id}",
-                      json.dumps({"edges": edge_list[:200], "size": self.GRID,
-                                  "window": window, "updated_at": now_ts}),
-                      ex=24 * 3600)
+                write_pipe.set(
+                    f"vg:heatmap:paths:{window}:{camera_id}",
+                    json.dumps({"edges": edge_list[:200],
+                                "size": self.GRID, "window": window,
+                                "updated_at": now_ts}),
+                    ex=24 * 3600)
 
             # Backwards-compat: the legacy un-suffixed key holds the
             # DAY traffic grid. Pre-time-window callers keep working.
-            day_grid = cam_grids.get("day") or []
-            r.set(
+            write_pipe.set(
                 f"vg:heatmap:{camera_id}",
-                json.dumps({"grid": day_grid, "size": self.GRID,
+                json.dumps({"grid": day_traffic, "size": self.GRID,
                             "updated_at": now_ts}),
-                ex=24 * 3600,
-            )
-        except Exception:
-            pass
+                ex=24 * 3600)
+            write_pipe.execute()
+        except Exception as e:
+            log_.error("heatmap render failed cam=%s: %s "
+                       "(accumulators are intact; next cycle re-renders)",
+                       camera_id, e)
 
     @staticmethod
     def _track_signature(camera_id: int, track_id: int) -> str:
@@ -773,10 +990,27 @@ class HeatmapDetector(Detector):
 
         # Minimum-visibility boost: any cell with a person RIGHT NOW
         # gets at least 30% of the grid max in the engagement layer,
-        # and adjacent cells get 15%. This way the operator sees the
-        # heatmap respond instantly to people on screen instead of
-        # staring at an empty grid waiting for the 3-second dwell.
-        self._stamp_live_activity(ctx.camera_id, currently_active_cells)
+        # and adjacent cells get 15%. Under delta publishing the boost
+        # is applied at RENDER time only (see _publish) — writing a
+        # max()-style boost into the additive accumulators would
+        # permanently pollute the durable totals. Here we just record
+        # which cells are live.
+        self._live_cells[ctx.camera_id] = set(currently_active_cells)
+
+        # Counter-zone presence → zone_visits rows (Odoo sales
+        # attribution). Best-effort: database trouble must never break
+        # the detector chain.
+        try:
+            self._log_counter_presence(ctx, now_ts)
+        except Exception:
+            import logging as _l
+            _l.getLogger(__name__).exception(
+                "zone-visit logging failed cam=%s", ctx.camera_id)
+            try:
+                if ctx.db is not None:
+                    ctx.db.rollback()
+            except Exception:
+                pass
 
         if now_ts - self._last_publish.get(ctx.camera_id, 0) >= self.PUBLISH_INTERVAL:
             self._last_publish[ctx.camera_id] = now_ts
@@ -816,33 +1050,37 @@ class HeatmapDetector(Detector):
                 if grid:
                     grid[gy][gx] += delta
 
-    def _stamp_live_activity(self, camera_id: int,
-                              cells: set[tuple[int, int]]) -> None:
+    @classmethod
+    def _apply_live_boost(cls, grid: list[list[float]],
+                          cells: set[tuple[int, int]]) -> None:
         """Boost cells with a person currently in frame so the heatmap
         always shows SOMETHING when the operator can see customers.
 
         Current cell -> max(value, current_max * 0.3) -> green/active
         8-neighbours -> max(value, current_max * 0.15) -> faint blue
+
+        Applied IN PLACE to a rendered engagement grid right before it
+        is written to the display key — never to the accumulators, so
+        the presentational max() can't compound into the durable
+        totals under delta publishing.
         """
-        if not cells:
+        if not cells or not grid:
             return
-        for w in self.WINDOWS:
-            grid = self.engagement.get(camera_id, {}).get(w)
-            if not grid:
+        # Floor of 1.0 means a never-touched grid still gets some
+        # baseline so the boost actually shows colour.
+        current_max = max((max(row) for row in grid), default=0) or 1.0
+        for (gy, gx) in cells:
+            if not (0 <= gy < cls.GRID and 0 <= gx < cls.GRID):
                 continue
-            # Floor of 1.0 means a never-touched grid still gets some
-            # baseline so the boost actually shows colour.
-            current_max = max((max(row) for row in grid), default=0) or 1.0
-            for (gy, gx) in cells:
-                grid[gy][gx] = max(grid[gy][gx], current_max * 0.3)
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        if dy == 0 and dx == 0:
-                            continue
-                        ny, nx = gy + dy, gx + dx
-                        if 0 <= ny < self.GRID and 0 <= nx < self.GRID:
-                            grid[ny][nx] = max(grid[ny][nx],
-                                                current_max * 0.15)
+            grid[gy][gx] = max(grid[gy][gx], current_max * 0.3)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = gy + dy, gx + dx
+                    if 0 <= ny < cls.GRID and 0 <= nx < cls.GRID:
+                        grid[ny][nx] = max(grid[ny][nx],
+                                            current_max * 0.15)
 
     def _flush_cell_dwell(self, camera_id: int, sess: dict, now_ts: float) -> None:
         """Credit a track's accumulated dwell in a cell into the
@@ -873,6 +1111,143 @@ class HeatmapDetector(Detector):
                 grid = self.congestion[camera_id].get(w)
                 if grid:
                     grid[gy][gx] += credit
+
+    # ---- Counter-zone presence → zone_visits (Odoo attribution) ----
+
+    # A counter zone that stays empty for this long closes the open
+    # visit. Doubling as the merge heuristic: a person who re-enters
+    # within the grace window simply keeps the SAME visit open, so
+    # per-slice track-id resets cannot split one customer into many
+    # visits. Identity is deliberately zone-occupancy based ("someone
+    # is at the counter"), not track-id based.
+    VISIT_EXIT_GRACE_S = 5.0
+
+    def _log_counter_presence(self, ctx: DetectorContext,
+                              now_ts: float) -> None:
+        """Maintain zone-occupancy sessions for `counter`-tagged zones
+        and persist them as zone_visits rows: entered_at when the zone
+        goes occupied, exited_at + duration_seconds when it has been
+        empty for VISIT_EXIT_GRACE_S. Staff tracks (per the same
+        roster the heatmap uses) do not count as occupancy, so the
+        cashier standing at the till all day doesn't produce one
+        endless visit."""
+        if ctx.db is None or ctx.store_id is None:
+            return
+        counter_zones = [
+            z for z in ctx.zones
+            if z.get("id") is not None
+            and "counter" in (z.get("detection_types_json") or [])
+        ]
+        if not counter_zones:
+            return
+        from datetime import datetime, timezone
+        # Derived from now_ts (not a second clock read) so grace-window
+        # math and row timestamps can never disagree.
+        now_utc = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+
+        # Non-staff person tracks in frame (sessions already carry the
+        # staff verdict, so no extra DB lookups here).
+        customer_tracks = []
+        for tr, _det in ctx.tracks:
+            if tr.cls not in COCO_PERSON:
+                continue
+            sess = self._sessions.get((ctx.camera_id, tr.track_id))
+            if sess and sess.get("is_staff"):
+                continue
+            customer_tracks.append(tr)
+
+        for z in counter_zones:
+            poly = z.get("polygon_coords_json") or []
+            occupied = any(bbox_in_zone(tr.bbox_norm, poly)
+                           for tr in customer_tracks)
+            key = (ctx.camera_id, int(z["id"]))
+            st = self._counter_presence.setdefault(
+                key, {"visit_id": None, "entered_at": None,
+                      "empty_since": None})
+            if occupied:
+                st["empty_since"] = None
+                if st["visit_id"] is None:
+                    self._open_visit(ctx, int(z["id"]), st, now_utc)
+            elif st["visit_id"] is not None:
+                if st["empty_since"] is None:
+                    st["empty_since"] = now_ts
+                elif now_ts - st["empty_since"] >= self.VISIT_EXIT_GRACE_S:
+                    self._close_visit(ctx, st, now_utc)
+
+    def _open_visit(self, ctx: DetectorContext, zone_id: int,
+                    st: dict, now_utc) -> None:
+        """Open (or re-open) a visit for one counter zone."""
+        from app.models.analytics import ZoneVisit
+        db = ctx.db
+        # Hygiene: a slice that died mid-visit leaves exited_at NULL
+        # behind with nobody to close it. Close any such dangler for
+        # this zone before opening a new visit.
+        danglers = (db.query(ZoneVisit)
+                      .filter(ZoneVisit.zone_id == zone_id,
+                              ZoneVisit.exited_at.is_(None))
+                      .all())
+        dangler_ids = []
+        for v in danglers:
+            v.exited_at = now_utc
+            entered = v.entered_at
+            if entered is not None:
+                if entered.tzinfo is None:
+                    from datetime import timezone as _tz
+                    entered = entered.replace(tzinfo=_tz.utc)
+                v.duration_seconds = max(
+                    0, int((now_utc - entered).total_seconds()))
+            dangler_ids.append(v.id)
+        # Merge heuristic: if the zone's last visit ended within the
+        # grace window, treat this as the same person and re-open it.
+        # Danglers just closed above are EXCLUDED — those are artifacts
+        # of a dead slice, not a 5-second gap by the same customer.
+        recent_q = (db.query(ZoneVisit)
+                      .filter(ZoneVisit.zone_id == zone_id,
+                              ZoneVisit.exited_at.isnot(None)))
+        if dangler_ids:
+            recent_q = recent_q.filter(~ZoneVisit.id.in_(dangler_ids))
+        recent = recent_q.order_by(ZoneVisit.exited_at.desc()).first()
+        reopened = False
+        if recent is not None and recent.exited_at is not None:
+            exited = recent.exited_at
+            if exited.tzinfo is None:
+                from datetime import timezone as _tz
+                exited = exited.replace(tzinfo=_tz.utc)
+            if (now_utc - exited).total_seconds() <= self.VISIT_EXIT_GRACE_S:
+                recent.exited_at = None
+                recent.duration_seconds = None
+                st["visit_id"] = recent.id
+                st["entered_at"] = recent.entered_at
+                reopened = True
+        if not reopened:
+            visit = ZoneVisit(store_id=ctx.store_id,
+                              camera_id=ctx.camera_id,
+                              zone_id=zone_id,
+                              entered_at=now_utc)
+            db.add(visit)
+            db.flush()
+            st["visit_id"] = visit.id
+            st["entered_at"] = now_utc
+        db.commit()
+
+    def _close_visit(self, ctx: DetectorContext, st: dict,
+                     now_utc) -> None:
+        from app.models.analytics import ZoneVisit
+        db = ctx.db
+        visit = db.get(ZoneVisit, st["visit_id"])
+        if visit is not None and visit.exited_at is None:
+            visit.exited_at = now_utc
+            entered = visit.entered_at
+            if entered is not None:
+                if entered.tzinfo is None:
+                    from datetime import timezone as _tz
+                    entered = entered.replace(tzinfo=_tz.utc)
+                visit.duration_seconds = max(
+                    0, int((now_utc - entered).total_seconds()))
+            db.commit()
+        st["visit_id"] = None
+        st["entered_at"] = None
+        st["empty_since"] = None
 
 
 class LPRDetector(Detector):
