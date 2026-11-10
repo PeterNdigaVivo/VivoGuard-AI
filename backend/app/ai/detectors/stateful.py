@@ -899,7 +899,14 @@ class HeatmapDetector(Detector):
         # this is safe in practice.
         person_dets = [d for d in ctx.raw_detections
                        if d.get("cls") in COCO_PERSON]
-        activity_dets = person_dets or ctx.raw_detections
+        # Mannequin false-positive fix: the fallback below promoted
+        # EVERY raw detection (including static mannequins and shelf
+        # stock seen by custom models that emit no person class) into
+        # permanent heat. Person detections only. Cameras whose custom
+        # model has no person class contribute no heatmap activity
+        # until retrained with one.
+        # activity_dets = person_dets or ctx.raw_detections
+        activity_dets = person_dets
 
         # Traffic layer — per-cell frame count, every active subject.
         for det in activity_dets:
