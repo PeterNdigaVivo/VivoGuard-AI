@@ -72,6 +72,13 @@ LOCK_TTL       = RUN_SECONDS + 30                  # 150s
 # publishing the same camera every LOCK_TTL while still bounding recovery if
 # the broker loses a task entirely.
 PENDING_LOCK_TTL = max(3600, RUN_SECONDS * 32)
+# A critical reservation that has not reached a worker within its entire SLA
+# is no longer useful: even if its broker message eventually arrives, the
+# ownership check below will make that superseded task exit without running.
+# Releasing only these overdue, heartbeat-free *pending* leases lets the next
+# supervisor tick republish the fast-lane task instead of hiding a lost broker
+# message for the full one-hour pending TTL.
+PENDING_CRITICAL_STALE_SECONDS = CRITICAL_GAP_SLA_SECONDS
 # Heartbeat TTL must comfortably exceed LOCK_TTL so a missing-hb on a
 # still-live lock is unambiguously "task is dead", never a race.
 HB_TTL         = LOCK_TTL + 30                     # 180s
@@ -110,6 +117,20 @@ if redis.call('get', KEYS[2]) == ARGV[1] then
   released = released + redis.call('del', KEYS[2])
 end
 return released
+"""
+
+_RELEASE_STALLED_PENDING_LUA = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if redis.call('exists', KEYS[2]) == 1 then
+  return 0
+end
+local ttl = redis.call('ttl', KEYS[1])
+if ttl > tonumber(ARGV[2]) and ttl <= tonumber(ARGV[3]) then
+  return redis.call('del', KEYS[1])
+end
+return 0
 """
 
 # Sweep safety — we only clear a lock when hb is missing AND the lock
@@ -443,6 +464,69 @@ def _release_owned_task(
     return int(r.eval(_RELEASE_LUA, 2, lock, heartbeat, task_id))
 
 
+def _repair_stalled_critical_reservations(
+    r: redis.Redis,
+    camera_ids: list[int],
+    last_run_by_camera: dict[int, float | None],
+    *,
+    now: float | None = None,
+) -> int:
+    """Release lost pending reservations after a critical SLA breach.
+
+    A pending lease has no heartbeat and retains the long
+    ``PENDING_LOCK_TTL``.  Active tasks shorten their lease to ``LOCK_TTL``
+    and create a heartbeat atomically, so the Lua check cannot delete a task
+    that starts while the supervisor is inspecting it.  Superseded broker
+    messages remain safe: their task id no longer owns the replacement lock
+    and ``_claim_reserved_task`` makes them exit before inference.
+    """
+    now = time.time() if now is None else float(now)
+    oldest_repairable_ttl = int(
+        PENDING_LOCK_TTL - PENDING_CRITICAL_STALE_SECONDS
+    )
+    repaired = 0
+    for camera_id in camera_ids:
+        last_run = last_run_by_camera.get(camera_id)
+        if (
+            last_run is not None
+            and now - float(last_run) <= CRITICAL_GAP_SLA_SECONDS
+        ):
+            continue
+        lock = LOCK_KEY_FMT.format(camera_id=camera_id)
+        heartbeat = HB_KEY_FMT.format(camera_id=camera_id)
+        try:
+            task_id = r.get(lock)
+            if task_id is None:
+                continue
+            if isinstance(task_id, bytes):
+                task_id = task_id.decode()
+            released = int(r.eval(
+                _RELEASE_STALLED_PENDING_LUA,
+                2,
+                lock,
+                heartbeat,
+                str(task_id),
+                int(LOCK_TTL),
+                oldest_repairable_ttl,
+            ))
+            if released:
+                repaired += 1
+                log.warning(
+                    "supervise_all: released stalled critical reservation "
+                    "cam=%s after SLA breach",
+                    camera_id,
+                )
+        except Exception as exc:
+            # Fail closed. The pending TTL still bounds the reservation and a
+            # Redis inspection fault must never risk concurrent inference.
+            log.warning(
+                "supervise_all: critical reservation repair failed cam=%s: %s",
+                camera_id,
+                exc,
+            )
+    return repaired
+
+
 def _sweep_stale_locks(r: redis.Redis) -> int:
     """Self-healing sweep. A lock is stale when its heartbeat key is
     missing AND the lock has ≤ SWEEP_TTL_THRESHOLD_S seconds remaining.
@@ -646,6 +730,12 @@ def supervise_all() -> None:
         r, [int(cam.id) for cam in schedulable],
     )
     schedule_now = time.time()
+    critical_reservations_repaired = _repair_stalled_critical_reservations(
+        r,
+        critical_ids,
+        last_runs,
+        now=schedule_now,
+    )
     # Workers may be idle while this loop publishes. Priority only reorders
     # messages already in Redis, so publishing ordinary tasks first can let
     # them start before a later critical message exists. Critical-first
@@ -688,14 +778,17 @@ def supervise_all() -> None:
             skipped.append(cam.id)
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
              "already_running=%s, critical_cooldown=%s, "
-             "stale_locks_cleared=%d",
+             "stale_locks_cleared=%d, critical_reservations_repaired=%d",
              len(cams), len(schedulable), enqueued, skipped, cooling_down,
-             stale_cleared)
+             stale_cleared, critical_reservations_repaired)
     reservation_health = _reservation_health(
         r, [int(cam.id) for cam in schedulable],
     )
     reservation_health.update(_critical_gap_health(r, critical_ids))
     reservation_health.update(_standard_gap_health(r, standard_ids))
+    reservation_health["critical_reservations_repaired"] = (
+        critical_reservations_repaired
+    )
     _write_health(r,
                   cameras_total=len(cams),
                   cameras_fresh=len(schedulable),

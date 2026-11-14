@@ -25,7 +25,21 @@ class FakeRedis:
                     self.ttls.pop(key, None)
                     released += 1
             return released
+        if script == inference._RELEASE_STALLED_PENDING_LUA:
+            if self.values.get(lock) != task_id:
+                return 0
+            if heartbeat in self.values:
+                return 0
+            ttl = self.ttls.get(lock, -2)
+            if ttl > int(ttls[0]) and ttl <= int(ttls[1]):
+                self.values.pop(lock, None)
+                self.ttls.pop(lock, None)
+                return 1
+            return 0
         raise AssertionError("unexpected Lua script")
+
+    def get(self, key: str):
+        return self.values.get(key)
 
 
 class FakePipeline:
@@ -121,6 +135,62 @@ def test_stale_task_cannot_release_newer_task_keys():
         r, lock="lock", heartbeat="hb", task_id="new-task",
     ) == 2
     assert r.values == {}
+
+
+def test_repairs_overdue_critical_pending_reservation_after_sla():
+    r = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=84)
+    r.values[lock] = "lost-task"
+    r.ttls[lock] = (
+        inference.PENDING_LOCK_TTL
+        - inference.PENDING_CRITICAL_STALE_SECONDS
+    )
+
+    assert inference._repair_stalled_critical_reservations(
+        r, [84], {84: 100.0}, now=1000.0,
+    ) == 1
+    assert lock not in r.values
+
+
+def test_preserves_recent_or_started_critical_reservations():
+    recent = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=84)
+    recent.values[lock] = "queued-task"
+    recent.ttls[lock] = (
+        inference.PENDING_LOCK_TTL
+        - inference.PENDING_CRITICAL_STALE_SECONDS
+        + 1
+    )
+
+    assert inference._repair_stalled_critical_reservations(
+        recent, [84], {84: 100.0}, now=1000.0,
+    ) == 0
+    assert recent.values[lock] == "queued-task"
+
+    started = FakeRedis()
+    heartbeat = inference.HB_KEY_FMT.format(camera_id=84)
+    started.values.update({lock: "running-task", heartbeat: "running-task"})
+    started.ttls[lock] = (
+        inference.PENDING_LOCK_TTL
+        - inference.PENDING_CRITICAL_STALE_SECONDS
+    )
+
+    assert inference._repair_stalled_critical_reservations(
+        started, [84], {84: 100.0}, now=1000.0,
+    ) == 0
+    assert started.values[lock] == "running-task"
+
+
+def test_preserves_pending_reservation_while_critical_camera_is_within_sla():
+    r = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=84)
+    r.values[lock] = "queued-task"
+    r.ttls[lock] = 1
+
+    assert inference._repair_stalled_critical_reservations(
+        r, [84], {84: 950.0}, now=1000.0,
+    ) == 0
+    assert r.values[lock] == "queued-task"
 
 
 def test_pending_reservation_outlives_full_cpu_queue_rotation():
