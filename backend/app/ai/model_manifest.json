@@ -1,0 +1,26 @@
+{
+  "_comment": "Pinned detector weights. Downloaded by scripts/fetch_models.py into MODELS_DIR, never committed. Change a URL only together with its sha256. YOLOv8 and YOLO11 are AGPL-3.0 (Ultralytics).",
+  "models": {
+    "yolov8n.pt": {
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt",
+      "sha256": "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36",
+      "size_bytes": 6549796,
+      "release": "ultralytics/assets v8.3.0",
+      "license": "AGPL-3.0"
+    },
+    "yolo11s.pt": {
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt",
+      "sha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5",
+      "size_bytes": 19313732,
+      "release": "ultralytics/assets v8.3.0",
+      "license": "AGPL-3.0"
+    },
+    "yolo11m.pt": {
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt",
+      "sha256": "d5ffc1a674953a08e11a8d21e022781b1b23a19b730afc309290bd9fb5305b95",
+      "size_bytes": 40684120,
+      "release": "ultralytics/assets v8.3.0",
+      "license": "AGPL-3.0"
+    }
+  }
+}

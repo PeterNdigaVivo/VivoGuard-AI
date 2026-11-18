@@ -141,3 +141,20 @@ def summarise_speed(ms: list[float]) -> dict:
 
 def _pct(part: int, whole: int) -> float | None:
     return round(100.0 * part / whole, 1) if whole else None
+
+
+def summarise_counts(pairs: list[tuple[int, int]]) -> dict:
+    """(model count, hand count) per clip → how close the counts are."""
+    if not pairs:
+        return {"clips": 0, "mean_abs_error": None, "exact_pct": None,
+                "within_one_pct": None, "overcount_pct": None, "undercount_pct": None}
+    errors = [model - hand for model, hand in pairs]
+    n = len(pairs)
+    return {
+        "clips": n,
+        "mean_abs_error": round(sum(abs(e) for e in errors) / n, 2),
+        "exact_pct": _pct(sum(e == 0 for e in errors), n),
+        "within_one_pct": _pct(sum(abs(e) <= 1 for e in errors), n),
+        "overcount_pct": _pct(sum(e > 0 for e in errors), n),
+        "undercount_pct": _pct(sum(e < 0 for e in errors), n),
+    }

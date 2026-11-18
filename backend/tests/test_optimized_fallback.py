@@ -141,7 +141,7 @@ def test_eval_labels_and_warns_about_pytorch_fallback(monkeypatch, caplog):
     from app.eval import run
 
     model = types.SimpleNamespace(_vg_format="pytorch")
-    monkeypatch.setattr(yolov8_runner, "load_model", lambda _w: model)
+    monkeypatch.setattr(yolov8_runner, "load_model", lambda _w, _imgsz=640: model)
     monkeypatch.setattr(yolov8_runner, "resolve_weights", lambda n: n)
 
     with caplog.at_level(logging.WARNING, logger="app.eval.run"):

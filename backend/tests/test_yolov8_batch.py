@@ -39,7 +39,7 @@ def test_infer_batch_preserves_input_order_and_normalises(monkeypatch):
         _result([20, 10, 100, 50], 0.9, 0),
         _result([40, 20, 200, 100], 0.8, 0),
     ]
-    monkeypatch.setattr(yolov8_runner, "load_model", lambda _weights: model)
+    monkeypatch.setattr(yolov8_runner, "load_model", lambda _weights, _imgsz=640: model)
     monkeypatch.setattr(yolov8_runner, "resolve_weights", lambda _weights: "model")
     monkeypatch.setattr(
         yolov8_runner, "_hardware", lambda: SimpleNamespace(device="cuda:0"),
@@ -65,7 +65,7 @@ def test_single_frame_infer_preserves_established_non_batch_hot_path(monkeypatch
     frame = np.zeros((100, 200, 3), dtype=np.uint8)
     model = Mock()
     model.predict.return_value = [_result([20, 10, 100, 50], 0.9, 0)]
-    monkeypatch.setattr(yolov8_runner, "load_model", lambda _weights: model)
+    monkeypatch.setattr(yolov8_runner, "load_model", lambda _weights, _imgsz=640: model)
     monkeypatch.setattr(yolov8_runner, "resolve_weights", lambda _weights: "model")
     monkeypatch.setattr(
         yolov8_runner, "_hardware", lambda: SimpleNamespace(device="cpu"),

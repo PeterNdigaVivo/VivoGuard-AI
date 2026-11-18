@@ -59,15 +59,23 @@ def _get_person_class_ids(model) -> list[int]:
     return [0]
 
 
-def load_model(weights: str):
+DEFAULT_IMGSZ = 640
+
+
+def load_model(weights: str, imgsz: int = DEFAULT_IMGSZ):
     """Load (and cache) a YOLO model for `weights`, optimized for the
-    detected backend when settings.use_optimized is True."""
+    detected backend when settings.use_optimized is True.
+
+    A compiled engine is fixed to one input size, so each size gets its
+    own cached model (live inference always uses the default 640)."""
+    key = weights if imgsz == DEFAULT_IMGSZ else f"{weights}@{imgsz}"
     with _lock:
-        if weights not in _models:
+        if key not in _models:
             from app.config import settings
             env = _hardware()
             use_opt = bool(getattr(settings, "use_optimized", True))
-            model, fmt = env.load_optimized(weights, use_optimized=use_opt)
+            model, fmt = env.load_optimized(weights, use_optimized=use_opt,
+                                            imgsz=imgsz)
             try:
                 # Format actually running ('engine', 'pytorch', …) — the eval
                 # report labels its speed numbers with it.
@@ -87,8 +95,8 @@ def load_model(weights: str):
                      env.export_ms, env.load_ms,
                      getattr(model, "_person_cls_ids", None),
                      getattr(model, "names", None))
-            _models[weights] = model
-        return _models[weights]
+            _models[key] = model
+        return _models[key]
 
 
 def resolve_weights(model_name: str | None = None) -> str:
@@ -141,7 +149,7 @@ def infer_batch(frames: list[np.ndarray], *, weights: str | None = None,
     """
     if not frames:
         return []
-    model = load_model(resolve_weights(weights))
+    model = load_model(resolve_weights(weights), imgsz)
     device = _hardware().device
     results = model.predict(frames, conf=conf, imgsz=imgsz, device=device,
                             verbose=False)
@@ -158,7 +166,7 @@ def infer_batch(frames: list[np.ndarray], *, weights: str | None = None,
 def infer(frame: np.ndarray, *, weights: str | None = None,
           conf: float = 0.25, imgsz: int = 640) -> list[dict]:
     """Run inference on a single BGR frame using the established hot path."""
-    model = load_model(resolve_weights(weights))
+    model = load_model(resolve_weights(weights), imgsz)
     results = model.predict(
         frame, conf=conf, imgsz=imgsz, device=_hardware().device,
         verbose=False,

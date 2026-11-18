@@ -4,7 +4,10 @@
 # (CPU / CUDA / ROCm / MPS) from the right index.
 numpy>=1.26
 opencv-python-headless>=4.10
-ultralytics>=8.3
+# Pinned to the version production runs (verified 2026-11-18). A different
+# Ultralytics changes engine metadata and detection output; bump only
+# together with an eval run (app.eval.run) on the test set.
+ultralytics==8.4.203
 ffmpeg-python>=0.2
 # Anthropic SDK for optional VLM scene analysis and store insights.
 anthropic>=0.40

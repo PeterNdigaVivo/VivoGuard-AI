@@ -2,9 +2,12 @@
 # CUDA 12.8 is the first CUDA 12 release with Blackwell support.
 -r requirements.worker.base.txt
 --extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.7
+# torch and tensorrt are pinned to what production runs (verified
+# 2026-11-18): a TensorRT engine only loads under the exact TensorRT that
+# built it, so an unpinned rebuild silently invalidated cached engines.
+torch==2.15.0
 torchvision>=0.22
-tensorrt>=10.0
+tensorrt==11.4.0.106
 onnxruntime-gpu>=1.17
 # GPU load/memory sampling for app.eval (model evaluation). BSD-3.
 nvidia-ml-py==12.575.51

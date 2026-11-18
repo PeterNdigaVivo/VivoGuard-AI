@@ -3,6 +3,7 @@
     python -m app.eval.run --detector yolov8n.pt
     python -m app.eval.run --detector yolov8n.pt --detector yolo11m.pt
     python -m app.eval.run --detector yolov8n.pt --compare /data/eval/reports/<old>.json
+    python -m app.eval.run --detector yolo11m.pt --detector yolo11m.pt@960   # per-model input size
 
 Run inside a GPU worker container (worker-training is usually idle):
 it uses the same loader and TensorRT path as live inference. Prints a
@@ -38,8 +39,14 @@ def load_samples(db, limit: int | None = None) -> dict[str, list]:
     """Labelled samples whose files still exist, grouped by use."""
     from app.models import EvalSample
     q = db.query(EvalSample).filter(EvalSample.status == "labelled")
-    out: dict[str, list] = {"alerts": [], "uniform": [], "people": []}
+    out: dict[str, list] = {"alerts": [], "uniform": [], "people": [], "clips": []}
     for s in q.order_by(EvalSample.id):
+        if s.kind == "clip":
+            # Clips carry a video, not a frame: a hand count of people.
+            if (s.clip_path and os.path.isfile(s.clip_path)
+                    and (s.label or {}).get("count") is not None):
+                out["clips"].append(s)
+            continue
         if not s.frame_path or not os.path.isfile(s.frame_path):
             continue
         if s.kind == "alert" and s.category in (COUNTER_UNATTENDED, PERSON):
@@ -219,13 +226,23 @@ def test_set_size(samples: dict[str, list]) -> dict:
         row = sizes.setdefault(s.category, {"true": 0, "false": 0})
         row[s.verdict] = row.get(s.verdict, 0) + 1
     return {"alerts": sizes, "people_frames": len(samples["people"]),
-            "people_clicked": sum(len(s.label["points"]) for s in samples["people"])}
+            "people_clicked": sum(len(s.label["points"]) for s in samples["people"]),
+            "clips": len(samples.get("clips", []))}
 
 
 # ---- rendering -----------------------------------------------------------------------
 
 def _fmt(v) -> str:
     return "—" if v is None else (f"{v:g}" if isinstance(v, float) else str(v))
+
+
+def _get(d: dict, *keys):
+    """Nested lookup that tolerates older reports without the key."""
+    for k in keys:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
 
 
 def _pct(v) -> str:
@@ -238,7 +255,8 @@ def render(report: dict, previous: dict | None = None) -> str:
     lines = [f"# Model evaluation report — {report['created_at']}", ""]
     size = report["test_set"]
     lines.append(f"Test set: {json.dumps(size['alerts'])}; people frames "
-                 f"{size['people_frames']} ({size['people_clicked']} people clicked)")
+                 f"{size['people_frames']} ({size['people_clicked']} people clicked); "
+                 f"clips {size.get('clips', 0)}")
     lines.append(f"Settings: conf={report['conf']} imgsz={report['imgsz']}; "
                  f"GPU={report['environment'].get('gpu')}")
     lines.append("")
@@ -263,9 +281,17 @@ def render(report: dict, previous: dict | None = None) -> str:
         row("people missed", lambda d: d["people"]["people_missed"])
         row("false detections", lambda d: d["people"]["false_detections"])
         row("edge-of-frame people found %", lambda d: d["people"]["edge_found_pct"])
+        row("clips: count off by (mean, raw)", lambda d: _get(d, "clips", "raw", "mean_abs_error"))
+        row("clips: exact count % (raw)", lambda d: _get(d, "clips", "raw", "exact_pct"))
+        row("clips: count off by (mean, with mannequin filter)",
+            lambda d: _get(d, "clips", "filtered", "mean_abs_error"))
+        row("clips: exact count % (with mannequin filter)",
+            lambda d: _get(d, "clips", "filtered", "exact_pct"))
+        row("input size (imgsz)", lambda d: d.get("imgsz"))
         row("model format (engine = TensorRT)", lambda d: d.get("model_format"))
         row("speed median ms/frame", lambda d: d["speed"]["median_ms"])
         row("speed p95 ms/frame", lambda d: d["speed"]["p95_ms"])
+        row("PyTorch speed median ms/frame", lambda d: _get(d, "speed_pytorch", "median_ms"))
         row("GPU memory MB", lambda d: d["gpu_memory_mb"])
         lines.append("")
     for name, res in report["uniform"].items():
@@ -282,11 +308,36 @@ def render(report: dict, previous: dict | None = None) -> str:
 
 # ---- entry point -----------------------------------------------------------------------
 
+def parse_detector(spec: str, default_imgsz: int) -> tuple[str, int]:
+    """'yolo11m.pt@960' → ('yolo11m.pt', 960); a bare name keeps the default."""
+    name, sep, size = spec.rpartition("@")
+    if sep and size.isdigit() and name:
+        return name, int(size)
+    return spec, default_imgsz
+
+
+def pytorch_speed(name: str, imgsz: int, frame_paths: list[str], *, conf: float,
+                  read=_read) -> dict:
+    """Median/p95 ms per frame of the plain PyTorch model, for comparison
+    with the optimized (TensorRT) speed the main run measures."""
+    from app.ai.yolov8_runner import _hardware, resolve_weights
+    env = _hardware()
+    model, _ = env.load_optimized(resolve_weights(name), use_optimized=False, imgsz=imgsz)
+    frames = [read(p) for p in frame_paths]
+    timings: list[float] = []
+    for i, frame in enumerate(frames[:WARMUP_RUNS] + frames):
+        t0 = time.perf_counter()
+        model.predict(frame, conf=conf, imgsz=imgsz, device=env.device, verbose=False)
+        if i >= min(WARMUP_RUNS, len(frames)):
+            timings.append((time.perf_counter() - t0) * 1000)
+    return scoring.summarise_speed(timings)
+
+
 def _detector_infer_fn(name: str, conf: float, imgsz: int) -> InferFn:
     from app.ai.yolov8_runner import infer, load_model, resolve_weights
     from app.config import settings
     weights = resolve_weights(name)
-    model = load_model(weights)
+    model = load_model(weights, imgsz)
     fmt = getattr(model, "_vg_format", "unknown")
     if fmt == "pytorch" and getattr(settings, "use_optimized", True):
         log.warning("eval: %s is running as raw PyTorch because the optimized "
@@ -299,7 +350,8 @@ def _detector_infer_fn(name: str, conf: float, imgsz: int) -> InferFn:
 
 def build_report(db, *, detectors: list[str], uniform: list[str], conf: float,
                  imgsz: int, limit: int | None = None,
-                 infer_factory=_detector_infer_fn) -> dict:
+                 infer_factory=_detector_infer_fn, pytorch_speed_frames: int = 100,
+                 speed_fn=pytorch_speed, clips_fn=None, clip_fps: float | None = None) -> dict:
     samples = load_samples(db, limit)
     report = {
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -307,11 +359,28 @@ def build_report(db, *, detectors: list[str], uniform: list[str], conf: float,
         "test_set": test_set_size(samples), "detectors": {}, "uniform": {},
         "snapshot_volume": snapshot_volume(db),
     }
-    for name in detectors:
-        log.info("eval: scoring detector %s", name)
-        infer_fn = infer_factory(name, conf, imgsz)
-        report["detectors"][name] = evaluate_detector(samples, infer_fn, conf=conf)
-        report["detectors"][name]["model_format"] = getattr(infer_fn, "model_format", "unknown")
+    from app.config import settings
+    from app.eval import clips as clip_eval
+    clips_fn = clips_fn or clip_eval.evaluate_clips
+    fps = float(clip_fps or getattr(settings, "inference_fps_default", 2))
+    speed_paths = [s.frame_path for s in samples["alerts"] + samples["people"]][:pytorch_speed_frames]
+    for spec in detectors:
+        name, size = parse_detector(spec, imgsz)
+        log.info("eval: scoring detector %s at imgsz=%d", name, size)
+        infer_fn = infer_factory(name, conf, size)
+        res = evaluate_detector(samples, infer_fn, conf=conf)
+        res["imgsz"] = size
+        res["model_format"] = getattr(infer_fn, "model_format", "unknown")
+        if samples["clips"]:
+            log.info("eval: counting people in %d clips with %s", len(samples["clips"]), spec)
+            res["clips"] = clips_fn(samples["clips"], infer_fn, fps=fps)
+        if speed_paths:
+            try:
+                res["speed_pytorch"] = speed_fn(name, size, speed_paths, conf=conf)
+            except Exception as exc:                            # noqa: BLE001
+                log.warning("eval: PyTorch speed for %s failed: %s", spec, exc)
+                res["speed_pytorch"] = None
+        report["detectors"][spec] = res
     for name in uniform:
         report["uniform"][name] = evaluate_uniform(samples["uniform"], UNIFORM_METHODS[name])
     return report
@@ -321,11 +390,13 @@ def main(argv: list[str] | None = None) -> int:
     from app.config import settings
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--detector", action="append", default=[],
-                   help="weights name or path (repeat to compare)")
+                   help="weights name or path, optionally @imgsz (e.g. yolo11m.pt@960); repeat to compare")
     p.add_argument("--uniform", action="append", default=[], choices=sorted(UNIFORM_METHODS))
     p.add_argument("--conf", type=float, default=0.25, help="same default as live inference")
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--limit", type=int, default=None, help="max samples per group (quick runs)")
+    p.add_argument("--pytorch-speed-frames", type=int, default=100,
+                   help="frames timed with plain PyTorch per detector (0 = skip)")
     p.add_argument("--compare", type=Path, default=None, help="an earlier report .json")
     p.add_argument("--out", type=Path, default=Path(settings.eval_dir) / "reports")
     args = p.parse_args(argv)
@@ -336,7 +407,8 @@ def main(argv: list[str] | None = None) -> int:
     from app.database import SessionLocal
     with SessionLocal() as db:
         report = build_report(db, detectors=args.detector, uniform=args.uniform,
-                              conf=args.conf, imgsz=args.imgsz, limit=args.limit)
+                              conf=args.conf, imgsz=args.imgsz, limit=args.limit,
+                              pytorch_speed_frames=args.pytorch_speed_frames)
     previous = json.loads(args.compare.read_text()) if args.compare else None
     text = render(report, previous)
     from app.eval.collect import ensure_private_dir, private_write_text

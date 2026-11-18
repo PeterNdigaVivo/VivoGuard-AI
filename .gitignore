@@ -69,3 +69,8 @@ deploy/ssl/*.crt
 deploy/ssl/*.key
 deploy/ssl/*.pem
 !deploy/ssl/.gitkeep
+
+# --- Model weights / compiled engines: fetched by script, never committed ---
+*.pt
+*.engine
+*.onnx

@@ -2,7 +2,7 @@
 # Heavy. Only installed in the worker image.
 numpy>=1.26
 opencv-python-headless>=4.10
-ultralytics>=8.3
+ultralytics==8.4.203   # keep in step with requirements.worker.base.txt
 torch>=2.3
 torchvision>=0.18
 ffmpeg-python>=0.2
