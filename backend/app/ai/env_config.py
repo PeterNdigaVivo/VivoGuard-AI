@@ -110,6 +110,29 @@ def _configure_onnxruntime_sessions(threads: int) -> bool:
     return True
 
 
+def _package_version(name: str) -> str:
+    """Installed version of a distribution, or 'none'."""
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return "none"
+
+
+def _cuda_arch() -> str:
+    """'sm<major><minor>' of GPU 0 — engines are built per architecture."""
+    try:
+        import torch
+        major, minor = torch.cuda.get_device_capability(0)
+        return f"sm{major}{minor}"
+    except Exception:
+        return "smunknown"
+
+
+def _safe_name(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "-" for c in value)
+
+
 # backend → Ultralytics export `format=` string. rocm has no export
 # path (PyTorch HIP runs the raw .pt on the AMD device), so it maps to
 # None = "load the raw .pt, no export".
@@ -220,14 +243,23 @@ class HardwareEnv:
     # ------------------------------------------------------------------
     # Optimized model loading
     # ------------------------------------------------------------------
-    def load_optimized(self, model_path: str, use_optimized: bool = True):
+    def load_optimized(self, model_path: str, use_optimized: bool = True,
+                       imgsz: int = 640):
         """Return (model, fmt).
 
         When use_optimized is True and the backend has an export format,
-        export the model to that format once (cached under
-        data/models/optimized/{stem}_{backend}/) and load it through
-        Ultralytics. On ANY failure — and for rocm / use_optimized=False
-        — fall back to a raw PyTorch YOLO(model_path).
+        export the model to that format once and load it through
+        Ultralytics. The cached artifact lives under
+        <models_dir>/optimized/<runtime key>/, where the key names
+        everything a compiled artifact depends on (see _cache_key), so a
+        container never loads an engine another runtime built.
+
+        The optimized model is proven with one warm-up prediction before
+        it is returned: Ultralytics may only deserialise a TensorRT engine
+        on first use, and an incompatible engine then fails *inside
+        predict()* — outside any try block here, on every frame. On ANY
+        failure — and for rocm / use_optimized=False — this returns a raw
+        PyTorch YOLO(model_path) and logs why, so detection keeps running.
 
         `fmt` is the format actually loaded ('pytorch', 'onnx',
         'engine', 'openvino', 'coreml')."""
@@ -238,42 +270,113 @@ class HardwareEnv:
         # No-export paths: optimization off, rocm (raw HIP), or an
         # unknown backend.
         if not use_optimized or not spec_format:
-            t0 = time.perf_counter()
-            model = YOLO(model_path)
-            self.load_ms = (time.perf_counter() - t0) * 1000.0
-            return model, "pytorch"
+            return self._load_pytorch(model_path), "pytorch"
 
         try:
             from app.config import settings
             base = Path(settings.models_dir) / "optimized"
-        except Exception:
+            max_batch = max(1, int(getattr(settings, "inference_max_batch_size", 1)))
+        except Exception as exc:
+            log.debug("env_config: settings unavailable (%s); using defaults", exc)
             base = Path("data/models/optimized")
+            max_batch = 1
 
         stem = Path(model_path).stem
-        max_batch = max(1, int(getattr(
-            settings, "inference_max_batch_size", 1,
-        )))
-        # A TensorRT engine has a compiled batch profile. Never reuse a
-        # batch-1 artifact for a batch-32 deployment (or vice versa).
-        batch_suffix = f"_b{max_batch}" if max_batch > 1 else ""
-        cache_dir = base / f"{stem}_{self.backend}{batch_suffix}"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        artifact = self._cached_artifact(cache_dir, stem, spec_format)
+        cache_dir = base / self._cache_key(stem, spec_format, max_batch, imgsz)
+
+        failed = self._failure_marker(cache_dir)
+        if failed:
+            log.warning(
+                "env_config: optimized %s for %s failed earlier in %s (%s) — "
+                "using raw PyTorch. Delete that directory to retry the export.",
+                spec_format, stem, cache_dir, failed)
+            return self._load_pytorch(model_path), "pytorch"
 
         try:
-            if artifact is None or not artifact.exists():
-                artifact = self._export(model_path, cache_dir, spec_format)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            artifact = self._cached_artifact(cache_dir, stem, spec_format)
+            if artifact is None:
+                artifact = self._export_locked(model_path, cache_dir, spec_format,
+                                               max_batch, imgsz)
             t0 = time.perf_counter()
             model = YOLO(str(artifact))
+            self._warm_up(model, imgsz)
             self.load_ms = (time.perf_counter() - t0) * 1000.0
             return model, spec_format
         except Exception as e:
-            log.warning("env_config: optimized load failed for backend=%s "
-                        "(%s) — falling back to raw PyTorch", self.backend, e)
-            t0 = time.perf_counter()
-            model = YOLO(model_path)
-            self.load_ms = (time.perf_counter() - t0) * 1000.0
-            return model, "pytorch"
+            log.warning(
+                "env_config: optimized %s load FAILED for %s (backend=%s, cache=%s): "
+                "%s: %s — falling back to raw PyTorch; detection continues",
+                spec_format, stem, self.backend, cache_dir, type(e).__name__, e)
+            self._write_failure_marker(cache_dir, e)
+            return self._load_pytorch(model_path), "pytorch"
+
+    def _load_pytorch(self, model_path: str):
+        from ultralytics import YOLO
+        t0 = time.perf_counter()
+        model = YOLO(model_path)
+        self.load_ms = (time.perf_counter() - t0) * 1000.0
+        return model
+
+    def _warm_up(self, model, imgsz: int) -> None:
+        """One prediction on a blank frame, so an artifact that cannot run
+        here fails now (and falls back) rather than on the first camera
+        frame."""
+        import numpy as np
+        frame = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+        model.predict(frame, imgsz=imgsz, device=self.device, verbose=False)
+
+    # ---- cache key ------------------------------------------------------
+    # A compiled TensorRT engine only runs under the TensorRT version, GPU
+    # architecture, batch profile and input size it was built for, and
+    # Ultralytics embeds its own metadata. All of those are in the
+    # directory name, so containers built at different times (or with a
+    # different batch/imgsz) each get their own artifact instead of
+    # loading one they cannot deserialise.
+    _FORMAT_RUNTIME = {"engine": "tensorrt", "onnx": "onnxruntime",
+                       "openvino": "openvino", "coreml": "coremltools"}
+
+    def _cache_key(self, stem: str, fmt: str, max_batch: int, imgsz: int) -> str:
+        parts = [stem, self.backend]
+        if max_batch > 1:
+            parts.append(f"b{max_batch}")
+        parts.append(f"i{imgsz}")
+        parts.append("ul" + _package_version("ultralytics"))
+        runtime = self._FORMAT_RUNTIME.get(fmt)
+        if runtime:
+            parts.append(runtime[:3] + _package_version(runtime))
+        if self.backend == "cuda":
+            parts.append(_cuda_arch())
+        return _safe_name("_".join(parts))
+
+    # ---- failure marker -------------------------------------------------
+    _MARKER = "LOAD_FAILED.json"
+
+    def _failure_marker(self, cache_dir: Path) -> Optional[str]:
+        """The recorded reason if this artifact failed to load before."""
+        marker = cache_dir / self._MARKER
+        if not marker.exists():
+            return None
+        try:
+            import json
+            return str(json.loads(marker.read_text()).get("error", "unknown error"))
+        except Exception as exc:
+            return f"unreadable marker: {exc}"
+
+    def _write_failure_marker(self, cache_dir: Path, error: Exception) -> None:
+        """Remember the failure so every restart does not pay for (and log)
+        the same failed load; the next runtime upgrade gets a new key."""
+        try:
+            import json
+            from datetime import datetime, timezone
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / self._MARKER).write_text(json.dumps({
+                "error": f"{type(error).__name__}: {error}"[:500],
+                "at": datetime.now(timezone.utc).isoformat(),
+            }))
+        except Exception as exc:
+            log.warning("env_config: could not record failure marker in %s: %s",
+                        cache_dir, exc)
 
     @staticmethod
     def _cached_artifact(cache_dir: Path, stem: str,
@@ -289,39 +392,60 @@ class HardwareEnv:
         p = cache_dir / f"{stem}{ext}"
         return p if p.exists() else None
 
-    def _export(self, model_path: str, cache_dir: Path, fmt: str) -> Path:
-        """Export model_path to `fmt`, move the artifact into cache_dir,
-        return its path. Times the export into self.export_ms."""
+    def _export_locked(self, model_path: str, cache_dir: Path, fmt: str,
+                       max_batch: int, imgsz: int) -> Path:
+        """Export once even when several containers start together.
+
+        Holds an exclusive lock on cache_dir while exporting; a process
+        that waited re-checks for the finished artifact instead of
+        exporting again."""
+        import fcntl
+        stem = Path(model_path).stem
+        with open(cache_dir / ".export.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                done = self._cached_artifact(cache_dir, stem, fmt)
+                if done is not None:
+                    return done
+                return self._export(model_path, cache_dir, fmt, max_batch, imgsz)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _export(self, model_path: str, cache_dir: Path, fmt: str,
+                max_batch: int = 1, imgsz: int = 640) -> Path:
+        """Export model_path to `fmt` and move the artifact into cache_dir.
+
+        Ultralytics writes the export next to its source weights, so the
+        weights are copied into a private temporary directory first: two
+        processes exporting the same model can then never write the same
+        file, and a half-written artifact never appears under its final
+        name (the finished one is moved into place in one step)."""
+        import shutil
+        import tempfile
         from ultralytics import YOLO
         t0 = time.perf_counter()
-        src = YOLO(model_path)
-        kwargs = {"format": fmt, "device": self.device}
-        if fmt == "engine":
-            from app.config import settings
-            max_batch = max(1, int(getattr(
-                settings, "inference_max_batch_size", 1,
-            )))
-            kwargs["batch"] = max_batch
-            kwargs["dynamic"] = max_batch > 1
-        exported = src.export(**kwargs)
+        with tempfile.TemporaryDirectory(dir=cache_dir, prefix=".export-") as tmp:
+            src_copy = Path(tmp) / Path(model_path).name
+            if Path(model_path).exists():
+                shutil.copy2(model_path, src_copy)
+                src = YOLO(str(src_copy))
+            else:
+                # A bare name such as "yolov8n.pt" that Ultralytics downloads.
+                src = YOLO(model_path)
+            kwargs: dict[str, Any] = {"format": fmt, "device": self.device,
+                                      "imgsz": imgsz}
+            if fmt == "engine":
+                kwargs["batch"] = max_batch
+                kwargs["dynamic"] = max_batch > 1
+            produced = Path(src.export(**kwargs))
+            target = cache_dir / produced.name
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            os.replace(produced, target)
         self.export_ms = (time.perf_counter() - t0) * 1000.0
-        # Ultralytics returns the produced path (str). Move it into the
-        # cache dir so all backends share one predictable layout.
-        produced = Path(exported)
-        target = cache_dir / produced.name
-        try:
-            if produced.resolve() != target.resolve():
-                import shutil
-                if target.exists():
-                    if target.is_dir():
-                        shutil.rmtree(target, ignore_errors=True)
-                    else:
-                        target.unlink(missing_ok=True)
-                shutil.move(str(produced), str(target))
-            return target
-        except Exception:
-            # Move failed — use the produced path in place rather than
-            # re-export every run.
-            return produced
+        return target
 
     # ------------------------------------------------------------------

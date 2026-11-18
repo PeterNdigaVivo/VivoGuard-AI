@@ -263,6 +263,7 @@ def render(report: dict, previous: dict | None = None) -> str:
         row("people missed", lambda d: d["people"]["people_missed"])
         row("false detections", lambda d: d["people"]["false_detections"])
         row("edge-of-frame people found %", lambda d: d["people"]["edge_found_pct"])
+        row("model format (engine = TensorRT)", lambda d: d.get("model_format"))
         row("speed median ms/frame", lambda d: d["speed"]["median_ms"])
         row("speed p95 ms/frame", lambda d: d["speed"]["p95_ms"])
         row("GPU memory MB", lambda d: d["gpu_memory_mb"])
@@ -283,9 +284,17 @@ def render(report: dict, previous: dict | None = None) -> str:
 
 def _detector_infer_fn(name: str, conf: float, imgsz: int) -> InferFn:
     from app.ai.yolov8_runner import infer, load_model, resolve_weights
+    from app.config import settings
     weights = resolve_weights(name)
-    load_model(weights)
-    return lambda frame: infer(frame, weights=weights, conf=conf, imgsz=imgsz)
+    model = load_model(weights)
+    fmt = getattr(model, "_vg_format", "unknown")
+    if fmt == "pytorch" and getattr(settings, "use_optimized", True):
+        log.warning("eval: %s is running as raw PyTorch because the optimized "
+                    "model could not be loaded (reason logged above); its speed "
+                    "numbers are PyTorch speed, not TensorRT", name)
+    infer_fn = lambda frame: infer(frame, weights=weights, conf=conf, imgsz=imgsz)  # noqa: E731
+    infer_fn.model_format = fmt
+    return infer_fn
 
 
 def build_report(db, *, detectors: list[str], uniform: list[str], conf: float,
@@ -300,8 +309,9 @@ def build_report(db, *, detectors: list[str], uniform: list[str], conf: float,
     }
     for name in detectors:
         log.info("eval: scoring detector %s", name)
-        report["detectors"][name] = evaluate_detector(
-            samples, infer_factory(name, conf, imgsz), conf=conf)
+        infer_fn = infer_factory(name, conf, imgsz)
+        report["detectors"][name] = evaluate_detector(samples, infer_fn, conf=conf)
+        report["detectors"][name]["model_format"] = getattr(infer_fn, "model_format", "unknown")
     for name in uniform:
         report["uniform"][name] = evaluate_uniform(samples["uniform"], UNIFORM_METHODS[name])
     return report

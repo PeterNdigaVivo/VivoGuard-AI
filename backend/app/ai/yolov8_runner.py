@@ -68,6 +68,12 @@ def load_model(weights: str):
             env = _hardware()
             use_opt = bool(getattr(settings, "use_optimized", True))
             model, fmt = env.load_optimized(weights, use_optimized=use_opt)
+            try:
+                # Format actually running ('engine', 'pytorch', …) — the eval
+                # report labels its speed numbers with it.
+                model._vg_format = fmt
+            except AttributeError:
+                log.debug("cannot tag model %s with its format", weights)
             # Diagnostic: which class ids are people? Empty => this model can
             # NOT drive person-based detectors (the chain-wide persons=0 cause).
             try:
