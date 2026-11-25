@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -534,26 +535,37 @@ def _as_utc_for_test(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def test_close_window_retains_source_for_delayed_extraction(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("storage", "write_offset", "end_offset"),
+    [("media", -20, -20), ("media", 1, 0), ("empty", -20, -60), ("missing", -20, -60)],
+)
+def test_close_window_bounds_each_source_to_its_last_write(
+    tmp_path, monkeypatch, storage, write_offset, end_offset,
+) -> None:
     monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
     db = _session()
+    ended = datetime(2026, 8, 24, 16, 0, tzinfo=timezone.utc)
+    started = ended - timedelta(minutes=60)
     source = tmp_path / "clips" / "20260824_1400" / "1" / "7.mp4"
     source.parent.mkdir(parents=True)
-    source.write_bytes(b"recoverable incident source")
+    if storage != "missing":
+        source.write_bytes(b"recoverable incident source" if storage == "media" else b"")
+        last_write = (ended + timedelta(minutes=write_offset)).timestamp()
+        os.utime(source, (last_write, last_write))
     clip = RecordingClip(
         camera_id=7, window_id="20260824_1400", file_path=str(source),
-        status="recording",
+        status="recording", started_at=started,
     )
     db.add(clip)
     db.commit()
-    ended = datetime(2026, 8, 24, 16, 0, tzinfo=timezone.utc)
 
     assert _close_window(db, clip.window_id, ended_at=ended) == 1
 
     db.refresh(clip)
     assert clip.status == "completed"
     assert clip.file_path == str(source)
-    assert source.exists()
+    assert source.exists() == (storage != "missing")
+    assert _as_utc_for_test(clip.ended_at) == ended + timedelta(minutes=end_offset)
 
 
 def test_prune_source_window_only_after_retention(tmp_path, monkeypatch) -> None:

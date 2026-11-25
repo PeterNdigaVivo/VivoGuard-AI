@@ -39,6 +39,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISREG
 from tempfile import TemporaryDirectory
 
 import redis
@@ -661,19 +662,35 @@ def _delete_window(db, window_id: str) -> bool:
     return True
 
 
+def _recording_end_from_file(clip, *, closed_at: datetime) -> datetime:
+    started = _as_utc(clip.started_at) if clip.started_at else closed_at
+    if not clip.file_path:
+        return started
+    try:
+        info = Path(clip.file_path).stat()
+        if S_ISREG(info.st_mode) and info.st_size > 0:
+            last_write = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
+            return max(started, min(closed_at, last_write))
+    except (OSError, OverflowError, ValueError):
+        pass
+    return started
+
+
 def _close_window(db, window_id: str, *, ended_at: datetime | None = None) -> int:
     """Finalise a source window without destroying recoverable evidence."""
     from app.models import RecordingClip
-    ended_at = ended_at or datetime.now(timezone.utc)
-    updated = (db.query(RecordingClip)
-                 .filter(RecordingClip.window_id == window_id,
-                         RecordingClip.status == "recording")
-                 .update({"status": "completed", "ended_at": ended_at},
-                         synchronize_session=False))
+    closed_at = _as_utc(ended_at or datetime.now(timezone.utc))
+    rows = (db.query(RecordingClip)
+              .filter(RecordingClip.window_id == window_id,
+                      RecordingClip.status == "recording")
+              .all())
+    for clip in rows:
+        clip.status = "completed"
+        clip.ended_at = _recording_end_from_file(clip, closed_at=closed_at)
     db.commit()
     log.info("Completed recording window %s (%d camera files retained)",
-             window_id, updated)
-    return int(updated)
+             window_id, len(rows))
+    return len(rows)
 
 
 def _close_stale_camera_recordings(
@@ -689,18 +706,8 @@ def _close_stale_camera_recordings(
                      RecordingClip.status == "recording")
              .all())
     for clip in rows:
-        started = _as_utc(clip.started_at) if clip.started_at else now_utc
-        ended = started
-        try:
-            if clip.file_path:
-                file_time = datetime.fromtimestamp(
-                    Path(clip.file_path).stat().st_mtime, tz=timezone.utc,
-                )
-                ended = max(started, min(now_utc, file_time))
-        except OSError:
-            pass
         clip.status = "completed"
-        clip.ended_at = ended
+        clip.ended_at = _recording_end_from_file(clip, closed_at=now_utc)
     return len(rows)
 
 
@@ -809,9 +816,8 @@ def tick() -> None:
             if remaining > 30:
                 _stop_all(r)                     # clear stale pid keys
                 with SessionLocal() as db:
-                    # Bound every stale row to the restart instant before
-                    # adding continuation rows. This prevents a stale source
-                    # from later appearing to cover post-restart incidents.
+                    # Close stale files before adding continuation rows.
+                    # Their coverage ends at the last write, capped at restart.
                     _close_window(
                         db, window_id,
                         ended_at=datetime.now(timezone.utc),
