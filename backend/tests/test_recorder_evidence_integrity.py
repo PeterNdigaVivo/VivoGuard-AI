@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Alert, Camera, DetectionEvent, RecordingClip, Store, Zone
+from app.tasks import recorder
 from app.tasks.recorder import (
     _clip_source_matches_event, _entrance_clip_for,
     _pending_alert_clip_rows, _pending_open_close_clip_rows, _prunable_alert_clip_rows,
@@ -197,6 +202,44 @@ def test_open_close_backfill_excludes_completed_clips_before_limit():
         rows = _pending_open_close_clip_rows(db, now - timedelta(days=1), limit=3)
 
         assert [alert.id for alert, _event in rows] == [alert.id for alert in alerts[2:5]]
+
+
+@pytest.mark.parametrize(
+    ("successful_source", "expected_attempts"),
+    [(3, [3]), (2, [3, 2]), (None, [3, 2])],
+)
+def test_clip_extractor_retries_one_distinct_overlapping_source(
+    monkeypatch, tmp_path, successful_source, expected_attempts,
+):
+    event_ts = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    alert = SimpleNamespace(id=1)
+    event = SimpleNamespace(timestamp=event_ts, detection_type="intrusion", extra={})
+    outside, newest, fallback, third = [
+        SimpleNamespace(
+            id=source_id,
+            file_path=str(tmp_path / f"{source_id}.mp4"),
+            started_at=event_ts - timedelta(minutes=10),
+            ended_at=event_ts + timedelta(seconds=end_offset),
+        )
+        for source_id, end_offset in [(4, -1), (3, 30), (2, 30), (1, 30)]
+    ]
+    rows = [(alert, event, source) for source in (outside, newest, newest, fallback, third)]
+    attempted = []
+
+    def extract(_db, _alert, _event, clip, _timestamp):
+        attempted.append(clip.id)
+        return clip.id == successful_source
+
+    monkeypatch.setattr(recorder.settings, "recording_enabled", True)
+    monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(object()))
+    monkeypatch.setattr(recorder, "_alert_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder, "_pending_alert_clip_rows", lambda *_args: rows)
+    monkeypatch.setattr(recorder, "_pending_open_close_clip_rows", lambda *_args: [])
+    monkeypatch.setattr(recorder, "_extract_one", extract)
+
+    recorder.extract_pending_clips.run()
+
+    assert attempted == expected_attempts
 
 
 def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():

@@ -970,8 +970,10 @@ def extract_pending_clips() -> None:
     with SessionLocal() as db:
         rows = _pending_alert_clip_rows(db, since)
         seen: set[int] = set()
+        attempted_sources: dict[int, set[int]] = {}
         for alert, ev, clip in rows:
-            if alert.id in seen:          # a camera can have >1 window row
+            tried = attempted_sources.get(alert.id)
+            if alert.id in seen or (tried and len(tried) >= 2):
                 continue
             if (ev.extra or {}).get("alert_clip_path"):
                 seen.add(alert.id)
@@ -981,7 +983,6 @@ def extract_pending_clips() -> None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
             if not _recording_covers_event(clip, ev_ts):
                 continue
-            seen.add(alert.id)
             # Store-open clips must show the DOOR: prefer an entrance
             # camera's recording over the (possibly occupancy) camera
             # that anchored the event.
@@ -990,7 +991,13 @@ def extract_pending_clips() -> None:
                 if (alt is not None and alt.file_path
                         and Path(alt.file_path).exists()):
                     clip = alt
-            _extract_one(db, alert, ev, clip, ev_ts)
+            # Try one distinct overlapping source after an extraction failure.
+            tried = attempted_sources.setdefault(alert.id, set())
+            if clip.id in tried:
+                continue
+            tried.add(clip.id)
+            if _extract_one(db, alert, ev, clip, ev_ts):
+                seen.add(alert.id)
 
         # ── PASS 2: shop_open_close backfill (last 24h) ─────────────────
         # THE FIX (Aug 2026) for beat-created store-open alerts with no
@@ -1006,7 +1013,8 @@ def extract_pending_clips() -> None:
         # Bounded (limit 200) + idempotent via the alert_clip_path guard.
         day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
         for alert, ev in _pending_open_close_clip_rows(db, day_ago):
-            if alert.id in seen or (ev.extra or {}).get("alert_clip_path"):
+            if (alert.id in seen or alert.id in attempted_sources
+                    or (ev.extra or {}).get("alert_clip_path")):
                 continue
             seen.add(alert.id)
             ev_ts = ev.timestamp
