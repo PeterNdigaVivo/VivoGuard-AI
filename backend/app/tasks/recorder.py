@@ -1074,6 +1074,7 @@ def prune_alert_clips() -> None:
     hours = int(getattr(settings, "recording_alert_clip_retention_hours", 48))
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     cleared = 0
+    failed = 0
     with SessionLocal() as db:
         rows = _prunable_alert_clip_rows(db, cutoff)
         for _alert, ev in rows:
@@ -1082,8 +1083,10 @@ def prune_alert_clips() -> None:
                 continue
             try:
                 Path(p).unlink(missing_ok=True)
-            except Exception:
-                pass
+            except (OSError, TypeError, ValueError):
+                # Keep the retention reference so a later run can retry.
+                failed += 1
+                continue
             provenance_keys = {
                 "alert_clip_path", "alert_clip_source_camera_id",
                 "alert_clip_source_recording_id", "alert_clip_event_timestamp",
@@ -1096,6 +1099,8 @@ def prune_alert_clips() -> None:
         if cleared:
             db.commit()
             log.info("recorder: pruned %d alert clips", cleared)
+    if failed:
+        log.warning("recorder: alert clip removal failed for %d retention candidate(s)", failed)
 
 
 def _prunable_alert_clip_rows(db, cutoff: datetime):

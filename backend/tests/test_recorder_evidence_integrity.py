@@ -335,3 +335,49 @@ def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():
     rows = _prunable_alert_clip_rows(db, cutoff)
 
     assert {alert.id for alert, _event in rows} == expected
+
+
+def test_alert_clip_retention_retries_failed_file_removal(monkeypatch, tmp_path, caplog):
+    clip = tmp_path / "retention-fixture.mp4"
+    clip.write_bytes(b"test recording")
+    with _session() as db:
+        camera = Camera(
+            name="Retention Camera", brand="generic", connection_type="lan_rtsp",
+            host="127.0.0.1",
+        )
+        db.add(camera); db.flush()
+        old = datetime.now(timezone.utc) - timedelta(days=7)
+        evidence = {"alert_clip_path": str(clip), "alert_clip_source_camera_id": camera.id,
+                    "alert_clip_sha256": "a" * 64, "other": "retain"}
+        event = DetectionEvent(
+            camera_id=camera.id, detection_type="intrusion", confidence=0.9,
+            bbox_json=[0, 0, 1, 1], timestamp=old, extra=evidence,
+        )
+        db.add(event); db.flush()
+        db.add(Alert(event_id=event.id, status="resolved", created_at=old, resolved_at=old))
+        db.commit()
+        monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(db))
+        monkeypatch.setattr(recorder.settings, "recording_alert_clip_retention_hours", 48)
+        unlink = Path.unlink
+
+        def denied(path, *, missing_ok=False):
+            if path == clip:
+                raise PermissionError("private storage diagnostic")
+            return unlink(path, missing_ok=missing_ok)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "unlink", denied)
+            recorder.prune_alert_clips.run()
+
+        db.refresh(event)
+        assert clip.exists()
+        assert event.extra == evidence
+        assert "removal failed for 1 retention candidate(s)" in caplog.text
+        assert str(clip) not in caplog.text
+        assert "private storage diagnostic" not in caplog.text
+
+        recorder.prune_alert_clips.run()
+
+        db.refresh(event)
+        assert not clip.exists()
+        assert event.extra == {"other": "retain"}
