@@ -122,13 +122,11 @@ while true; do
   fi
   if [ "$SECONDS" -ge "$INFERENCE_RECOVERY_DEADLINE" ]; then
     echo "inference coverage failed to recover after deploy"
-    if [ -n "$INFERENCE_HEALTH_JSON" ]; then
-      printf 'latest inference health: %s\n' "$INFERENCE_HEALTH_JSON"
-    else
+    if [ -z "$INFERENCE_HEALTH_JSON" ] || ! printf '%s' "$INFERENCE_HEALTH_JSON" \
+        | docker compose exec -T api python -m app.utils.inference_recovery --summary; then
       echo "latest inference health: unavailable"
     fi
-    docker compose ps
-    docker compose logs --tail=100 streamer worker-inference
+    docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' streamer worker-inference
     exit 1
   fi
   sleep "$INFERENCE_RECOVERY_POLL_SECONDS"

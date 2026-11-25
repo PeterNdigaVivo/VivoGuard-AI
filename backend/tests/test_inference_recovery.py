@@ -48,3 +48,24 @@ def test_recovery_command_exit_code(fresh):
         cwd=Path(__file__).resolve().parents[1], timeout=10, check=False,
     )
     assert result.returncode == (0 if fresh else 1)
+
+
+def test_recovery_summary_prints_only_known_aggregate_fields():
+    heartbeat = {
+        **HEALTH, "last_run_ts": "invalid-timestamp", "cameras_fresh": "opaque-value",
+        "inference_queue_depth": 3, "fresh_camera_ids": [199], "details": "private detail",
+    }
+    command = [sys.executable, "-B", "-m", "app.utils.inference_recovery", "--summary"]
+    result = subprocess.run(
+        command, input=json.dumps(heartbeat), text=True, capture_output=True,
+        cwd=Path(__file__).resolve().parents[1], timeout=10, check=True,
+    )
+
+    assert json.loads(result.stdout.removeprefix("latest inference health: ")) == {
+        "heartbeat_age_seconds": None,
+        "cameras_total": 10,
+        "cameras_fresh": None,
+        "cameras_actively_inferencing": 2,
+        "critical_cameras_overdue": 0,
+        "inference_queue_depth": 3,
+    }

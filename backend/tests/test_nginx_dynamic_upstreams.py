@@ -28,3 +28,14 @@ def test_deploy_gate_waits_for_inference_coverage_recovery():
     assert "vg:inference:health" in deploy
     assert "docker compose exec -T api python -m app.utils.inference_recovery" in deploy
     assert "inference coverage failed to recover after deploy" in deploy
+
+
+def test_deploy_inference_timeout_uses_aggregate_diagnostics():
+    root = Path(__file__).resolve().parents[2]
+    deploy = (root / "scripts" / "deploy.sh").read_text()
+    timeout = deploy.split('echo "inference coverage failed to recover after deploy"', 1)[1]
+    timeout = timeout.split("exit 1", 1)[0]
+
+    assert "python -m app.utils.inference_recovery --summary" in timeout
+    assert "docker compose logs" not in timeout
+    assert "latest inference health: %s" not in timeout
