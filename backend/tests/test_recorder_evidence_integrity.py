@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -240,6 +243,56 @@ def test_clip_extractor_retries_one_distinct_overlapping_source(
     recorder.extract_pending_clips.run()
 
     assert attempted == expected_attempts
+
+
+@pytest.mark.parametrize("failure", [None, "ffmpeg", "timeout", "checksum"])
+def test_extraction_publishes_only_a_hashed_encode(monkeypatch, tmp_path, failure):
+    event_ts = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    alert = SimpleNamespace(id=1)
+    published = tmp_path / "1.mp4"
+    previous_bytes = b"previous clip"
+    published.write_bytes(previous_bytes)
+    original_extra = {"alert_clip_path": str(published),
+                      "alert_clip_sha256": sha256(previous_bytes).hexdigest()}
+    event = SimpleNamespace(camera_id=2, detection_type="intrusion", extra=original_extra)
+    clip = RecordingClip(
+        id=3, camera_id=2, window_id="source", file_path=str(tmp_path / "source.mp4"),
+        started_at=event_ts - timedelta(minutes=10),
+        ended_at=event_ts + timedelta(minutes=1), status="completed",
+    )
+
+    encoded = b"new encoded clip"
+
+    def encode(cmd, **_kwargs):
+        staged = Path(cmd[-1])
+        assert staged.parent.parent == tmp_path
+        staged.write_bytes(encoded)
+        assert published.read_bytes() == previous_bytes
+        if failure == "timeout":
+            raise recorder.subprocess.TimeoutExpired(cmd, 180)
+        return SimpleNamespace(returncode=int(failure == "ffmpeg"))
+
+    def fail_checksum(_path):
+        raise OSError("unreadable staged clip")
+
+    monkeypatch.setattr(recorder, "_alert_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder.settings, "incident_foundations_enabled", False)
+    monkeypatch.setattr(recorder.subprocess, "run", encode)
+    if failure == "checksum":
+        monkeypatch.setattr(recorder, "_sha256_file", fail_checksum)
+
+    db = Mock()
+    assert recorder._extract_one(db, alert, event, clip, event_ts) is (failure is None)
+    assert list(tmp_path.iterdir()) == [published]
+    if failure is None:
+        assert published.read_bytes() == encoded
+        assert event.extra["alert_clip_sha256"] == sha256(encoded).hexdigest()
+        assert event.extra["alert_clip_source_recording_id"] == clip.id
+        db.commit.assert_called_once_with()
+    else:
+        assert published.read_bytes() == previous_bytes
+        assert event.extra == original_extra
+        db.commit.assert_not_called()
 
 
 def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():

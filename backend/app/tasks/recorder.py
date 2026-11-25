@@ -39,6 +39,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import redis
 from sqlalchemy import or_
@@ -857,44 +858,52 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
     dur = pre_buffer + post_buffer
     offset = max(0, int((ev_ts - started).total_seconds()) - pre_buffer)
     out = _alert_clips_root() / f"{alert.id}.mp4"
-    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-           "-ss", str(offset), "-i", clip.file_path,
-           "-t", str(dur),
-           "-c:v", "libx264", "-preset", "veryfast",
-           "-c:a", "aac",
-           "-movflags", "+faststart", str(out)]
     try:
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, timeout=180)
-    except Exception as e:
-        log.warning("recorder: clip extract failed alert=%s: %s", alert.id, e)
+        # Keep failed and in-flight encodes away from the published path.
+        with TemporaryDirectory(
+            dir=out.parent, prefix=f".{alert.id}-", ignore_cleanup_errors=True,
+        ) as staging_dir:
+            staged = Path(staging_dir) / out.name
+            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+                   "-ss", str(offset), "-i", clip.file_path,
+                   "-t", str(dur),
+                   "-c:v", "libx264", "-preset", "veryfast",
+                   "-c:a", "aac",
+                   "-movflags", "+faststart", str(staged)]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, timeout=180)
+            if res.returncode != 0 or staged.stat().st_size == 0:
+                return False
+            digest = _sha256_file(staged)
+            staged.replace(out)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("recorder: clip extract failed alert=%s: %s", alert.id, type(exc).__name__)
         return False
-    if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
-        ev.extra = {
-            **(ev.extra or {}),
-            "alert_clip_path": str(out),
-            "alert_clip_source_camera_id": int(clip.camera_id),
-            "alert_clip_source_recording_id": int(clip.id),
-            "alert_clip_event_timestamp": _as_utc(ev_ts).isoformat(),
-            "alert_clip_offset_seconds": offset,
-            "alert_clip_sha256": _sha256_file(out),
-        }
-        if bool(getattr(settings, "incident_foundations_enabled", False)):
-            try:
-                from app.services.incident_foundations import (
-                    sync_evidence_manifest,
-                )
-                sync_evidence_manifest(db, alert, ev)
-            except Exception as e:
-                log.warning(
-                    "recorder: evidence-manifest sync failed alert=%s: %s",
-                    alert.id, e,
-                )
-        db.commit()
-        log.info("recorder: extracted clip alert=%s cam=%s src_cam=%s dur=%ds",
-                 alert.id, ev.camera_id, clip.camera_id, dur)
-        return True
-    return False
+
+    ev.extra = {
+        **(ev.extra or {}),
+        "alert_clip_path": str(out),
+        "alert_clip_source_camera_id": int(clip.camera_id),
+        "alert_clip_source_recording_id": int(clip.id),
+        "alert_clip_event_timestamp": _as_utc(ev_ts).isoformat(),
+        "alert_clip_offset_seconds": offset,
+        "alert_clip_sha256": digest,
+    }
+    if bool(getattr(settings, "incident_foundations_enabled", False)):
+        try:
+            from app.services.incident_foundations import (
+                sync_evidence_manifest,
+            )
+            sync_evidence_manifest(db, alert, ev)
+        except Exception as e:
+            log.warning(
+                "recorder: evidence-manifest sync failed alert=%s: %s",
+                alert.id, e,
+            )
+    db.commit()
+    log.info("recorder: extracted clip alert=%s cam=%s src_cam=%s dur=%ds",
+             alert.id, ev.camera_id, clip.camera_id, dur)
+    return True
 
 
 def _missing_alert_clip_path():
