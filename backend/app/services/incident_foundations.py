@@ -27,15 +27,19 @@ VALID_EVALUATION_TRANSITIONS = {
 
 
 def _sha256_file(path: str | None) -> str | None:
-    """Hash evidence without allowing a missing/pruned file to look valid."""
+    """Hash readable evidence with at least one byte."""
     if not path:
         return None
     target = Path(path)
-    if not target.is_file():
-        return None
     digest = hashlib.sha256()
     try:
+        if not target.is_file():
+            return None
         with target.open("rb") as fh:
+            first_chunk = fh.read(1024 * 1024)
+            if not first_chunk:
+                return None
+            digest.update(first_chunk)
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError:
@@ -280,10 +284,10 @@ def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> 
 def backfill_evidence_hashes(db: Session, *, limit: int = 100) -> dict[str, int]:
     """Verify a bounded batch of legacy manifests that claimed clip access.
 
-    Old rows predate digest population. A referenced file that has since been
-    pruned is marked unavailable; a present file receives its immutable hash.
-    The `clip_available` filter makes missing files terminal instead of
-    reprocessing them forever. The caller owns the transaction.
+    Old rows predate digest population. Missing or empty files are marked
+    unavailable, and readable non-empty files receive a digest. The
+    `clip_available` filter prevents repeated attempts on unavailable files.
+    The caller owns the transaction.
     """
     rows = (db.query(EvidenceManifest)
               .filter(EvidenceManifest.clip_available.is_(True),

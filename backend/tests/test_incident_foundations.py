@@ -104,14 +104,43 @@ def test_manifest_marks_missing_clip_path_unavailable():
     assert manifest.clip_sha256 is None
 
 
+def test_empty_evidence_stays_unavailable_until_populated(tmp_path):
+    with _session() as db:
+        store, alert, event = _alert(db)
+        clip = tmp_path / "empty.mp4"
+        snapshot = tmp_path / "empty.jpg"
+        clip.touch()
+        snapshot.touch()
+        event.extra = {**event.extra, "alert_clip_path": str(clip)}
+        event.thumbnail_path = str(snapshot)
+
+        record_alert_foundations(db, alert, event, store_id=store.id)
+        manifest = db.query(EvidenceManifest).one()
+
+        assert manifest.clip_eligible is True
+        assert manifest.clip_available is False
+        assert manifest.clip_sha256 is None
+        assert manifest.snapshot_sha256 is None
+
+        clip.write_bytes(b"recorded clip")
+        snapshot.write_bytes(b"recorded snapshot")
+        assert sync_evidence_manifest(db, alert, event) is True
+        assert manifest.clip_available is True
+        assert len(manifest.clip_sha256) == 64
+        assert len(manifest.snapshot_sha256) == 64
+
+
 def test_legacy_evidence_backfill_hashes_present_and_closes_missing(tmp_path):
     db = _session()
     present = tmp_path / "present.mp4"
     present.write_bytes(b"legacy evidence")
+    empty = tmp_path / "empty.mp4"
+    empty.touch()
     rows = [
         EvidenceManifest(alert_id=1, clip_path=str(present), clip_available=True),
         EvidenceManifest(alert_id=2, clip_path=str(tmp_path / "gone.mp4"),
                          clip_available=True),
+        EvidenceManifest(alert_id=3, clip_path=str(empty), clip_available=True),
     ]
     # These isolated rows deliberately omit Alert FKs; SQLite does not enforce
     # them in this in-memory unit test and the service only needs manifests.
@@ -120,13 +149,15 @@ def test_legacy_evidence_backfill_hashes_present_and_closes_missing(tmp_path):
     result = backfill_evidence_hashes(db)
 
     assert result == {
-        "processed": 2, "clips_hashed": 1, "clips_unavailable": 1,
+        "processed": 3, "clips_hashed": 1, "clips_unavailable": 2,
         "snapshots_hashed": 0,
     }
     assert rows[0].clip_available is True
     assert len(rows[0].clip_sha256) == 64
     assert rows[1].clip_available is False
     assert rows[1].clip_sha256 is None
+    assert rows[2].clip_available is False
+    assert rows[2].clip_sha256 is None
     assert backfill_evidence_hashes(db)["processed"] == 0
 
 
