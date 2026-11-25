@@ -263,12 +263,16 @@ def sync_evidence_manifest(db: Session, alert: Alert, event: DetectionEvent) -> 
     if row is None:
         return False
     clip_path = event.clip_path or (event.extra or {}).get("alert_clip_path")
+    observed_digest = _sha256_file(clip_path)
+    # A refresh can verify an existing clip, but must not silently bless
+    # different bytes at a path that already has a recorded fingerprint.
+    if row.clip_path != clip_path or row.clip_sha256 is None:
+        row.clip_sha256 = observed_digest
     row.snapshot_path = event.thumbnail_path
     row.clip_path = clip_path
     row.filmstrip_paths_json = alert.snapshot_paths
     row.snapshot_sha256 = _sha256_file(event.thumbnail_path)
-    row.clip_sha256 = _sha256_file(clip_path)
-    row.clip_available = row.clip_sha256 is not None
+    row.clip_available = observed_digest is not None and observed_digest == row.clip_sha256
     if row.clip_available:
         row.clip_eligible = True
         row.ineligible_reason = None

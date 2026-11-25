@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -89,6 +90,35 @@ def test_clip_sync_uses_one_canonical_manifest(tmp_path):
     assert manifest.clip_available is True
     assert manifest.ineligible_reason is None
     assert len(manifest.clip_sha256) == 64
+
+
+@pytest.mark.parametrize("replacement", [b"different evidence", None])
+def test_clip_sync_preserves_fingerprint_at_existing_path(tmp_path, replacement):
+    with _session() as db:
+        store, alert, event = _alert(db)
+        clip = tmp_path / "recorded.mp4"
+        original = b"original evidence"
+        clip.write_bytes(original)
+        event.extra = {**event.extra, "alert_clip_path": str(clip)}
+        record_alert_foundations(db, alert, event, store_id=store.id)
+        manifest = db.query(EvidenceManifest).one()
+        expected = manifest.clip_sha256
+        assert expected is not None
+        assert manifest.clip_available is True
+
+        if replacement is None:
+            clip.unlink()
+        else:
+            clip.write_bytes(replacement)
+        assert sync_evidence_manifest(db, alert, event) is True
+        assert manifest.clip_sha256 == expected
+        assert manifest.clip_available is False
+        assert manifest.clip_eligible is True
+
+        clip.write_bytes(original)
+        assert sync_evidence_manifest(db, alert, event) is True
+        assert manifest.clip_available is True
+        assert manifest.clip_sha256 == expected
 
 
 def test_manifest_marks_missing_clip_path_unavailable():
