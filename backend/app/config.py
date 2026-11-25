@@ -678,6 +678,9 @@ class Settings(BaseSettings):
     models_dir: str = "/data/models"
     datasets_dir: str = "/data/datasets"
     thumbnails_dir: str = "/data/thumbnails"
+    # Store floor-plan images (Heatmap Insights page). Mounted volume so
+    # uploads survive container rebuilds.
+    floor_plans_dir: str = "/data/floor_plans"
     # Auto-harvested training crops (uniform_compliance + staff_identity).
     # Must be a mounted volume in docker-compose.yml: the detectors that
     # write here and the training worker that reads are separate

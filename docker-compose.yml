@@ -221,6 +221,9 @@ services:
       - ./data/models:/data/models
       - ./data/datasets:/data/datasets
       - ./data/thumbnails:/data/thumbnails
+      # Store floor plans (Heatmap Insights). Mounted so uploads survive
+      # rebuilds, same trap as data/training below.
+      - ./data/floor_plans:/data/floor_plans
       # Auto-harvested uniform crops. Shared by every service that writes
       # or reads them — unmounted, this is a per-container layer that the
       # next rebuild deletes, which is how 1000 training samples were lost.

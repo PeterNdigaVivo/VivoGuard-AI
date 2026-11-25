@@ -59,6 +59,10 @@ export default function StoreHeatmapsPage() {
                   onClick={() => setMode('hotspot')}>🔥 Hotspot</Button>
           <Button variant={mode === 'flow' ? 'primary' : 'ghost'}
                   onClick={() => setMode('flow')}>🧭 Customer flow</Button>
+          <Button variant="ghost" title="Floor-plan heat view (opens in a new tab)"
+                  onClick={() => window.open(`/heatmaps/${storeId}/insights`, '_blank')}>
+            🗺️ View more heatmap insights ↗
+          </Button>
           <Link to={`/stores/${storeId}`}
                 className="text-sky-600 dark:text-sky-300 hover:underline self-center ml-2">← Store dashboard</Link>
         </>}

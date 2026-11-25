@@ -1,6 +1,6 @@
 """Stores, shifts, and campaigns API."""
 from __future__ import annotations
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -527,3 +527,116 @@ def stores_zone_health_csv(db: Session = Depends(get_db),
         headers={"Content-Disposition":
                  'attachment; filename="zone_health.csv"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Floor plans (Heatmap Insights page)
+# ---------------------------------------------------------------------------
+# The plan is one image per store, stored under settings.floor_plans_dir
+# (a mounted volume). The Heatmap Insights page overlays each camera's
+# heatmap PNG onto it using the camera's floor_placement_json rectangle,
+# so there is no projection math server-side — placement is visual.
+
+_FLOOR_PLAN_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+_FLOOR_PLAN_MAX_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/{store_id:int}/floor-plan", response_model=StoreOut)
+async def upload_floor_plan(store_id: int,
+                            file: UploadFile = File(...),
+                            db: Session = Depends(get_db),
+                            _u=Depends(require_role("admin", "operator"))):
+    """Upload (or replace) the store's floor-plan image."""
+    import os
+    from app.config import settings
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    ext = _FLOOR_PLAN_TYPES.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(415, "floor plan must be a PNG, JPEG or WebP image")
+    data = await file.read()
+    if len(data) > _FLOOR_PLAN_MAX_BYTES:
+        raise HTTPException(413, "floor plan too large (max 10 MB)")
+    # Re-encode through PIL: proves the bytes really are an image and
+    # strips anything that isn't pixels.
+    import io as _io
+    from PIL import Image as _Image
+    try:
+        img = _Image.open(_io.BytesIO(data))
+        img.load()
+    except Exception:
+        raise HTTPException(415, "file is not a readable image")
+
+    os.makedirs(settings.floor_plans_dir, exist_ok=True)
+    # One canonical file per store; replacing swaps it atomically.
+    path = os.path.join(settings.floor_plans_dir, f"store_{store_id}.png")
+    tmp = path + ".tmp"
+    img.convert("RGB").save(tmp, format="PNG")
+    os.replace(tmp, path)
+    store.floor_plan_path = path
+    db.commit()
+    db.refresh(store)
+    return store
+
+
+@router.get("/{store_id:int}/floor-plan")
+def get_floor_plan(store_id: int,
+                   db: Session = Depends(get_db),
+                   _u=Depends(get_current_user)):
+    """Serve the store's floor-plan image (404 until one is uploaded)."""
+    import os
+    from fastapi.responses import FileResponse
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    path = store.floor_plan_path
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "no floor plan uploaded for this store")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.post("/{store_id:int}/floor-plan/generate", response_model=StoreOut)
+def generate_floor_plan_ai(store_id: int,
+                           db: Session = Depends(get_db),
+                           _u=Depends(require_role("admin", "operator"))):
+    """AI-draft a schematic floor plan from this store's cameras (names,
+    zone tags, and a live frame each where available), save it as the
+    store's plan, and pre-place every camera the model covered. The
+    operator adjusts placements afterwards; replacing the image later
+    keeps them."""
+    import os
+    from app.config import settings
+    from app.services.floor_plan_ai import generate_floor_plan
+
+    store = db.get(Store, store_id)
+    if not store:
+        raise HTTPException(404, "store not found")
+    try:
+        png, placements = generate_floor_plan(db, store)
+    except RuntimeError as e:
+        # No API key configured — a deployment state, not a bad request.
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(502, f"AI draft failed: {e}. Try again, or "
+                                 "upload a plan image instead.")
+
+    os.makedirs(settings.floor_plans_dir, exist_ok=True)
+    path = os.path.join(settings.floor_plans_dir, f"store_{store_id}.png")
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(png)
+    os.replace(tmp, path)
+    store.floor_plan_path = path
+    for cam in (db.query(Camera).filter(Camera.store_id == store_id).all()):
+        if cam.id in placements:
+            cam.floor_placement_json = placements[cam.id]
+    db.commit()
+    db.refresh(store)
+    return store

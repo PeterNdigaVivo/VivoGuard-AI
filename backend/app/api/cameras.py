@@ -1203,3 +1203,52 @@ def activity_live(limit: int = 15,
         "source":   "redis",
         "total_with_activity": len(scored),
     }
+
+
+# ---------------------------------------------------------------------------
+# Floor placement (Heatmap Insights page)
+# ---------------------------------------------------------------------------
+
+class FloorPlacementIn(BaseModel):
+    """Where this camera's heatmap sits on the store floor plan.
+    x/y/w/h are normalised [0..1] to the plan image; rot rotates the
+    heatmap overlay in quarter turns."""
+    x: float
+    y: float
+    w: float
+    h: float
+    rot: int = 0
+
+
+@router.put("/{camera_id}/floor-placement", response_model=CameraOut)
+def set_floor_placement(camera_id: int, body: FloorPlacementIn,
+                        db: Session = Depends(get_db),
+                        _u: User = Depends(require_role("admin", "operator"))):
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not (0.0 <= body.x <= 1.0 and 0.0 <= body.y <= 1.0):
+        raise HTTPException(422, "x/y must be within the plan (0..1)")
+    if not (0.01 <= body.w <= 1.0 and 0.01 <= body.h <= 1.0):
+        raise HTTPException(422, "w/h must be between 0.01 and 1")
+    if body.rot not in (0, 90, 180, 270):
+        raise HTTPException(422, "rot must be 0, 90, 180 or 270")
+    cam.floor_placement_json = {"x": round(body.x, 4), "y": round(body.y, 4),
+                                "w": round(body.w, 4), "h": round(body.h, 4),
+                                "rot": body.rot}
+    db.commit()
+    db.refresh(cam)
+    return cam
+
+
+@router.delete("/{camera_id}/floor-placement", response_model=CameraOut)
+def clear_floor_placement(camera_id: int,
+                          db: Session = Depends(get_db),
+                          _u: User = Depends(require_role("admin", "operator"))):
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    cam.floor_placement_json = None
+    db.commit()
+    db.refresh(cam)
+    return cam

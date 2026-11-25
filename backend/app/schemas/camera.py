@@ -58,6 +58,7 @@ class CameraOut(BaseModel):
     transport: str = "rtsp"
     snapshot_url_override: str | None = None
     rtsp_transport: str = "tcp"
+    floor_placement_json: dict | None = None
     created_at: datetime
 
     @field_serializer("snapshot_url_override")

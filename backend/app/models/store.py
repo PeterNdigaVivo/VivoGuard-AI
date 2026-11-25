@@ -55,6 +55,11 @@ class Store(Base):
     queue_sla_seconds: Mapped[int] = mapped_column(Integer, default=180, server_default="180")
     queue_sla_length:  Mapped[int] = mapped_column(Integer, default=6,   server_default="6")
 
+    # Uploaded floor-plan image (served by /stores/{id}/floor-plan).
+    # The Heatmap Insights page composes camera heatmaps onto it using
+    # each camera's floor_placement_json rectangle.
+    floor_plan_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     is_active: Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at:Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

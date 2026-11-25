@@ -41,6 +41,7 @@ const HeatmapPage          = lazy(() => import('@/pages/HeatmapPage'))
 const SearchPage           = lazy(() => import('@/pages/SearchPage'))
 const CameraSetupPage      = lazy(() => import('@/pages/CameraSetupPage'))
 const StoreHeatmapsPage    = lazy(() => import('@/pages/StoreHeatmapsPage'))
+const HeatmapInsightsPage  = lazy(() => import('@/pages/HeatmapInsightsPage'))
 const DetectorsPage        = lazy(() => import('@/pages/DetectorsPage'))
 const UsersPage            = lazy(() => import('@/pages/UsersPage'))
 const OdooAssurancePage    = lazy(() => import('@/pages/OdooAssurancePage'))
@@ -77,6 +78,7 @@ export default function App() {
               <Route path="/stores/:id/cameras"       element={<StoreMultiCameraView />} />
               <Route path="/stores/:id/add-camera"    element={<AddCameraWizard />} />
               <Route path="/heatmaps/:id"             element={<StoreHeatmapsPage />} />
+              <Route path="/heatmaps/:id/insights"    element={<HeatmapInsightsPage />} />
               <Route path="/detectors"                element={<DetectorsPage />} />
               <Route path="/users"                    element={<UsersPage />} />
               <Route path="/cameras"                  element={<CamerasPage />} />

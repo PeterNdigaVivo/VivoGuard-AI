@@ -42,6 +42,7 @@ class StoreOut(BaseModel):
     default_rtsp_port: int | None = None
     queue_sla_seconds: int | None = None
     queue_sla_length:  int | None = None
+    floor_plan_path: str | None = None
     is_active: bool = True
     created_at: datetime
 

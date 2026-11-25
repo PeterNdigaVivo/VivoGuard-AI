@@ -6,7 +6,7 @@ keep `nvr_id` populated and `channel_number` set.
 """
 from datetime import datetime
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, String, Text, func,
+    Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -89,6 +89,12 @@ class Camera(Base):
                                                      default="rtsp",
                                                      server_default="rtsp")
     snapshot_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Where this camera's heatmap sits on the store floor plan:
+    # {"x","y","w","h"} normalised [0..1] to the plan image, plus
+    # "rot" in {0, 90, 180, 270}. Set from the Heatmap Insights page;
+    # NULL = not placed yet (camera stays off the floor view).
+    floor_placement_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # FFmpeg -rtsp_transport flag. Independent of the higher-level
     # `transport` column above.
