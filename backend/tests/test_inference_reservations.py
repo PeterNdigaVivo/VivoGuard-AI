@@ -1,6 +1,8 @@
 """Regression tests for restart-safe, backlog-safe inference reservations."""
 from types import SimpleNamespace
 
+import pytest
+
 from app.tasks import inference
 
 
@@ -89,7 +91,7 @@ class FakeReservationRedis:
 
 
 class FakeLastRunRedis:
-    def __init__(self, values: dict[int, str | None]):
+    def __init__(self, values: dict[int, str | bytes | None]):
         self.values = values
         self.keys: list[str] = []
 
@@ -413,3 +415,18 @@ def test_standard_gap_health_uses_actual_starts_and_flags_never_started():
         "standard_max_gap_seconds": 950.0,
         "standard_gap_sla_seconds": inference.STANDARD_GAP_SLA_SECONDS,
     }
+
+
+@pytest.mark.parametrize("tier", ["critical", "standard"])
+def test_gap_health_rejects_invalid_and_future_completion_times(tier):
+    r = FakeLastRunRedis({
+        1: b"900", 2: b"NaN", 3: b"Infinity", 4: b"1100", 5: b"\xff", 6: b"0",
+    })
+    measure = getattr(inference, f"_{tier}_gap_health")
+
+    report = measure(r, [1, 2, 3, 4, 5, 6], now=1_000)
+
+    assert report[f"{tier}_cameras_overdue"] == 5
+    assert report[f"{tier}_camera_ids_overdue"] == [2, 3, 4, 5, 6]
+    assert report[f"{tier}_cameras_never_started"] == 5
+    assert report[f"{tier}_max_gap_seconds"] == 100.0

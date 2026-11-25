@@ -316,14 +316,33 @@ def _critical_gap_headroom_seconds() -> int:
     return int(CRITICAL_GAP_SLA_SECONDS - _critical_gap_budget_seconds())
 
 
+def _last_run_ages(
+    r: redis.Redis, camera_ids: list[int], *, now: float | None,
+) -> dict[int, float | None]:
+    pipe = r.pipeline(transaction=False)
+    for camera_id in camera_ids:
+        pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+    values = pipe.execute()
+    # Sample the clock after reading so a completion during the read is valid.
+    observed_at = time.time() if now is None else float(now)
+    ages: dict[int, float | None] = dict.fromkeys(camera_ids)
+    for camera_id, value in zip(camera_ids, values):
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 < timestamp <= observed_at:
+            ages[camera_id] = observed_at - timestamp
+    return ages
+
+
 def _critical_gap_health(
     r: redis.Redis,
     camera_ids: list[int],
     *,
     now: float | None = None,
 ) -> dict:
-    """Measure critical-camera scheduling gaps from actual task starts."""
-    now = time.time() if now is None else float(now)
+    """Measure critical-camera gaps from completed inference work."""
     if not camera_ids:
         return {
             "critical_cameras_total": 0,
@@ -337,18 +356,7 @@ def _critical_gap_health(
             "critical_gap_headroom_seconds": _critical_gap_headroom_seconds(),
         }
     try:
-        pipe = r.pipeline(transaction=False)
-        for camera_id in camera_ids:
-            pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
-        values = pipe.execute()
-        ages: dict[int, float | None] = {}
-        for camera_id, value in zip(camera_ids, values):
-            if isinstance(value, bytes):
-                value = value.decode()
-            try:
-                ages[camera_id] = max(0.0, now - float(value)) if value else None
-            except (TypeError, ValueError):
-                ages[camera_id] = None
+        ages = _last_run_ages(r, camera_ids, now=now)
         overdue = sorted(
             camera_id for camera_id, age in ages.items()
             if age is None or age > CRITICAL_GAP_SLA_SECONDS
@@ -390,13 +398,12 @@ def _standard_gap_health(
     *,
     now: float | None = None,
 ) -> dict:
-    """Measure ordinary-camera coverage gaps from actual task starts.
+    """Measure ordinary-camera gaps from completed inference work.
 
     Critical cameras have a separate, tighter SLA. Together these two
     measurements cover every fresh, schedulable camera instead of relying on
     an estimated rotation time that can hide starvation or queue stalls.
     """
-    now = time.time() if now is None else float(now)
     if not camera_ids:
         return {
             "standard_cameras_total": 0,
@@ -407,18 +414,7 @@ def _standard_gap_health(
             "standard_gap_sla_seconds": int(STANDARD_GAP_SLA_SECONDS),
         }
     try:
-        pipe = r.pipeline(transaction=False)
-        for camera_id in camera_ids:
-            pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
-        values = pipe.execute()
-        ages: dict[int, float | None] = {}
-        for camera_id, value in zip(camera_ids, values):
-            if isinstance(value, bytes):
-                value = value.decode()
-            try:
-                ages[camera_id] = max(0.0, now - float(value)) if value else None
-            except (TypeError, ValueError):
-                ages[camera_id] = None
+        ages = _last_run_ages(r, camera_ids, now=now)
         overdue = sorted(
             camera_id for camera_id, age in ages.items()
             if age is None or age > STANDARD_GAP_SLA_SECONDS
