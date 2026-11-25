@@ -26,6 +26,5 @@ def test_deploy_gate_waits_for_inference_coverage_recovery():
     deploy = (root / "scripts" / "deploy.sh").read_text()
 
     assert "vg:inference:health" in deploy
-    assert 'health["critical_cameras_overdue"]' in deploy
-    assert 'health.get("cameras_actively_inferencing")' in deploy
+    assert "docker compose exec -T api python -m app.utils.inference_recovery" in deploy
     assert "inference coverage failed to recover after deploy" in deploy

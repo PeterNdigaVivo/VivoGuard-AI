@@ -105,8 +105,8 @@ done
 # application tier was recreated.  In particular, restarting the streamer can
 # temporarily empty the frame buffer and create a fleet-wide observation gap.
 # Do not declare the release complete until the authoritative supervisor
-# breadcrumb is fresh, every latency-critical camera is inside its SLA, and at
-# least one worker is active whenever fresh camera frames exist.
+# breadcrumb is fresh, every latency-critical camera is inside its SLA, and a
+# configured fleet has both fresh frames and an active inference worker.
 echo "→ waiting for inference coverage recovery"
 INFERENCE_RECOVERY_TIMEOUT_SECONDS=${DEPLOY_INFERENCE_RECOVERY_TIMEOUT_SECONDS:-600}
 INFERENCE_RECOVERY_POLL_SECONDS=${DEPLOY_INFERENCE_RECOVERY_POLL_SECONDS:-5}
@@ -117,27 +117,7 @@ while true; do
       2>/dev/null || true
   )
   if [ -n "$INFERENCE_HEALTH_JSON" ] && printf '%s' "$INFERENCE_HEALTH_JSON" \
-      | docker compose exec -T api python -c '
-import json
-import sys
-import time
-
-try:
-    health = json.load(sys.stdin)
-    age = time.time() - float(health["last_run_ts"])
-    overdue = health["critical_cameras_overdue"]
-    fresh = int(health.get("cameras_fresh") or 0)
-    active = int(health.get("cameras_actively_inferencing") or 0)
-    healthy = (
-        age <= 120
-        and overdue is not None
-        and int(overdue) == 0
-        and (fresh == 0 or active > 0)
-    )
-except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-    healthy = False
-sys.exit(0 if healthy else 1)
-'; then
+      | docker compose exec -T api python -m app.utils.inference_recovery; then
     break
   fi
   if [ "$SECONDS" -ge "$INFERENCE_RECOVERY_DEADLINE" ]; then
