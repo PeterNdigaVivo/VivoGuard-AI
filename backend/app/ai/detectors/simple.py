@@ -112,6 +112,15 @@ class PersonDetector(_ClassFilterDetector):
             verdict = staff_identity.classify(ctx, det, tid, now)
             if verdict["level"] in ("high", "medium"):
                 continue
+            # Context for the alert: whether the uniform classifier read
+            # this person as a customer ("unknown") or simply couldn't
+            # tell ("uncertain") — so operators see classified pings,
+            # not raw detections. Alert wording/UI reads extra.
+            ev.extra = {**(ev.extra or {}),
+                        "staff_level": verdict["level"],
+                        "person_context": ("customer"
+                                           if verdict["level"] == "unknown"
+                                           else "unidentified")}
             kept.append(ev)
         return kept
 

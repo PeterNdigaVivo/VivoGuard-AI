@@ -349,6 +349,11 @@ class Settings(BaseSettings):
     # many minutes. The separate gap SLA is measured from actual task starts.
     inference_supervisor_interval_seconds: int = Field(default=30, ge=10, le=120)
     inference_critical_slice_seconds: int = Field(default=15, ge=5, le=3600)
+    # Slice length for always_on_ai (pinned) cameras: long enough that a
+    # pinned camera effectively holds a worker slot continuously, short
+    # enough that a crashed slice is reclaimed within the hour.
+    inference_pinned_slice_seconds: int = Field(default=3600, ge=300,
+                                                le=7200)
     inference_critical_requeue_seconds: int = Field(default=120, ge=30, le=600)
     inference_critical_gap_sla_seconds: int = Field(default=300, ge=60, le=900)
     inference_standard_gap_sla_seconds: int = Field(

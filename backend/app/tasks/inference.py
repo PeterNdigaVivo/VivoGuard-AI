@@ -247,6 +247,16 @@ def _task_profile(camera) -> tuple[int, int]:
         # Kombu's Redis transport checks the priority-0 list before priority-9
         # (RabbitMQ uses the inverse convention). This service uses Redis.
         return int(CRITICAL_RUN_SECONDS), 0
+    # Always-on pinning (checked after the critical tier, which must keep
+    # its short slice and top priority): a pinned camera gets an hour-long
+    # slice at priority 1 — above the rotating fleet's 9, below critical's
+    # 0 on the Redis transport — so once running it HOLDS its worker slot
+    # and re-queues ahead of rotating cameras when the slice ends. One
+    # pinned camera = one slot held continuously; budget accordingly
+    # (docs/GPU_SLOT_BUDGET.md).
+    if bool(getattr(camera, "always_on_ai", False)):
+        return int(getattr(settings, "inference_pinned_slice_seconds",
+                           3600)), 1
     # Experiment override is deliberately checked *after* the critical tier:
     # a latency-critical camera must keep its short slice and priority 0
     # even if someone adds it to the experiment set by mistake.
@@ -322,8 +332,16 @@ def _schedule_order(
 
     def priority(camera) -> tuple[int, float]:
         timestamp = last_runs.get(int(camera.id))
+        if _camera_is_latency_critical(camera):
+            tier = 0
+        elif bool(getattr(camera, "always_on_ai", False)):
+            # Pinned cameras publish ahead of the rotating fleet so the
+            # moment their long slice ends they reclaim a slot.
+            tier = 1
+        else:
+            tier = 2
         return (
-            0 if _camera_is_latency_critical(camera) else 1,
+            tier,
             float("-inf") if timestamp is None else float(timestamp),
         )
 

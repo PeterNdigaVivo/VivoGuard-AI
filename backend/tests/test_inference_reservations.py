@@ -343,3 +343,48 @@ def test_standard_gap_health_uses_actual_starts_and_flags_never_started():
         "standard_max_gap_seconds": 950.0,
         "standard_gap_sla_seconds": inference.STANDARD_GAP_SLA_SECONDS,
     }
+
+
+def test_pinned_camera_gets_long_slice_between_critical_and_ordinary():
+    pinned = SimpleNamespace(
+        detection_configs=[SimpleNamespace(
+            enabled=True, detection_type="dwell",
+        )],
+        zones=[], always_on_ai=True, id=7,
+    )
+    critical_and_pinned = SimpleNamespace(
+        detection_configs=[SimpleNamespace(
+            enabled=True, detection_type="intrusion",
+        )],
+        zones=[], always_on_ai=True, id=8,
+    )
+
+    from app.config import settings
+    assert inference._task_profile(pinned) == (
+        settings.inference_pinned_slice_seconds, 1,
+    )
+    # The critical tier always wins: pinning must never stretch a
+    # latency-critical camera's slice.
+    assert inference._task_profile(critical_and_pinned) == (
+        inference.CRITICAL_RUN_SECONDS, 0,
+    )
+
+
+def test_supervisor_publishes_pinned_cameras_between_critical_and_rest():
+    def camera(camera_id: int, detection_type: str, pinned: bool = False):
+        return SimpleNamespace(
+            id=camera_id,
+            detection_configs=[SimpleNamespace(
+                enabled=True, detection_type=detection_type,
+            )],
+            zones=[], always_on_ai=pinned,
+        )
+
+    ordered = inference._schedule_order([
+        camera(1, "dwell"),
+        camera(2, "dwell", pinned=True),
+        camera(3, "intrusion"),
+        camera(4, "dwell", pinned=True),
+    ])
+
+    assert [row.id for row in ordered] == [3, 2, 4, 1]

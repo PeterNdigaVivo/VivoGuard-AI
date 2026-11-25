@@ -7,6 +7,8 @@ export interface Camera {
   rtsp_port: number; http_port: number; nvr_id: number | null
   channel_number: number | null; network_type: string
   ai_model_id: number | null; ai_enabled: boolean; inference_fps: number
+  // Always-on AI: holds a permanent inference slot, never rotates.
+  always_on_ai: boolean
   status: string; last_seen_at: string | null; last_error: string | null
   // Store-first onboarding: every newly-created camera has a store.
   // Legacy rows can still be null until an operator attaches them.

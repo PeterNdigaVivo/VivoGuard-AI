@@ -215,6 +215,26 @@ export default function CamerasPage() {
   // store_id (nullable). Empty dropdown value → detach (store_id=null).
   // We optimistically update the camera locally and fire a toast on
   // success so the operator sees the change even before the refetch.
+  async function togglePin(camId: number) {
+    const cam = cams.find(c => c.id === camId)
+    if (!cam) return
+    const next = !cam.always_on_ai
+    setBusyId(camId)
+    setCams(prev => prev.map(c => c.id === camId ? { ...c, always_on_ai: next } : c))
+    try {
+      const updated = await camsApi.update(camId, { always_on_ai: next })
+      setCams(prev => prev.map(c => c.id === camId ? { ...c, ...updated } : c))
+      toast.push(next
+        ? `${cam.name}: pinned always-on AI (holds one inference slot)`
+        : `${cam.name}: unpinned — rotates with the fleet`)
+    } catch (e) {
+      setCams(prev => prev.map(c => c.id === camId ? { ...c, always_on_ai: !next } : c))
+      toast.push(`Failed to update ${cam.name}: ${e}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   async function setStore(camId: number, storeIdRaw: string) {
     const cam = cams.find(c => c.id === camId)
     if (!cam) return
@@ -381,8 +401,17 @@ export default function CamerasPage() {
                     {c.host}:{c.rtsp_port}
                     {c.channel_number ? ` · ch${c.channel_number}` : ''}
                   </td>
-                  <td className="p-3">
+                  <td className="p-3 whitespace-nowrap">
                     <Badge color={statusColor(c.status)}>{c.status}</Badge>
+                    <button
+                      title={c.always_on_ai
+                        ? 'Always-on AI: holds a permanent inference slot. Click to unpin.'
+                        : 'Pin always-on AI: hold a permanent inference slot (one slot per pinned camera). Click to pin.'}
+                      disabled={busyId === c.id}
+                      onClick={() => togglePin(c.id)}
+                      className={`ml-2 text-base align-middle ${c.always_on_ai
+                        ? '' : 'opacity-30 grayscale hover:opacity-70'}`}
+                    >📌</button>
                   </td>
                   <td className="p-3">
                     <Select value={c.store_id ?? ''}

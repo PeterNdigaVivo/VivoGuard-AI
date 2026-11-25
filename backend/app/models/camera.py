@@ -90,6 +90,14 @@ class Camera(Base):
                                                      server_default="rtsp")
     snapshot_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Always-on AI: holds a permanent inference slot (long slices at
+    # elevated queue priority) instead of rotating with the fleet.
+    # Meant for one entrance camera per store; each pinned camera
+    # occupies one worker slot continuously, so pin within the
+    # WORKER_INFERENCE_CONCURRENCY budget (see docs/GPU_SLOT_BUDGET.md).
+    always_on_ai: Mapped[bool] = mapped_column(Boolean, default=False,
+                                               server_default="false")
+
     # Where this camera's heatmap sits on the store floor plan:
     # {"x","y","w","h"} normalised [0..1] to the plan image, plus
     # "rot" in {0, 90, 180, 270}. Set from the Heatmap Insights page;

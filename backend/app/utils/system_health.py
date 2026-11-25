@@ -227,11 +227,17 @@ def collect_system_health(db: Session) -> dict:
         cam_ids = [c.id for c in cams]
         fb = FrameBuffer()
         health = fb.health_many(cam_ids) if cam_ids else {}
-        hb_map: dict[int, float] = {}
+        # The heartbeat key's VALUE is the Celery task id (a UUID), not
+        # a timestamp — the old float(v) parse here raised on the first
+        # camera, the bare except swallowed it, and the dashboard
+        # reported 0 AI-active forever while the fleet ran fine.
+        # Presence of the key is the liveness signal: it is created at
+        # slice start with TTL slice+60s and deleted on clean slice end.
+        hb_live: set[int] = set()
         if r is not None and cam_ids:
             try:
                 raws = r.mget([f"vg:inference-hb:{cid}" for cid in cam_ids])
-                hb_map = {cid: float(v) for cid, v in zip(cam_ids, raws) if v}
+                hb_live = {cid for cid, v in zip(cam_ids, raws) if v}
             except Exception:
                 pass
         streaming, offline = 0, []
@@ -243,7 +249,7 @@ def collect_system_health(db: Session) -> dict:
             else:
                 offline.append(c.name or f"camera {c.id}")
         ai_active = sum(1 for c in cams
-                        if c.ai_enabled and (now - hb_map.get(c.id, 0)) < 60)
+                        if c.ai_enabled and c.id in hb_live)
         return {"total": len(cams), "streaming": streaming,
                 "offline": len(cams) - streaming,
                 "offline_names": offline[:25],

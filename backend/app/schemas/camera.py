@@ -59,6 +59,7 @@ class CameraOut(BaseModel):
     snapshot_url_override: str | None = None
     rtsp_transport: str = "tcp"
     floor_placement_json: dict | None = None
+    always_on_ai: bool = False
     created_at: datetime
 
     @field_serializer("snapshot_url_override")
@@ -70,6 +71,7 @@ class CameraUpdate(BaseModel):
     name: str | None = None
     site: str | None = None
     ai_enabled: bool | None = None
+    always_on_ai: bool | None = None
     ai_model_id: int | None = None
     inference_fps: int | None = None
     rtsp_url_override: str | None = None
