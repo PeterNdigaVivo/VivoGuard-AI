@@ -13,7 +13,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
 from app.database import Base
-from app.models import RecordingClip
+from app.models import DetectionEvent, RecordingClip
+from app.services.incident_foundations import clip_eligibility
 from app.tasks.recorder import (
     _classify_ffmpeg_exit,
     _close_stale_camera_recordings, _close_window, _current_window,
@@ -564,6 +565,7 @@ def test_prune_source_window_only_after_retention(tmp_path, monkeypatch) -> None
     expired.parent.mkdir(parents=True)
     recent.write_bytes(b"recent")
     expired.write_bytes(b"expired")
+    expired_end = now - timedelta(hours=13)
     db.add_all([
         RecordingClip(
             camera_id=1, window_id="recent", file_path=str(recent),
@@ -571,7 +573,8 @@ def test_prune_source_window_only_after_retention(tmp_path, monkeypatch) -> None
         ),
         RecordingClip(
             camera_id=2, window_id="expired", file_path=str(expired),
-            status="completed", ended_at=now - timedelta(hours=13),
+            status="completed", started_at=expired_end - timedelta(hours=1),
+            ended_at=expired_end,
         ),
     ])
     db.commit()
@@ -587,6 +590,13 @@ def test_prune_source_window_only_after_retention(tmp_path, monkeypatch) -> None
     assert rows["expired"].status == "deleted"
     assert rows["expired"].file_path is None
     assert not expired.exists()
+    assert _as_utc_for_test(rows["expired"].ended_at) == expired_end
+
+    event = DetectionEvent(camera_id=2, detection_type="intrusion")
+    event.timestamp = expired_end - timedelta(minutes=1)
+    assert clip_eligibility(db, event) == (True, None)
+    event.timestamp = expired_end + timedelta(minutes=1)
+    assert clip_eligibility(db, event) == (False, "no_recording_coverage")
 
 
 def test_prune_does_not_delete_window_shared_with_active_recorder(

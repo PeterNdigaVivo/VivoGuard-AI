@@ -640,11 +640,11 @@ def _delete_window(db, window_id: str) -> None:
             try: freed += f.stat().st_size
             except Exception: pass
         shutil.rmtree(d, ignore_errors=True)
-    now = datetime.now(timezone.utc)
+    # The retained row describes when footage existed, even after it is pruned.
     (db.query(RecordingClip)
        .filter(RecordingClip.window_id == window_id,
                RecordingClip.status != "deleted")
-       .update({"status": "deleted", "file_path": None, "ended_at": now},
+       .update({"status": "deleted", "file_path": None},
                synchronize_session=False))
     db.commit()
     log.info("Deleted recording window %s — freed %.1f GB", window_id, freed / 1024**3)
