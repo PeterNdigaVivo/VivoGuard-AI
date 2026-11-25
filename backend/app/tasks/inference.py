@@ -232,15 +232,20 @@ def _task_profile(camera) -> tuple[int, int]:
     return int(RUN_SECONDS), 9
 
 
+def _valid_last_run_timestamp(value, *, now: float) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if 0 < timestamp <= now else None
+
+
 def _critical_due_from_timestamp(value, *, now: float) -> bool:
     """Fail open unless the camera completed inference inside its cooldown."""
-    if isinstance(value, bytes):
-        value = value.decode()
-    try:
-        age = max(0.0, float(now) - float(value))
-    except (TypeError, ValueError):
-        return True
-    return age >= CRITICAL_REQUEUE_SECONDS
+    timestamp = _valid_last_run_timestamp(value, now=now)
+    return timestamp is None or now - timestamp >= CRITICAL_REQUEUE_SECONDS
 
 
 def _last_run_timestamps(
@@ -267,14 +272,10 @@ def _last_run_timestamps(
         )
         return {camera_id: None for camera_id in camera_ids}
 
-    result: dict[int, float | None] = {}
+    observed_at = time.time()
+    result: dict[int, float | None] = dict.fromkeys(camera_ids)
     for camera_id, value in zip(camera_ids, values):
-        if isinstance(value, bytes):
-            value = value.decode()
-        try:
-            result[camera_id] = float(value) if value is not None else None
-        except (TypeError, ValueError):
-            result[camera_id] = None
+        result[camera_id] = _valid_last_run_timestamp(value, now=observed_at)
     return result
 
 
@@ -327,11 +328,8 @@ def _last_run_ages(
     observed_at = time.time() if now is None else float(now)
     ages: dict[int, float | None] = dict.fromkeys(camera_ids)
     for camera_id, value in zip(camera_ids, values):
-        try:
-            timestamp = float(value)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if 0 < timestamp <= observed_at:
+        timestamp = _valid_last_run_timestamp(value, now=observed_at)
+        if timestamp is not None:
             ages[camera_id] = observed_at - timestamp
     return ages
 

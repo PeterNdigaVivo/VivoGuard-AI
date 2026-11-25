@@ -382,6 +382,17 @@ def test_last_run_batch_read_normalises_invalid_values_and_fails_open():
     }
 
 
+@pytest.mark.parametrize("value", [b"NaN", b"Infinity", b"1e30", b"\xff", b"0"])
+def test_invalid_completion_does_not_delay_scheduling(value):
+    r = FakeLastRunRedis({1: b"900", 2: value})
+    last_runs = inference._last_run_timestamps(r, [1, 2])
+    cameras = [SimpleNamespace(id=i, detection_configs=[], zones=[]) for i in (1, 2)]
+
+    assert last_runs == {1: 900.0, 2: None}
+    assert [camera.id for camera in inference._schedule_order(cameras, last_runs)] == [2, 1]
+    assert inference._critical_due_from_timestamp(value, now=1_000) is True
+
+
 def test_critical_gap_health_uses_actual_starts_and_flags_never_started():
     r = FakeLastRunRedis({1: "900", 2: "600", 3: None})
 
