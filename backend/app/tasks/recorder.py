@@ -630,16 +630,26 @@ def _stop_all(r) -> None:
         except Exception: pass
 
 
-def _delete_window(db, window_id: str) -> None:
+def _delete_window(db, window_id: str) -> bool:
     """Delete a completed window's directory + mark its rows deleted."""
     from app.models import RecordingClip
     d = _clips_root() / window_id
     freed = 0
-    if d.exists():
-        for f in d.rglob("*"):
-            try: freed += f.stat().st_size
-            except Exception: pass
-        shutil.rmtree(d, ignore_errors=True)
+    try:
+        try:
+            d.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            for f in d.rglob("*"):
+                try:
+                    freed += f.stat().st_size
+                except OSError:
+                    pass
+            shutil.rmtree(d)
+    except OSError:
+        log.warning("recorder: source window removal failed; it will be retried")
+        return False
     # The retained row describes when footage existed, even after it is pruned.
     (db.query(RecordingClip)
        .filter(RecordingClip.window_id == window_id,
@@ -648,6 +658,7 @@ def _delete_window(db, window_id: str) -> None:
                synchronize_session=False))
     db.commit()
     log.info("Deleted recording window %s — freed %.1f GB", window_id, freed / 1024**3)
+    return True
 
 
 def _close_window(db, window_id: str, *, ended_at: datetime | None = None) -> int:
@@ -759,10 +770,8 @@ def _prune_expired_source_windows(
                                 RecordingClip.ended_at.is_(None),
                                 RecordingClip.ended_at >= cutoff))
                     .first())
-        if unsafe:
-            continue
-        _delete_window(db, window_id)
-        pruned += 1
+        if not unsafe and _delete_window(db, window_id):
+            pruned += 1
     return pruned
 
 

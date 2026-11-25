@@ -15,6 +15,7 @@ from app.config import settings
 from app.database import Base
 from app.models import DetectionEvent, RecordingClip
 from app.services.incident_foundations import clip_eligibility
+from app.tasks import recorder
 from app.tasks.recorder import (
     _classify_ffmpeg_exit,
     _close_stale_camera_recordings, _close_window, _current_window,
@@ -597,6 +598,47 @@ def test_prune_source_window_only_after_retention(tmp_path, monkeypatch) -> None
     assert clip_eligibility(db, event) == (True, None)
     event.timestamp = expired_end + timedelta(minutes=1)
     assert clip_eligibility(db, event) == (False, "no_recording_coverage")
+
+
+def test_source_window_cleanup_retries_a_failed_removal(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    ended = now - timedelta(hours=13)
+    window = tmp_path / "clips" / "expired"
+    window.mkdir(parents=True)
+    source = window / "camera.mp4"
+    source.write_bytes(b"test recording")
+
+    with _session() as db:
+        clip = RecordingClip(
+            camera_id=1, window_id="expired", file_path=str(source),
+            started_at=ended - timedelta(hours=1), ended_at=ended, status="completed",
+        )
+        db.add(clip)
+        db.commit()
+
+        def fail_removal(path):
+            assert path == window
+            raise PermissionError("private filesystem diagnostic")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(recorder.shutil, "rmtree", fail_removal)
+            assert _prune_expired_source_windows(db, now=now, retention_hours=12) == 0
+
+        db.refresh(clip)
+        assert source.exists()
+        assert clip.status == "completed"
+        assert clip.file_path == str(source)
+        assert "source window removal failed" in caplog.text
+        assert str(window) not in caplog.text
+        assert "private filesystem diagnostic" not in caplog.text
+
+        assert _prune_expired_source_windows(db, now=now, retention_hours=12) == 1
+        db.refresh(clip)
+        assert not window.exists()
+        assert clip.status == "deleted"
+        assert clip.file_path is None
+        assert _as_utc_for_test(clip.ended_at) == ended
 
 
 def test_prune_does_not_delete_window_shared_with_active_recorder(
