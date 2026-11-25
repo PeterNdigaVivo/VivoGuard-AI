@@ -1,6 +1,7 @@
 """System health endpoints — used by the System Health page (step 14)."""
 from __future__ import annotations
 import json
+import math
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,15 +21,21 @@ router = APIRouter(prefix="/system", tags=["system"])
 STREAM_FRESH_SECONDS = 10.0
 
 
+def _pipeline_age_seconds(pipeline: dict | None, *, now: float) -> float | None:
+    """Read a usable heartbeat timestamp from inference telemetry."""
+    try:
+        timestamp = float((pipeline or {}).get("last_run_ts"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return None
+    return max(0.0, now - timestamp)
+
+
 def _proof_of_life_state(pipeline: dict | None, *, now: float) -> str:
     """Classify monitoring liveness without treating a quiet store as failed."""
-    if not pipeline:
-        return "offline"
-    try:
-        age = now - float(pipeline.get("last_run_ts") or 0)
-    except (TypeError, ValueError):
-        return "offline"
-    if age > 10 * 60:
+    age = _pipeline_age_seconds(pipeline, now=now)
+    if not pipeline or age is None or age > 10 * 60:
         return "offline"
     total = int(pipeline.get("cameras_total") or 0)
     fresh = int(pipeline.get("cameras_fresh") or 0)
@@ -329,6 +336,7 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     now_ts = now_dt.timestamp()
     fb = FrameBuffer()
     pipeline = _decode_inference_pipeline(fb.r.get("vg:inference:health"))
+    pipeline_age = _pipeline_age_seconds(pipeline, now=now_ts)
     latest_detection = db.query(func.max(DetectionEvent.timestamp)).scalar()
     latest_alert = db.query(func.max(Alert.created_at)).scalar()
 
@@ -346,10 +354,7 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "latest_detection_age_seconds": age_seconds(latest_detection),
         "latest_alert_at": latest_alert.isoformat() if latest_alert else None,
         "latest_alert_age_seconds": age_seconds(latest_alert),
-        "pipeline_age_seconds": (
-            max(0, int(now_ts - float(pipeline.get("last_run_ts") or 0)))
-            if pipeline and pipeline.get("last_run_ts") else None
-        ),
+        "pipeline_age_seconds": int(pipeline_age) if pipeline_age is not None else None,
         "cameras_total": int((pipeline or {}).get("cameras_total") or 0),
         "cameras_fresh": int((pipeline or {}).get("cameras_fresh") or 0),
         "cameras_actively_inferencing": (

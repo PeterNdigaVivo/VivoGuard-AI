@@ -1,9 +1,12 @@
+from unittest.mock import Mock
+
 import pytest
 
 from app.api.system import (
     _decode_inference_pipeline,
     _proof_of_life_state,
     _runtime_camera_status,
+    proof_of_life,
 )
 
 
@@ -108,3 +111,21 @@ def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
     assert payload == {
         "mode": "shadow", "authoritative": False, "frames_processed": 110,
     }
+
+
+@pytest.mark.parametrize("timestamp", [b'"invalid"', b'"NaN"', b'"-Infinity"', b'"Infinity"', b"null"])
+def test_proof_of_life_responds_when_heartbeat_is_invalid(monkeypatch, timestamp: bytes) -> None:
+    frame_buffer = Mock()
+    frame_buffer.r.get.return_value = (
+        b'{"last_run_ts":' + timestamp
+        + b',"cameras_total":1,"cameras_fresh":1,'
+        b'"critical_cameras_overdue":0,"standard_cameras_overdue":0}'
+    )
+    monkeypatch.setattr("app.api.system.FrameBuffer", lambda: frame_buffer)
+    db = Mock()
+    db.query.return_value.scalar.return_value = None
+
+    payload = proof_of_life(db=db, _u=None)
+
+    assert payload["state"] == "offline"
+    assert payload["pipeline_age_seconds"] is None
