@@ -635,6 +635,7 @@ def _run_streamer() -> dict:
     r = _redis()
     dark: list = []
     streaming = 0
+    unverified = 0
     for cid in cam_ids:
         try:
             if r.exists(f"vg:frame:{cid}"):
@@ -642,12 +643,15 @@ def _run_streamer() -> dict:
             else:
                 dark.append(cid)
         except Exception:
-            dark.append(cid)
+            unverified += 1
     f["streaming"] = streaming
     f["dark"] = len(dark)
+    f["frame_checks_unavailable"] = unverified
     if dark:
         gaps.append({"dark_cameras": dark[:50]})   # bounded list
-    return {"status": "warning" if dark else "ok", "findings": f, "gaps": gaps or None}
+    if unverified:
+        gaps.append({"frame_checks_unavailable": unverified})
+    return {"status": "warning" if gaps else "ok", "findings": f, "gaps": gaps or None}
 
 
 def _run_simulation() -> dict:

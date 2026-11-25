@@ -52,6 +52,39 @@ def test_inference_supervision_uses_non_blocking_beat_queue():
 
 
 @pytest.mark.parametrize(
+    ("checks", "streaming", "dark_cameras", "unverified"),
+    [
+        ([1, 1, 1], 3, [], 0),
+        ([1, 0, RuntimeError("private backend diagnostic")], 1, [2], 1),
+        ([RuntimeError("private backend diagnostic")] * 3, 0, [], 3),
+    ],
+)
+def test_streamer_health_distinguishes_missing_frames_from_failed_checks(
+    monkeypatch, checks, streaming, dark_cameras, unverified,
+):
+    redis = Mock()
+    redis.exists.side_effect = checks
+    db = Mock()
+    db.execute.return_value.all.return_value = [(1,), (2,), (3,)]
+    monkeypatch.setattr(agents, "_redis", lambda: redis)
+    monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(db))
+
+    report = agents._run_streamer()
+
+    assert report["findings"] == {
+        "ai_enabled_cameras": 3, "streaming": streaming, "dark": len(dark_cameras),
+        "frame_checks_unavailable": unverified,
+    }
+    gaps = []
+    if dark_cameras:
+        gaps.append({"dark_cameras": dark_cameras})
+    if unverified:
+        gaps.append({"frame_checks_unavailable": unverified})
+    assert report["gaps"] == (gaps or None)
+    assert report["status"] == ("warning" if gaps else "ok")
+
+
+@pytest.mark.parametrize(
     ("has_anchor", "suppressed", "sends_notification"),
     [(True, False, True), (True, True, False), (False, False, False)],
 )
