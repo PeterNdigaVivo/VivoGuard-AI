@@ -341,12 +341,15 @@ def test_stalled_recorder_is_terminated_before_repair(monkeypatch) -> None:
         "app.tasks.recorder.os.kill",
         lambda pid, sig: signals.append((pid, sig)),
     )
+    if not hasattr(signal, "SIGKILL"):
+        # The mocked recorder follows the Linux container's signal contract.
+        monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
     monkeypatch.setattr(
         "app.tasks.recorder.time.sleep", lambda seconds: sleeps.append(seconds),
     )
 
     assert _stop_tracked_camera_recorder(redis, 7)
-    assert signals == [(707, signal.SIGTERM), (707, signal.SIGKILL)]
+    assert signals == [(707, signal.SIGTERM), (707, 9)]
     assert sleeps == [0.5]
     assert redis.deleted == ["vg:recording:pid:7"]
 
