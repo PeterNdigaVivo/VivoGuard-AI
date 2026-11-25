@@ -6,6 +6,7 @@ inferred from throughput telemetry.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,10 +21,16 @@ class CapacityThresholds:
 
 
 def _number(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+    """Capacity measurements must be finite, nonnegative numbers."""
+    if isinstance(value, bool):
         return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def _id_set(value: Any) -> set[int]:

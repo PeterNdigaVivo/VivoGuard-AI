@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from app.services.inference_acceptance import (
     CapacityThresholds,
     evaluate_capacity_acceptance,
@@ -83,3 +87,35 @@ def test_capacity_is_pending_without_shadow_telemetry():
 
     assert result["status"] == "pending"
     assert result["capacity_gate_passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("source", "field", "value", "check_name"),
+    [
+        ("authoritative", "last_run_ts", "NaN", "authoritative_health_fresh"),
+        ("shadow", "last_run_ts", "Infinity", "shadow_health_fresh"),
+        ("authoritative", "cameras_fresh", float("inf"), "all_fresh_cameras_served"),
+        ("shadow", "uptime_seconds", float("inf"), "two_hour_canary"),
+        ("shadow", "frames_processed", 10**400, "minimum_shadow_frames"),
+        ("shadow", "p95_per_frame_ms", -1, "shadow_p95_per_frame"),
+        ("shadow", "max_camera_schedule_wait_seconds", float("-inf"),
+         "bounded_camera_schedule_wait"),
+        ("shadow", "errors", False, "zero_shadow_errors"),
+    ],
+)
+def test_capacity_fails_on_invalid_numeric_telemetry(source, field, value, check_name):
+    telemetry = {"authoritative": _authoritative(), "shadow": _shadow()}
+    telemetry[source][field] = value
+
+    result = evaluate_capacity_acceptance(
+        **telemetry,
+        now=NOW,
+        baseline={"cameras_reporting": 58, "frames": 10000},
+        thresholds=THRESHOLDS,
+    )
+
+    assert result["status"] == "failed"
+    assert result["capacity_gate_passed"] is False
+    check = next(item for item in result["checks"] if item["name"] == check_name)
+    assert check["passed"] is False
+    json.dumps(result, allow_nan=False)
