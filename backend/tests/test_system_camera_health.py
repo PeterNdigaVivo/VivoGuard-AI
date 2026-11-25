@@ -1,3 +1,5 @@
+import pytest
+
 from app.api.system import (
     _decode_inference_pipeline,
     _proof_of_life_state,
@@ -68,6 +70,8 @@ def test_proof_of_life_distinguishes_active_degraded_and_offline() -> None:
         "cameras_total": 10,
         "cameras_fresh": 10,
         "cameras_waiting_for_worker": 0,
+        "critical_cameras_overdue": 0,
+        "standard_cameras_overdue": 0,
     }
     assert _proof_of_life_state(healthy, now=now) == "active"
     assert _proof_of_life_state({**healthy, "cameras_fresh": 8}, now=now) == "degraded"
@@ -80,6 +84,21 @@ def test_proof_of_life_distinguishes_active_degraded_and_offline() -> None:
     ) == "degraded"
     assert _proof_of_life_state({**healthy, "last_run_ts": 300}, now=now) == "offline"
     assert _proof_of_life_state(None, now=now) == "offline"
+
+
+@pytest.mark.parametrize("metric", ["critical_cameras_overdue", "standard_cameras_overdue"])
+def test_proof_of_life_degrades_without_sla_measurement(metric: str) -> None:
+    pipeline = {
+        "last_run_ts": 990,
+        "cameras_total": 10,
+        "cameras_fresh": 10,
+        "cameras_waiting_for_worker": 0,
+        "critical_cameras_overdue": 0,
+        "standard_cameras_overdue": 0,
+    }
+    assert _proof_of_life_state({**pipeline, metric: None}, now=1000) == "degraded"
+    del pipeline[metric]
+    assert _proof_of_life_state(pipeline, now=1000) == "degraded"
 
 
 def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
