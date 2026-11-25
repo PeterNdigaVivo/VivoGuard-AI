@@ -252,8 +252,6 @@ def inference_pipeline_health_check() -> None:
     # No camera_id → use the first ai_enabled camera as an FK anchor
     # (matches the shop_not_opened URGENT pattern; the alert is fleet-
     # scoped but the schema needs a camera_id).
-    anchor_cam_id = None
-    created_event = None
     try:
         from app.database import SessionLocal as _SL
         from app.models import Camera as _Cam
@@ -261,22 +259,25 @@ def inference_pipeline_health_check() -> None:
             row = (db.query(_Cam.id)
                      .filter(_Cam.ai_enabled == True)                      # noqa: E712
                      .order_by(_Cam.id.asc()).first())
-            anchor_cam_id = int(row[0]) if row else None
-            if anchor_cam_id:
-                created_event = _create_info_alert(
-                    db, camera_id=anchor_cam_id, zone_id=None, store_id=None,
-                    detection_type="system_health",
-                    cls="inference_pipeline_stalled", extra=extra,
-                )
-                db.commit()
+            if not row:
+                return
+            created_event = _create_info_alert(
+                db, camera_id=int(row[0]), zone_id=None, store_id=None,
+                detection_type="system_health",
+                cls="inference_pipeline_stalled", extra=extra,
+            )
+            # The event's policy must be read before commit expires ORM state.
+            notification_allowed = _info_notification_allowed(created_event)
+            db.commit()
     except Exception as e:
         log.exception("inference_pipeline_health_check: alert write failed: %s", e)
         return
 
     try:
-        recipients = _dashboard_recipients()
-        if recipients and _info_notification_allowed(created_event):
-            _send_whatsapp(recipients, f"🚨 {body}")
+        if notification_allowed:
+            recipients = _dashboard_recipients()
+            if recipients:
+                _send_whatsapp(recipients, f"🚨 {body}")
     except Exception:
         pass
 
