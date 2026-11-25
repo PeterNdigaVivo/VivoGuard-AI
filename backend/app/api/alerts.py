@@ -22,6 +22,7 @@ from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
 from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
+from app.utils.evidence_files import evidence_file_available
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -1100,7 +1101,7 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.snapshot_count  = len(sp) or None
     # Recorded clip (if the recorder extracted one for this alert). We only
     # expose the URL — the path stays server-side.
-    has_clip = bool((event.extra or {}).get("alert_clip_path"))
+    has_clip = evidence_file_available(extra.get("alert_clip_path"))
     item.clip_url = f"/api/alerts/{alert.id}/clip" if has_clip else None
     if has_clip:
         item.clip_status = "ready"
@@ -1673,13 +1674,12 @@ def alert_clip(alert_id: int, db: Session = Depends(get_db),
     event's extra JSON (written by recorder.extract_pending_clips). 404 when
     the alert has no clip or it was pruned (48h retention). Auth required."""
     from fastapi.responses import FileResponse
-    import os
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
     ev = db.get(DetectionEvent, a.event_id)
     path = (ev.extra or {}).get("alert_clip_path") if ev else None
-    if not path or not os.path.exists(path):
+    if not evidence_file_available(path):
         raise HTTPException(404, "clip not available")
     return FileResponse(path, media_type="video/mp4",
                         filename=f"alert_{alert_id}.mp4")

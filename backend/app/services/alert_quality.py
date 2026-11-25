@@ -4,8 +4,6 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import sqrt
-from pathlib import Path
-from stat import S_ISREG
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -14,6 +12,7 @@ from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
     DetectionEvent, EvidenceManifest, RecordingClip, Store,
 )
+from app.utils.evidence_files import evidence_file_available
 
 MIN_REVIEWED_SAMPLES = 20
 ROLLING_SAMPLE_SIZE = 50
@@ -25,14 +24,6 @@ TARGET_PRECISION = 0.99
 TARGET_MIN_REVIEWED = 300
 TARGET_MIN_RECALL_EVENTS = 300
 ONE_SIDED_95_Z = 1.6448536269514722
-
-
-def _clip_file_available(path: str) -> bool:
-    try:
-        info = Path(path).stat()
-    except (OSError, ValueError):
-        return False
-    return S_ISREG(info.st_mode) and info.st_size > 0
 
 
 def _wilson_lower_bound(successes: int, total: int) -> float | None:
@@ -308,7 +299,7 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
             # Keep references to missing or pruned clips in the denominator.
             if isinstance(clip_path, str) and clip_path:
                 eligibility = True
-                if _clip_file_available(clip_path):
+                if evidence_file_available(clip_path):
                     clips += 1
             elif eligibility is None and event.timestamp is not None:
                 event_at = (event.timestamp.replace(tzinfo=timezone.utc)
