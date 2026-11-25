@@ -8,17 +8,73 @@ from app.ai.inference_worker import (_alert_dedup_key, _large_enough,
                                      _schedule_active)
 
 
-def test_stateless_detector_preserves_tracker_identity() -> None:
+PERSON_ZONE = {"id": 7, "detection_types_json": ["person"],
+               "polygon_coords_json": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+STAFF_ZONE = {"id": 8, "detection_types_json": ["staff_zone"],
+              "polygon_coords_json": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+
+
+def _person_det(**over) -> dict:
     det = {"cls": "person", "conf": 0.91, "rolling_conf": 0.84,
            "bbox_norm": [0.1, 0.1, 0.4, 0.8],
            "bbox_px": [10, 10, 40, 80], "track_id": 42}
+    det.update(over)
+    return det
+
+
+def test_stateless_detector_preserves_tracker_identity() -> None:
     ctx = DetectorContext(
-        camera_id=1, timestamp=1.0, raw_detections=[det], tracks=[], zones=[],
+        camera_id=1, timestamp=1.0, raw_detections=[_person_det()],
+        tracks=[], zones=[PERSON_ZONE],
         config={"person": {"enabled": True, "confidence_threshold": 0.6}},
     )
     event = PersonDetector().evaluate(ctx)[0]
     assert event.track_id == 42
     assert event.confidence == 0.84
+
+
+def test_person_without_zone_is_silent() -> None:
+    """Nov-2026 false-alarm fix: a camera with no person-tagged zone
+    raises no person alerts (93% of the urgent backlog was zoneless
+    daytime person noise)."""
+    ctx = DetectorContext(
+        camera_id=1, timestamp=1.0, raw_detections=[_person_det()],
+        tracks=[], zones=[],
+        config={"person": {"enabled": True, "confidence_threshold": 0.6}},
+    )
+    assert PersonDetector().evaluate(ctx) == []
+
+
+def test_person_zoneless_escape_hatch() -> None:
+    ctx = DetectorContext(
+        camera_id=1, timestamp=1.0, raw_detections=[_person_det()],
+        tracks=[], zones=[],
+        config={"person": {"enabled": True, "confidence_threshold": 0.6,
+                           "extra": {"allow_zoneless": True}}},
+    )
+    assert len(PersonDetector().evaluate(ctx)) == 1
+
+
+def test_person_in_pure_staff_zone_is_silent() -> None:
+    """A person standing in a staff_zone is staff turf — not a person
+    alert, whatever the uniform classifier can or can't read."""
+    ctx = DetectorContext(
+        camera_id=1, timestamp=1.0, raw_detections=[_person_det()],
+        tracks=[], zones=[PERSON_ZONE, STAFF_ZONE],
+        config={"person": {"enabled": True, "confidence_threshold": 0.6}},
+    )
+    assert PersonDetector().evaluate(ctx) == []
+
+
+def test_person_unreadable_pixels_still_alert() -> None:
+    """No frame -> staff classifier returns 'uncertain' -> the alert
+    still fires. Only confident staff verdicts are excluded."""
+    ctx = DetectorContext(
+        camera_id=1, timestamp=1.0, raw_detections=[_person_det()],
+        tracks=[], zones=[PERSON_ZONE],
+        config={"person": {"enabled": True, "confidence_threshold": 0.6}},
+    )
+    assert len(PersonDetector().evaluate(ctx)) == 1
 
 
 def test_incident_key_uses_track_when_available() -> None:

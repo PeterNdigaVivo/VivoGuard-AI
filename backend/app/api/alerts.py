@@ -1552,16 +1552,27 @@ def resolve_all(db: Session = Depends(get_db),
                 user: User = Depends(require_role("admin", "operator")),
                 store_id: Optional[int] = Query(None),
                 since: Optional[datetime] = Query(None),
-                until: Optional[datetime] = Query(None)):
+                until: Optional[datetime] = Query(None),
+                detection_type: Optional[str] = Query(None),
+                include_acknowledged: bool = Query(False)):
     """Bulk-mark every currently-NEW alert in the window (and optional
     store filter) as resolved. Mirrors the per-alert /resolve action.
-    Returns the count actually flipped."""
+    Returns the count actually flipped.
+
+    Backlog-clearing extras (both default OFF so existing callers are
+    unchanged): `include_acknowledged=true` also closes alerts someone
+    acknowledged and then abandoned — they count as "pending" on the
+    health dashboard; `detection_type=person` (etc.) closes one alert
+    type's backlog without touching the rest."""
+    statuses = ("new", "acknowledged") if include_acknowledged else ("new",)
     q = (db.query(Alert)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
-           .filter(Alert.status == "new"))
+           .filter(Alert.status.in_(statuses)))
     if store_id is not None:
         q = q.filter(Camera.store_id == store_id)
+    if detection_type:
+        q = q.filter(DetectionEvent.detection_type == detection_type)
     if since:
         q = q.filter(DetectionEvent.timestamp >= since)
     if until:

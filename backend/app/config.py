@@ -329,6 +329,13 @@ class Settings(BaseSettings):
     # Per-camera dedupe — once an after-hours person alert has fired
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30
+    # Daytime person-alert gates (Nov-2026 false-alarm fix): a camera
+    # with no person-tagged zone raises no person alerts, and people
+    # identified as staff (or inside a pure staff zone) don't alert.
+    # Per-camera escape hatches live in the detection config `extra`
+    # ({"allow_zoneless": true} / {"include_staff": true}).
+    person_requires_zone: bool = True
+    person_exclude_staff: bool = True
 
     # --- Sales-floor insight debugging ---
     # When True, sales_floor_insights_check skips the 15-min Redis

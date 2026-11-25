@@ -66,8 +66,92 @@ class _ClassFilterDetector(Detector):
 
 
 class PersonDetector(_ClassFilterDetector):
+    """person alerts were the platform's biggest false-alarm source:
+    with no person-tagged zone the base class fired on EVERY person
+    anywhere in frame, all day, staff and customers included. Three
+    gates (Nov-2026):
+
+      zone requirement  — a camera with no person-tagged zone raises
+                          no person alerts (operator draws the zone
+                          that matters: a stockroom door, a safe, a
+                          fire exit). Per-camera escape hatch:
+                          config extra {"allow_zoneless": true}.
+                          Global kill switch:
+                          settings.person_requires_zone = False.
+      staff exclusion   — detections inside a pure staff zone, or
+                          classified high/medium staff by
+                          staff_identity, don't alert. Per-camera
+                          escape hatch: extra {"include_staff": true}.
+                          Global: settings.person_exclude_staff.
+      trading hours     — OPT-IN per camera: extra
+                          {"only_when_closed": true} suppresses while
+                          the store is open (overnight coverage of
+                          the whole frame is IntrusionDetector's job;
+                          this is for door cameras that only care
+                          about people when the store is shut).
+    """
+
     detection_type = "person"
     class_set = COCO_PERSON
+
+    def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
+        from app.config import settings
+
+        cfg = ctx.config.get(self.detection_type)
+        if not cfg or not cfg.get("enabled"):
+            return []
+        extra = cfg.get("extra") or {}
+
+        has_zone = any(
+            self.detection_type in (z.get("detection_types_json") or [])
+            and not z.get("suppressed")
+            for z in ctx.zones)
+        if (not has_zone
+                and bool(getattr(settings, "person_requires_zone", True))
+                and not extra.get("allow_zoneless")):
+            return []
+
+        if (extra.get("only_when_closed")
+                and ctx.store_id is not None and ctx.store_timezone):
+            try:
+                from app.utils.business_hours import (
+                    is_open_with_default, localised_now)
+                if is_open_with_default(ctx.business_hours,
+                                        localised_now(ctx.store_timezone)):
+                    return []
+            except Exception:
+                # Unparseable hours must never kill the detector.
+                pass
+
+        events = super().evaluate(ctx)
+        if not events:
+            return events
+
+        if (not bool(getattr(settings, "person_exclude_staff", True))
+                or extra.get("include_staff")):
+            return events
+
+        import time as _time
+        from app.ai.detectors import staff_identity
+        now = _time.time()
+        kept: list[DetectionEvent] = []
+        for ev in events:
+            in_staff, _tag = staff_identity.is_in_pure_staff_zone(
+                ctx, ev.bbox_norm)
+            if in_staff:
+                continue
+            det = {"bbox_norm": ev.bbox_norm, "conf": ev.confidence}
+            tid = (ev.track_id if ev.track_id is not None
+                   else staff_identity.match_track(ctx, det))
+            # classify() is "uncertain" when pixels are unreadable —
+            # that still alerts: a customer at a stockroom door matters
+            # even when their clothing can't be read. Only confident
+            # staff verdicts are excluded.
+            verdict = staff_identity.classify(ctx, det, tid, now)
+            if verdict["level"] in ("high", "medium"):
+                continue
+            kept.append(ev)
+        return kept
 
 
 class VehicleDetector(_ClassFilterDetector):
