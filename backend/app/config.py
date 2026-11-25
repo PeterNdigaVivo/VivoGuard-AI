@@ -426,6 +426,11 @@ class Settings(BaseSettings):
     # Per-camera dedupe — once an after-hours person alert has fired
     # for a camera, suppress repeats for this many minutes.
     person_afterhours_dedupe_min: int = 30
+    # Staff exclusion for person alerts (Nov-2026 false-alarm fix):
+    # people inside a pure staff zone, or rated high/medium staff by
+    # the uniform classifier, don't raise person alerts. Per-camera
+    # escape hatch: detection config extra {"include_staff": true}.
+    person_exclude_staff: bool = True
 
     # --- Alert quality control (the per camera+detector circuit breaker) ---
     # When on, a pair whose reviewed false-alert rate crosses the threshold is

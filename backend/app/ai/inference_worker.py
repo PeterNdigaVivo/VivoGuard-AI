@@ -563,6 +563,15 @@ def _make_tracker(camera_id: int):
         from app.ai.tracker import VivoGuardTracker
         t = VivoGuardTracker(camera_id)
         log.info("camera %s: tracking via ByteTrack (supervision)", camera_id)
+        # Heartbeat for the Mission Control integrations panel: the
+        # API container deliberately doesn't install supervision, so
+        # the dashboard reads this key instead of importability.
+        try:
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            r.set("vg:tracker:bytetrack_active",
+                  datetime.now(timezone.utc).isoformat(), ex=6 * 3600)
+        except Exception:
+            pass
         return t
     except Exception as e:                                   # noqa: BLE001
         from app.ai.tracker import IOUTracker

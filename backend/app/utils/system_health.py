@@ -383,10 +383,24 @@ def collect_system_health(db: Session) -> dict:
                 return importlib.util.find_spec(mod) is not None
             except Exception:
                 return False
+        # The API container deliberately does NOT install the AI stack
+        # (supervision lives only in the worker images), so importability
+        # HERE said nothing about the fleet — the dashboard light was
+        # red forever. The inference workers heartbeat
+        # vg:tracker:bytetrack_active (6h TTL) every time a ByteTrack
+        # tracker is created; that key is the real signal. Importability
+        # stays as a fallback for single-container dev setups.
+        tracker_live = False
+        try:
+            tracker_live = bool(
+                r is not None and r.get("vg:tracker:bytetrack_active"))
+        except Exception:
+            tracker_live = False
+        bytetrack = tracker_live or _importable("supervision")
         return {
             # ByteTrack ships inside supervision.
-            "bytetrack_active": _importable("supervision"),
-            "supervision_active": _importable("supervision"),
+            "bytetrack_active": bytetrack,
+            "supervision_active": bytetrack,
             "mannequin_filter_active": bool(
                 getattr(settings, "mannequin_filter_enabled", True)),
         }

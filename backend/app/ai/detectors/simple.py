@@ -59,8 +59,61 @@ class _ClassFilterDetector(Detector):
 
 
 class PersonDetector(_ClassFilterDetector):
+    """person alerts carry one extra gate on top of the base class:
+    staff exclusion. Detections inside a pure staff zone, or whose
+    track the uniform classifier rates high/medium staff, don't
+    alert — staff walking through a person-tagged stockroom zone was
+    a major false-alarm source. Per-camera escape hatch: config extra
+    {"include_staff": true}. Global: settings.person_exclude_staff.
+
+    Deliberately NOT here: zone requirements or trading-hours gates.
+    The inference worker's _person_alert_warranted() already
+    suppresses daytime person noise (trading hours -> only
+    restricted-type zones alert) and it FAILS OPEN after hours — a
+    detector-level zone gate would silently drop a 2 a.m. break-in
+    on a camera nobody drew zones for, which that design forbids.
+    """
+
     detection_type = "person"
     class_set = COCO_PERSON
+
+    def evaluate(self, ctx: DetectorContext) -> list[DetectionEvent]:
+        from app.config import settings
+
+        cfg = ctx.config.get(self.detection_type)
+        if not cfg or not cfg.get("enabled"):
+            return []
+        extra = cfg.get("extra") or {}
+
+        events = super().evaluate(ctx)
+        if not events:
+            return events
+
+        if (not bool(getattr(settings, "person_exclude_staff", True))
+                or extra.get("include_staff")):
+            return events
+
+        import time as _time
+        from app.ai.detectors import staff_identity
+        now = _time.time()
+        kept: list[DetectionEvent] = []
+        for ev in events:
+            in_staff, _tag = staff_identity.is_in_pure_staff_zone(
+                ctx, ev.bbox_norm)
+            if in_staff:
+                continue
+            det = {"bbox_norm": ev.bbox_norm, "conf": ev.confidence}
+            tid = (ev.track_id if ev.track_id is not None
+                   else staff_identity.match_track(ctx, det))
+            # classify() is "uncertain" when pixels are unreadable —
+            # that still alerts: a customer at a stockroom door matters
+            # even when their clothing can't be read. Only confident
+            # staff verdicts are excluded.
+            verdict = staff_identity.classify(ctx, det, tid, now)
+            if verdict["level"] in ("high", "medium"):
+                continue
+            kept.append(ev)
+        return kept
 
 
 class VehicleDetector(_ClassFilterDetector):
