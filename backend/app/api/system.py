@@ -15,6 +15,7 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models import Alert, Camera, DetectionEvent
 from app.stream.frame_buffer import FrameBuffer
+from app.utils.stream_secrets import redact_stream_credentials
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -220,7 +221,7 @@ def stream_health(camera_id: int, db: Session = Depends(get_db),
         "seconds_since_last_frame": (now - float(last_frame_at)) if last_frame_at else None,
         "seconds_since_last_health_write":
             (now - float(last_health_at)) if last_health_at else None,
-        "error": (health or {}).get("error"),
+        "error": redact_stream_credentials((health or {}).get("error")) or None,
         "inference_last_heartbeat": inference_hb,
         "inference_running": bool(inference_hb and (now - inference_hb) < 60),
     }
@@ -270,6 +271,9 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         runtime_status, frame_age = _runtime_camera_status(
             c.status, h, now=now,
         )
+        error = None
+        if runtime_status != "online":
+            error = redact_stream_credentials(h.get("error") or c.last_error) or None
         cam_health.append({
             "camera_id": c.id,
             "name":      c.name,
@@ -278,7 +282,7 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
             "fps":       h.get("fps"),
             "last_frame_at": h.get("last_frame_at"),
             "seconds_since_last_frame": frame_age,
-            "error":     None if runtime_status == "online" else (h.get("error") or c.last_error),
+            "error":     error,
             "network_type": c.network_type,
         })
 

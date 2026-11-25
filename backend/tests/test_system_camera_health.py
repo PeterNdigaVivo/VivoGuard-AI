@@ -1,3 +1,6 @@
+import json
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -7,6 +10,8 @@ from app.api.system import (
     _proof_of_life_state,
     _runtime_camera_status,
     proof_of_life,
+    stream_health,
+    system_health,
 )
 
 
@@ -129,3 +134,42 @@ def test_proof_of_life_responds_when_heartbeat_is_invalid(monkeypatch, timestamp
 
     assert payload["state"] == "offline"
     assert payload["pipeline_age_seconds"] is None
+
+
+def test_stream_health_redacts_stored_diagnostic(monkeypatch):
+    private_error = "Connection failed for rtsp://demo-user:demo-password@camera.example/stream"
+    redis = Mock()
+    redis.get.side_effect = {"vg:health:1": json.dumps({"error": private_error})}.get
+    monkeypatch.setattr("redis.from_url", lambda _url: redis)
+    db = Mock()
+    db.get.return_value = SimpleNamespace(id=1, name="Camera", ai_enabled=True)
+
+    result = stream_health(1, db=db, _u=None)
+
+    assert result["error"] == "Connection failed for rtsp://****:****@camera.example/stream"
+
+
+@pytest.mark.parametrize("source", ["redis", "database"])
+def test_system_health_redacts_diagnostics_from_either_source(monkeypatch, source):
+    error = "HTTP timeout https://camera.example/snapshot?token=demo-token&mode=still"
+    camera = SimpleNamespace(
+        id=1, name="Camera", status="offline", network_type="lan",
+        last_error=error if source == "database" else None,
+    )
+    fb = Mock()
+    fb.health_many.return_value = {1: {"error": error}} if source == "redis" else {}
+    fb.r.get.return_value = None
+    monkeypatch.setattr("app.api.system.FrameBuffer", lambda: fb)
+    monkeypatch.setattr("app.api.system.shutil.disk_usage", lambda _path: SimpleNamespace(
+        total=100, used=10, free=90,
+    ))
+    monkeypatch.setitem(sys.modules, "torch", None)
+    db = Mock()
+    db.query.return_value.filter.return_value.all.return_value = [camera]
+    db.query.return_value.filter.return_value.scalar.return_value = 0
+
+    result = system_health(db=db, _u=None)
+
+    assert result["cameras"][0]["error"] == (
+        "HTTP timeout https://camera.example/snapshot?token=****&mode=still"
+    )
