@@ -897,6 +897,13 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
     return False
 
 
+def _missing_alert_clip_path():
+    from app.models import DetectionEvent
+
+    path = DetectionEvent.extra["alert_clip_path"].as_string()
+    return or_(path.is_(None), path == "")
+
+
 def _pending_alert_clip_rows(db, since: datetime, *, limit: int = 1000):
     """Return bounded clip candidates without letting completed work starve it.
 
@@ -919,14 +926,24 @@ def _pending_alert_clip_rows(db, since: datetime, *, limit: int = 1000):
                   DetectionEvent.timestamp >= RecordingClip.started_at,
                   or_(RecordingClip.ended_at.is_(None),
                       RecordingClip.ended_at >= DetectionEvent.timestamp),
-                  or_(
-                      DetectionEvent.extra.is_(None),
-                      DetectionEvent.extra["alert_clip_path"]
-                      .as_string().is_(None),
-                  ),
+                  _missing_alert_clip_path(),
               )
               .order_by(Alert.created_at.asc(),
                         RecordingClip.started_at.desc())
+              .limit(limit)
+              .all())
+
+
+def _pending_open_close_clip_rows(db, since: datetime, *, limit: int = 200):
+    """Find opening alerts needing clips even without an anchor recording."""
+    from app.models import Alert, DetectionEvent
+
+    return (db.query(Alert, DetectionEvent)
+              .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
+              .filter(Alert.created_at >= since,
+                      DetectionEvent.detection_type == "shop_open_close",
+                      _missing_alert_clip_path())
+              .order_by(Alert.created_at.desc(), Alert.id.desc())
               .limit(limit)
               .all())
 
@@ -945,7 +962,7 @@ def extract_pending_clips() -> None:
         return
     from datetime import timedelta
     from app.database import SessionLocal
-    from app.models import Alert, DetectionEvent, RecordingClip
+    from app.models import RecordingClip
     recovery_hours = int(getattr(settings, "recording_source_retention_hours", 8))
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, recovery_hours))
     _alert_clips_root().mkdir(parents=True, exist_ok=True)
@@ -988,14 +1005,7 @@ def extract_pending_clips() -> None:
         # alert: entrance camera first, the event's own camera second.
         # Bounded (limit 200) + idempotent via the alert_clip_path guard.
         day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-        pending = (db.query(Alert, DetectionEvent)
-                     .join(DetectionEvent, DetectionEvent.id == Alert.event_id)
-                     .filter(Alert.created_at >= day_ago,
-                             DetectionEvent.detection_type == "shop_open_close")
-                     .order_by(Alert.created_at.desc())
-                     .limit(200)
-                     .all())
-        for alert, ev in pending:
+        for alert, ev in _pending_open_close_clip_rows(db, day_ago):
             if alert.id in seen or (ev.extra or {}).get("alert_clip_path"):
                 continue
             seen.add(alert.id)

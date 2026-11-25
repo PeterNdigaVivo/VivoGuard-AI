@@ -9,7 +9,7 @@ from app.database import Base
 from app.models import Alert, Camera, DetectionEvent, RecordingClip, Store, Zone
 from app.tasks.recorder import (
     _clip_source_matches_event, _entrance_clip_for,
-    _pending_alert_clip_rows, _prunable_alert_clip_rows,
+    _pending_alert_clip_rows, _pending_open_close_clip_rows, _prunable_alert_clip_rows,
     _recording_covers_event,
 )
 
@@ -163,6 +163,40 @@ def test_pending_clip_batch_excludes_completed_work_before_limit(tmp_path):
     )
 
     assert [alert.id for alert, _event, _clip in rows] == [missing_alert.id]
+
+
+def test_open_close_backfill_excludes_completed_clips_before_limit():
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    with _session() as db:
+        camera = Camera(
+            name="Unrecorded Anchor", brand="generic", connection_type="lan_rtsp",
+            host="127.0.0.1",
+        )
+        db.add(camera); db.flush()
+
+        cases = [
+            (now, "shop_open_close", {"alert_clip_path": "/clips/done.mp4"}),
+            (now, "intrusion", {}),
+            (now - timedelta(minutes=5), "shop_open_close", {"alert_clip_path": ""}),
+            (now - timedelta(minutes=10), "shop_open_close", {}),
+            (now - timedelta(minutes=15), "shop_open_close", None),
+            (now - timedelta(days=2), "shop_open_close", {}),
+        ]
+        alerts = []
+        for timestamp, detection_type, extra in cases:
+            event = DetectionEvent(
+                camera_id=camera.id, detection_type=detection_type, confidence=0.9,
+                bbox_json=[0, 0, 1, 1], timestamp=timestamp, extra=extra,
+            )
+            db.add(event); db.flush()
+            alert = Alert(event_id=event.id, created_at=timestamp)
+            db.add(alert)
+            alerts.append(alert)
+        db.flush()
+
+        rows = _pending_open_close_clip_rows(db, now - timedelta(days=1), limit=3)
+
+        assert [alert.id for alert, _event in rows] == [alert.id for alert in alerts[2:5]]
 
 
 def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():
