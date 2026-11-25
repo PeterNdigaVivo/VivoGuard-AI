@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import sqrt
+from pathlib import Path
+from stat import S_ISREG
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -23,6 +25,14 @@ TARGET_PRECISION = 0.99
 TARGET_MIN_REVIEWED = 300
 TARGET_MIN_RECALL_EVENTS = 300
 ONE_SIDED_95_Z = 1.6448536269514722
+
+
+def _clip_file_available(path: str) -> bool:
+    try:
+        info = Path(path).stat()
+    except (OSError, ValueError):
+        return False
+    return S_ISREG(info.st_mode) and info.st_size > 0
 
 
 def _wilson_lower_bound(successes: int, total: int) -> float | None:
@@ -286,24 +296,20 @@ def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:
             reviewed >= TARGET_MIN_REVIEWED
             and lower_bound is not None
             and lower_bound >= TARGET_PRECISION)
-        # Legacy recorder paths were persisted in event.extra before the
-        # canonical clip_path column was wired for every detector.  Counting
-        # only the column understates evidence availability and can block a
-        # release gate even when a playable incident clip exists.
+        # Recorder paths can be stored in either the column or legacy extra.
         clips = 0
         clip_eligible = 0
         clip_ineligible = 0
         clip_unknown = 0
         for alert, event in samples:
-            available = bool(
-                event.clip_path or (event.extra or {}).get("alert_clip_path"))
+            clip_path = event.clip_path or (event.extra or {}).get("alert_clip_path")
             manifest = manifests.get(alert.id)
             eligibility = manifest.clip_eligible if manifest else None
-            # A persisted playable path is conclusive evidence that this alert
-            # was eligible, including pre-manifest legacy alerts.
-            if available:
+            # Keep references to missing or pruned clips in the denominator.
+            if isinstance(clip_path, str) and clip_path:
                 eligibility = True
-                clips += 1
+                if _clip_file_available(clip_path):
+                    clips += 1
             elif eligibility is None and event.timestamp is not None:
                 event_at = (event.timestamp.replace(tzinfo=timezone.utc)
                             if event.timestamp.tzinfo is None else event.timestamp)

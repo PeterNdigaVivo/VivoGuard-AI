@@ -166,9 +166,12 @@ def test_release_is_evidence_gated_but_force_is_attributed(db):
     assert released.changed_by == "admin@vivo"
 
 
-def test_scorecard_is_honest_about_precision_recall_and_agreement(db):
+def test_scorecard_is_honest_about_precision_recall_and_agreement(db, tmp_path):
     cam = _camera(db)
-    _alert(db, cam, "confirmed", clip=True)
+    _, event = _alert(db, cam, "confirmed")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"test evidence")
+    event.clip_path = str(clip)
     _alert(db, cam, "dismissed")
     _alert(db, cam, "new")
     cards = quality_scorecards(db)
@@ -191,16 +194,37 @@ def test_scorecard_is_honest_about_precision_recall_and_agreement(db):
     assert card["reviewer_agreement"] is None
 
 
-def test_scorecard_counts_legacy_extra_clip_path(db):
+def test_scorecard_counts_legacy_extra_clip_path(db, tmp_path):
     cam = _camera(db)
     _alert_row, event = _alert(db, cam, "confirmed")
-    event.extra = {"alert_clip_path": "/legacy/incident.mp4"}
+    clip = tmp_path / "incident.mp4"
+    clip.write_bytes(b"test evidence")
+    event.extra = {"alert_clip_path": str(clip)}
     db.commit()
 
     card = quality_scorecards(db)[0]
     assert card["incident_clips_available"] == 1
     assert card["clip_eligible_alerts"] == 1
     assert card["clip_availability_rate"] == 1.0
+
+
+@pytest.mark.parametrize("storage", ["missing", "empty", "directory"])
+def test_unusable_clip_reference_stays_in_denominator(db, tmp_path, storage):
+    cam = _camera(db)
+    _, event = _alert(db, cam, "confirmed")
+    clip = tmp_path / "incident.mp4"
+    if storage == "empty":
+        clip.touch()
+    elif storage == "directory":
+        clip.mkdir()
+    event.extra = {"alert_clip_path": str(clip)}
+    db.commit()
+
+    card = quality_scorecards(db)[0]
+
+    assert card["incident_clips_available"] == 0
+    assert card["clip_eligible_alerts"] == 1
+    assert card["clip_availability_rate"] == 0.0
 
 
 def test_scorecard_excludes_alert_without_recording_from_clip_sla(db):
