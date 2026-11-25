@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.api.system import (
+    _current_recording_pipeline,
     _decode_inference_pipeline,
     _proof_of_life_state,
     _runtime_camera_status,
@@ -116,6 +117,22 @@ def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
     assert payload == {
         "mode": "shadow", "authoritative": False, "frames_processed": 110,
     }
+
+
+@pytest.mark.parametrize("timestamp", [None, "invalid", 820, 700])
+def test_recording_pipeline_omits_unavailable_or_expired_coverage(timestamp):
+    raw = json.dumps({"status": "healthy", "last_run_ts": timestamp})
+
+    assert _current_recording_pipeline(raw, now=1_000) is None
+
+
+def test_recording_pipeline_retains_fresh_degraded_coverage():
+    snapshot = {
+        "status": "degraded", "last_run_ts": 950,
+        "cameras_recording": 43, "cameras_expected": 81, "cameras_missing": 38,
+    }
+
+    assert _current_recording_pipeline(json.dumps(snapshot), now=1_000) == snapshot
 
 
 @pytest.mark.parametrize("timestamp", [b'"invalid"', b'"NaN"', b'"-Infinity"', b'"Infinity"', b"null"])

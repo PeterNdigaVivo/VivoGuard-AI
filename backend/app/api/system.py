@@ -20,6 +20,7 @@ from app.utils.stream_secrets import redact_stream_credentials
 router = APIRouter(prefix="/system", tags=["system"])
 
 STREAM_FRESH_SECONDS = 10.0
+RECORDING_HEALTH_MAX_AGE_SECONDS = 180.0
 
 
 def _pipeline_age_seconds(pipeline: dict | None, *, now: float) -> float | None:
@@ -99,6 +100,12 @@ def _decode_inference_pipeline(raw_pipeline) -> dict | None:
         return value if isinstance(value, dict) else None
     except (TypeError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _current_recording_pipeline(raw_pipeline, *, now: float) -> dict | None:
+    pipeline = _decode_inference_pipeline(raw_pipeline)
+    age = _pipeline_age_seconds(pipeline, now=now)
+    return pipeline if age is not None and age < RECORDING_HEALTH_MAX_AGE_SECONDS else None
 
 
 def _inference_baseline(db: Session, *, now: datetime) -> dict:
@@ -316,8 +323,8 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     inference_batch_shadow = _decode_inference_pipeline(
         fb.r.get("vg:inference:batch-shadow-health"),
     )
-    recording_pipeline = _decode_inference_pipeline(
-        fb.r.get("vg:recording:health"),
+    recording_pipeline = _current_recording_pipeline(
+        fb.r.get("vg:recording:health"), now=time.time(),
     )
     return {
         "now":            datetime.now(timezone.utc).isoformat(),

@@ -17,6 +17,12 @@ interface SystemHealth {
   disk_total_gb: number; disk_used_gb: number; disk_free_gb: number
   gpus: { index: number; name: string; total_mb: number; free_mb: number }[]
   alerts_today: number
+  recording_pipeline?: {
+    status: 'healthy' | 'degraded' | 'inactive'
+    cameras_expected: number
+    cameras_recording: number
+    cameras_missing: number
+  } | null
   inference_pipeline: {
     cameras_total: number; cameras_fresh: number
     cameras_actively_inferencing: number | null
@@ -109,6 +115,7 @@ export default function SystemHealthPage() {
     (data.inference_pipeline.critical_cameras_overdue ?? 0) > 0 ||
     (data.inference_pipeline.standard_cameras_overdue ?? 0) > 0
   )
+  const recording = data.recording_pipeline
 
   return (
     <div className="p-6">
@@ -142,6 +149,32 @@ export default function SystemHealthPage() {
           <div className="text-3xl font-semibold">{data.alerts_today}</div>
         </Card>
       </div>
+
+      <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">Recording Coverage</div>
+          {recording?.status === 'healthy' && <Badge color="green">Healthy</Badge>}
+          {recording?.status === 'degraded' && <Badge color="amber">Degraded</Badge>}
+          {recording?.status === 'inactive' && <Badge>Inactive</Badge>}
+          {!recording && <Badge color="amber">Unavailable</Badge>}
+        </div>
+        {recording && recording.status !== 'inactive' ? (
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">Recording / expected cameras</div>
+              <div className="text-xl font-semibold">{recording.cameras_recording} / {recording.cameras_expected}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">Missing recordings</div>
+              <div className="text-xl font-semibold">{recording.cameras_missing}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-sm text-slate-500 dark:text-slate-400">
+            {recording ? 'No active recording window.' : 'No current recorder telemetry.'}
+          </div>
+        )}
+      </Card>
 
       <Card className="p-4 mb-4 dark:bg-slate-900 dark:border-slate-800">
         <div className="flex items-center justify-between mb-3">
