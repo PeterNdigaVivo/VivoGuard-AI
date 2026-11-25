@@ -42,6 +42,10 @@ interface Snapshot {
   integrations: {
     bytetrack_active: boolean; supervision_active: boolean
     mannequin_filter_active: boolean
+    odoo_webhook_armed?: boolean
+    odoo_sales_today?: number
+    odoo_sales_validated_today?: number
+    odoo_sales_unmatched_today?: number
   }
   collection_errors?: string[]
 }
@@ -257,6 +261,21 @@ export default function MissionControlPage() {
               <span>{data.integrations.bytetrack_active ? '🟢' : '🔴'} ByteTrack</span>
               <span>{data.integrations.supervision_active ? '🟢' : '🔴'} Supervision</span>
               <span>{data.integrations.mannequin_filter_active ? '🟢' : '⚪'} Mannequin filter</span>
+              <span title={data.integrations.odoo_webhook_armed
+                ? ((data.integrations.odoo_sales_today ?? 0) > 0
+                    ? 'Odoo is posting sales; green = flowing'
+                    : 'Webhook armed (secret set); waiting for Odoo to send the first sale')
+                : 'ODOO_WEBHOOK_SECRET not set — webhook answers 503'}>
+                {data.integrations.odoo_webhook_armed
+                  ? ((data.integrations.odoo_sales_today ?? 0) > 0 ? '🟢' : '🟡')
+                  : '🔴'} Odoo sales
+                {(data.integrations.odoo_sales_today ?? 0) > 0 && (
+                  <span className="text-slate-400 ml-1">
+                    {data.integrations.odoo_sales_validated_today ?? 0}✓ /{' '}
+                    {data.integrations.odoo_sales_unmatched_today ?? 0}✗ today
+                  </span>
+                )}
+              </span>
             </div>
           </Card>
         </>

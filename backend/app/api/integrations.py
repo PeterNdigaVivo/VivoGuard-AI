@@ -80,6 +80,84 @@ async def _verify_odoo_signature(request: Request) -> bytes:
     return body
 
 
+def _counter_camera_and_zone(db: Session, store_id: int):
+    """The store's counter evidence anchor: (camera_id, zone_id) of the
+    first counter-tagged zone, or (None, None) when the store has no
+    counter zone drawn yet."""
+    from app.models import Camera, Zone
+    row = (db.query(Zone.camera_id, Zone.id)
+             .join(Camera, Zone.camera_id == Camera.id)
+             .filter(Camera.store_id == store_id)
+             .filter(Zone.suppressed.is_(False))
+             .order_by(Zone.id.asc())
+             .all())
+    for cam_id, zone_id in row:
+        z = db.get(Zone, zone_id)
+        if z is not None and "counter" in (z.detection_types_json or []):
+            return int(cam_id), int(zone_id)
+    return None, None
+
+
+def _maybe_alert_unmatched_sale(db: Session, store, payload,
+                                order_ts: datetime) -> bool:
+    """Ghost-sale alert: a confirmed POS sale with NO camera evidence of
+    a customer at the counter. Guarded so it never spams and NEVER
+    fails the webhook: requires the flag, a counter-tagged zone in the
+    store, and the store open at sale time. Returns whether an alert
+    was created."""
+    if not bool(getattr(settings, "odoo_unmatched_sale_alerts", True)):
+        return False
+    try:
+        cam_id, zone_id = _counter_camera_and_zone(db, store.id)
+        if cam_id is None:
+            return False      # no counter zone: unmatched is expected noise
+        from app.utils.business_hours import is_open_with_default
+        local = order_ts.astimezone(
+            ZoneInfo(getattr(store, "timezone", None) or "Africa/Nairobi"))
+        if not is_open_with_default(
+                getattr(store, "business_hours_json", None), local):
+            return False      # closed-hours sales are a different problem
+        amount = (f"KES {payload.amount_total:,.0f}"
+                  if payload.amount_total is not None else "unknown amount")
+        from app.tasks.alerting import _create_info_alert
+        _create_info_alert(
+            db,
+            camera_id=cam_id,
+            zone_id=zone_id,
+            store_id=store.id,
+            detection_type="sales_attribution",
+            cls="sale_without_presence",
+            extra={
+                "priority": "high",
+                "title": "Sale with no customer at the counter",
+                "message": (f"Odoo confirmed sale {payload.order_id} "
+                            f"({amount}) at {store.name} at "
+                            f"{local.strftime('%H:%M')}, but the counter "
+                            "camera saw no customer around that time."),
+                "order_id": payload.order_id,
+                "store_code": payload.store_code,
+                "amount_total": payload.amount_total,
+                "sale_time_local": local.isoformat(),
+                "what_to_do": [
+                    "Review the attached counter snapshot and recordings "
+                    "around the sale time",
+                    "Check the POS session/cashier for this order in Odoo",
+                    "Confirm the counter zone still covers the till area",
+                ],
+            },
+        )
+        db.commit()
+        return True
+    except Exception:
+        log.exception("unmatched-sale alert failed (webhook unaffected): "
+                      "store=%s order=%s", store.id, payload.order_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _as_utc(ts: datetime) -> datetime:
     """Normalise the sale timestamp. Odoo POS clocks are store-local,
     so a NAIVE timestamp is interpreted as EAT (Africa/Nairobi) — the
@@ -132,9 +210,13 @@ async def sale_confirmed(request: Request,
         reason=None if visit is not None else "no_customer_presence")
     db.add(row)
     db.commit()
-    log.info("odoo sale-confirmed: store=%s order=%s -> %s (visit=%s)",
-             store.id, payload.order_id, row.status,
-             row.zone_visit_id)
+    alerted = False
+    if visit is None:
+        alerted = _maybe_alert_unmatched_sale(db, store, payload, order_ts)
+    log.info("odoo sale-confirmed: store=%s order=%s -> %s (visit=%s, "
+             "alert=%s)", store.id, payload.order_id, row.status,
+             row.zone_visit_id, alerted)
     if visit is not None:
         return {"status": "validated", "visit_id": visit.id}
-    return {"status": "unmatched", "reason": "no_customer_presence"}
+    return {"status": "unmatched", "reason": "no_customer_presence",
+            "alert_created": alerted}

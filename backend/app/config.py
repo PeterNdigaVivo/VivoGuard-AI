@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # An empty secret keeps the service endpoint unavailable, never unsigned.
     odoo_webhook_secret: str = ""
     odoo_webhook_max_age_seconds: int = 300
+    # Raise an operator alert when a confirmed Odoo sale finds NO
+    # customer at the counter (the ghost-sale fraud signal). Guarded in
+    # code: only fires for stores that have a counter-tagged zone and
+    # were open at the sale time, so unzoned stores don't spam.
+    odoo_unmatched_sale_alerts: bool = True
     # Read-only Odoo pull integration. OFF by default and independent of the
     # inbound webhook above. The API key belongs in the deployment secret
     # store, never in source control or an image layer.
@@ -258,6 +263,7 @@ class Settings(BaseSettings):
             "store_intelligence", "sales_floor_insight", "entry_exit",
             "occupancy", "occupancy_metrics", "unique_visitor",
             "heatmap", "customer_journey", "demographic",
+            "sales_attribution",
         ],
         validation_alias=AliasChoices("VERIFIER_NON_VISUAL_TYPES",
                                       "verifier_non_visual_types"),

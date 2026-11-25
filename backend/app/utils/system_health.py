@@ -177,7 +177,10 @@ _DEFAULTS: dict[str, dict] = {
                  "detection_events_count": 0},
     "alerts": {"urgent_today": 0, "resolved_today": 0, "pending_today": 0},
     "integrations": {"bytetrack_active": False, "supervision_active": False,
-                     "mannequin_filter_active": False},
+                     "mannequin_filter_active": False,
+                     "odoo_webhook_armed": False, "odoo_sales_today": 0,
+                     "odoo_sales_validated_today": 0,
+                     "odoo_sales_unmatched_today": 0},
 }
 
 
@@ -403,10 +406,33 @@ def collect_system_health(db: Session) -> dict:
         except Exception:
             tracker_live = False
         bytetrack = tracker_live or _importable("supervision")
+        # Odoo sales-attribution webhook: armed = shared secret set;
+        # the counters show whether Odoo is actually calling us.
+        odoo_armed = bool(str(getattr(settings, "odoo_webhook_secret", "")
+                              or "").strip())
+        odoo_sales = odoo_validated = odoo_unmatched = 0
+        try:
+            from app.models import SalesAICorrelation
+            rows = (db.query(SalesAICorrelation.status,
+                             func.count(SalesAICorrelation.id))
+                      .filter(SalesAICorrelation.created_at >= today_start)
+                      .group_by(SalesAICorrelation.status).all())
+            for status_val, n in rows:
+                odoo_sales += int(n)
+                if status_val == "validated":
+                    odoo_validated = int(n)
+                elif status_val == "unmatched":
+                    odoo_unmatched = int(n)
+        except Exception:
+            db.rollback()
         return {
             # ByteTrack ships inside supervision.
             "bytetrack_active": bytetrack,
             "supervision_active": bytetrack,
+            "odoo_webhook_armed": odoo_armed,
+            "odoo_sales_today": odoo_sales,
+            "odoo_sales_validated_today": odoo_validated,
+            "odoo_sales_unmatched_today": odoo_unmatched,
             "mannequin_filter_active": bool(
                 getattr(settings, "mannequin_filter_enabled", True)),
         }

@@ -121,7 +121,7 @@ x-app-env: &app-env
   # shop_open_close belongs here: the daily summary is built from database
   # rows, has no frames, and the verifier was scoring it "likely false"
   # because it could not find any to look at.
-  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic","shop_open_close"]}
+  VERIFIER_NON_VISUAL_TYPES: ${VERIFIER_NON_VISUAL_TYPES:-["camera_offline","system_health","live_activity","store_intelligence","sales_floor_insight","entry_exit","occupancy","occupancy_metrics","unique_visitor","heatmap","customer_journey","demographic","shop_open_close","sales_attribution"]}
   # Verifier provider: anthropic | openai | ollama.
   VERIFIER_PROVIDER: ${VERIFIER_PROVIDER:-anthropic}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}

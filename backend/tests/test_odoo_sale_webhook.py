@@ -17,18 +17,29 @@ from sqlalchemy.pool import StaticPool
 from app.api.integrations import router
 from app.config import settings
 from app.database import Base, get_db
-from app.models import (Camera, SalesAICorrelation, Store, Zone,
-                        ZoneVisit)
+from app.models import (Alert, Camera, DetectionEvent, SalesAICorrelation,
+                        Store, User, Zone, ZoneVisit)
 
 TABLES = [Store.__table__, Camera.__table__, Zone.__table__,
-          ZoneVisit.__table__, SalesAICorrelation.__table__]
+          ZoneVisit.__table__, SalesAICorrelation.__table__,
+          DetectionEvent.__table__, Alert.__table__, User.__table__]
 
 SECRET = "test-webhook-secret"
+
+# 12:00 EAT on a Wednesday — inside the default 09:00-21:00 trading
+# window, so the ghost-sale alert's open-hours guard passes.
+OPEN_SALE_TS = "2026-11-25T12:00:00+03:00"
+# 03:00 EAT — outside trading hours; the guard must suppress.
+CLOSED_SALE_TS = "2026-11-25T03:00:00+03:00"
 
 
 @pytest.fixture()
 def client(monkeypatch):
     monkeypatch.setattr(settings, "odoo_webhook_secret", SECRET)
+    # Quality control reaches tables/services this focused schema
+    # doesn't carry; it has its own suite.
+    monkeypatch.setattr("app.services.alert_quality.apply_quality_control",
+                        lambda db, alert, event: None)
     # TestClient drives the async endpoint from another thread;
     # a shared StaticPool connection keeps the one in-memory DB
     # visible to both threads.
@@ -108,19 +119,62 @@ def test_open_visit_counts_as_presence(client):
     assert r.json()["status"] == "validated"
 
 
-def test_unmatched_logged_when_no_presence(client):
+def test_unmatched_sale_logs_audit_and_raises_ghost_sale_alert(client):
     c, session = client
-    _seed(session)
+    store, cam, zone = _seed(session)
     r = _signed_post(c, {"store_code": "NRB-JCT", "order_id": 5003,
-                         "timestamp":
-                             datetime.now(timezone.utc).isoformat(),
+                         "timestamp": OPEN_SALE_TS,
                          "amount_total": 100.0})
     assert r.status_code == 200
     assert r.json() == {"status": "unmatched",
-                        "reason": "no_customer_presence"}
+                        "reason": "no_customer_presence",
+                        "alert_created": True}
     audit = session.query(SalesAICorrelation).one()
     assert audit.status == "unmatched"
     assert audit.reason == "no_customer_presence"
+    ev = session.query(DetectionEvent).one()
+    assert ev.detection_type == "sales_attribution"
+    assert ev.camera_id == cam.id and ev.zone_id == zone.id
+    assert ev.extra["order_id"] == 5003
+    assert session.query(Alert).count() == 1
+
+
+def test_no_ghost_sale_alert_outside_trading_hours(client):
+    c, session = client
+    _seed(session)
+    r = _signed_post(c, {"store_code": "NRB-JCT", "order_id": 5004,
+                         "timestamp": CLOSED_SALE_TS,
+                         "amount_total": 100.0})
+    assert r.status_code == 200
+    assert r.json()["alert_created"] is False
+    assert session.query(Alert).count() == 0
+
+
+def test_no_ghost_sale_alert_without_counter_zone(client):
+    c, session = client
+    store = Store(name="Vivo Runda", code="NRB-RND", country="Kenya")
+    session.add(store); session.flush()
+    cam = Camera(name="Ch1", store_id=store.id, brand="dahua",
+                 connection_type="rtsp", host="10.0.0.9")
+    session.add(cam); session.commit()
+    r = _signed_post(c, {"store_code": "NRB-RND", "order_id": 5005,
+                         "timestamp": OPEN_SALE_TS,
+                         "amount_total": 100.0})
+    assert r.status_code == 200
+    assert r.json()["alert_created"] is False
+    assert session.query(Alert).count() == 0
+
+
+def test_ghost_sale_alerts_disabled_by_flag(client, monkeypatch):
+    c, session = client
+    _seed(session)
+    monkeypatch.setattr(settings, "odoo_unmatched_sale_alerts", False)
+    r = _signed_post(c, {"store_code": "NRB-JCT", "order_id": 5006,
+                         "timestamp": OPEN_SALE_TS,
+                         "amount_total": 100.0})
+    assert r.status_code == 200
+    assert r.json()["alert_created"] is False
+    assert session.query(Alert).count() == 0
 
 
 def test_visit_outside_window_does_not_match(client):
