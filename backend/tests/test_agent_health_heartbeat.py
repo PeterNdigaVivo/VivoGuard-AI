@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.tasks import alerting
+from app.tasks import agents, alerting
 from app.tasks.agents import _heartbeat_age_seconds
 from app.tasks.celery_app import celery_app
 
@@ -17,7 +17,31 @@ def test_supervisor_json_heartbeat_uses_last_run_timestamp():
 
 def test_legacy_supervisor_heartbeat_remains_supported():
     assert _heartbeat_age_seconds("1000", now_ts=1_045) == 45
+    assert _heartbeat_age_seconds(b'{"ts":1000}', now_ts=1_045) == 45
     assert _heartbeat_age_seconds(None, now_ts=1_045) is None
+
+
+@pytest.mark.parametrize("raw", [b"broken", b"\xff", b"{}", b"NaN", b"Infinity", b"true", b"0", b"1100"])
+def test_invalid_heartbeat_is_unavailable(raw):
+    assert _heartbeat_age_seconds(raw, now_ts=1_045) is None
+
+
+@pytest.mark.parametrize("read_failure", [False, True])
+def test_backend_health_warns_when_inference_heartbeat_is_unverifiable(monkeypatch, read_failure):
+    redis = Mock()
+    if read_failure:
+        redis.get.side_effect = RuntimeError("private diagnostic")
+    else:
+        redis.get.return_value = b"private diagnostic"
+    monkeypatch.setattr(agents, "_redis", lambda: redis)
+    monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(Mock()))
+
+    report = agents._run_backend_health()
+
+    assert report["status"] == "warning"
+    assert report["findings"]["inference_health_age_s"] is None
+    assert report["gaps"] == [{"inference": "health breadcrumb unavailable"}]
+    assert "private diagnostic" not in json.dumps(report)
 
 
 def test_inference_supervision_uses_non_blocking_beat_queue():
