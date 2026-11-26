@@ -16,8 +16,7 @@ with the Yaya 9:13 door-opening sequence — [-30s][-15s][-5s][0s][+5s][+15s] �
 so the strip shows the person approaching, opening the door, and entering.
 
 Snapshot 1 (-10s): extracted from the camera's ACTIVE recording file at
-(alert_time - 10s) when one is running; otherwise the most-recent Redis
-frame (vg:frame:{cam}) is used as the best available "before" image.
+(alert_time - 10s), when footage is available.
 Snapshot 2 is the Redis frame at t=0; snapshots 3-6 are captured by
 `capture_filmstrip_frame` scheduled with Celery countdowns (30/60/90/120s).
 
@@ -32,7 +31,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -143,8 +141,8 @@ def _redis_frame(camera_id: int) -> bytes | None:
 
 def _extract_recording_frame(camera_id: int, target_dt: datetime) -> bytes | None:
     """Pull a single JPEG at `target_dt` from the camera's ACTIVE recording
-    window, if one is running. Returns None when there's no live recording
-    or ffmpeg fails (caller falls back to the Redis frame)."""
+    window, if one is running. Return None when the recording or frame is
+    unavailable."""
     from app.database import SessionLocal
     from app.models import RecordingClip
     try:
@@ -162,20 +160,17 @@ def _extract_recording_frame(camera_id: int, target_dt: datetime) -> bytes | Non
         if started.tzinfo is None:
             started = started.replace(tzinfo=timezone.utc)
         offset = max(0, int((target_dt - started).total_seconds()))
-        out = Path(tempfile.gettempdir()) / f"vg_pre_{camera_id}_{int(target_dt.timestamp())}.jpg"
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-               "-ss", str(offset), "-i", file_path,
-               "-frames:v", "1", "-q:v", "3", str(out)]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=30)
-        if out.exists():
-            data = out.read_bytes()
-            try: out.unlink()
-            except OSError: pass
-            return data or None
-    except Exception as e:
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error",
+               "-ss", str(offset), "-i", file_path, "-frames:v", "1",
+               "-c:v", "mjpeg", "-q:v", "3", "-f", "image2pipe", "pipe:1"]
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout or None
+    except Exception as exc:
         log.warning("alert filmstrip pre-frame extract failed cam=%s: %s",
-                    camera_id, e)
+                    camera_id, type(exc).__name__)
     return None
 
 
@@ -215,12 +210,10 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
     pre_offsets, post_offsets = FILMSTRIP_TIMELINES.get(
         detection_type, (DEFAULT_PRE_OFFSETS_S, DEFAULT_POST_OFFSETS_S))
 
-    # Pre-frames — each extracted from the active recording at (alert - Ns),
-    # else the most-recent Redis frame. Oldest-first so the strip reads
-    # left-to-right as the approach to the door.
+    # Save pre-event frames in chronological order when recorded footage exists.
     for pre in sorted(pre_offsets, reverse=True):    # e.g. 30,15,5 → -30/-15/-5s
         pre_dt = alert_dt - timedelta(seconds=pre)
-        pre_jpeg = _extract_recording_frame(camera_id, pre_dt) or _redis_frame(camera_id)
+        pre_jpeg = _extract_recording_frame(camera_id, pre_dt)
         if pre_jpeg:
             p = _save_jpeg(pre_jpeg, store_id=store_id, alert_id=alert_id,
                            epoch_ts=int(pre_dt.timestamp()))
