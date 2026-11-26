@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -322,6 +324,40 @@ def test_extraction_publishes_only_a_hashed_video_encode(monkeypatch, tmp_path, 
         assert published.read_bytes() == previous_bytes
         assert event.extra == original_extra
         db.commit.assert_not_called()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is not installed")
+@pytest.mark.parametrize("with_video", [True, False], ids=["video", "audio_only"])
+def test_clip_publish_checks_encoded_video_frames(monkeypatch, tmp_path, with_video):
+    source = tmp_path / "source.mp4"
+    media_args = (
+        ["-i", "color=size=64x64:rate=5", "-c:v", "mpeg4"]
+        if with_video else ["-i", "sine=frequency=400", "-c:a", "aac"]
+    )
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+         *media_args, "-t", "1", str(source)],
+        check=True, capture_output=True, timeout=10,
+    )
+    event_ts = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    event = SimpleNamespace(camera_id=2, detection_type="intrusion", extra={})
+    clip = RecordingClip(
+        id=3, camera_id=2, window_id="source", file_path=str(source),
+        started_at=event_ts, ended_at=event_ts + timedelta(seconds=1), status="completed",
+    )
+    db = Mock()
+    monkeypatch.setattr(recorder, "_alert_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder.settings, "incident_foundations_enabled", False)
+
+    assert recorder._extract_one(db, SimpleNamespace(id=1), event, clip, event_ts) is with_video
+
+    output = tmp_path / "1.mp4"
+    assert output.is_file() is with_video
+    assert db.commit.call_count == int(with_video)
+    if with_video:
+        assert event.extra["alert_clip_sha256"] == sha256(output.read_bytes()).hexdigest()
+    else:
+        assert event.extra == {}
 
 
 def test_alert_clip_pruning_protects_unresolved_and_escalated_evidence():
