@@ -37,6 +37,7 @@ fi
 
 # 3. Build images. Build every named application service explicitly so a new
 # queue/worker cannot be omitted from a release by an obsolete service alias.
+release_revision=$(git rev-parse --verify HEAD)
 echo "→ building api image"
 docker compose build api
 
@@ -67,6 +68,8 @@ docker compose run --rm --no-deps api alembic upgrade head
 echo "→ starting application services"
 docker compose up -d
 docker compose restart nginx
+
+bash scripts/verify-release-sources.sh "$release_revision"
 
 echo "→ waiting for API health"
 for i in $(seq 1 60); do
