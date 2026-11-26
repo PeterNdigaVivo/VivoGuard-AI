@@ -1,7 +1,6 @@
 """System health endpoints — used by the System Health page (step 14)."""
 from __future__ import annotations
 import json
-import math
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,14 +23,17 @@ RECORDING_HEALTH_MAX_AGE_SECONDS = 180.0
 
 
 def _pipeline_age_seconds(pipeline: dict | None, *, now: float) -> float | None:
-    """Read a usable heartbeat timestamp from inference telemetry."""
+    """Return the age of a heartbeat with a usable timestamp."""
+    raw_timestamp = (pipeline or {}).get("last_run_ts")
+    if isinstance(raw_timestamp, bool):
+        return None
     try:
-        timestamp = float((pipeline or {}).get("last_run_ts"))
+        timestamp = float(raw_timestamp)
     except (TypeError, ValueError, OverflowError):
         return None
-    if not math.isfinite(timestamp) or timestamp <= 0:
+    if not 0 < timestamp <= now:
         return None
-    return max(0.0, now - timestamp)
+    return now - timestamp
 
 
 def _proof_of_life_state(pipeline: dict | None, *, now: float) -> str:

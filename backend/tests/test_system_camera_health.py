@@ -119,7 +119,7 @@ def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
     }
 
 
-@pytest.mark.parametrize("timestamp", [None, "invalid", 820, 700])
+@pytest.mark.parametrize("timestamp", [None, "invalid", 820, 700, 1001, "NaN", "Infinity", True, 0])
 def test_recording_pipeline_omits_unavailable_or_expired_coverage(timestamp):
     raw = json.dumps({"status": "healthy", "last_run_ts": timestamp})
 
@@ -190,3 +190,21 @@ def test_system_health_redacts_diagnostics_from_either_source(monkeypatch, sourc
     assert result["cameras"][0]["error"] == (
         "HTTP timeout https://camera.example/snapshot?token=****&mode=still"
     )
+
+
+@pytest.mark.parametrize("timestamp", ["NaN", 10**20, True])
+def test_proof_of_life_rejects_heartbeat_without_current_timestamp(monkeypatch, timestamp):
+    frame_buffer = Mock()
+    frame_buffer.r.get.return_value = json.dumps({
+        "last_run_ts": timestamp, "cameras_total": 1, "cameras_fresh": 1,
+        "critical_cameras_overdue": 0, "standard_cameras_overdue": 0,
+    })
+    monkeypatch.setattr("app.api.system.FrameBuffer", lambda: frame_buffer)
+    db = Mock()
+    db.query.return_value.outerjoin.return_value.order_by.return_value.first.return_value = None
+    db.query.return_value.scalar.return_value = None
+
+    payload = proof_of_life(db=db, _u=None)
+
+    assert payload["state"] == "offline"
+    assert payload["pipeline_age_seconds"] is None
