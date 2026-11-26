@@ -1,5 +1,6 @@
 """Regression tests for restart-safe, backlog-safe inference reservations."""
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -42,6 +43,14 @@ class FakeRedis:
 
     def get(self, key: str):
         return self.values.get(key)
+
+
+    def set(self, key: str, value: str, *, ex: int, nx: bool = False):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        self.ttls[key] = ex
+        return True
 
 
 class FakePipeline:
@@ -309,6 +318,53 @@ def test_critical_requeue_budget_preserves_non_preemptive_sla_headroom():
     assert inference._critical_gap_budget_seconds() < (
         inference.CRITICAL_GAP_SLA_SECONDS
     )
+
+
+@pytest.mark.parametrize("publish_state", ["claimed", "finished", "failed", "claimed_then_failed"])
+def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_state):
+    redis = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=7)
+    heartbeat = inference.HB_KEY_FMT.format(camera_id=7)
+    camera = SimpleNamespace(id=7, detection_configs=[], zones=[])
+    session = MagicMock()
+    query = session.__enter__.return_value.query.return_value
+    query.options.return_value.filter.return_value.all.return_value = [camera]
+    monkeypatch.setattr("app.database.SessionLocal", lambda: session)
+    monkeypatch.setattr(inference, "_redis", lambda: redis)
+    monkeypatch.setattr(inference, "_sweep_stale_locks", lambda _redis: 0)
+    monkeypatch.setattr(inference, "_camera_ids_with_fresh_frames", lambda *_: {7})
+    monkeypatch.setattr(inference, "_last_run_timestamps", lambda *_: {7: None})
+    monkeypatch.setattr(inference, "_reservation_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_critical_gap_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_standard_gap_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_write_health", lambda *_, **__: None)
+
+    published: list[tuple[str, str | None]] = []
+
+    def publish(*, task_id, **_kwargs):
+        published.append((task_id, redis.get(lock)))
+        if publish_state != "failed":
+            assert inference._claim_reserved_task(
+                redis, lock=lock, heartbeat=heartbeat, task_id=task_id,
+            )
+        if publish_state == "finished":
+            inference._release_owned_task(redis, lock=lock, heartbeat=heartbeat, task_id=task_id)
+        if publish_state in {"failed", "claimed_then_failed"}:
+            raise RuntimeError("broker response failed")
+
+    monkeypatch.setattr(inference.run_camera_inference, "apply_async", publish)
+
+    inference.supervise_all.run()
+
+    assert len(published) == 1
+    task_id, reserved_id = published[0]
+    assert task_id and task_id == reserved_id
+    if publish_state in {"failed", "finished"}:
+        assert lock not in redis.values
+        assert heartbeat not in redis.values
+    else:
+        assert redis.get(lock) == redis.get(heartbeat) == task_id
+        assert redis.ttls[lock] == inference.LOCK_TTL
 
 
 def test_supervisor_publishes_critical_cameras_before_ordinary_cameras():
