@@ -45,6 +45,16 @@ function card(head: Alert, siblings: Alert[], onChanged?: () => void) {
 
 const shownAlertId = () => screen.getByTitle('Alert reference for investigation notes').textContent
 
+// False Alert asks what the operator actually saw before it saves (the
+// sentence is required; there is no confirm popup). Opens the box, types
+// the reason and presses "Mark False & save".
+async function markFalse(reason = 'mannequin by the door') {
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+  fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
+                   { target: { value: reason } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Mark False & save/ })) })
+}
+
 beforeEach(() => {
   vi.spyOn(window, 'confirm').mockReturnValue(true)
   vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -64,9 +74,9 @@ describe('grouped AlertCard verdicts', () => {
   it('saves False on the alert being shown, never its neighbour', async () => {
     render(card(olderOpen, [newerTrue]))
     expect(shownAlertId()).toBe('Alert #1')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    await markFalse()
     expect(api.dismiss).toHaveBeenCalledTimes(1)
-    expect(api.dismiss).toHaveBeenCalledWith(1)
+    expect(api.dismiss).toHaveBeenCalledWith(1, undefined, 'mannequin by the door')
     expect(api.confirm).not.toHaveBeenCalled()
     expect(screen.getByText('✓ Marked False')).toBeTruthy()
     expect(screen.getByTestId('group-summary').textContent)
@@ -76,7 +86,7 @@ describe('grouped AlertCard verdicts', () => {
   it('keeps showing the marked alert when the group head switches, then moves on after 10 s', async () => {
     vi.useFakeTimers()
     const { rerender } = render(card(olderOpen, [newerTrue]))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    await markFalse()
 
     // The page refreshes and (under the old rule) hands the card the OTHER
     // alert as head. The card must not swap to "Marked True" under the operator.
@@ -109,7 +119,7 @@ describe('grouped AlertCard verdicts', () => {
     api.dismiss.mockRejectedValueOnce(new Error('offline'))
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
     render(card(olderOpen, [newerTrue]))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    await markFalse()
     expect(alertSpy).toHaveBeenCalled()
     expect(shownAlertId()).toBe('Alert #1')
     expect(screen.getByRole('button', { name: /False Alert/ })).toBeTruthy()
@@ -127,8 +137,11 @@ describe('verdict responsiveness', () => {
     let finish: (v: { id: number; status: string }) => void = () => {}
     api.dismiss.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
     render(card(alert(1, '10:00'), []))
-    const falseBtn = screen.getByRole('button', { name: /False Alert/ })
-    await act(async () => { fireEvent.click(falseBtn); fireEvent.click(falseBtn) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
+                     { target: { value: 'reflection' } })
+    const saveBtn = screen.getByRole('button', { name: /Mark False & save/ })
+    await act(async () => { fireEvent.click(saveBtn); fireEvent.click(saveBtn) })
     expect(screen.getByText('✓ Marked False')).toBeTruthy()
     expect(screen.getByText(/saving…/)).toBeTruthy()
     expect(api.dismiss).toHaveBeenCalledTimes(1)
@@ -150,11 +163,20 @@ describe('verdict responsiveness', () => {
                                       patch: { status: 'confirmed', resolved_at: null } })
   })
 
-  it('cancelling the "Are you sure?" popup saves nothing', async () => {
-    vi.mocked(window.confirm).mockReturnValueOnce(false)
+  it('Cancel on the "what did you see" box saves nothing', async () => {
     render(card(alert(1, '10:00'), []))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }))
     expect(api.dismiss).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /False Alert/ })).toBeTruthy()
+  })
+
+  it('False cannot be saved without saying what was seen', async () => {
+    render(card(alert(1, '10:00'), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    const saveBtn = screen.getByRole('button', { name: /Mark False & save/ }) as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    fireEvent.click(saveBtn)
+    expect(api.dismiss).not.toHaveBeenCalled()
   })
 })
