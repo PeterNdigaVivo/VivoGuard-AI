@@ -180,7 +180,9 @@ _DEFAULTS: dict[str, dict] = {
                      "mannequin_filter_active": False,
                      "odoo_webhook_armed": False, "odoo_sales_today": 0,
                      "odoo_sales_validated_today": 0,
-                     "odoo_sales_unmatched_today": 0},
+                     "odoo_sales_unmatched_today": 0,
+                     "odoo_last_received_at": None,
+                     "odoo_last_rejected": None},
 }
 
 
@@ -410,12 +412,20 @@ def collect_system_health(db: Session) -> dict:
         # the counters show whether Odoo is actually calling us.
         odoo_armed = bool(str(getattr(settings, "odoo_webhook_secret", "")
                               or "").strip())
+        odoo_last_received = odoo_last_rejected = None
+        if r is not None:
+            try:
+                odoo_last_received = r.get("vg:odoo:last_received")
+                odoo_last_rejected = r.get("vg:odoo:last_rejected")
+            except Exception:
+                pass
         odoo_sales = odoo_validated = odoo_unmatched = 0
         try:
             from app.models import SalesAICorrelation
+            day_ago = now_utc - timedelta(hours=24)
             rows = (db.query(SalesAICorrelation.status,
                              func.count(SalesAICorrelation.id))
-                      .filter(SalesAICorrelation.created_at >= today_start)
+                      .filter(SalesAICorrelation.created_at >= day_ago)
                       .group_by(SalesAICorrelation.status).all())
             for status_val, n in rows:
                 odoo_sales += int(n)
@@ -433,6 +443,11 @@ def collect_system_health(db: Session) -> dict:
             "odoo_sales_today": odoo_sales,
             "odoo_sales_validated_today": odoo_validated,
             "odoo_sales_unmatched_today": odoo_unmatched,
+            # When the last VALID signed call arrived, and the last
+            # rejected one (bad signature / stale clock) with its
+            # reason — a misconfigured Odoo shows up here, not nowhere.
+            "odoo_last_received_at": odoo_last_received,
+            "odoo_last_rejected": odoo_last_rejected,
             "mannequin_filter_active": bool(
                 getattr(settings, "mannequin_filter_enabled", True)),
         }

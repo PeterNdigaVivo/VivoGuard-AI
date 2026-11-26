@@ -15,7 +15,7 @@ import {
 } from '@/lib/alertFeed'
 
 // Simple quick-filter buttons non-technical staff understand.
-type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
+type Quick = 'store' | 'positive' | 'sales' | 'urgent' | 'attention' | 'calibration' | 'resolved' | 'all'
 
 // store_intelligence has its own "Store Update" tab and is kept OUT of the
 // actionable tabs (urgent / attention / resolved / all). system_health never
@@ -23,8 +23,13 @@ type Quick = 'store' | 'positive' | 'urgent' | 'attention' | 'calibration' | 're
 // _operator_alert_filter); it lives on the System Health page instead.
 const STORE_INTEL_TYPE = 'store_intelligence'
 const POSITIVE_TYPE = 'positive_operational'
+// Odoo sales attribution (ghost-sale alerts). Sales alerts stay in the
+// operational tabs too (they are URGENT work), but get their own tab so
+// the Odoo link's output is findable in one click.
+const SALES_TYPE = 'sales_attribution'
 const _isStoreIntel = (a: Alert) => a.detection_type === STORE_INTEL_TYPE
 const _isPositive = (a: Alert) => a.detection_type === POSITIVE_TYPE
+const _isSales = (a: Alert) => a.detection_type === SALES_TYPE
 const _isActionable = (a: Alert) => !_isStoreIntel(a) && !_isPositive(a)
 const _isCalibration = (a: Alert) => a.review_only || a.notification_suppressed
 const _isOperational = (a: Alert) => _isActionable(a) && !_isCalibration(a)
@@ -48,6 +53,8 @@ function matchesView(a: Alert, quick: Quick, search: string): boolean {
     if (!_isStoreIntel(a)) return false
   } else if (quick === 'positive') {
     if (!_isPositive(a)) return false
+  } else if (quick === 'sales') {
+    if (!_isSales(a)) return false
   } else {
     if (quick === 'calibration') {
       if (!(_isActionable(a) && _isCalibration(a))) return false
@@ -443,6 +450,7 @@ export default function AlertsPage() {
       // Store Update badge = unread (new) store_intelligence updates.
       store:     items.filter(a => _isStoreIntel(a) && _isOpen(a)).length,
       positive:  items.filter(_isPositive).length,
+      sales:     items.filter(a => _isSales(a) && _isOpen(a)).length,
       urgent:    operational.filter(a => a.severity_label === 'URGENT' && _isOpen(a)).length,
       attention: operational.filter(a => a.severity_label === 'ATTENTION' && _isOpen(a)).length,
       calibration: items.filter(a => _isActionable(a) && _isCalibration(a)).length,
@@ -567,6 +575,9 @@ export default function AlertsPage() {
         <QuickBtn active={quick === 'positive'} onClick={() => setQuick('positive')}
                   tone="green">
           ✅ Positive ({shownCount(counts.positive)})
+        </QuickBtn>
+        <QuickBtn active={quick === 'sales'} onClick={() => setQuick('sales')}>
+          💰 Sales ({shownCount(counts.sales)})
         </QuickBtn>
         <QuickBtn active={quick === 'urgent'}    onClick={() => setQuick('urgent')}>
           🔴 Urgent ({shownCount(counts.urgent)})

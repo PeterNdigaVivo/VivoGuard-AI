@@ -46,6 +46,8 @@ interface Snapshot {
     odoo_sales_today?: number
     odoo_sales_validated_today?: number
     odoo_sales_unmatched_today?: number
+    odoo_last_received_at?: string | null
+    odoo_last_rejected?: string | null
   }
   collection_errors?: string[]
 }
@@ -262,17 +264,21 @@ export default function MissionControlPage() {
               <span>{data.integrations.supervision_active ? '🟢' : '🔴'} Supervision</span>
               <span>{data.integrations.mannequin_filter_active ? '🟢' : '⚪'} Mannequin filter</span>
               <span title={data.integrations.odoo_webhook_armed
-                ? ((data.integrations.odoo_sales_today ?? 0) > 0
-                    ? 'Odoo is posting sales; green = flowing'
-                    : 'Webhook armed (secret set); waiting for Odoo to send the first sale')
+                ? (data.integrations.odoo_last_received_at
+                    ? `Last valid sale call: ${data.integrations.odoo_last_received_at}`
+                    : (data.integrations.odoo_last_rejected
+                        ? `Calls arriving but REJECTED — ${data.integrations.odoo_last_rejected}`
+                        : 'Webhook armed (secret set); no call from Odoo yet'))
                 : 'ODOO_WEBHOOK_SECRET not set — webhook answers 503'}>
                 {data.integrations.odoo_webhook_armed
-                  ? ((data.integrations.odoo_sales_today ?? 0) > 0 ? '🟢' : '🟡')
+                  ? ((data.integrations.odoo_sales_today ?? 0) > 0 ? '🟢'
+                      : (data.integrations.odoo_last_rejected && !data.integrations.odoo_last_received_at
+                          ? '🔴' : '🟡'))
                   : '🔴'} Odoo sales
                 {(data.integrations.odoo_sales_today ?? 0) > 0 && (
                   <span className="text-slate-400 ml-1">
                     {data.integrations.odoo_sales_validated_today ?? 0}✓ /{' '}
-                    {data.integrations.odoo_sales_unmatched_today ?? 0}✗ today
+                    {data.integrations.odoo_sales_unmatched_today ?? 0}✗ 24h
                   </span>
                 )}
               </span>

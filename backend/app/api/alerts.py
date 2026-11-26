@@ -125,6 +125,7 @@ _SEVERITY_4: dict[str, str] = {
     "loitering":          "HIGH",
     "tailgating":         "HIGH",
     "uniform_compliance": "HIGH",
+    "sales_attribution":  "HIGH",      # Odoo sale, no customer at counter
     "shutter":            "HIGH",
     "shelf_change":       "HIGH",
     "shelf":              "HIGH",
@@ -288,6 +289,9 @@ def _plain_title(event: DetectionEvent, zone: Zone | None = None, store=None) ->
     extra = event.extra or {}
     if dt == "positive_operational":
         return str(extra.get("title") or "Positive Operational Update")
+    if dt == "sales_attribution":
+        return str(extra.get("title")
+                   or "Sale with no customer at the counter")
     if dt == "person":
         ctxt = _person_context(event, zone, store)
         if ctxt == "restricted":
@@ -746,6 +750,10 @@ def _title(event: DetectionEvent, camera: Camera | None,
     icon = _icon(dt)
     if dt == "positive_operational":
         return str(extra.get("title") or "Positive Operational Update")
+    if dt == "sales_attribution":
+        order = extra.get("order_id")
+        return (f"💰 Sale With No Customer at Counter — order {order} — {cam}"
+                if order else f"💰 Sale With No Customer at Counter — {cam}")
 
     if dt == "person":
         ctxt = _person_context(event, zone, store)

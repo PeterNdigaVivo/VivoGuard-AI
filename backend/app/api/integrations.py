@@ -54,6 +54,36 @@ class SaleConfirmedIn(BaseModel):
     amount_total: float
 
 
+LAST_RECEIVED_KEY = "vg:odoo:last_received"      # iso ts, valid signed call
+LAST_REJECTED_KEY = "vg:odoo:last_rejected"      # iso ts + reason
+REJECTED_COUNT_KEY = "vg:odoo:rejected_count"    # rolling counter, 7d TTL
+
+
+def _mark(key: str, value: str) -> None:
+    """Best-effort Redis breadcrumb for the health page; never raises."""
+    try:
+        import redis
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        r.set(key, value, ex=7 * 24 * 3600)
+    except Exception:
+        pass
+
+
+def _mark_rejected(reason: str) -> None:
+    """A webhook call arrived but was refused — make it VISIBLE (health
+    breadcrumb + log line) so misconfigured Odoo isn't a silent 401."""
+    log.warning("odoo webhook rejected: %s", reason)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _mark(LAST_REJECTED_KEY, f"{now_iso} {reason}")
+    try:
+        import redis
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        r.incr(REJECTED_COUNT_KEY)
+        r.expire(REJECTED_COUNT_KEY, 7 * 24 * 3600)
+    except Exception:
+        pass
+
+
 async def _verify_odoo_signature(request: Request) -> bytes:
     """HMAC check. Returns the raw body for downstream parsing."""
     secret = str(getattr(settings, "odoo_webhook_secret", "") or "")
@@ -63,21 +93,53 @@ async def _verify_odoo_signature(request: Request) -> bytes:
     ts = request.headers.get("X-Odoo-Timestamp", "")
     sig = request.headers.get("X-Odoo-Signature", "")
     if not ts or not sig:
+        _mark_rejected("missing signature headers")
         raise HTTPException(401, "missing signature headers")
     try:
         age = abs(time.time() - float(ts))
     except ValueError:
+        _mark_rejected("bad timestamp header")
         raise HTTPException(400, "bad timestamp header")
     max_age = int(getattr(settings, "odoo_webhook_max_age_seconds", 300))
     if age > max_age:
+        _mark_rejected(f"stale timestamp ({int(age)}s old)")
         raise HTTPException(400, "stale webhook timestamp")
     body = await request.body()
     expected = hmac.new(secret.encode(),
                         f"{ts}.".encode() + body,
                         hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, sig.strip().lower()):
+        _mark_rejected("bad signature")
         raise HTTPException(401, "bad signature")
+    _mark(LAST_RECEIVED_KEY, datetime.now(timezone.utc).isoformat())
     return body
+
+
+def _resolve_store(db: Session, store_code: str):
+    """Store resolution, two ways: VivoGuard's own Store.code first,
+    then the Odoo sync's odoo_store_map (matches its `code`, or its
+    odoo_pos_config_id / odoo_res_id when Odoo sends a numeric id).
+    Returns None when neither matches."""
+    store = db.query(Store).filter(Store.code == store_code).first()
+    if store is not None:
+        return store
+    try:
+        from app.models import OdooStoreMap
+        q = db.query(OdooStoreMap).filter(OdooStoreMap.code == store_code)
+        m = q.first()
+        if m is None and store_code.isdigit():
+            num = int(store_code)
+            m = (db.query(OdooStoreMap)
+                   .filter((OdooStoreMap.odoo_pos_config_id == num)
+                           | (OdooStoreMap.odoo_res_id == num))
+                   .first())
+        if m is not None:
+            return db.get(Store, m.store_id)
+    except Exception:
+        # The map table may not exist on older schemas; Store.code
+        # remains the primary path.
+        db.rollback()
+    return None
 
 
 def _counter_camera_and_zone(db: Session, store_id: int):
@@ -177,8 +239,7 @@ async def sale_confirmed(request: Request,
     except Exception as e:
         raise HTTPException(422, f"bad payload: {e}")
 
-    store = (db.query(Store)
-               .filter(Store.code == payload.store_code).first())
+    store = _resolve_store(db, payload.store_code)
     if store is None:
         # Still auditable — record the miss, then 404.
         db.add(SalesAICorrelation(

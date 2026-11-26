@@ -17,12 +17,13 @@ from sqlalchemy.pool import StaticPool
 from app.api.integrations import router
 from app.config import settings
 from app.database import Base, get_db
-from app.models import (Alert, Camera, DetectionEvent, SalesAICorrelation,
-                        Store, User, Zone, ZoneVisit)
+from app.models import (Alert, Camera, DetectionEvent, OdooStoreMap,
+                        SalesAICorrelation, Store, User, Zone, ZoneVisit)
 
 TABLES = [Store.__table__, Camera.__table__, Zone.__table__,
           ZoneVisit.__table__, SalesAICorrelation.__table__,
-          DetectionEvent.__table__, Alert.__table__, User.__table__]
+          DetectionEvent.__table__, Alert.__table__, User.__table__,
+          OdooStoreMap.__table__]
 
 SECRET = "test-webhook-secret"
 
@@ -163,6 +164,32 @@ def test_no_ghost_sale_alert_without_counter_zone(client):
     assert r.status_code == 200
     assert r.json()["alert_created"] is False
     assert session.query(Alert).count() == 0
+
+
+def test_store_resolves_via_odoo_store_map(client):
+    """Odoo sends ITS code/POS id, not VivoGuard's Store.code — the
+    odoo_store_map fallback bridges the naming gap."""
+    c, session = client
+    store, cam, zone = _seed(session)
+    session.add(OdooStoreMap(store_id=store.id, odoo_model="pos.config",
+                             odoo_res_id=42, odoo_pos_config_id=42,
+                             code="JUNCTION-POS", name="Junction POS"))
+    session.commit()
+    sale_ts = datetime.now(timezone.utc)
+    session.add(ZoneVisit(store_id=store.id, camera_id=cam.id,
+                          zone_id=zone.id,
+                          entered_at=sale_ts - timedelta(minutes=2)))
+    session.commit()
+    # By the Odoo-side code...
+    r = _signed_post(c, {"store_code": "JUNCTION-POS", "order_id": 6001,
+                         "timestamp": sale_ts.isoformat(),
+                         "amount_total": 100.0})
+    assert r.status_code == 200 and r.json()["status"] == "validated"
+    # ...and by the numeric pos_config id.
+    r2 = _signed_post(c, {"store_code": "42", "order_id": 6002,
+                          "timestamp": sale_ts.isoformat(),
+                          "amount_total": 50.0})
+    assert r2.status_code == 200 and r2.json()["status"] == "validated"
 
 
 def test_ghost_sale_alerts_disabled_by_flag(client, monkeypatch):
