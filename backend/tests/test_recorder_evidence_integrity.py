@@ -264,8 +264,10 @@ def test_clip_extractor_retries_one_distinct_overlapping_source(
     assert attempted == expected_attempts
 
 
-@pytest.mark.parametrize("failure", [None, "ffmpeg", "timeout", "checksum"])
-def test_extraction_publishes_only_a_hashed_encode(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize(
+    "failure", [None, "ffmpeg", "timeout", "checksum", "audio_only", "zero_frames"],
+)
+def test_extraction_publishes_only_a_hashed_video_encode(monkeypatch, tmp_path, failure):
     event_ts = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
     alert = SimpleNamespace(id=1)
     published = tmp_path / "1.mp4"
@@ -284,14 +286,20 @@ def test_extraction_publishes_only_a_hashed_encode(monkeypatch, tmp_path, failur
 
     encoded = b"new encoded clip"
 
-    def encode(cmd, **_kwargs):
+    def encode(cmd, **kwargs):
+        assert cmd[cmd.index("-progress") + 1] == "pipe:1"
+        assert kwargs["stdout"] == recorder.subprocess.PIPE
         staged = Path(cmd[-1])
         assert staged.parent.parent == tmp_path
         staged.write_bytes(encoded)
         assert published.read_bytes() == previous_bytes
         if failure == "timeout":
             raise recorder.subprocess.TimeoutExpired(cmd, 180)
-        return SimpleNamespace(returncode=int(failure == "ffmpeg"))
+        progress = {
+            "audio_only": b"total_size=200\nprogress=end\n",
+            "zero_frames": b"frame=0\nprogress=continue\nframe=  0\nprogress=end\n",
+        }.get(failure, b"frame=0\nprogress=continue\nframe=  5\nprogress=end\n")
+        return SimpleNamespace(returncode=int(failure == "ffmpeg"), stdout=progress)
 
     def fail_checksum(_path):
         raise OSError("unreadable staged clip")

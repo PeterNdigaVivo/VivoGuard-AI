@@ -897,15 +897,25 @@ def _extract_one(db, alert, ev, clip, ev_ts) -> bool:
             dir=out.parent, prefix=f".{alert.id}-", ignore_cleanup_errors=True,
         ) as staging_dir:
             staged = Path(staging_dir) / out.name
-            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-                   "-ss", str(offset), "-i", clip.file_path,
+            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-nostats",
+                   "-progress", "pipe:1", "-y", "-ss", str(offset), "-i", clip.file_path,
                    "-t", str(dur),
                    "-c:v", "libx264", "-preset", "veryfast",
                    "-c:a", "aac",
                    "-movflags", "+faststart", str(staged)]
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+            res = subprocess.run(cmd, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, timeout=180)
             if res.returncode != 0 or staged.stat().st_size == 0:
+                return False
+            # A successful audio-only encode can still produce a nonempty MP4.
+            frame_count = next(
+                (line.removeprefix(b"frame=").strip()
+                 for line in reversed(res.stdout.splitlines())
+                 if line.startswith(b"frame=")),
+                b"",
+            )
+            if not frame_count.isdigit() or int(frame_count) == 0:
+                log.warning("recorder: clip encode produced no verified video frames alert=%s", alert.id)
                 return False
             digest = _sha256_file(staged)
             staged.replace(out)
