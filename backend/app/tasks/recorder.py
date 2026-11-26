@@ -516,34 +516,33 @@ def _recording_output_has_data(path: str, *, now: float | None = None) -> bool:
 
 
 def _stop_tracked_camera_recorder(r, camera_id: int) -> bool:
-    """Stop a tracked live ffmpeg before replacing its stale evidence stream."""
+    """Return whether a replacement can safely start after stopping a recorder."""
     key = _PID_KEY_FMT.format(cam=camera_id)
     try:
-        pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
+        raw = r.get(key)
     except Exception:
+        return False
+    try:
+        pid = int(json.loads(raw or "{}").get("pid") or 0)
+    except (AttributeError, TypeError, ValueError, OverflowError):
         pid = 0
-    stopped = bool(pid and _pid_is_ffmpeg(pid))
-    if stopped:
+    if pid and _pid_is_ffmpeg(pid):
         try:
             os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            stopped = False
-        except OSError:
-            log.exception("recorder: could not stop stale ffmpeg cam=%s", camera_id)
-        if stopped:
             time.sleep(0.5)
             if _pid_is_ffmpeg(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    log.exception(
-                        "recorder: could not kill stale ffmpeg cam=%s",
-                        camera_id,
-                    )
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(0.1)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            log.warning("recorder: could not stop stale ffmpeg cam=%s", camera_id)
+            return False
+        if _pid_is_ffmpeg(pid):
+            log.warning("recorder: stale ffmpeg still running cam=%s", camera_id)
+            return False
     r.delete(key)
-    return stopped
+    return True
 
 
 def _recording_health_snapshot(db, r, window_id: str | None, *,
@@ -746,7 +745,8 @@ def _repair_missing_recordings(db, r, window_id: str,
         if not r.set(_REPAIR_KEY_FMT.format(cam=camera_id), "1",
                      nx=True, ex=300):
             continue
-        _stop_tracked_camera_recorder(r, camera_id)
+        if not _stop_tracked_camera_recorder(r, camera_id):
+            continue
         _close_stale_camera_recordings(db, camera_id, window_id)
         if _start_camera(db, r, cameras[camera_id], window_id, seconds):
             repaired += 1

@@ -366,7 +366,7 @@ def test_stalled_recorder_is_terminated_before_repair(monkeypatch) -> None:
             self.deleted.append(key)
 
     redis = _Redis()
-    monkeypatch.setattr("app.tasks.recorder._pid_is_ffmpeg", lambda _pid: True)
+    monkeypatch.setattr("app.tasks.recorder._pid_is_ffmpeg", lambda pid: (pid, 9) not in signals)
     monkeypatch.setattr(
         "app.tasks.recorder.os.kill",
         lambda pid, sig: signals.append((pid, sig)),
@@ -380,7 +380,7 @@ def test_stalled_recorder_is_terminated_before_repair(monkeypatch) -> None:
 
     assert _stop_tracked_camera_recorder(redis, 7)
     assert signals == [(707, signal.SIGTERM), (707, 9)]
-    assert sleeps == [0.5]
+    assert sleeps == [0.5, 0.1]
     assert redis.deleted == ["vg:recording:pid:7"]
 
 
@@ -492,6 +492,31 @@ def test_repairs_only_missing_live_recorders_with_retry_bound(monkeypatch) -> No
     assert _repair_missing_recordings(db, redis, "current", 600) == 0
     assert db.commits == 2
     assert sleeps == [5]
+
+
+@pytest.mark.parametrize("failure", [PermissionError("private diagnostic"), None])
+def test_repair_keeps_tracking_when_source_remains_alive(monkeypatch, caplog, failure):
+    redis = _RepairRedis()
+    camera = SimpleNamespace(id=2, store_id=1)
+    monkeypatch.setattr(recorder, "_key_cameras", lambda _db: [camera])
+    monkeypatch.setattr(recorder, "_pid_is_ffmpeg", lambda pid: pid == 102)
+    monkeypatch.setattr(recorder, "_recording_output_has_data", lambda _path: False)
+    monkeypatch.setattr(recorder.time, "sleep", lambda _seconds: None)
+    if not hasattr(signal, "SIGKILL"):
+        monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(recorder.os, "kill", Mock(side_effect=failure))
+    start = Mock()
+    close = Mock()
+    monkeypatch.setattr(recorder, "_start_camera", start)
+    monkeypatch.setattr(recorder, "_close_stale_camera_recordings", close)
+
+    assert _repair_missing_recordings(Mock(), redis, "current", 600) == 0
+
+    assert "vg:recording:pid:2" in redis.values
+    assert "vg:recording:pid:2" not in redis.deleted
+    start.assert_not_called()
+    close.assert_not_called()
+    assert "private diagnostic" not in caplog.text
 
 
 def test_repairs_proven_recorder_without_streamer_frame(monkeypatch) -> None:
