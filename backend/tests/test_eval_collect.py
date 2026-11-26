@@ -97,7 +97,8 @@ def test_collects_reviewed_alert_with_clean_frame(Session, world, tmp_path):
         assert open(s.frame_path, "rb").read() == b"jpeg-bytes"
         if os.name != "nt":   # Windows has no POSIX file modes; CI/servers do
             assert stat.S_IMODE(os.stat(s.frame_path).st_mode) == 0o600
-    assert stat.S_IMODE(os.stat(root / "frames").st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(root / "frames").st_mode) == 0o700
     assert _collect(Session, root)["added"] == 0                       # never twice
 
 
