@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.utils.evidence_files import alert_clip_file
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
 from app.schemas.alert import (AlertActionOut, AlertNoteIn, AlertOut,
@@ -1356,7 +1357,7 @@ def _to_alert_out(alert: Alert, event: DetectionEvent,
     item.snapshot_count  = len(sp) or None
     # Recorded clip (if the recorder extracted one for this alert). We only
     # expose the URL — the path stays server-side.
-    has_clip = bool((event.extra or {}).get("alert_clip_path"))
+    has_clip = alert_clip_file(extra.get("alert_clip_path"), recordings_dir=settings.recordings_dir) is not None
     item.clip_url = f"/api/alerts/{alert.id}/clip" if has_clip else None
     if has_clip:
         item.clip_status = "ready"
@@ -2081,15 +2082,15 @@ def alert_clip(alert_id: int, db: Session = Depends(get_db),
     event's extra JSON (written by recorder.extract_pending_clips). 404 when
     the alert has no clip or it was pruned (48h retention). Auth required."""
     from fastapi.responses import FileResponse
-    import os
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
     ev = db.get(DetectionEvent, a.event_id)
-    path = (ev.extra or {}).get("alert_clip_path") if ev else None
-    if not path or not os.path.exists(path):
+    stored_path = (ev.extra or {}).get("alert_clip_path") if ev else None
+    path = alert_clip_file(stored_path, recordings_dir=settings.recordings_dir)
+    if path is None:
         raise HTTPException(404, "clip not available")
-    return FileResponse(path, media_type="video/mp4",
+    return FileResponse(str(path), media_type="video/mp4",
                         filename=f"alert_{alert_id}.mp4")
 
 
