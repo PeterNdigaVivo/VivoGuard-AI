@@ -7,6 +7,7 @@ import { Badge, Button, Card, Input, PageHeader, Select, useToast } from '@/comp
 import { api } from '@/api/client'
 import { cameras as camsApi, type Camera } from '@/api/cameras'
 import { stores as storesApi, type Store } from '@/api/stores'
+import { fleet as fleetApi, type FleetStatus } from '@/api/incidents'
 
 function statusColor(s: string): 'green' | 'red' | 'amber' | 'slate' {
   if (s === 'online')   return 'green'
@@ -83,9 +84,12 @@ export default function CamerasPage() {
   const [busyId, setBusyId] = useState<number | null>(null)
   const toast = useToast()
 
+  // Canonical fleet totals (same numbers as Alerts and System Health).
+  const [fleet, setFleet] = useState<FleetStatus | null>(null)
   const reload = () => Promise.all([
     camsApi.list().then(setCams),
     storesApi.list().then(setStores),
+    fleetApi.status().then(setFleet).catch(() => setFleet(null)),
   ]).catch(e => setError(String(e)))
   useEffect(() => { reload() }, [])
 
@@ -310,6 +314,19 @@ export default function CamerasPage() {
         </>}
       />
       {error && <div className="text-red-600 dark:text-red-300 mb-2">{error}</div>}
+      {fleet && (
+        <Card className="p-3 mb-3 text-sm text-slate-700 dark:text-slate-200 flex flex-wrap gap-x-5 gap-y-1">
+          <span><strong className="tabular-nums">{fleet.totals.total}</strong> cameras</span>
+          <span><strong className="tabular-nums">{fleet.totals.fresh}</strong> fresh</span>
+          <span><strong className="tabular-nums">{fleet.totals.stale}</strong> stale</span>
+          <span><strong className="tabular-nums">{fleet.totals.offline}</strong> offline</span>
+          <span><strong className="tabular-nums">{fleet.totals.unconfigured}</strong> not set up for AI</span>
+          <span><strong className="tabular-nums">{fleet.totals.ai_active}</strong> AI-active</span>
+          <span className="ml-auto text-xs text-slate-500 dark:text-slate-300">
+            Fleet health: <strong>{fleet.health}</strong> · same totals as Alerts and System Health
+          </span>
+        </Card>
+      )}
 
       {/* Search — filters the loaded camera list by store name OR
           camera name. Client-side only, no API call. Empty groups

@@ -1627,9 +1627,11 @@ def acknowledge_alert(alert_id: int, db: Session = Depends(get_db),
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "alert not found")
+    # "I'm on it" acknowledges the whole incident the alert belongs to.
+    _close_owning_incident(db, alert_id, "acknowledge", _u)
     if alert.acknowledged_at is None:
         alert.acknowledged_at = datetime.now(timezone.utc)
-        db.commit()
+    db.commit()
     return AlertActionOut(id=alert.id, status=alert.status)
 
 
@@ -1847,12 +1849,35 @@ def get_alert(alert_id: int, db: Session = Depends(get_db),
     return _to_alert_out(a, ev, cam, zone, store)
 
 
+def _close_owning_incident(db: Session, alert_id: int, action: str,
+                           user: User, reason: str | None = None) -> None:
+    """Per-alert buttons act on the WHOLE incident the alert belongs to.
+
+    Keeps older browser tabs (and any integration still calling the
+    per-alert routes) from closing one alert and leaving its duplicates
+    open. No-op for alerts that are not part of an incident.
+    """
+    from app.services import incidents as _inc
+    if not _inc.lifecycle_ready(db):
+        return
+    a = db.get(Alert, alert_id)
+    if a is None or a.incident_id is None:
+        return
+    from app.models.incident import INCIDENT_OPEN_STATUSES, Incident
+    inc = (db.query(Incident).filter(Incident.id == a.incident_id)
+             .with_for_update().first())
+    if inc is None or inc.status not in INCIDENT_OPEN_STATUSES:
+        return
+    _inc.apply_action(db, inc, action, actor_user_id=user.id, reason=reason)
+
+
 @router.post("/{alert_id}/confirm", response_model=AlertActionOut)
 def confirm(alert_id: int, db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
     # Single source of truth for confirm/dismiss/sprint-label.
     # See app/services/alert_feedback.py for the rationale.
     from app.services.alert_feedback import record_verdict
+    _close_owning_incident(db, alert_id, "resolve", user, "confirmed_true")
     return record_verdict(db, alert_id, "confirm", user)
 
 
@@ -1864,6 +1889,15 @@ def dismiss(alert_id: int, payload: DismissIn | None = None,
     # Verdict first, reason second. An unrecognised or missing reason
     # must never cost the operator their dismissal: clearing the feed is
     # the job, the reason is the bonus.
+    _close_owning_incident(db, alert_id, "dismiss", user,
+                           (payload.reason if payload else None))
+    # The reason must be on the row BEFORE record_verdict commits and
+    # queues the training task: the task reads it to decide whether this
+    # is a negative example or a policy error (staff, normal activity).
+    if payload and payload.reason in DISMISS_REASONS:
+        _a = db.get(Alert, alert_id)
+        if _a is not None:
+            _a.dismiss_reason = payload.reason
     out = record_verdict(db, alert_id, "dismiss", user)
     reason = payload.reason if payload else None
     comment = (payload.comment or "").strip() if payload else ""
@@ -1895,6 +1929,7 @@ def resolve(alert_id: int, db: Session = Depends(get_db),
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
+    _close_owning_incident(db, alert_id, "resolve", user)
     # Its OWN status, deliberately not "confirmed". Sharing that bucket
     # made "I dealt with this" indistinguishable from "the detector was
     # right": 569 of 574 confirmed intrusion alerts in one week came
@@ -1925,7 +1960,17 @@ def resolve_all(db: Session = Depends(get_db),
     unchanged): `include_acknowledged=true` also closes alerts someone
     acknowledged and then abandoned — they count as "pending" on the
     health dashboard; `detection_type=person` (etc.) closes one alert
-    type's backlog without touching the rest."""
+    type's backlog without touching the rest.
+
+    DEPRECATED. It flips every new alert in the window, including rows
+    the operator never saw, so its result could exceed the number in the
+    confirmation dialog. Refused once the incident lifecycle is enabled:
+    use POST /incidents/bulk-resolve with expected_count.
+    """
+    from app.services import incidents as _inc
+    if _inc.lifecycle_ready(db):
+        raise HTTPException(
+            409, "Bulk resolve now works on incidents. Reload the Alerts page.")
     statuses = ("new", "acknowledged") if include_acknowledged else ("new",)
     q = (db.query(Alert)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)

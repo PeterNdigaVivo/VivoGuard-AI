@@ -45,6 +45,8 @@ const HeatmapInsightsPage  = lazy(() => import('@/pages/HeatmapInsightsPage'))
 const DetectorsPage        = lazy(() => import('@/pages/DetectorsPage'))
 const UsersPage            = lazy(() => import('@/pages/UsersPage'))
 const OdooAssurancePage    = lazy(() => import('@/pages/OdooAssurancePage'))
+const ModelsPage           = lazy(() => import('@/pages/ModelsPage'))
+const EvidenceReviewPage   = lazy(() => import('@/pages/EvidenceReviewPage'))
 
 
 function Protected({ children }: { children: ReactNode }) {
@@ -99,7 +101,8 @@ export default function App() {
               <Route path="/ai-learning"              element={<Navigate to="/training" replace />} />
               <Route path="/ai-progress"              element={<Navigate to="/training" replace />} />
               <Route path="/sprint"                   element={<Navigate to="/training" replace />} />
-              <Route path="/models"                   element={<Navigate to="/training" replace />} />
+              <Route path="/models"                   element={<ModelsPage />} />
+              <Route path="/training/review"         element={<EvidenceReviewPage />} />
               <Route path="/system"                   element={<MissionControlPage />} />
               <Route path="/system-health"            element={<Navigate to="/system" replace />} />
               <Route path="/system/odoo"              element={<OdooAssurancePage />} />

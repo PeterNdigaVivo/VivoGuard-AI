@@ -467,12 +467,13 @@ def weekly_retrain_all() -> None:
 @celery_app.task(name="training.evaluate_pending_promotions",
                   ignore_result=True)
 def evaluate_pending_promotions() -> None:
-    """Hourly sweep — picks every AIModel that's NOT currently
-    deployed, has a sibling deployed model with the same name, and
-    has accumulated enough operator-marked traffic, then promotes
-    it if precision + fp_rate beat production. Manual /deploy still
-    works for ops overrides."""
-    from app.database import SessionLocal
+    """DISABLED (Nov 2026). Promotion is manual, after a canary:
+    app.services.model_rollout. Kept registered so an old beat schedule
+    or queued message does not error."""
+    log.info("evaluate_pending_promotions: automatic promotion is disabled; "
+             "use a canary rollout and manual promotion")
+    return
+    from app.database import SessionLocal  # noqa: F401 (unreachable)
     from app.models import AIModel
     from app.training.promotion import promote
     with SessionLocal() as db:

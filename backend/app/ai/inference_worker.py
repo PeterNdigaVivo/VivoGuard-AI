@@ -130,10 +130,24 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     #      individually re-pointed at it;
     #   3. otherwise the base model (settings.default_model, yolov8n.pt).
     weights: str | None = None
+    used_model_id: int | None = None
     if cam.ai_model_id:
         m = db.get(AIModel, cam.ai_model_id)
-        if m and m.weights_path and os.path.exists(m.weights_path):
+        # One model drives the whole person pipeline on this camera, so a
+        # classifier or a detector without a 'person' class would blind
+        # every person-based detector. Such an assignment falls back to
+        # the base COCO model (the universal fallback) instead.
+        from app.services.model_rollout import person_compatible
+        ok, why = person_compatible(m)
+        if ok:
             weights = m.weights_path
+            used_model_id = m.id
+        else:
+            _log_throttled(
+                f"model-fallback:{camera_id}:{cam.ai_model_id}", logging.WARNING,
+                "camera %s assigned model %s is not usable for the person "
+                "pipeline (%s); using the base model", camera_id,
+                cam.ai_model_id, why)
     # The chain-wide deployed-model fallback is OFF by default: the deployed
     # retail model (v25) is a specialist whose classes are NOT COCO "person",
     # so routing the GENERAL inference pass through it makes every person-based
@@ -143,7 +157,14 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
         weights = _deployed_weights(db)
     if weights is None:
         weights = settings.default_model
+    # Events are attributed to the model that ACTUALLY ran (None = base),
+    # not to the assignment, so canary metrics measure the right model.
+    MODEL_USED[camera_id] = used_model_id
     return cam, zones, cfg, weights
+
+
+# camera_id -> AIModel id the worker actually loaded (None = base model).
+MODEL_USED: dict[int, int | None] = {}
 
 
 def _deployed_weights(db: Session) -> str | None:
@@ -236,12 +257,21 @@ def _alert_disposition(detection_type: str, suppress_alert: bool) -> str:
 def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                    *, frame_bgr=None, store_name: str | None = None,
                    camera_name: str | None = None, store_id: int | None = None,
-                   suppress_alert: bool = False) -> tuple[int, int | None]:
+                   suppress_alert: bool = False,
+                   suppress_reason: str | None = None,
+                   frames_seen: int | None = None) -> tuple[int, int | None]:
     """Always writes a DetectionEvent row. `suppress_alert` ONLY
     controls whether the companion Alert row is created — it must
     NEVER gate the underlying detection_event persistence (Vivo
     regression Jun 2026 traced to a path where a suppress-check
-    exception silently dropped every person event for the frame)."""
+    exception silently dropped every person event for the frame).
+
+    With the incident lifecycle enabled, app.services.alert_policy
+    decides what the detection becomes and the decision is stamped on
+    extra["policy"]. The returned alert_id is None unless the alert
+    should notify: a NEW incident, or a reminder after a long gap.
+    Repeats of a continuing event are kept (row + incident timeline)
+    but are not operator-facing on their own."""
     # Capture an annotated snapshot for the alert-worthy detector types
     # so the Alerts page can show the picture, not just the label.
     thumb_path = None
@@ -273,6 +303,30 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
     _cls = getattr(ev, "cls", None)
     if _cls and "cls" not in extra:
         extra["cls"] = _cls
+    # Retail alert policy (incident lifecycle). Fails open to the legacy
+    # path: a policy error must never cost a detection or an alert.
+    decision = None
+    if ev.detection_type not in _SKIP_ALERT_TYPES:
+        try:
+            from app.services import incidents as _inc
+            if _inc.lifecycle_ready(db):
+                from app.services.alert_policy import decide
+                if frames_seen is not None:
+                    extra.setdefault("frames_seen", int(frames_seen))
+                decision = decide(_inc.build_policy_input(
+                    db, detection_type=ev.detection_type,
+                    confidence=ev.confidence, extra=extra, zone_id=ev.zone_id,
+                    store_id=store_id, frames_seen=frames_seen,
+                    suppressed_reason=((suppress_reason or "detector_suppressed")
+                                       if suppress_alert else None),
+                    raw_review=bool(suppress_alert and _raw_review_applies(
+                        ev.detection_type, camera_id)),
+                ))
+                extra["policy"] = decision.as_dict()
+        except Exception as e:
+            decision = None
+            log.warning("alert policy failed cam=%s type=%s: %s; legacy path",
+                        camera_id, ev.detection_type, e)
     # Model-evaluation test set: also keep the CLEAN frame (the snapshot
     # has boxes + caption burned in). Gated, best-effort, ~5-10 ms.
     if thumb_path and settings.eval_capture_raw_frames:
@@ -331,7 +385,16 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         suppress_alert
         and _raw_review_applies(ev.detection_type, camera_id)
     )
-    if ev.detection_type not in _SKIP_ALERT_TYPES and (not suppress_alert or _raw_review):
+    _create_alert = (ev.detection_type not in _SKIP_ALERT_TYPES
+                     and (not suppress_alert or _raw_review))
+    if decision is not None:
+        # incident/review always get a row; metric_only keeps the legacy
+        # row (store updates) but never an incident; discarded gets none.
+        if decision.creates_alert_row:
+            _create_alert = ev.detection_type not in _SKIP_ALERT_TYPES
+        elif decision.decision == "discarded":
+            _create_alert = False
+    if _create_alert:
         alert = Alert(event_id=rec.id, status="new", review_only=_raw_review)
         db.add(alert)
         db.flush()
@@ -345,11 +408,19 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         if _raw_review and not alert.review_only:
             alert.review_only = True
             db.flush()
+        # Authoritative incident lifecycle: one continuing event, one
+        # incident. Repeats are folded in and do not notify.
+        _attach = None
+        if decision is not None:
+            from app.services.incidents import promote
+            _attach = promote(db, alert, rec, decision, store_id=store_id)
         # Shadow incident/evidence/outbox projection. A savepoint makes this
         # fail-open in the precise transactional sense: any projection error
         # rolls back only additive rows and leaves the baseline event+alert
-        # intact. Both feature switches default off.
-        if bool(getattr(settings, "incident_foundations_enabled", False)):
+        # intact. Both feature switches default off. Superseded by the
+        # lifecycle above when that is enabled.
+        if (decision is None
+                and bool(getattr(settings, "incident_foundations_enabled", False))):
             try:
                 with db.begin_nested():
                     from app.services.incident_foundations import (
@@ -368,6 +439,13 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
         alert_id = alert.id
         log.info("Created alert: %s for camera %s (event=%s)",
                  ev.detection_type, camera_id, rec.id)
+        if _attach is not None and not _attach.notify:
+            # Folded into an incident that already notified. No filmstrip,
+            # verifier or VLM call: the head alert carries that evidence.
+            return rec.id, None
+        if decision is not None and decision.decision == "review":
+            # Review items are kept for a human, never pushed live.
+            return rec.id, None
         # Business-hours filmstrip — 6 smartly-timed snapshots bracketing
         # the incident (-10s, 0, +30/60/90/120s). Fire-and-forget on the
         # alerts queue; the task itself gates on type + the 09:00–20:00 EAT
@@ -404,6 +482,16 @@ def _persist_event(db: Session, camera_id: int, ev, model_id: int | None,
                 analyse_alert_scene.delay(alert.id)
         except Exception:
             pass
+    # First valid entry closes an open "store not opened" incident.
+    if (decision is not None and ev.detection_type == "shop_open_close"
+            and str(extra.get("rule") or extra.get("cls") or "").startswith("shop_opened")):
+        try:
+            from app.services.incidents import close_store_not_opened
+            with db.begin_nested():
+                close_store_not_opened(db, store_id=store_id,
+                                       evidence_event_id=rec.id)
+        except Exception as e:
+            log.warning("store-not-opened close failed store=%s: %s", store_id, e)
     return rec.id, alert_id
 
 
@@ -921,10 +1009,13 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                         # transaction and drop every event queued for
                         # this frame (Vivo regression, Jun 2026).
                         suppress = False
+                        suppress_reason = None
                         if ev.detection_type == "person":
                             # Never raises; fails open (alert is sent).
                             suppress = _person_alert_suppressed(
                                 ev, zones, store, camera_id)
+                            if suppress:
+                                suppress_reason = "normal_trading_presence"
                         # Temporal gate — suppress the ALERT (never the
                         # event row) when the underlying track hasn't
                         # persisted long enough; kills 1-frame blips.
@@ -937,16 +1028,26 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                             _fs = frames_seen.get(ev.track_id, 0)
                             if _need > 1 and _fs < _need:
                                 suppress = True
+                                suppress_reason = "not_confirmed_across_frames"
                                 log.debug(
                                     "temporal gate: %s cam=%s track=%s "
                                     "frames_seen=%d < %d — alert suppressed",
                                     ev.detection_type, camera_id,
                                     ev.track_id, _fs, _need)
                         eid, alert_id = _persist_event(
-                                             db, camera_id, ev, cam.ai_model_id,
+                                             db, camera_id, ev,
+                                             MODEL_USED.get(camera_id),
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name, store_id=store_id,
-                                             suppress_alert=suppress)
+                                             suppress_alert=suppress,
+                                             suppress_reason=suppress_reason,
+                                             # Detectors with their own frame
+                                             # gate are not judged twice.
+                                             frames_seen=(frames_seen.get(ev.track_id)
+                                                          if ev.track_id is not None
+                                                          and ev.detection_type
+                                                          not in _TEMPORAL_GATE_EXEMPT
+                                                          else None))
                         if suppress or alert_id is None:
                             continue  # not an operator-facing event
                         events_emitted.append({

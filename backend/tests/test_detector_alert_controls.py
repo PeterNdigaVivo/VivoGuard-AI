@@ -7,6 +7,21 @@ from app.ai.detectors.stateful import CrowdDetector
 from app.ai.tracker import Track
 from app.ai.tracker import partition_static_person_tracks
 
+import pytest
+
+from app.ai.detectors import sustained_state
+
+
+@pytest.fixture(autouse=True)
+def _fresh_sustained_state():
+    """Without Redis (CI, laptops) sustained_state falls back to a module-
+    level dict. Every crowd test uses camera 17, so a cooldown left by one
+    test silently blocked the next one's alert (order-dependent failure of
+    test_crowd_is_latched_until_continuous_clear_rearm)."""
+    sustained_state._memory.clear()
+    yield
+    sustained_state._memory.clear()
+
 
 def _box(cx: float, cy: float = 0.5) -> list[float]:
     return [cx - 0.03, cy - 0.08, cx + 0.03, cy + 0.08]
