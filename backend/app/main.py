@@ -99,6 +99,7 @@ _OPTIONAL_ROUTERS = [
     ("app.api.detection_config",   ["router"]),
     ("app.api.zones",              ["router", "catalog_router"]),
     ("app.api.alerts",             ["router"]),
+    ("app.api.incidents",          ["router"]),
     ("app.api.labels",             ["router"]),
     ("app.api.training",           ["router"]),
     ("app.api.system",             ["router"]),

@@ -1839,12 +1839,35 @@ def get_alert(alert_id: int, db: Session = Depends(get_db),
     return _to_alert_out(a, ev, cam, zone, store)
 
 
+def _close_owning_incident(db: Session, alert_id: int, action: str,
+                           user: User, reason: str | None = None) -> None:
+    """Per-alert buttons act on the WHOLE incident the alert belongs to.
+
+    Keeps older browser tabs (and any integration still calling the
+    per-alert routes) from closing one alert and leaving its duplicates
+    open. No-op for alerts that are not part of an incident.
+    """
+    from app.services import incidents as _inc
+    if not _inc.lifecycle_ready(db):
+        return
+    a = db.get(Alert, alert_id)
+    if a is None or a.incident_id is None:
+        return
+    from app.models.incident import INCIDENT_OPEN_STATUSES, Incident
+    inc = (db.query(Incident).filter(Incident.id == a.incident_id)
+             .with_for_update().first())
+    if inc is None or inc.status not in INCIDENT_OPEN_STATUSES:
+        return
+    _inc.apply_action(db, inc, action, actor_user_id=user.id, reason=reason)
+
+
 @router.post("/{alert_id}/confirm", response_model=AlertActionOut)
 def confirm(alert_id: int, db: Session = Depends(get_db),
             user: User = Depends(require_role("admin", "operator"))):
     # Single source of truth for confirm/dismiss/sprint-label.
     # See app/services/alert_feedback.py for the rationale.
     from app.services.alert_feedback import record_verdict
+    _close_owning_incident(db, alert_id, "resolve", user, "confirmed_true")
     return record_verdict(db, alert_id, "confirm", user)
 
 
@@ -1856,6 +1879,8 @@ def dismiss(alert_id: int, payload: DismissIn | None = None,
     # Verdict first, reason second. An unrecognised or missing reason
     # must never cost the operator their dismissal: clearing the feed is
     # the job, the reason is the bonus.
+    _close_owning_incident(db, alert_id, "dismiss", user,
+                           (payload.reason if payload else None))
     out = record_verdict(db, alert_id, "dismiss", user)
     reason = payload.reason if payload else None
     comment = (payload.comment or "").strip() if payload else ""
@@ -1887,6 +1912,7 @@ def resolve(alert_id: int, db: Session = Depends(get_db),
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
+    _close_owning_incident(db, alert_id, "resolve", user)
     # Its OWN status, deliberately not "confirmed". Sharing that bucket
     # made "I dealt with this" indistinguishable from "the detector was
     # right": 569 of 574 confirmed intrusion alerts in one week came
@@ -1909,7 +1935,17 @@ def resolve_all(db: Session = Depends(get_db),
                 until: Optional[datetime] = Query(None)):
     """Bulk-mark every currently-NEW alert in the window (and optional
     store filter) as resolved. Mirrors the per-alert /resolve action.
-    Returns the count actually flipped."""
+    Returns the count actually flipped.
+
+    DEPRECATED. It flips every new alert in the window, including rows
+    the operator never saw, so its result could exceed the number in the
+    confirmation dialog. Refused once the incident lifecycle is enabled:
+    use POST /incidents/bulk-resolve with expected_count.
+    """
+    from app.services import incidents as _inc
+    if _inc.lifecycle_ready(db):
+        raise HTTPException(
+            409, "Bulk resolve now works on incidents. Reload the Alerts page.")
     q = (db.query(Alert)
            .join(DetectionEvent, Alert.event_id == DetectionEvent.id)
            .outerjoin(Camera, DetectionEvent.camera_id == Camera.id)
