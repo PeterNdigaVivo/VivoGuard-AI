@@ -35,6 +35,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,20 @@ _PID_KEY_FMT = "vg:recording:pid:{cam}"          # → json {pid, window_id, pat
 _REPAIR_KEY_FMT = "vg:recording:repair:{cam}"
 _CURRENT_WINDOW_KEY = "vg:recording:current_window"
 _HEALTH_KEY = "vg:recording:health"
+_FAILURE_KEY_FMT = "vg:recording:failure:{cam}"
+_FAILURE_TTL_SECONDS = 24 * 3600
+_FFMPEG_FAILURE_REASONS = {
+    "authentication_failed",
+    "access_forbidden",
+    "connection_refused",
+    "connection_timeout",
+    "connection_limit",
+    "stream_not_found",
+    "invalid_stream_data",
+    "unclassified",
+}
+_REPAIR_SETTLE_SECONDS = 5
+_RECORDING_OUTPUT_MAX_STALE_SECONDS = 180
 
 
 def _redis():
@@ -136,6 +151,66 @@ def _substream_url(cam) -> str | None:
         return None
 
 
+def _classify_ffmpeg_exit(stderr: bytes) -> str:
+    """Return a credential-safe reason for a recorder ffmpeg failure.
+
+    ffmpeg often repeats the full RTSP URL in stderr.  Never log or persist
+    that text; reduce it to a small operational category instead.
+    """
+    message = stderr.decode("utf-8", errors="replace").lower()
+    if "401 unauthorized" in message or "authentication failed" in message:
+        return "authentication_failed"
+    if "403 forbidden" in message:
+        return "access_forbidden"
+    if "connection refused" in message:
+        return "connection_refused"
+    if "timed out" in message or "timeout" in message:
+        return "connection_timeout"
+    if "453 not enough bandwidth" in message or "too many connections" in message:
+        return "connection_limit"
+    if "404 not found" in message:
+        return "stream_not_found"
+    if "invalid data found" in message:
+        return "invalid_stream_data"
+    return "unclassified"
+
+
+def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int, r=None) -> None:
+    """Reap a recorder child and emit only credential-safe diagnostics."""
+    try:
+        _, stderr = proc.communicate()
+    except Exception:
+        log.exception("recorder: could not reap ffmpeg cam=%s", camera_id)
+        return
+    if proc.returncode and proc.returncode > 0:
+        reason = _classify_ffmpeg_exit(stderr or b"")
+        if r is not None:
+            try:
+                r.set(
+                    _FAILURE_KEY_FMT.format(cam=camera_id),
+                    reason,
+                    ex=_FAILURE_TTL_SECONDS,
+                )
+            except Exception:
+                log.exception(
+                    "recorder: could not persist failure reason cam=%s",
+                    camera_id,
+                )
+        log.warning(
+            "recorder: ffmpeg exited cam=%s code=%s reason=%s",
+            camera_id, proc.returncode, reason,
+        )
+
+
+def _start_exit_watcher(proc: subprocess.Popen, camera_id: int, r) -> None:
+    threading.Thread(
+        target=_watch_recorder_exit,
+        args=(proc, camera_id, r),
+        daemon=True,
+        name=f"recorder-reaper-{camera_id}",
+    ).start()
+
+
 def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
     """Start one non-destructive recorder segment without committing."""
     from app.models import RecordingClip
@@ -159,10 +234,15 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
         # 2nd connection, ffmpeg exits quickly and the file stays tiny -
         # inference always keeps priority (we never touch the streamer).
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
+                                stderr=subprocess.PIPE, start_new_session=True)
     except Exception as e:
         log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
         return False
+    try:
+        r.delete(_FAILURE_KEY_FMT.format(cam=cam.id))
+    except Exception:
+        log.exception("recorder: could not clear failure reason cam=%s", cam.id)
+    _start_exit_watcher(proc, cam.id, r)
     r.set(_PID_KEY_FMT.format(cam=cam.id),
           json.dumps({"pid": proc.pid, "window_id": window_id,
                       "path": str(out_path)}),
@@ -291,14 +371,50 @@ def _clip_source_matches_event(db, ev, clip) -> bool:
 
 
 def _pid_is_ffmpeg(pid: int) -> bool:
-    """True if `pid` is alive AND is one of our ffmpeg recorders. Guards
+    """True if `pid` is alive AND is one of our source recorders. Guards
     against acting on a PID that a stale Redis key names but which, after a
-    container restart, now belongs to an unrelated (reused) process."""
+    container restart, now belongs to an unrelated or clip-extractor process.
+    """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return b"ffmpeg" in fh.read()
+            cmdline = fh.read().split(b"\0")
+        return bool(
+            cmdline
+            and Path(os.fsdecode(cmdline[0])).name == "ffmpeg"
+            and b"+frag_keyframe+empty_moov" in cmdline
+            and b"copy" in cmdline
+        )
     except Exception:
         return False
+
+
+def _owned_recorder_pids() -> set[int]:
+    """Return every live source-recorder ffmpeg, including untracked ones.
+
+    Older releases could let Redis ownership keys expire before a long
+    recording window ended.  Once a key was lost or overwritten, rollover
+    could no longer stop that process.  Identify only the source-recorder
+    command signature; alert-clip extraction also uses ffmpeg in this
+    container and must never be interrupted by recorder reconciliation.
+    """
+    pids: set[int] = set()
+    proc_root = Path("/proc")
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().split(b"\0")
+            if (cmdline and Path(os.fsdecode(cmdline[0])).name == "ffmpeg"
+                    and b"+frag_keyframe+empty_moov" in cmdline
+                    and b"copy" in cmdline):
+                pids.add(int(entry.name))
+        except (OSError, ValueError):
+            continue
+    return pids
 
 
 def _any_recording_alive(r) -> bool:
@@ -315,7 +431,7 @@ def _any_recording_alive(r) -> bool:
 
 def _live_recording_ids(r, window_id: str,
                         expected_ids: set[int]) -> set[int]:
-    """Return expected cameras with a live recorder in the current window."""
+    """Return expected cameras whose live recorder has written evidence."""
     active_ids: set[int] = set()
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
@@ -323,11 +439,62 @@ def _live_recording_ids(r, window_id: str,
             camera_id = int(str(key).rsplit(":", 1)[-1])
             if (camera_id in expected_ids
                     and str(item.get("window_id") or "") == window_id
-                    and _pid_is_ffmpeg(int(item.get("pid") or 0))):
+                    and _pid_is_ffmpeg(int(item.get("pid") or 0))
+                    and _recording_output_has_data(
+                        str(item.get("path") or ""),
+                    )):
                 active_ids.add(camera_id)
         except Exception:
             continue
     return active_ids
+
+
+def _recording_output_has_data(path: str, *, now: float | None = None) -> bool:
+    """Return whether the current recorder is writing fresh evidence."""
+    if not path:
+        return False
+    try:
+        output = Path(path)
+        stat = output.stat()
+        observed_at = time.time() if now is None else float(now)
+        return (
+            output.is_file()
+            and stat.st_size > 0
+            and observed_at - stat.st_mtime <= _RECORDING_OUTPUT_MAX_STALE_SECONDS
+        )
+    except OSError:
+        return False
+
+
+def _stop_tracked_camera_recorder(r, camera_id: int) -> bool:
+    """Stop a tracked live ffmpeg before replacing its stale evidence stream."""
+    key = _PID_KEY_FMT.format(cam=camera_id)
+    try:
+        pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
+    except Exception:
+        pid = 0
+    stopped = bool(pid and _pid_is_ffmpeg(pid))
+    if stopped:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            stopped = False
+        except OSError:
+            log.exception("recorder: could not stop stale ffmpeg cam=%s", camera_id)
+        if stopped:
+            time.sleep(0.5)
+            if _pid_is_ffmpeg(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    log.exception(
+                        "recorder: could not kill stale ffmpeg cam=%s",
+                        camera_id,
+                    )
+    r.delete(key)
+    return stopped
 
 
 def _recording_health_snapshot(db, r, window_id: str | None, *,
@@ -341,15 +508,53 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         _live_recording_ids(r, window_id, expected_ids)
         if window_id else set()
     )
+    # A vg:frame key proves fresh pixels reached the streamer within its
+    # short TTL. Its absence does not prove the camera/NVR feed is offline:
+    # an independent recorder process can still be receiving that feed.
+    frame_fresh_ids = (
+        {
+            camera_id for camera_id in expected_ids
+            if r.exists(f"vg:frame:{camera_id}")
+        }
+        if window_id else set()
+    )
     expected = len(expected_ids)
     active = len(active_ids)
-    missing = len(expected_ids - active_ids)
+    missing_ids = expected_ids - active_ids
+    missing = len(missing_ids)
+    frame_stale = len(expected_ids - frame_fresh_ids)
+    recorder_missing_with_fresh_frame = len(missing_ids & frame_fresh_ids)
+    recorder_active_without_fresh_frame = len(active_ids - frame_fresh_ids)
+    failure_reasons: dict[str, int] = {}
+    missing_without_failure_reason = 0
+    for camera_id in missing_ids:
+        reason = r.get(_FAILURE_KEY_FMT.format(cam=camera_id))
+        if not reason:
+            missing_without_failure_reason += 1
+            continue
+        safe_reason = (
+            str(reason) if str(reason) in _FFMPEG_FAILURE_REASONS
+            else "unclassified"
+        )
+        failure_reasons[safe_reason] = failure_reasons.get(safe_reason, 0) + 1
     return {
         "last_run_ts": float(now if now is not None else time.time()),
         "window_active": bool(window_id),
         "cameras_expected": expected,
         "cameras_recording": active,
         "cameras_missing": missing,
+        "cameras_frame_fresh": len(frame_fresh_ids),
+        "cameras_frame_stale": frame_stale,
+        "recorders_missing_with_fresh_frame": (
+            recorder_missing_with_fresh_frame
+        ),
+        "recorders_active_without_fresh_frame": (
+            recorder_active_without_fresh_frame
+        ),
+        "recorder_failure_reasons": failure_reasons,
+        "recorders_missing_without_failure_reason": (
+            missing_without_failure_reason
+        ),
         "status": (
             "inactive" if not window_id
             else "healthy" if expected > 0 and missing == 0
@@ -368,17 +573,20 @@ def _publish_recording_health(db, r, window_id: str | None) -> None:
 
 
 def _stop_all(r) -> None:
-    """SIGTERM every tracked ffmpeg, then SIGKILL survivors after a grace.
-    Only signals PIDs verified to be ffmpeg (a stale key after a restart
-    could otherwise name a reused, unrelated PID)."""
-    pids: list[int] = []
+    """Stop tracked and signature-owned source recorders after a grace.
+
+    Tracked PIDs are verified as ffmpeg to avoid PID-reuse accidents. The
+    source-recorder signature also recovers processes orphaned by old Redis
+    TTL behaviour without touching alert-clip extraction ffmpeg jobs.
+    """
+    pids = _owned_recorder_pids()
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
             pid = int(json.loads(r.get(key) or "{}").get("pid") or 0)
         except Exception:
             pid = 0
         if pid and _pid_is_ffmpeg(pid):
-            pids.append(pid)
+            pids.add(pid)
         r.delete(key)
     for pid in pids:
         try: os.kill(pid, signal.SIGTERM)
@@ -468,13 +676,17 @@ def _repair_missing_recordings(db, r, window_id: str,
         if not r.set(_REPAIR_KEY_FMT.format(cam=camera_id), "1",
                      nx=True, ex=300):
             continue
-        r.delete(_PID_KEY_FMT.format(cam=camera_id))
+        _stop_tracked_camera_recorder(r, camera_id)
         _close_stale_camera_recordings(db, camera_id, window_id)
         if _start_camera(db, r, cameras[camera_id], window_id, seconds):
             repaired += 1
     db.commit()
     if repaired:
-        log.warning("recorder: repaired %d missing camera recorder(s)", repaired)
+        log.warning(
+            "recorder: started %d missing camera recorder repair(s)", repaired,
+        )
+        # Allow refused second RTSP connections to exit before health is published.
+        time.sleep(_REPAIR_SETTLE_SECONDS)
     return repaired
 
 

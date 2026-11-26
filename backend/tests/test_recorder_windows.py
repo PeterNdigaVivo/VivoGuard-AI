@@ -58,7 +58,7 @@ class _RecorderHealthRedis:
     def __init__(self):
         self.values = {
             "vg:recording:pid:1": json.dumps({
-                "pid": 101, "window_id": "current",
+                "pid": 101, "window_id": "current", "path": "/test/1.mp4",
             }),
             "vg:recording:pid:2": json.dumps({
                 "pid": 102, "window_id": "current",
@@ -80,6 +80,10 @@ class _RecorderHealthRedis:
         return self.values.get(key)
 
 
+    def exists(self, key: str) -> bool:
+        return key in {"vg:frame:2", "vg:frame:3"}
+
+
 def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None:
     expected_cameras = [
         SimpleNamespace(id=camera_id) for camera_id in range(1, 4)
@@ -89,6 +93,10 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
     )
     monkeypatch.setattr(
         "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid in {101, 199},
+    )
+
+    monkeypatch.setattr(
+        "app.tasks.recorder._recording_output_has_data", lambda path: path == "/test/1.mp4",
     )
 
     result = _recording_health_snapshot(
@@ -101,6 +109,12 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "cameras_expected": 3,
         "cameras_recording": 1,
         "cameras_missing": 2,
+        "cameras_frame_fresh": 2,
+        "cameras_frame_stale": 1,
+        "recorders_missing_with_fresh_frame": 2,
+        "recorders_active_without_fresh_frame": 1,
+        "recorder_failure_reasons": {},
+        "recorders_missing_without_failure_reason": 2,
         "status": "degraded",
     }
     assert "camera_ids" not in result

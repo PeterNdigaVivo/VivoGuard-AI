@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import time
+from uuid import uuid4
 
 import redis
 
@@ -149,6 +150,20 @@ if redis.call('get', KEYS[2]) == ARGV[1] then
   released = released + redis.call('del', KEYS[2])
 end
 return released
+"""
+
+_RELEASE_STALLED_PENDING_LUA = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if redis.call('exists', KEYS[2]) == 1 then
+  return 0
+end
+local ttl = redis.call('ttl', KEYS[1])
+if ttl > tonumber(ARGV[2]) and ttl <= tonumber(ARGV[3]) then
+  return redis.call('del', KEYS[1])
+end
+return 0
 """
 
 # Sweep safety — we only clear a lock when hb is missing AND the lock
@@ -516,6 +531,17 @@ def _release_owned_task(
     return int(r.eval(_RELEASE_LUA, 2, lock, heartbeat, task_id))
 
 
+def _release_pending_task(
+    r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
+    max_ttl: int = PENDING_LOCK_TTL,
+) -> int:
+    """Release the exact reservation only while it is still pending."""
+    return int(r.eval(
+        _RELEASE_STALLED_PENDING_LUA, 2, lock, heartbeat,
+        task_id, LOCK_TTL, max_ttl,
+    ))
+
+
 def _sweep_stale_locks(r: redis.Redis) -> int:
     """Self-healing sweep. A lock is stale when its heartbeat key is
     missing AND the lock has ≤ SWEEP_TTL_THRESHOLD_S seconds remaining.
@@ -732,31 +758,32 @@ def supervise_all() -> None:
                 cooling_down.append(int(cam.id))
                 continue
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
-        # SET NX with TTL — atomic acquire. Value is a placeholder until
-        # we know the real task_id; stamped below.
-        placeholder = f"pending:{int(time.time())}"
-        if r.set(lock, placeholder, ex=PENDING_LOCK_TTL, nx=True):
+        # Reserve the exact task ID before the broker can deliver it.
+        task_id = str(uuid4())
+        if r.set(lock, task_id, ex=PENDING_LOCK_TTL, nx=True):
             try:
                 max_seconds, priority = _task_profile(cam)
-                ar = run_camera_inference.apply_async(
+                run_camera_inference.apply_async(
                     args=[cam.id],
                     kwargs={"max_seconds": max_seconds},
                     queue=_inference_queue(int(cam.id)),
                     priority=priority,
+                    task_id=task_id,
                 )
-                # Stamp the reservation with the real task_id.  It remains a
-                # long pending lease until that exact task atomically claims
-                # it at worker start.
-                r.set(lock, ar.id, ex=PENDING_LOCK_TTL)
                 enqueued.append(cam.id)
-            except Exception as e:
-                # apply_async failed (broker hiccup). Release the lock
-                # so the next tick re-acquires immediately rather than
-                # waiting LOCK_TTL.
-                log.exception("supervise_all: enqueue failed cam=%s: %s",
-                              cam.id, e)
-                try: r.delete(lock)
-                except Exception: pass
+            except Exception as exc:
+                log.warning("supervise_all: enqueue failed cam=%s: %s",
+                            cam.id, type(exc).__name__)
+                # The broker may have delivered the task before its response
+                # failed. Keep any lease already claimed by a worker.
+                try:
+                    _release_pending_task(
+                        r, lock=lock,
+                        heartbeat=HB_KEY_FMT.format(camera_id=cam.id),
+                        task_id=task_id,
+                    )
+                except Exception:
+                    log.warning("supervise_all: pending cleanup failed cam=%s", cam.id)
         else:
             skipped.append(cam.id)
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
