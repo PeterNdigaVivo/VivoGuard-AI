@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.database import Base
-from app.api.alerts import _to_alert_out, alerts_summary, resolve_all
+from app.api.alerts import _to_alert_out, alert_clip, alerts_summary, resolve_all
 from app.models import (
     Alert, AlertQualityControl, AlertReviewDecision, AssuranceCase, Camera,
     DetectionEvent, RecordingClip, User,
@@ -105,6 +107,52 @@ def test_alert_without_video_surfaces_snapshot_timeline_fallback(db):
     assert item.snapshot_count == 2
     assert item.snapshot_paths == ["/snapshots/one.jpg", "/snapshots/two.jpg"]
 
+
+@pytest.mark.parametrize(
+    "storage", ["valid", "missing", "empty", "directory", "outside", "outside_link"],
+)
+def test_alert_feed_and_playback_agree_on_clip_availability(db, tmp_path, monkeypatch, storage):
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    directory = tmp_path / "alert_clips"
+    directory.mkdir()
+    clip = directory / "incident.mp4"
+    if storage == "valid":
+        clip.write_bytes(b"test evidence")
+    elif storage == "empty":
+        clip.touch()
+    elif storage == "directory":
+        clip.mkdir()
+    elif storage in {"outside", "outside_link"}:
+        outside = tmp_path / "alert_clips_sibling" / "incident.mp4"
+        outside.parent.mkdir()
+        outside.write_bytes(b"unrelated test file")
+        if storage == "outside":
+            clip = outside
+        else:
+            try:
+                clip.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows denied symbolic-link creation")
+                raise
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=10)
+    event.extra = {"alert_clip_path": str(clip)}
+
+    item = _to_alert_out(alert, event, cam, None, None)
+
+    if storage == "valid":
+        assert item.clip_url == f"/api/alerts/{alert.id}/clip"
+        assert item.clip_status == "ready"
+        response = alert_clip(alert.id, db=db, _u=None)
+        assert response.path == str(clip.resolve())
+        assert response.media_type == "video/mp4"
+    else:
+        assert item.clip_url is None
+        assert item.clip_status == "unavailable"
+        with pytest.raises(HTTPException) as exc:
+            alert_clip(alert.id, db=db, _u=None)
+        assert exc.value.status_code == 404
 
 def test_operational_summary_separates_quarantined_evidence(db):
     cam = _camera(db)
