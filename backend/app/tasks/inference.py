@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import time
+from uuid import uuid4
 
 import redis
 
@@ -151,9 +152,33 @@ end
 return released
 """
 
-# Sweep safety — we only clear a lock when hb is missing AND the lock
-# has ≤ this many seconds of TTL left. The lock-TTL grace prevents
-# racing a still-starting task whose hb hasn't landed yet.
+_RELEASE_STALLED_PENDING_LUA = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if redis.call('exists', KEYS[2]) == 1 then
+  return 0
+end
+local ttl = redis.call('ttl', KEYS[1])
+if ttl > tonumber(ARGV[2]) and ttl <= tonumber(ARGV[3]) then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+_SWEEP_STALE_LUA = """
+if redis.call('exists', KEYS[2]) == 1 then
+  return -1
+end
+local ttl = redis.call('ttl', KEYS[1])
+if ttl < 0 or ttl > tonumber(ARGV[1]) then
+  return -1
+end
+redis.call('del', KEYS[1])
+return ttl
+"""
+
+
 SWEEP_TTL_THRESHOLD_S = 30
 
 
@@ -516,23 +541,22 @@ def _release_owned_task(
     return int(r.eval(_RELEASE_LUA, 2, lock, heartbeat, task_id))
 
 
+def _release_pending_task(
+    r: redis.Redis, *, lock: str, heartbeat: str, task_id: str,
+    max_ttl: int = PENDING_LOCK_TTL,
+) -> int:
+    """Release the exact reservation only while it is still pending."""
+    return int(r.eval(
+        _RELEASE_STALLED_PENDING_LUA, 2, lock, heartbeat,
+        task_id, LOCK_TTL, max_ttl,
+    ))
+
+
 def _sweep_stale_locks(r: redis.Redis) -> int:
-    """Self-healing sweep. A lock is stale when its heartbeat key is
-    missing AND the lock has ≤ SWEEP_TTL_THRESHOLD_S seconds remaining.
+    """Clear expiring leases only while no worker heartbeat exists.
 
-    Why both conditions are required for safety (no double-inference):
-      • HB_TTL (180s) > LOCK_TTL (150s) > RUN_SECONDS (120s). A live
-        worker's hb cannot expire mid-run.
-      • If hb is missing, the task is dead OR never started. Cannot be
-        running.
-      • The lock-TTL grace (≤30s) avoids deleting a lock during the
-        first ~120s of its life when a real task could theoretically
-        still be starting up between `.set(lock)` and `r.set(hb)`.
-        Worst case the sweep waits one extra tick (30s) before clearing
-        — bounded latency, zero risk.
-
-    Returns the count of locks cleared (also surfaced in the health
-    breadcrumb for the URGENT alerter).
+    The heartbeat, TTL, and deletion must be checked together because a
+    worker can claim a reservation while the supervisor is sweeping.
     """
     cleared = 0
     try:
@@ -540,24 +564,21 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
             try:
                 key_s = key.decode() if isinstance(key, bytes) else key
                 cam_id = int(key_s.rsplit(":", 1)[-1])
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 continue
-            hb_present = bool(r.get(HB_KEY_FMT.format(camera_id=cam_id)))
-            if hb_present:
-                continue                # live worker — leave alone
-            ttl = r.ttl(key)            # remaining lock TTL in seconds
-            if ttl is None or ttl < 0:
-                continue                # already expiring / Redis quirk
-            if ttl <= SWEEP_TTL_THRESHOLD_S:
-                if r.delete(key):
-                    cleared += 1
-                    log.warning(
-                        "supervise_all: cleared stale lock cam=%s "
-                        "(no hb, ttl was %ss)", cam_id, ttl)
-    except Exception as e:
-        # Sweep failure must not kill the supervisor — the normal
-        # SET NX path still works without the heal.
-        log.warning("supervise_all: stale-lock sweep failed: %s", e)
+            ttl = int(r.eval(
+                _SWEEP_STALE_LUA, 2, key, HB_KEY_FMT.format(camera_id=cam_id),
+                SWEEP_TTL_THRESHOLD_S,
+            ))
+            if ttl >= 0:
+                cleared += 1
+                log.warning(
+                    "supervise_all: cleared stale lock cam=%s "
+                    "(no hb, ttl was %ss)", cam_id, ttl,
+                )
+    except Exception as exc:
+        # SET NX still works when the sweep is temporarily unavailable.
+        log.warning("supervise_all: stale-lock sweep failed: %s", type(exc).__name__)
     return cleared
 
 
@@ -732,31 +753,32 @@ def supervise_all() -> None:
                 cooling_down.append(int(cam.id))
                 continue
         lock = LOCK_KEY_FMT.format(camera_id=cam.id)
-        # SET NX with TTL — atomic acquire. Value is a placeholder until
-        # we know the real task_id; stamped below.
-        placeholder = f"pending:{int(time.time())}"
-        if r.set(lock, placeholder, ex=PENDING_LOCK_TTL, nx=True):
+        # Reserve the exact task ID before the broker can deliver it.
+        task_id = str(uuid4())
+        if r.set(lock, task_id, ex=PENDING_LOCK_TTL, nx=True):
             try:
                 max_seconds, priority = _task_profile(cam)
-                ar = run_camera_inference.apply_async(
+                run_camera_inference.apply_async(
                     args=[cam.id],
                     kwargs={"max_seconds": max_seconds},
                     queue=_inference_queue(int(cam.id)),
                     priority=priority,
+                    task_id=task_id,
                 )
-                # Stamp the reservation with the real task_id.  It remains a
-                # long pending lease until that exact task atomically claims
-                # it at worker start.
-                r.set(lock, ar.id, ex=PENDING_LOCK_TTL)
                 enqueued.append(cam.id)
-            except Exception as e:
-                # apply_async failed (broker hiccup). Release the lock
-                # so the next tick re-acquires immediately rather than
-                # waiting LOCK_TTL.
-                log.exception("supervise_all: enqueue failed cam=%s: %s",
-                              cam.id, e)
-                try: r.delete(lock)
-                except Exception: pass
+            except Exception as exc:
+                log.warning("supervise_all: enqueue failed cam=%s: %s",
+                            cam.id, type(exc).__name__)
+                # The broker may have delivered the task before its response
+                # failed. Keep any lease already claimed by a worker.
+                try:
+                    _release_pending_task(
+                        r, lock=lock,
+                        heartbeat=HB_KEY_FMT.format(camera_id=cam.id),
+                        task_id=task_id,
+                    )
+                except Exception:
+                    log.warning("supervise_all: pending cleanup failed cam=%s", cam.id)
         else:
             skipped.append(cam.id)
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "

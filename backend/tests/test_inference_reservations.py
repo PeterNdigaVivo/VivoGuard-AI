@@ -1,5 +1,8 @@
 """Regression tests for restart-safe, backlog-safe inference reservations."""
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from app.tasks import inference
 
@@ -25,7 +28,29 @@ class FakeRedis:
                     self.ttls.pop(key, None)
                     released += 1
             return released
+        if script == inference._RELEASE_STALLED_PENDING_LUA:
+            if self.values.get(lock) != task_id:
+                return 0
+            if heartbeat in self.values:
+                return 0
+            ttl = self.ttls.get(lock, -2)
+            if ttl > int(ttls[0]) and ttl <= int(ttls[1]):
+                self.values.pop(lock, None)
+                self.ttls.pop(lock, None)
+                return 1
+            return 0
         raise AssertionError("unexpected Lua script")
+
+    def get(self, key: str):
+        return self.values.get(key)
+
+
+    def set(self, key: str, value: str, *, ex: int, nx: bool = False):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        self.ttls[key] = ex
+        return True
 
 
 class FakePipeline:
@@ -89,6 +114,40 @@ class FakeLastRunRedis:
 
     def execute(self):
         return [self.values.get(int(key.rsplit(":", 1)[-1])) for key in self.keys]
+
+
+def test_stale_lock_sweep_rechecks_heartbeat_and_ttl_at_deletion():
+    class SweepRedis(FakeRedis):
+        def scan_iter(self, *, match, count):
+            assert match == "vg:inference-lock:*"
+            assert count == 200
+            return iter(tuple(self.values))
+
+        def eval(self, script, key_count, lock, heartbeat, max_ttl):
+            assert script == inference._SWEEP_STALE_LUA
+            assert key_count == 2
+            assert max_ttl == inference.SWEEP_TTL_THRESHOLD_S
+            ttl = self.ttls[lock]
+            if lock.endswith(":2"):
+                self.values[heartbeat] = self.values[lock]
+            if heartbeat in self.values or not 0 <= ttl <= max_ttl:
+                return -1
+            self.values.pop(lock)
+            return ttl
+
+    redis = SweepRedis()
+    keys = {
+        i: inference.LOCK_KEY_FMT.format(camera_id=i) for i in range(1, 6)
+    }
+    redis.values = {key: "task" for key in keys.values()}
+    redis.ttls = {
+        keys[1]: 0, keys[2]: 10, keys[3]: 30, keys[4]: 31, keys[5]: -1,
+    }
+
+    assert inference._sweep_stale_locks(redis) == 2
+    assert keys[1] not in redis.values and keys[3] not in redis.values
+    assert all(keys[i] in redis.values for i in (2, 4, 5))
+    assert inference.HB_KEY_FMT.format(camera_id=2) in redis.values
 
 
 def test_only_reserved_task_can_claim_and_claim_shortens_active_lease():
@@ -388,3 +447,50 @@ def test_supervisor_publishes_pinned_cameras_between_critical_and_rest():
     ])
 
     assert [row.id for row in ordered] == [3, 2, 4, 1]
+
+
+@pytest.mark.parametrize("publish_state", ["claimed", "finished", "failed", "claimed_then_failed"])
+def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_state):
+    redis = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=7)
+    heartbeat = inference.HB_KEY_FMT.format(camera_id=7)
+    camera = SimpleNamespace(id=7, detection_configs=[], zones=[])
+    session = MagicMock()
+    query = session.__enter__.return_value.query.return_value
+    query.options.return_value.filter.return_value.all.return_value = [camera]
+    monkeypatch.setattr("app.database.SessionLocal", lambda: session)
+    monkeypatch.setattr(inference, "_redis", lambda: redis)
+    monkeypatch.setattr(inference, "_sweep_stale_locks", lambda _redis: 0)
+    monkeypatch.setattr(inference, "_camera_ids_with_fresh_frames", lambda *_: {7})
+    monkeypatch.setattr(inference, "_last_run_timestamps", lambda *_: {7: None})
+    monkeypatch.setattr(inference, "_reservation_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_critical_gap_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_standard_gap_health", lambda *_: {})
+    monkeypatch.setattr(inference, "_write_health", lambda *_, **__: None)
+
+    published: list[tuple[str, str | None]] = []
+
+    def publish(*, task_id, **_kwargs):
+        published.append((task_id, redis.get(lock)))
+        if publish_state != "failed":
+            assert inference._claim_reserved_task(
+                redis, lock=lock, heartbeat=heartbeat, task_id=task_id,
+            )
+        if publish_state == "finished":
+            inference._release_owned_task(redis, lock=lock, heartbeat=heartbeat, task_id=task_id)
+        if publish_state in {"failed", "claimed_then_failed"}:
+            raise RuntimeError("broker response failed")
+
+    monkeypatch.setattr(inference.run_camera_inference, "apply_async", publish)
+
+    inference.supervise_all.run()
+
+    assert len(published) == 1
+    task_id, reserved_id = published[0]
+    assert task_id and task_id == reserved_id
+    if publish_state in {"failed", "finished"}:
+        assert lock not in redis.values
+        assert heartbeat not in redis.values
+    else:
+        assert redis.get(lock) == redis.get(heartbeat) == task_id
+        assert redis.ttls[lock] == inference.LOCK_TTL
