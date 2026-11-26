@@ -134,9 +134,19 @@ end
 return 0
 """
 
-# Sweep safety — we only clear a lock when hb is missing AND the lock
-# has ≤ this many seconds of TTL left. The lock-TTL grace prevents
-# racing a still-starting task whose hb hasn't landed yet.
+_SWEEP_STALE_LUA = """
+if redis.call('exists', KEYS[2]) == 1 then
+  return -1
+end
+local ttl = redis.call('ttl', KEYS[1])
+if ttl < 0 or ttl > tonumber(ARGV[1]) then
+  return -1
+end
+redis.call('del', KEYS[1])
+return ttl
+"""
+
+
 SWEEP_TTL_THRESHOLD_S = 30
 
 
@@ -529,22 +539,10 @@ def _repair_stalled_critical_reservations(
 
 
 def _sweep_stale_locks(r: redis.Redis) -> int:
-    """Self-healing sweep. A lock is stale when its heartbeat key is
-    missing AND the lock has ≤ SWEEP_TTL_THRESHOLD_S seconds remaining.
+    """Clear expiring leases only while no worker heartbeat exists.
 
-    Why both conditions are required for safety (no double-inference):
-      • HB_TTL (180s) > LOCK_TTL (150s) > RUN_SECONDS (120s). A live
-        worker's hb cannot expire mid-run.
-      • If hb is missing, the task is dead OR never started. Cannot be
-        running.
-      • The lock-TTL grace (≤30s) avoids deleting a lock during the
-        first ~120s of its life when a real task could theoretically
-        still be starting up between `.set(lock)` and `r.set(hb)`.
-        Worst case the sweep waits one extra tick (30s) before clearing
-        — bounded latency, zero risk.
-
-    Returns the count of locks cleared (also surfaced in the health
-    breadcrumb for the URGENT alerter).
+    The heartbeat, TTL, and deletion must be checked together because a
+    worker can claim a reservation while the supervisor is sweeping.
     """
     cleared = 0
     try:
@@ -552,24 +550,21 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
             try:
                 key_s = key.decode() if isinstance(key, bytes) else key
                 cam_id = int(key_s.rsplit(":", 1)[-1])
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 continue
-            hb_present = bool(r.get(HB_KEY_FMT.format(camera_id=cam_id)))
-            if hb_present:
-                continue                # live worker — leave alone
-            ttl = r.ttl(key)            # remaining lock TTL in seconds
-            if ttl is None or ttl < 0:
-                continue                # already expiring / Redis quirk
-            if ttl <= SWEEP_TTL_THRESHOLD_S:
-                if r.delete(key):
-                    cleared += 1
-                    log.warning(
-                        "supervise_all: cleared stale lock cam=%s "
-                        "(no hb, ttl was %ss)", cam_id, ttl)
-    except Exception as e:
-        # Sweep failure must not kill the supervisor — the normal
-        # SET NX path still works without the heal.
-        log.warning("supervise_all: stale-lock sweep failed: %s", e)
+            ttl = int(r.eval(
+                _SWEEP_STALE_LUA, 2, key, HB_KEY_FMT.format(camera_id=cam_id),
+                SWEEP_TTL_THRESHOLD_S,
+            ))
+            if ttl >= 0:
+                cleared += 1
+                log.warning(
+                    "supervise_all: cleared stale lock cam=%s "
+                    "(no hb, ttl was %ss)", cam_id, ttl,
+                )
+    except Exception as exc:
+        # SET NX still works when the sweep is temporarily unavailable.
+        log.warning("supervise_all: stale-lock sweep failed: %s", type(exc).__name__)
     return cleared
 
 

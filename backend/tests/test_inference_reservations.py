@@ -116,6 +116,40 @@ class FakeLastRunRedis:
         return [self.values.get(int(key.rsplit(":", 1)[-1])) for key in self.keys]
 
 
+def test_stale_lock_sweep_rechecks_heartbeat_and_ttl_at_deletion():
+    class SweepRedis(FakeRedis):
+        def scan_iter(self, *, match, count):
+            assert match == "vg:inference-lock:*"
+            assert count == 200
+            return iter(tuple(self.values))
+
+        def eval(self, script, key_count, lock, heartbeat, max_ttl):
+            assert script == inference._SWEEP_STALE_LUA
+            assert key_count == 2
+            assert max_ttl == inference.SWEEP_TTL_THRESHOLD_S
+            ttl = self.ttls[lock]
+            if lock.endswith(":2"):
+                self.values[heartbeat] = self.values[lock]
+            if heartbeat in self.values or not 0 <= ttl <= max_ttl:
+                return -1
+            self.values.pop(lock)
+            return ttl
+
+    redis = SweepRedis()
+    keys = {
+        i: inference.LOCK_KEY_FMT.format(camera_id=i) for i in range(1, 6)
+    }
+    redis.values = {key: "task" for key in keys.values()}
+    redis.ttls = {
+        keys[1]: 0, keys[2]: 10, keys[3]: 30, keys[4]: 31, keys[5]: -1,
+    }
+
+    assert inference._sweep_stale_locks(redis) == 2
+    assert keys[1] not in redis.values and keys[3] not in redis.values
+    assert all(keys[i] in redis.values for i in (2, 4, 5))
+    assert inference.HB_KEY_FMT.format(camera_id=2) in redis.values
+
+
 def test_only_reserved_task_can_claim_and_claim_shortens_active_lease():
     r = FakeRedis()
     r.values["lock"] = "current-task"
