@@ -970,40 +970,43 @@ def feedback_stats(
 def deploy_model(model_id: int, payload: DeployModelIn,
                  db: Session = Depends(get_db),
                  _u=Depends(require_role("admin", "operator"))):
-    m = db.get(AIModel, model_id)
-    if not m:
-        raise HTTPException(404, "model not found")
-    affected: list[int] = []
-    for cid in payload.camera_ids:
-        cam = db.get(Camera, cid)
-        if cam:
-            cam.ai_model_id = model_id
-            affected.append(cam.id)
-    m.deployed = True
+    """Starts a CANARY on the given cameras (at most
+    MODEL_CANARY_MAX_CAMERAS). Direct deployment no longer exists:
+    promotion is a separate, manual step after evaluation."""
+    from app.services.model_rollout import RolloutError, start_canary
+    try:
+        r = start_canary(db, model_id, list(payload.camera_ids), user_id=_u.id)
+    except RolloutError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc))
     db.commit()
-    return affected
+    return list(r.camera_ids_json or [])
 
 
 @router.post("/models/{model_id}/rollback")
 def rollback_model(model_id: int, db: Session = Depends(get_db),
                    _u=Depends(require_role("admin"))):
-    """Find the previous model with the same `name` and re-deploy it."""
+    """Roll back every active rollout of this model: each camera returns
+    to exactly the model it had before (often the base model). Cameras
+    assigned outside a rollout go back to the base model."""
+    from app.models.model_rollout import ModelRollout
+    from app.services.model_rollout import rollback
     m = db.get(AIModel, model_id)
     if not m:
         raise HTTPException(404, "model not found")
-    prev = (db.query(AIModel)
-              .filter(AIModel.name == m.name, AIModel.id < m.id)
-              .order_by(AIModel.id.desc())
-              .first())
-    if not prev:
-        raise HTTPException(400, "no previous version exists")
-    cams = db.query(Camera).filter(Camera.ai_model_id == m.id).all()
-    for c in cams:
-        c.ai_model_id = prev.id
+    touched: list[int] = []
+    for r in (db.query(ModelRollout)
+                .filter(ModelRollout.model_id == m.id,
+                        ModelRollout.stage != "rolled_back").all()):
+        touched += list(r.camera_ids_json or [])
+        rollback(db, r, user_id=_u.id)
+    for c in db.query(Camera).filter(Camera.ai_model_id == m.id).all():
+        c.ai_model_id = None
+        touched.append(c.id)
     m.deployed = False
-    prev.deployed = True
     db.commit()
-    return {"rolled_back_to": prev.id, "cameras": [c.id for c in cams]}
+    return {"rolled_back_to": "previous assignment / base model",
+            "cameras": sorted(set(touched))}
 
 
 @router.post("/models/{model_id}/export")
@@ -1226,20 +1229,18 @@ def shutter_train_status(store_id: int,
 def shutter_deploy(model_id: int, camera_ids: list[int],
                    db: Session = Depends(get_db),
                    _u=Depends(require_role("admin", "operator"))):
-    """Assign a trained shutter model to the given cameras so the
-    ShutterDetector uses it instead of the rule-based path."""
-    model = db.get(AIModel, model_id)
-    if not model:
+    """REFUSED. This used to write a yolov8n-cls classifier into
+    Camera.ai_model_id, which replaced the camera's detector and blinded
+    every person-based detector on it; nothing in live inference loads
+    a shutter classifier."""
+    if db.get(AIModel, model_id) is None:
         raise HTTPException(404, "model not found")
-    updated = []
-    for cid in camera_ids:
-        cam = db.get(Camera, cid)
-        if cam:
-            cam.ai_model_id = model_id
-            updated.append(cid)
-    model.deployed = True
-    db.commit()
-    return {"deployed_to": updated, "model_id": model_id}
+    raise HTTPException(
+        409,
+        "Classifier models cannot be assigned to cameras: one model drives "
+        "each camera's person pipeline, and a classifier would blind it. "
+        "Detector models go through a canary rollout.")
+
 
 
 # ====================================================================
@@ -1451,20 +1452,18 @@ def uniform_train_status(store_id: int,
 def uniform_deploy(model_id: int, camera_ids: list[int],
                    db: Session = Depends(get_db),
                    _u=Depends(require_role("admin", "operator"))):
-    """Assign a trained uniform model to the given cameras so the
-    UniformComplianceDetector uses it instead of the colour rules."""
-    model = db.get(AIModel, model_id)
-    if not model:
+    """REFUSED. Same defect as /shutter/deploy: it assigned a classifier
+    as every listed camera's detector. Uniform colour rules stay in
+    force; a uniform classifier needs a crop-classification consumer
+    before it can be used."""
+    if db.get(AIModel, model_id) is None:
         raise HTTPException(404, "model not found")
-    updated = []
-    for cid in camera_ids:
-        cam = db.get(Camera, cid)
-        if cam:
-            cam.ai_model_id = model_id
-            updated.append(cid)
-    model.deployed = True
-    db.commit()
-    return {"deployed_to": updated, "model_id": model_id}
+    raise HTTPException(
+        409,
+        "Classifier models cannot be assigned to cameras: one model drives "
+        "each camera's person pipeline, and a classifier would blind it. "
+        "Detector models go through a canary rollout.")
+
 
 
 # ====================================================================
@@ -1793,10 +1792,17 @@ def chain_deploy(detector_type: str, model_id: int,
             f"(repaired {repaired} camera(s) silently broken by prior deploys)"
         )
 
-    cam_ids = _chain_camera_targets(db, detector_type)
-    cams = db.query(Camera).filter(Camera.id.in_(cam_ids)).all() if cam_ids else []
-    for cam in cams:
-        cam.ai_model_id = model_id
+    from app.config import settings as _settings
+    # Fleet-wide assignment removed: a detector model reaches cameras only
+    # through a canary (POST /model-rollouts/canary) and a manual promote.
+    if repaired:
+        db.commit()
+    raise HTTPException(
+        409, "Fleet-wide deploy is disabled. Start a canary on up to "
+             f"{int(getattr(_settings, 'model_canary_max_cameras', 3))} "
+             "cameras, evaluate it, then promote.")
+    cam_ids = _chain_camera_targets(db, detector_type)  # noqa: F841 (unreachable)
+    cams = []
 
     # Mark prior chain models for this detector as undeployed.
     (db.query(AIModel)

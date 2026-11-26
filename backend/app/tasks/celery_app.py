@@ -377,13 +377,8 @@ celery_app.conf.update(
             "task": "training.weekly_retrain_all",
             "schedule": timedelta(hours=6),
         },
-        # Hourly promotion gate. Walks every non-deployed candidate
-        # AIModel and flips deployment when its 7-day metrics beat
-        # the sibling production model on precision + fp_rate.
-        "evaluate-pending-promotions-hourly": {
-            "task": "training.evaluate_pending_promotions",
-            "schedule": timedelta(hours=1),
-        },
+        # evaluate-pending-promotions-hourly removed: promotion is manual
+        # after a canary (app.services.model_rollout).
         # The fix that completes the self-learning loop. Every 5 min,
         # picks up any TrainingJob rows sitting in status='queued',
         # marks them running, and dispatches them to the alerts

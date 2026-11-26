@@ -130,10 +130,24 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
     #      individually re-pointed at it;
     #   3. otherwise the base model (settings.default_model, yolov8n.pt).
     weights: str | None = None
+    used_model_id: int | None = None
     if cam.ai_model_id:
         m = db.get(AIModel, cam.ai_model_id)
-        if m and m.weights_path and os.path.exists(m.weights_path):
+        # One model drives the whole person pipeline on this camera, so a
+        # classifier or a detector without a 'person' class would blind
+        # every person-based detector. Such an assignment falls back to
+        # the base COCO model (the universal fallback) instead.
+        from app.services.model_rollout import person_compatible
+        ok, why = person_compatible(m)
+        if ok:
             weights = m.weights_path
+            used_model_id = m.id
+        else:
+            _log_throttled(
+                f"model-fallback:{camera_id}:{cam.ai_model_id}", logging.WARNING,
+                "camera %s assigned model %s is not usable for the person "
+                "pipeline (%s); using the base model", camera_id,
+                cam.ai_model_id, why)
     # The chain-wide deployed-model fallback is OFF by default: the deployed
     # retail model (v25) is a specialist whose classes are NOT COCO "person",
     # so routing the GENERAL inference pass through it makes every person-based
@@ -143,7 +157,14 @@ def _load_camera_state(db: Session, camera_id: int) -> tuple[Camera | None, list
         weights = _deployed_weights(db)
     if weights is None:
         weights = settings.default_model
+    # Events are attributed to the model that ACTUALLY ran (None = base),
+    # not to the assignment, so canary metrics measure the right model.
+    MODEL_USED[camera_id] = used_model_id
     return cam, zones, cfg, weights
+
+
+# camera_id -> AIModel id the worker actually loaded (None = base model).
+MODEL_USED: dict[int, int | None] = {}
 
 
 def _deployed_weights(db: Session) -> str | None:
@@ -1005,7 +1026,8 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
                                     ev.detection_type, camera_id,
                                     ev.track_id, _fs, _need)
                         eid, alert_id = _persist_event(
-                                             db, camera_id, ev, cam.ai_model_id,
+                                             db, camera_id, ev,
+                                             MODEL_USED.get(camera_id),
                                              frame_bgr=frame, store_name=store_name,
                                              camera_name=cam.name, store_id=store_id,
                                              suppress_alert=suppress,

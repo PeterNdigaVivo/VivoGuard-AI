@@ -103,6 +103,7 @@ _OPTIONAL_ROUTERS = [
     ("app.api.labels",             ["router"]),
     ("app.api.training",           ["router"]),
     ("app.api.training_evidence",  ["router"]),
+    ("app.api.model_rollouts",     ["router"]),
     ("app.api.system",             ["router"]),
     ("app.api.system_health",      ["router"]),
     ("app.api.websockets",         ["router"]),

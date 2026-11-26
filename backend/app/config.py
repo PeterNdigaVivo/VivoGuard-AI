@@ -160,6 +160,12 @@ class Settings(BaseSettings):
     # When True the reviewer must be a different person from the operator
     # who gave the verdict (off by default: single-operator workflow).
     training_review_require_different_user: bool = False
+    # Model rollout (app.services.model_rollout): canary size, the reviewed
+    # canary alerts needed before promotion, and how far canary precision
+    # may sit below the same cameras' baseline (0 = must not be worse).
+    model_canary_max_cameras: int = 3
+    model_canary_min_reviewed: int = 30
+    model_canary_precision_tolerance: float = 0.0
     # Anti-catastrophic-forgetting replay: fraction of the parent model's
     # original dataset sampled into every fine-tune (train split only).
     # 0.18 sits inside the standard 15-20% replay band.
