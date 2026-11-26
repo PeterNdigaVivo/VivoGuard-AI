@@ -184,8 +184,14 @@ def stream_health(camera_id: int, db: Session = Depends(get_db),
     r = _redis.from_url(_s.redis_url)
     raw_health = r.get(f"vg:health:{camera_id}")
     health = json.loads(raw_health) if raw_health else None
-    hb_raw = r.get(f"vg:inference-hb:{camera_id}")
-    inference_hb = float(hb_raw) if hb_raw else None
+    # vg:inference-hb holds the claiming task id, not a time; float() on it
+    # raised and turned this endpoint into a 500 while inference ran. The
+    # last-run key is the worker's real "processed frames at" timestamp.
+    hb_raw = r.get(f"vg:inference:last-run:{camera_id}")
+    try:
+        inference_hb = float(hb_raw) if hb_raw else None
+    except (TypeError, ValueError):
+        inference_hb = None
 
     now = _t.time()
     # last_frame_at = REAL JPEG arrival time (push_frame writes this).
@@ -213,7 +219,7 @@ def stream_health(camera_id: int, db: Session = Depends(get_db),
             (now - float(last_health_at)) if last_health_at else None,
         "error": (health or {}).get("error"),
         "inference_last_heartbeat": inference_hb,
-        "inference_running": bool(inference_hb and (now - inference_hb) < 60),
+        "inference_running": bool(inference_hb and (now - inference_hb) < 300),
     }
 
 
@@ -318,6 +324,18 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "inference_batch_shadow": inference_batch_shadow,
         "recording_pipeline": recording_pipeline,
     }
+
+
+@router.get("/fleet")
+def fleet(db: Session = Depends(get_db), _u=Depends(get_current_user)):
+    """Canonical fleet totals, health state and coverage gaps.
+
+    The single source for camera totals on Alerts, System Health and
+    Cameras (app.services.fleet). Coverage gaps are listed here, never
+    as incidents.
+    """
+    from app.services.fleet import fleet_status
+    return fleet_status(db, FrameBuffer().r)
 
 
 @router.get("/proof-of-life")

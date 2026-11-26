@@ -6,6 +6,7 @@ import { useAuth } from '@/auth/AuthContext'
 import { useTheme } from '@/contexts/ThemeContext'
 import AlertNotificationBell from '@/components/AlertNotificationBell'
 import { alerts as alertsApi, type Alert } from '@/api/alerts'
+import { incidents as incidentsApi } from '@/api/incidents'
 import { isSystemAdmin } from '@/lib/systemAdmins'
 
 const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
@@ -15,7 +16,9 @@ const NAV: { to: string; label: string; systemAdminOnly?: boolean }[] = [
   { to: '/alerts',   label: 'Alerts' },
   { to: '/search',   label: 'Investigate' },
   { to: '/training', label: 'AI Training' },
+  { to: '/training/review', label: 'Training Review' },
   { to: '/detectors', label: 'Detectors', systemAdminOnly: true },
+  { to: '/models',    label: 'Models', systemAdminOnly: true },
   { to: '/users',     label: 'Users', systemAdminOnly: true },
   { to: '/system',    label: 'System Health', systemAdminOnly: true },
   { to: '/evaluation', label: 'Model Evaluation', systemAdminOnly: true },
@@ -46,14 +49,25 @@ export default function Layout() {
   }, [ribbonEl])
   useEffect(() => {
     let alive = true
-    const refresh = () => alertsApi.summary()
+    // With the incident lifecycle on, the badge counts open URGENT
+    // incidents — the same number as the Alerts page summary bar —
+    // instead of raw alert rows. Otherwise the legacy alert summary.
+    const refresh = () => incidentsApi.summary()
       .then(s => {
+        if (!s.lifecycle_enabled) throw new Error('legacy')
         if (!alive) return
-        setUrgentBadge(s.unread_urgent)
-        setUrgentCount(s.urgent ?? 0)
-        setCriticalCount(s.critical_today ?? 0)
+        setUrgentBadge(s.urgent)
+        setUrgentCount(s.urgent)
+        setCriticalCount(s.urgent)
       })
-      .catch(() => {})
+      .catch(() => alertsApi.summary()
+        .then(s => {
+          if (!alive) return
+          setUrgentBadge(s.unread_urgent)
+          setUrgentCount(s.urgent ?? 0)
+          setCriticalCount(s.critical_today ?? 0)
+        })
+        .catch(() => {}))
     refresh()
     const t = setInterval(refresh, 60_000)
     const unsub = alertsApi.subscribe(() => refresh())

@@ -181,13 +181,30 @@ _DEFAULTS: dict[str, dict] = {
 }
 
 
+def cameras_section(db: Session, r, now: float) -> dict:
+    """Cameras block of the snapshot, from the canonical fleet definition
+    shared with Alerts and Cameras (app.services.fleet). Keys kept for
+    the daily email and the System Health page."""
+    from app.services.fleet import collect_inputs, summarize
+    cams, pipeline = collect_inputs(db, r)
+    s = summarize(cams, now=now, pipeline=pipeline)
+    problem = [g["camera_name"] for g in s.coverage_gaps
+               if g["state"] in ("offline", "stale")]
+    return {"total": s.total, "streaming": s.fresh,
+            "offline": s.stale + s.offline,
+            "stale": s.stale, "unconfigured": s.unconfigured,
+            "configured": s.configured,
+            "offline_names": problem[:25],
+            "ai_enabled_active": s.ai_active,
+            "health": s.health, "health_reasons": s.health_reasons}
+
+
 def collect_system_health(db: Session) -> dict:
     """The full snapshot served by GET /system-health and rendered into
     the daily email. Pure read — no state changes anywhere. Sections
     that fail land in `collection_errors` with their default values and
     a full traceback in the api logs."""
-    from app.models import AIModel, Alert, Camera, DetectionEvent, TrainingJob
-    from app.stream.frame_buffer import FrameBuffer
+    from app.models import AIModel, Alert, DetectionEvent, TrainingJob
 
     now_utc = datetime.now(timezone.utc)
     now = time.time()
@@ -223,31 +240,7 @@ def collect_system_health(db: Session) -> dict:
 
     # ---- cameras -----------------------------------------------------
     def _cameras() -> dict:
-        cams = db.query(Camera).filter(Camera.is_deleted.is_(False)).all()
-        cam_ids = [c.id for c in cams]
-        fb = FrameBuffer()
-        health = fb.health_many(cam_ids) if cam_ids else {}
-        hb_map: dict[int, float] = {}
-        if r is not None and cam_ids:
-            try:
-                raws = r.mget([f"vg:inference-hb:{cid}" for cid in cam_ids])
-                hb_map = {cid: float(v) for cid, v in zip(cam_ids, raws) if v}
-            except Exception:
-                pass
-        streaming, offline = 0, []
-        for c in cams:
-            h = health.get(c.id) or {}
-            lf = h.get("last_frame_at")
-            if lf and (now - float(lf)) < 10 and (h.get("fps") or 0) > 0:
-                streaming += 1
-            else:
-                offline.append(c.name or f"camera {c.id}")
-        ai_active = sum(1 for c in cams
-                        if c.ai_enabled and (now - hb_map.get(c.id, 0)) < 60)
-        return {"total": len(cams), "streaming": streaming,
-                "offline": len(cams) - streaming,
-                "offline_names": offline[:25],
-                "ai_enabled_active": ai_active}
+        return cameras_section(db, r, now)
 
     # ---- detection ----------------------------------------------------
     def _detection() -> dict:
@@ -422,6 +415,10 @@ def overall_status(snap: dict) -> tuple[str, str]:
     """
     storage = snap.get("storage") or {}
     cams = snap.get("cameras") or {}
+    # Fleet health (healthy / degraded / critical) is decided once, in
+    # app.services.fleet; this rollup only adds server-level signals.
+    if cams.get("health") == "critical":
+        return "🔴", "Critical"
     core_down = any(not c.get("healthy")
                     for c in (snap.get("containers") or [])
                     if c.get("name") in ("postgres", "redis"))

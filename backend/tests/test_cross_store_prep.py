@@ -77,7 +77,10 @@ def _seed_confirmed_pool(db, tmp_path, n=40):
         f.write_bytes(b"\xff\xd8\xff" + b"0" * 128)
         db.add(TrainingImage(dataset_id=pool.id, camera_id=cam.id,
                              file_path=str(f), labeled=True,
-                             source_alert_id=a.id))
+                             source_alert_id=a.id,
+                             review_state="approved",
+                             eligible_for_training=True,
+                             example_kind="positive", target_class="person"))
     db.commit()
 
 
@@ -179,15 +182,17 @@ def test_quarantined_dataset_error_names_provenance_stage(db, tmp_path):
     assert "Stage: provenance" in msg and "0045" in msg
 
 
-def test_training_provenance_honours_policy_flag(monkeypatch):
+def test_training_provenance_never_trainable_on_click(monkeypatch):
+    """Nov 2026: a click is evidence; the dual-review flag no longer
+    makes a verdict trainable either way."""
     from app.config import settings
     from app.training.feedback_loop import _training_provenance
-    monkeypatch.setattr(settings, "training_require_dual_review", False)
-    p = _training_provenance("correct")
-    assert p["eligible_for_training"] is True and p["review_state"] == "approved"
-    assert p["source_kind"] == "operator_confirmed"
-    n = _training_provenance("false")
-    assert n["eligible_for_training"] is True and n["source_kind"] == "operator_dismissed"
-    monkeypatch.setattr(settings, "training_require_dual_review", True)
-    q = _training_provenance("correct")
-    assert q["eligible_for_training"] is False and q["review_state"] == "pending"
+    for flag in (False, True):
+        monkeypatch.setattr(settings, "training_require_dual_review", flag)
+        p = _training_provenance("correct", "person")
+        assert p["eligible_for_training"] is False
+        assert p["review_state"] == "pending_review"
+        assert p["source_kind"] == "operator_confirmed"
+        n = _training_provenance("false", "person", "not_a_person")
+        assert n["eligible_for_training"] is False
+        assert n["source_kind"] == "operator_dismissed"

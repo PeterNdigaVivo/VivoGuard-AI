@@ -32,7 +32,7 @@ import {
 // because the URL is keyed by alert id.
 const _snapshotCache = new Map<number, string>()
 
-function useSnapshot(alertId: number, url: string | null) {
+export function useSnapshot(alertId: number, url: string | null) {
   const [src, setSrc] = useState<string | null>(_snapshotCache.get(alertId) ?? null)
   const [failed, setFailed] = useState(false)
 
@@ -670,11 +670,12 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   }
 
   async function markTrue() {
-    // ✅ True Alert — the AI was right. Positive training sample via
-    // /alerts/{id}/confirm (made in the background on the server).
+    // ✅ True Alert — the AI was right. The verdict becomes review
+    // evidence on the server (training_evidence); it never trains a model
+    // until a reviewer approves it.
     const prompt = isCalibration
       ? 'Mark this calibration alert as TRUE? It will remain quarantined until independent review.'
-      : 'Mark this alert as TRUE? It will be added to AI training as a positive example.'
+      : 'Mark this alert as TRUE? It goes to the training review queue; nothing is trained until a reviewer approves it.'
     if (savingRef.current || !window.confirm(prompt)) return
     await saveOutcome({
       optimistic: { status: 'confirmed', resolved_at: null,

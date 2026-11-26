@@ -31,6 +31,7 @@ from app.models.odoo import (
     OdooStoreSalesHourly, OdooSyncState, OdooTillConflict, StoreBusinessHours,
 )
 from app.models.eval_sample import EvalSample
+from app.models.model_rollout import ModelEvaluation, ModelRollout
 
 __all__ = [
     "User",
@@ -56,4 +57,5 @@ __all__ = [
     "OdooPosSession", "OdooTillConflict", "OdooStoreSalesHourly",
     "OdooPosActivityBucket", "OdooConversionMetric", "OdooSyncState",
     "EvalSample",
+    "ModelEvaluation", "ModelRollout",
 ]
