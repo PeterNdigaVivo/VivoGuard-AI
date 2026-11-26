@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -23,17 +25,35 @@ def dataset_root(dataset_id: int) -> Path:
 
 
 def save_uploaded_image(dataset_id: int, filename: str, data: bytes) -> Path:
-    """Persist a single image. Returns the on-disk path."""
-    root = dataset_root(dataset_id)
-    safe = filename.replace("/", "_").replace("..", "")
-    target = root / "images" / safe
-    n = 1
-    while target.exists():
-        stem, suf = target.stem, target.suffix
-        target = target.with_name(f"{stem}_{n}{suf}")
-        n += 1
-    target.write_bytes(data)
-    return target
+    """Persist an image under a bounded name without overwriting another upload."""
+    images = dataset_root(dataset_id) / "images"
+    filename = filename.encode("utf-8", errors="replace").decode("utf-8")
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename).replace("..", "").strip(". ")
+    if PureWindowsPath(safe).is_reserved():
+        safe = f"image_{safe}"
+    stem, suffix = os.path.splitext(safe)
+    # Reserve room for a UUID suffix and the adjacent review preview.
+    budget = 255 - len("_preview") - 1 - 32
+    suffix_bytes = len(suffix.encode("utf-8"))
+    if suffix_bytes > budget - len("image"):
+        stem, suffix, suffix_bytes = safe, "", 0
+    stem = stem.encode("utf-8")[:budget - suffix_bytes].decode("utf-8", errors="ignore")
+    stem = stem.rstrip(". ") or "image"
+
+    target = images / f"{stem}{suffix}"
+    while True:
+        try:
+            handle = target.open("xb")
+        except FileExistsError:
+            target = images / f"{stem}_{uuid4().hex}{suffix}"
+            continue
+        try:
+            with handle:
+                handle.write(data)
+        except OSError:
+            target.unlink(missing_ok=True)
+            raise
+        return target
 
 
 def split_dataset(db: Session, dataset_id: int, *,
