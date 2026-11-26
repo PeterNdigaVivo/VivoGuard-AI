@@ -41,6 +41,23 @@ def test_closed_recording_must_cover_event_timestamp(tmp_path):
     assert _recording_covers_event(clip, event_ts) is False
 
 
+@pytest.mark.parametrize("status", ["recording", "completed"])
+def test_source_coverage_requires_nonempty_media(tmp_path, status):
+    event_ts = datetime.now(timezone.utc)
+    path = tmp_path / "source.mp4"
+    clip = RecordingClip(
+        camera_id=1, window_id="current", file_path=str(path),
+        started_at=event_ts - timedelta(minutes=1), status=status,
+        ended_at=event_ts + timedelta(seconds=1) if status == "completed" else None,
+    )
+
+    assert not _recording_covers_event(clip, event_ts)
+    path.touch()
+    assert not _recording_covers_event(clip, event_ts)
+    path.write_bytes(b"recorded source fixture")
+    assert _recording_covers_event(clip, event_ts)
+
+
 def test_entrance_selection_skips_newer_non_covering_recording(tmp_path):
     db = _session()
     store = Store(name="Evidence Store", country="Kenya")
@@ -226,6 +243,8 @@ def test_clip_extractor_retries_one_distinct_overlapping_source(
         )
         for source_id, end_offset in [(4, -1), (3, 30), (2, 30), (1, 30)]
     ]
+    for source in (outside, newest, fallback, third):
+        Path(source.file_path).write_bytes(b"recorded source fixture")
     rows = [(alert, event, source) for source in (outside, newest, newest, fallback, third)]
     attempted = []
 
@@ -255,8 +274,10 @@ def test_extraction_publishes_only_a_hashed_encode(monkeypatch, tmp_path, failur
     original_extra = {"alert_clip_path": str(published),
                       "alert_clip_sha256": sha256(previous_bytes).hexdigest()}
     event = SimpleNamespace(camera_id=2, detection_type="intrusion", extra=original_extra)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"recorded source fixture")
     clip = RecordingClip(
-        id=3, camera_id=2, window_id="source", file_path=str(tmp_path / "source.mp4"),
+        id=3, camera_id=2, window_id="source", file_path=str(source),
         started_at=event_ts - timedelta(minutes=10),
         ended_at=event_ts + timedelta(minutes=1), status="completed",
     )
@@ -283,7 +304,7 @@ def test_extraction_publishes_only_a_hashed_encode(monkeypatch, tmp_path, failur
 
     db = Mock()
     assert recorder._extract_one(db, alert, event, clip, event_ts) is (failure is None)
-    assert list(tmp_path.iterdir()) == [published]
+    assert set(tmp_path.iterdir()) == {published, source}
     if failure is None:
         assert published.read_bytes() == encoded
         assert event.extra["alert_clip_sha256"] == sha256(encoded).hexdigest()

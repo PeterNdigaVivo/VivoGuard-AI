@@ -338,17 +338,17 @@ def _recording_covers_event(clip, event_ts: datetime) -> bool:
     event_utc = _as_utc(event_ts)
     if _as_utc(clip.started_at) > event_utc:
         return False
+    try:
+        info = Path(clip.file_path).stat()
+    except (OSError, ValueError):
+        return False
+    if not S_ISREG(info.st_mode) or info.st_size == 0:
+        return False
     if clip.ended_at is not None:
         return _as_utc(clip.ended_at) >= event_utc
-    target = Path(clip.file_path)
-    if not target.is_file():
-        return False
-    try:
-        # Fragmented MP4 writes may update in chunks. Two minutes tolerates a
-        # slow share while rejecting a recorder that stopped before the event.
-        return target.stat().st_mtime >= event_utc.timestamp() - 120
-    except OSError:
-        return False
+    # Fragmented MP4 writes may update in chunks. Two minutes tolerates a
+    # slow share while rejecting a recorder that stopped before the event.
+    return info.st_mtime >= event_utc.timestamp() - 120
 
 
 def _sha256_file(path: Path) -> str:
