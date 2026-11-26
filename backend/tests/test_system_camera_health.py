@@ -1,7 +1,14 @@
+import json
+from unittest.mock import Mock
+
+import pytest
+
 from app.api.system import (
+    _current_recording_pipeline,
     _decode_inference_pipeline,
     _proof_of_life_state,
     _runtime_camera_status,
+    proof_of_life,
 )
 
 
@@ -89,3 +96,35 @@ def test_batch_shadow_telemetry_retains_non_authoritative_marker() -> None:
     assert payload == {
         "mode": "shadow", "authoritative": False, "frames_processed": 110,
     }
+
+
+@pytest.mark.parametrize("timestamp", [None, "invalid", 820, 700, 1001, "NaN", "Infinity", True, 0])
+def test_recording_pipeline_omits_unavailable_or_expired_coverage(timestamp):
+    raw = json.dumps({"status": "healthy", "last_run_ts": timestamp})
+    assert _current_recording_pipeline(raw, now=1_000) is None
+
+
+def test_recording_pipeline_retains_fresh_degraded_coverage():
+    snapshot = {
+        "status": "degraded", "last_run_ts": 950,
+        "cameras_recording": 43, "cameras_expected": 81, "cameras_missing": 38,
+    }
+    assert _current_recording_pipeline(json.dumps(snapshot), now=1_000) == snapshot
+
+
+@pytest.mark.parametrize("timestamp", ["NaN", 10**20, True])
+def test_proof_of_life_rejects_heartbeat_without_current_timestamp(monkeypatch, timestamp):
+    frame_buffer = Mock()
+    frame_buffer.r.get.return_value = json.dumps({
+        "last_run_ts": timestamp, "cameras_total": 1, "cameras_fresh": 1,
+        "critical_cameras_overdue": 0, "standard_cameras_overdue": 0,
+    })
+    monkeypatch.setattr("app.api.system.FrameBuffer", lambda: frame_buffer)
+    db = Mock()
+    db.query.return_value.outerjoin.return_value.order_by.return_value.first.return_value = None
+    db.query.return_value.scalar.return_value = None
+
+    payload = proof_of_life(db=db, _u=None)
+
+    assert payload["state"] == "offline"
+    assert payload["pipeline_age_seconds"] is None

@@ -18,17 +18,27 @@ from app.stream.frame_buffer import FrameBuffer
 router = APIRouter(prefix="/system", tags=["system"])
 
 STREAM_FRESH_SECONDS = 10.0
+RECORDING_HEALTH_MAX_AGE_SECONDS = 180.0
+
+
+def _pipeline_age_seconds(pipeline: dict | None, *, now: float) -> float | None:
+    """Return the age of a heartbeat with a usable timestamp."""
+    raw_timestamp = (pipeline or {}).get("last_run_ts")
+    if isinstance(raw_timestamp, bool):
+        return None
+    try:
+        timestamp = float(raw_timestamp)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not 0 < timestamp <= now:
+        return None
+    return now - timestamp
 
 
 def _proof_of_life_state(pipeline: dict | None, *, now: float) -> str:
     """Classify monitoring liveness without treating a quiet store as failed."""
-    if not pipeline:
-        return "offline"
-    try:
-        age = now - float(pipeline.get("last_run_ts") or 0)
-    except (TypeError, ValueError):
-        return "offline"
-    if age > 10 * 60:
+    age = _pipeline_age_seconds(pipeline, now=now)
+    if not pipeline or age is None or age > 10 * 60:
         return "offline"
     total = int(pipeline.get("cameras_total") or 0)
     fresh = int(pipeline.get("cameras_fresh") or 0)
@@ -89,6 +99,12 @@ def _decode_inference_pipeline(raw_pipeline) -> dict | None:
         return value if isinstance(value, dict) else None
     except (TypeError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _current_recording_pipeline(raw_pipeline, *, now: float) -> dict | None:
+    pipeline = _decode_inference_pipeline(raw_pipeline)
+    age = _pipeline_age_seconds(pipeline, now=now)
+    return pipeline if age is not None and age < RECORDING_HEALTH_MAX_AGE_SECONDS else None
 
 
 def _inference_baseline(db: Session, *, now: datetime) -> dict:
@@ -309,8 +325,8 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     inference_batch_shadow = _decode_inference_pipeline(
         fb.r.get("vg:inference:batch-shadow-health"),
     )
-    recording_pipeline = _decode_inference_pipeline(
-        fb.r.get("vg:recording:health"),
+    recording_pipeline = _current_recording_pipeline(
+        fb.r.get("vg:recording:health"), now=time.time(),
     )
     return {
         "now":            datetime.now(timezone.utc).isoformat(),
@@ -345,6 +361,7 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
     now_ts = now_dt.timestamp()
     fb = FrameBuffer()
     pipeline = _decode_inference_pipeline(fb.r.get("vg:inference:health"))
+    pipeline_age = _pipeline_age_seconds(pipeline, now=now_ts)
     latest_detection_row = (
         db.query(DetectionEvent, Alert.id)
         .outerjoin(Alert, Alert.event_id == DetectionEvent.id)
@@ -385,10 +402,7 @@ def proof_of_life(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         ),
         "latest_alert_at": latest_alert.isoformat() if latest_alert else None,
         "latest_alert_age_seconds": age_seconds(latest_alert),
-        "pipeline_age_seconds": (
-            max(0, int(now_ts - float(pipeline.get("last_run_ts") or 0)))
-            if pipeline and pipeline.get("last_run_ts") else None
-        ),
+        "pipeline_age_seconds": int(pipeline_age) if pipeline_age is not None else None,
         "cameras_total": int((pipeline or {}).get("cameras_total") or 0),
         "cameras_fresh": int((pipeline or {}).get("cameras_fresh") or 0),
         "cameras_actively_inferencing": (
