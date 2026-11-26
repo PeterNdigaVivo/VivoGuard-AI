@@ -38,11 +38,13 @@ fi
 # 3. Build images. Build every named application service explicitly so a new
 # queue/worker cannot be omitted from a release by an obsolete service alias.
 release_revision=$(git rev-parse --verify HEAD)
+app_services=(api streamer worker-inference worker-alerts worker-training recorder frontend)
+bash scripts/pin-rollback-images.sh "${app_services[@]}"
 echo "→ building api image"
 docker compose build api
 
 echo "→ building remaining images"
-docker compose build streamer worker-inference worker-alerts worker-training recorder frontend
+docker compose build "${app_services[@]:1}"
 
 # 4. Start only stateful dependencies.  Keep the currently running API and
 # workers on the old image while the new schema is applied; migrations in a
