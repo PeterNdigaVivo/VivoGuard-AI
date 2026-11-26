@@ -22,6 +22,7 @@ interface SystemHealth {
     cameras_expected: number
     cameras_recording: number
     cameras_missing: number
+    recorders_missing_with_live_process?: number
   } | null
   inference_pipeline: {
     cameras_total: number; cameras_fresh: number
@@ -167,6 +168,11 @@ export default function SystemHealthPage() {
             <div>
               <div className="text-xs text-slate-500 dark:text-slate-400">Missing recordings</div>
               <div className="text-xl font-semibold">{recording.cameras_missing}</div>
+              {(recording.recorders_missing_with_live_process ?? 0) > 0 && (
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  {recording.recorders_missing_with_live_process} with a live recorder and no fresh output
+                </div>
+              )}
             </div>
           </div>
         ) : (

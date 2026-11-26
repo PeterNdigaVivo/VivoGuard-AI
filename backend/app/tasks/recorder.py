@@ -462,21 +462,22 @@ def _any_recording_alive(r) -> bool:
     return False
 
 
-def _live_recording_ids(r, window_id: str,
-                        expected_ids: set[int]) -> set[int]:
-    """Return expected cameras whose live recorder has written evidence."""
+def _recording_coverage_ids(
+    r, window_id: str, expected_ids: set[int],
+) -> tuple[set[int], set[int]]:
+    """Return expected camera IDs with fresh output and with live processes."""
     active_ids: set[int] = set()
+    live_process_ids: set[int] = set()
     for key in r.scan_iter(match="vg:recording:pid:*", count=200):
         try:
             item = json.loads(r.get(key) or "{}")
             camera_id = int(str(key).rsplit(":", 1)[-1])
             if (camera_id in expected_ids
                     and str(item.get("window_id") or "") == window_id
-                    and _pid_is_ffmpeg(int(item.get("pid") or 0))
-                    and _recording_output_has_data(
-                        str(item.get("path") or ""),
-                    )):
-                active_ids.add(camera_id)
+                    and _pid_is_ffmpeg(int(item.get("pid") or 0))):
+                live_process_ids.add(camera_id)
+                if _recording_output_has_data(str(item.get("path") or "")):
+                    active_ids.add(camera_id)
         except Exception:
             continue
     # Preserve evidence that these independent recorders worked in the
@@ -495,7 +496,7 @@ def _live_recording_ids(r, window_id: str,
             # Health collection must remain read-safe even when Redis is
             # briefly unable to persist the recovery hint.
             pass
-    return active_ids
+    return active_ids, live_process_ids
 
 
 def _recording_output_has_data(path: str, *, now: float | None = None) -> bool:
@@ -552,9 +553,9 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         {int(camera.id) for camera in _key_cameras(db)}
         if window_id else set()
     )
-    active_ids = (
-        _live_recording_ids(r, window_id, expected_ids)
-        if window_id else set()
+    active_ids, live_process_ids = (
+        _recording_coverage_ids(r, window_id, expected_ids)
+        if window_id else (set(), set())
     )
     # A vg:frame key proves fresh pixels reached the streamer within its
     # short TTL. Its absence does not prove the camera/NVR feed is offline:
@@ -591,6 +592,7 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
         "cameras_expected": expected,
         "cameras_recording": active,
         "cameras_missing": missing,
+        "recorders_missing_with_live_process": len(missing_ids & live_process_ids),
         "cameras_frame_fresh": len(frame_fresh_ids),
         "cameras_frame_stale": frame_stale,
         "recorders_missing_with_fresh_frame": (
@@ -730,7 +732,7 @@ def _repair_missing_recordings(db, r, window_id: str,
                                seconds: int) -> int:
     """Restart only missing live-camera recorders, with bounded retries."""
     cameras = {int(camera.id): camera for camera in _key_cameras(db)}
-    active_ids = _live_recording_ids(r, window_id, set(cameras))
+    active_ids, _ = _recording_coverage_ids(r, window_id, set(cameras))
     repaired = 0
     for camera_id in sorted(set(cameras) - active_ids):
         # Do not create futile rows for an offline feed, and do not retry a

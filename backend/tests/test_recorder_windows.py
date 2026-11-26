@@ -297,7 +297,7 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "app.tasks.recorder._key_cameras", lambda _db: expected_cameras,
     )
     monkeypatch.setattr(
-        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid in {101, 199},
+        "app.tasks.recorder._pid_is_ffmpeg", lambda pid: pid in {101, 102, 103, 199},
     )
     monkeypatch.setattr(
         "app.tasks.recorder._recording_output_has_data",
@@ -314,6 +314,7 @@ def test_recording_health_counts_only_expected_live_cameras(monkeypatch) -> None
         "cameras_expected": 3,
         "cameras_recording": 1,
         "cameras_missing": 2,
+        "recorders_missing_with_live_process": 1,
         "cameras_frame_fresh": 2,
         "cameras_frame_stale": 1,
         "recorders_missing_with_fresh_frame": 2,
