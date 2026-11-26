@@ -66,6 +66,7 @@ def no_inline_absorb(monkeypatch):
         raise AssertionError("training copy must not run inside the request")
     monkeypatch.setattr(fl, "absorb_confirmed", boom)
     monkeypatch.setattr(fl, "absorb_dismissed", boom)
+    monkeypatch.setattr(fl, "absorb_label", boom)
 
 
 # ── record_verdict (the request) ────────────────────────────────────
@@ -131,11 +132,12 @@ def test_verdict_logs_its_timings(Session, monkeypatch, no_inline_absorb, caplog
 
 def test_absorbs_matching_verdict(Session, monkeypatch):
     calls = []
-    monkeypatch.setattr(fl, "absorb_dismissed", lambda db, aid: calls.append(aid))
+    monkeypatch.setattr(fl, "absorb_label",
+                        lambda db, aid, mode: calls.append((aid, mode)))
     with Session() as db:
         alert_id, _ = _seed(db, status="dismissed")
     assert fa.absorb_verdict_now(alert_id, "dismiss", Session) == "absorbed"
-    assert calls == [alert_id]
+    assert calls == [(alert_id, "dismiss")]
 
 
 @pytest.mark.parametrize("seed, verdict, expected", [
@@ -147,7 +149,7 @@ def test_absorbs_matching_verdict(Session, monkeypatch):
 def test_skips_without_touching_training(Session, monkeypatch, seed, verdict, expected):
     def boom(*_a, **_k):
         raise AssertionError("must not absorb")
-    monkeypatch.setattr(fl, "absorb_dismissed", boom)
+    monkeypatch.setattr(fl, "absorb_label", boom)
     with Session() as db:
         alert_id, _ = _seed(db, **seed)
     assert fa.absorb_verdict_now(alert_id, verdict, Session) == expected
@@ -158,10 +160,10 @@ def test_missing_alert(Session):
 
 
 def test_failure_never_changes_the_verdict(Session, monkeypatch):
-    def broken(db, aid):
+    def broken(db, aid, mode):
         db.get(Alert, aid).status = "new"     # a buggy helper must not leak
         raise OSError("disk full")
-    monkeypatch.setattr(fl, "absorb_confirmed", broken)
+    monkeypatch.setattr(fl, "absorb_label", broken)
     with Session() as db:
         alert_id, _ = _seed(db, status="confirmed")
     with pytest.raises(OSError):

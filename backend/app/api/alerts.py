@@ -9,10 +9,11 @@ inconsistently) and just renders what we send.
 from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.utils.cache import cached_store_endpoint
 from sqlalchemy import case, desc, func
@@ -38,6 +39,9 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 # the list is wrong and should be rewritten from the data.
 DISMISS_REASONS: dict[str, str] = {
     "not_a_person":    "Not a person (mannequin, reflection, poster)",
+    # Person-based alerts: a real person was there but the rule fired
+    # wrongly (staff, cleaner). A policy error - never trained.
+    "real_person_rule_wrong": "Real person - the rule was wrong",
     "staff_member":    "That is a staff member",
     "normal_activity": "Normal activity, not an incident",
     "camera_problem":  "Camera problem (blocked, dark, misaimed)",
@@ -1916,6 +1920,49 @@ def dismiss(alert_id: int, payload: DismissIn | None = None,
                 a.notes = (a.notes + chr(10) + line) if a.notes else line
             db.commit()
     return out
+
+
+class ExcludeIn(BaseModel):
+    reason: Literal["unclear", "bad_image"]
+    comment: Optional[str] = None
+
+
+@router.post("/{alert_id}/exclude-from-training", response_model=AlertActionOut)
+def exclude_from_training(alert_id: int, payload: ExcludeIn,
+                          db: Session = Depends(get_db),
+                          user: User = Depends(require_role("admin", "operator"))):
+    """The "Unclear" and "Bad image" buttons.
+
+    Closes the alert (and its whole incident) as resolved, and records the
+    snapshot as uncertain / unusable so it is EXCLUDED from training. Not a
+    True/False verdict: it writes no review decision, so it never counts
+    for or against a detector's accuracy.
+
+    "Unclear" is for snapshots too ambiguous to label. An operator who
+    thinks it may be a real incident acts on it instead.
+    """
+    a = db.get(Alert, alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    _close_owning_incident(db, alert_id, "resolve", user, payload.reason)
+    now = datetime.now(timezone.utc)
+    a.status = "resolved"
+    a.assigned_to = user.id
+    a.acknowledged_at = a.acknowledged_at or now
+    a.resolved_at = now
+    a.dismiss_reason = payload.reason
+    a.feedback_used_for_training = False
+    comment = (payload.comment or "").strip()
+    label = "Unclear" if payload.reason == "unclear" else "Bad image"
+    line = f"[{now.strftime('%Y-%m-%d %H:%M')}] {user.email}: {label}" + (
+        f" - {comment}" if comment else "")
+    a.notes = (a.notes + chr(10) + line) if a.notes else line
+    training_eligible = bool(a.training_eligible)
+    db.commit()
+    if training_eligible:
+        from app.services.alert_feedback import _enqueue_absorb
+        _enqueue_absorb(a.id, "exclude")
+    return AlertActionOut(id=a.id, status=a.status)
 
 
 @router.post("/{alert_id}/resolve", response_model=AlertActionOut)

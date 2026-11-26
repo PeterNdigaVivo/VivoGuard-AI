@@ -38,6 +38,9 @@ class UserPatch(BaseModel):
     role: str | None = None
     is_active: bool | None = None
     password: str | None = None      # admin password reset
+    # Trusted labeller: marks skip the model-agreement gate (not the
+    # burst guard). Grant to a few reliable control-room leads.
+    trusted_labeller: bool | None = None
 
 
 class UserOut(BaseModel):
@@ -47,6 +50,7 @@ class UserOut(BaseModel):
     full_name: str | None
     role: str
     is_active: bool
+    trusted_labeller: bool = False
     created_at: datetime
     last_login_at: datetime | None
 
@@ -101,6 +105,14 @@ def update_user(user_id: int, patch: UserPatch,
         u.is_active = patch.is_active
     if patch.password:
         u.password_hash = hash_password(patch.password)
+    if patch.trusted_labeller is not None and patch.trusted_labeller != u.trusted_labeller:
+        u.trusted_labeller = patch.trusted_labeller
+        from app.models import GovernanceAuditLog
+        db.add(GovernanceAuditLog(
+            actor_user_id=actor.id, actor_email=actor.email,
+            action=("user.trusted_labeller.granted" if patch.trusted_labeller
+                    else "user.trusted_labeller.revoked"),
+            entity_type="user", entity_id=str(u.id), details={"email": u.email}))
     db.commit(); db.refresh(u)
     return u
 

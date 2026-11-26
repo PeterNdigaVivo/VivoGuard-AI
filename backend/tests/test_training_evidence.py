@@ -40,8 +40,14 @@ def test_confirmed_object_detection_is_pending_positive():
     assert (fc.kind, fc.target_class, fc.review_state) == ("positive", "person", te.PENDING)
 
 
-def test_confirmed_behaviour_rule_is_never_a_class():
+def test_confirmed_person_rule_is_a_person_positive_not_a_rule_class():
+    # A confirmed intrusion fired on a detected person at that box.
     fc = te.classify_feedback("correct", "intrusion")
+    assert (fc.kind, fc.target_class, fc.gated) == ("positive", "person", True)
+
+
+def test_confirmed_rule_without_an_object_is_excluded():
+    fc = te.classify_feedback("correct", "queue")
     assert fc.target_class is None and fc.review_state == te.EXCLUDED
 
 
@@ -57,9 +63,10 @@ def test_policy_errors_are_never_trained_as_background(reason):
     assert fc.target_class is None
 
 
-def test_dismissal_without_reason_is_uncertain():
+def test_person_false_without_the_choice_is_held_not_trained():
     fc = te.classify_feedback("false", "loitering", None)
     assert fc.kind == "uncertain" and fc.review_state == te.PENDING
+    assert fc.gated is False
 
 
 def test_camera_problem_is_excluded():

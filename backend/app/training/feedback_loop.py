@@ -287,165 +287,129 @@ def _enqueue_preview(image_id: int) -> None:
         log.warning("preview enqueue failed image=%s: %s", image_id, e)
 
 
-def absorb_confirmed(db: Session, alert_id: int) -> None:
-    """Operator confirmed the alert was a true positive — promote the
-    frame to the positive pool with its detection bbox as the ground-
-    truth annotation."""
+def absorb_label(db: Session, alert_id: int, mode: str) -> None:
+    """Turn one operator mark into the alert's single training row.
+
+    ``mode`` is "confirm" (True), "dismiss" (False, reason from
+    alert.dismiss_reason) or "exclude" (Unclear / Bad image buttons).
+
+    One row per alert (TrainingImage.label_alert_id is unique): a re-mark
+    updates this row — kind, pool, boxes and promotion decision — instead
+    of adding another. Whether it trains is decided by
+    app.services.label_promotion (trust/agreement gate, burst guard, audit
+    sample); every decision is recorded on the row and in the governance
+    audit log. Never queues a training job.
+    """
+    import os as _os
+
+    from app.services import label_promotion as lp
+    from app.services.training_evidence import POSITIVE, classify_feedback
+
     a = db.get(Alert, alert_id)
     if not a or a.feedback_used_for_training:
         return
     ev = db.get(DetectionEvent, a.event_id)
     if not ev or not ev.thumbnail_path:
-        # Stamp, like absorb_dismissed already does. Returning without
-        # stamping left the alert permanently "pending a sample", and
-        # feedback.absorb_pending re-enqueued the same rows every 15
-        # minutes forever (29 of them, every sweep, for days).
         _abandon(a, db, "no snapshot was saved for the event")
         return
     cls = ev.detection_type
     if _skip_non_trainable(db, a, cls):
         return
-    # Legacy name without the `-positive-` infix is kept so feedback
-    # absorbed by earlier deploys lands in the same Dataset.
-    ds  = _ensure_dataset(
-        db, f"feedback-{cls}",
-        [cls],
-        description="auto: confirmed alerts (positive feedback pool)",
-    )
-    file_path = _persist_feedback_image(ds.id, a.id, ev.thumbnail_path)
-    if not file_path:
-        # The path was recorded but the file is gone (pruned, or the
-        # write failed). Nothing will bring it back, so stamp instead of
-        # leaving it for the sweep to retry until the end of time.
-        _abandon(a, db, "the snapshot file is no longer on disk")
-        return
-    # A confirmed alert with no usable box cannot become a positive
-    # sample: the unpack below would raise, the Celery task would retry
-    # five times and the sweep would then retry it forever. Detectors
-    # that legitimately have no box are handled by NON_TRAINABLE_TYPES
-    # above, so reaching here means the event row itself is malformed.
-    bbox = list(ev.bbox_json or [])
-    if len(bbox) != 4:
-        _abandon(a, db, f"event bbox is unusable ({ev.bbox_json!r})")
-        return
-    source_extra = _build_source_extra(db, ev, a, "correct")
-    source_extra["source_thumbnail_path"] = ev.thumbnail_path
-    source_extra["verdict_user_id"] = a.assigned_to
-    provenance = _training_provenance("correct", cls)
-    img = TrainingImage(
-        dataset_id=ds.id,
-        camera_id=ev.camera_id,
-        file_path=file_path,
-        labeled=True,
-        source_extra=source_extra,
-        source_alert_id=a.id,           # for revert_verdict
-        **provenance,
-    )
-    db.add(img); db.flush()
-    # YOLO bbox = (cx, cy, w, h). Event has [x1,y1,x2,y2] normalised.
-    x1, y1, x2, y2 = bbox
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-    w  = max(0.0, x2 - x1)
-    h  = max(0.0, y2 - y1)
-    db.add(Annotation(image_id=img.id, class_label=cls,
-                       bbox_json=[cx, cy, w, h], verified=True))
-    a.feedback_used_for_training = True
-    db.commit()
-    _enqueue_preview(img.id)     # preview runs on the worker (opencv)
-    # Temporal context (Aug 2026): extract the ±1s sibling frames from
-    # the alert clip on the worker. They land labeled=False so the
-    # hourly pseudo-labeler gives them REAL YOLO boxes — the detection-
-    # moment bbox above must never be copied onto frames where the
-    # person has moved.
-    _enqueue_temporal_harvest(alert_id)
-    # No training trigger: a verdict is pending evidence. Jobs are
-    # considered only after review approval (training_evidence).
-    log.info("feedback: confirmed alert %s → positive pool %s (%s)",
-             alert_id, ds.id, provenance["review_state"])
 
+    verdict = "correct" if mode == "confirm" else "false"
+    fc = classify_feedback(verdict, cls,
+                           None if mode == "confirm" else a.dismiss_reason)
+    decision = lp.latest_decision(db, a.id) if mode != "exclude" else None
+    user_id = decision.reviewer_id if decision is not None else a.assigned_to
+    from app.models import User
+    user = db.get(User, user_id) if user_id else None
+    marked_at = lp.marked_at_for(decision)
 
-def absorb_dismissed(db: Session, alert_id: int) -> None:
-    """Operator dismissed the alert as a false positive — promote the
-    frame to the *negative* pool. YOLO treats a TrainingImage row
-    with no Annotation rows as a pure background sample; the next
-    fine-tune learns to suppress whatever spurious feature triggered
-    this detection."""
-    a = db.get(Alert, alert_id)
-    if not a or a.feedback_used_for_training:
-        return
-    ev = db.get(DetectionEvent, a.event_id)
-    if not ev or not ev.thumbnail_path:
-        # Stamp the alert anyway — we don't want to keep retrying
-        # an alert whose snapshot was never saved.
-        a.feedback_used_for_training = True
-        db.commit()
-        return
-    cls = ev.detection_type
-    if _skip_non_trainable(db, a, cls):
-        return
-    # live_activity dismissals: the event thumbnail is the TRACK-ANNOTATED
-    # frame (boxes burned in) — feeding it to YOLO would teach the model
-    # to detect boxes, not people. Harvest the RAW sibling the sentinel
-    # saved instead, into feedback-negative-person: the false positive is
-    # the PERSON class (usually a mannequin). NOTE: YOLO negatives are
-    # annotation-free by definition, so "mannequin" is recorded as a
-    # source_extra hint for curators/future classifiers, NOT as an
-    # Annotation class (that would make it a mannequin POSITIVE).
-    import os as _os
-    provenance = _training_provenance("false", cls, a.dismiss_reason)
-    file_path = ev.thumbnail_path
-    # Negatives go to the pool of the class they teach ("not a person" on
-    # an intrusion alert is a person-class negative), never to a pool
-    # named after a behaviour rule that a specialist would then learn.
-    ds_name = f"feedback-negative-{provenance['target_class'] or cls}"
-    label_hint: str | None = None
+    # live_activity snapshots have boxes burned in; use the raw frame.
+    src = ev.thumbnail_path
     if cls == "live_activity":
         raw = (ev.extra or {}).get("raw_snapshot_path")
         if not raw or not _os.path.exists(raw):
-            a.feedback_used_for_training = True
-            db.commit()
-            log.info("feedback: dismissed live_activity %s has no raw "
-                     "snapshot — skipped (annotated frame is unusable "
-                     "for training)", alert_id)
+            _abandon(a, db, "live_activity has no raw snapshot")
             return
-        file_path = raw
-        ds_name = "feedback-negative-person"
-        label_hint = "mannequin"
-    ds  = _ensure_dataset(
-        db, ds_name,
-        [],     # no classes — pure background
-        description="auto: dismissed alerts (hard-negative pool)",
-    )
-    durable_path = _persist_feedback_image(ds.id, a.id, file_path)
-    if not durable_path:
-        a.feedback_used_for_training = True
-        db.commit()
-        log.warning("feedback: dismissed alert %s source image is unavailable",
-                    alert_id)
+        src = raw
+
+    positive = fc.kind == POSITIVE and fc.target_class is not None
+    pool = (f"feedback-{fc.target_class}" if positive
+            else f"feedback-negative-{fc.target_class or cls}")
+    ds = _ensure_dataset(
+        db, pool, [fc.target_class] if positive else [],
+        description=("auto: operator-confirmed labels (positive pool)" if positive
+                     else "auto: operator labels without boxes (negative pool)"))
+
+    bbox = list(ev.bbox_json or [])
+    if positive and len(bbox) != 4:
+        _abandon(a, db, f"event bbox is unusable ({ev.bbox_json!r})")
         return
-    _src = _build_source_extra(db, ev, a, "false")
-    _src["source_thumbnail_path"] = file_path
-    _src["verdict_user_id"] = a.assigned_to
-    _src["dismiss_reason"] = a.dismiss_reason
-    _src["training_quarantined_reason"] = "awaiting_review"
-    if label_hint:
-        _src["label_hint"] = label_hint
-    neg_img = TrainingImage(
-        dataset_id=ds.id,
-        camera_id=ev.camera_id,
-        file_path=durable_path,
-        labeled=True,           # labelled as background — no Annotation rows
-        source_extra=_src,
-        source_alert_id=a.id,           # for revert_verdict
-        **provenance,
-    )
-    db.add(neg_img); db.flush()
+
+    img = (db.query(TrainingImage)
+             .filter(TrainingImage.label_alert_id == a.id).one_or_none())
+    created = img is None
+    if created:
+        file_path = _persist_feedback_image(ds.id, a.id, src)
+        if not file_path:
+            _abandon(a, db, "the snapshot file is no longer on disk")
+            return
+        img = TrainingImage(dataset_id=ds.id, camera_id=ev.camera_id,
+                            file_path=file_path, labeled=True,
+                            source_alert_id=a.id, label_alert_id=a.id)
+        db.add(img)
+    else:
+        img.dataset_id = ds.id       # a re-mark can move it between pools
+    src_extra = _build_source_extra(db, ev, a, "correct" if mode == "confirm" else "false")
+    src_extra.update({"source_thumbnail_path": src, "verdict_user_id": user_id,
+                      "dismiss_reason": a.dismiss_reason if mode != "confirm" else None,
+                      "mark": mode})
+    img.source_extra = src_extra
+    img.source_kind = "operator_confirmed" if mode == "confirm" else "operator_dismissed"
+    img.example_kind = fc.kind
+    img.target_class = fc.target_class
+    db.flush()
+
+    db.query(Annotation).filter(Annotation.image_id == img.id).delete()
+    if positive:
+        x1, y1, x2, y2 = bbox
+        db.add(Annotation(image_id=img.id, class_label=fc.target_class,
+                          bbox_json=[(x1 + x2) / 2, (y1 + y2) / 2,
+                                     max(0.0, x2 - x1), max(0.0, y2 - y1)],
+                          verified=True))
+
+    result = lp.decide(
+        db, fc, user=user,
+        verdict=(decision.verdict if decision is not None else None),
+        marked_at=marked_at, ai_verdict=a.ai_verdict,
+        ai_confidence=a.ai_confidence, detector_confidence=ev.confidence)
+    lp.apply(img, result, user_id=user_id, marked_at=marked_at,
+             extra={"mark": mode, "detection_type": cls})
+    db.flush()
+    if result.path == "held_burst":
+        held = lp.hold_earlier_burst(db, user_id=user_id, kind=fc.kind,
+                                     at=marked_at, exclude_id=img.id)
+        img.gate_json = {**(img.gate_json or {}), "earlier_marks_held": held}
+    lp.audit(db, img, user=user, alert_id=a.id, mark=mode)
     a.feedback_used_for_training = True
     db.commit()
-    _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    log.info("feedback: dismissed alert %s → hard-negative pool %s",
-             alert_id, ds.id)
+    if created:
+        _enqueue_preview(img.id)
+        if positive:
+            _enqueue_temporal_harvest(alert_id)
+    log.info("feedback: alert %s %s -> %s (%s %s)", alert_id, mode,
+             img.promotion_path, fc.kind, fc.target_class)
+
+
+def absorb_confirmed(db: Session, alert_id: int) -> None:
+    """Operator marked the alert True (see absorb_label)."""
+    absorb_label(db, alert_id, "confirm")
+
+
+def absorb_dismissed(db: Session, alert_id: int) -> None:
+    """Operator marked the alert False (see absorb_label)."""
+    absorb_label(db, alert_id, "dismiss")
 
 
 # Backwards-compat alias — old call sites still import `mark_dismissed`.
@@ -502,11 +466,19 @@ def revert_verdict(db: Session, alert_id: int) -> bool:
             db.commit()
         return False
 
+    # The label row is kept for provenance (and so a re-mark updates it)
+    # but can no longer train. Other rows derived from the alert
+    # (harvested context frames) are removed as before.
     for img in imgs:
-        db.delete(img)        # Annotations CASCADE via FK
+        if img.label_alert_id == alert_id:
+            img.eligible_for_training = False
+            img.review_state = "excluded"
+            img.promotion_path = "reverted"
+        else:
+            db.delete(img)        # Annotations CASCADE via FK
     if a is not None:
         a.feedback_used_for_training = False
     db.commit()
-    log.info("feedback: reverted verdict alert=%s training_images_removed=%d",
+    log.info("feedback: reverted verdict alert=%s training_images=%d",
              alert_id, len(imgs))
     return True

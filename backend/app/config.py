@@ -165,6 +165,26 @@ class Settings(BaseSettings):
     # When True the reviewer must be a different person from the operator
     # who gave the verdict (off by default: single-operator workflow).
     training_review_require_different_user: bool = False
+    # Direct label promotion (app.services.label_promotion). When ON, an
+    # operator's True/False on the Alerts page IS the training label,
+    # subject to the trust/agreement gate, the burst guard and a random
+    # audit sample. When OFF (default), every verdict waits in Training
+    # Review as before. An automation change: switch on only after
+    # vivo_control_governance maker/checker approval.
+    training_direct_promotion_enabled: bool = False
+    # Agreement gate on the detector's own confidence, used when the AI
+    # second opinion (verifier) has no clear verdict: True agrees at or
+    # above the first, False agrees below the second; between is a
+    # disagreement and goes to review.
+    label_agree_true_min_confidence: float = 0.60
+    label_agree_false_max_confidence: float = 0.45
+    # Burst guard: N same-way marks by one person within M minutes are
+    # held out of training (queue-clearing must not poison the model).
+    label_burst_count: int = 15
+    label_burst_window_minutes: int = 10
+    # Share of auto-promoted labels also sent to Training Review for a
+    # spot-check (they still train; a reviewer reject removes them).
+    label_audit_sample_rate: float = 0.05
     # Model rollout (app.services.model_rollout): canary size, the reviewed
     # canary alerts needed before promotion, and how far canary precision
     # may sit below the same cameras' baseline (0 = must not be worse).

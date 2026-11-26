@@ -71,6 +71,25 @@ class TrainingImage(Base):
     # The object class this example teaches (e.g. "person"); NULL when the
     # evidence is not trainable as an object class.
     target_class: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # --- Label provenance (migration 0056) ----------------------------
+    # The ONE training row for an alert's operator label. Unique, so a
+    # re-mark updates this row instead of adding another; clones and
+    # harvested context frames never set it.
+    label_alert_id: Mapped[int | None] = mapped_column(
+        ForeignKey("alerts.id", ondelete="SET NULL"), nullable=True, unique=True)
+    labelled_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    labelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True)
+    # How the label reached (or did not reach) training: auto_agreement,
+    # auto_trusted, held_disagreement, held_burst, held_ambiguous,
+    # pending_manual, excluded_unclear, excluded_bad_image, policy_error,
+    # excluded_no_class, reverted, reviewed, audited_ok, legacy.
+    promotion_path: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True)
+    gate_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    audit_sample: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", index=True)
     simulation_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

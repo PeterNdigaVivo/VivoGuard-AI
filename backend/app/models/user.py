@@ -18,3 +18,8 @@ class User(Base):
     is_active:    Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_login_at:Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Trusted labeller (migration 0056): this person's True/False marks
+    # skip the model-agreement gate (never the burst guard). Granted to a
+    # few reliable control-room leads by an admin.
+    trusted_labeller: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")

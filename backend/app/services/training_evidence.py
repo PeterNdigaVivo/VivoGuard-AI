@@ -65,13 +65,23 @@ PERSON_FAMILY_TYPES = frozenset({
     "live_activity", "tailgating", "stockroom_access",
 })
 
+# Dismissal reason codes the Alerts page sends.
+#   not_a_person            "No person there" (person-based alerts)
+#   real_person_rule_wrong  "Real person - rule was wrong" (policy error)
+#   unclear                 "Unclear" button: ambiguous snapshot
+#   bad_image               "Bad image" button: unusable picture
+# Older codes are still honoured.
 DISMISS_REASON_KIND = {
     "not_a_person": NEGATIVE,
-    "camera_problem": UNCERTAIN,     # image unusable: excluded below
+    "real_person_rule_wrong": POLICY_ERROR,
     "staff_member": POLICY_ERROR,
     "normal_activity": POLICY_ERROR,
+    "unclear": UNCERTAIN,
+    "bad_image": UNCERTAIN,
+    "camera_problem": UNCERTAIN,
     "something_else": UNCERTAIN,
 }
+EXCLUDE_REASONS = ("unclear", "bad_image")
 
 
 @dataclass(frozen=True)
@@ -80,35 +90,58 @@ class FeedbackClass:
     target_class: str | None
     review_state: str
     reason: str
+    # A trainable label whose promotion depends on the trust gate.
+    gated: bool = False
+
+
+def target_class_for(detection_type: str) -> str | None:
+    """The learnable object class for a detection type, if any.
+
+    Person-based rules (intrusion, staff zone, ...) fire on a detected
+    person, so a confirmed alert IS a person at that box; other behaviour
+    rules (queue, shelf change, crowd) have no object class.
+    """
+    if detection_type in PERSON_FAMILY_TYPES:
+        return "person"
+    return OBJECT_CLASS_FOR_TYPE.get(detection_type)
 
 
 def classify_feedback(verdict: str, detection_type: str,
                       dismiss_reason: str | None = None) -> FeedbackClass:
-    """Map one operator verdict to (kind, target class, initial state)."""
+    """Map one operator mark to (kind, target class, initial state).
+
+    Trainable labels (``gated=True``) start pending; the label-promotion
+    gate decides whether they train. Everything else is final here.
+    """
+    target = target_class_for(detection_type)
     if verdict in ("correct", "confirm", "true"):
-        cls = OBJECT_CLASS_FOR_TYPE.get(detection_type)
-        if cls is None:
+        if target is None:
             return FeedbackClass(POSITIVE, None, EXCLUDED,
                                  "behaviour_rule_not_an_object_class")
-        return FeedbackClass(POSITIVE, cls, PENDING, "confirmed_by_operator")
+        return FeedbackClass(POSITIVE, target, PENDING, "confirmed_by_operator",
+                             gated=True)
 
-    kind = DISMISS_REASON_KIND.get(dismiss_reason or "", UNCERTAIN)
-    if dismiss_reason == "camera_problem":
-        return FeedbackClass(UNCERTAIN, None, EXCLUDED, "camera_problem_unusable")
+    if dismiss_reason == "unclear":
+        return FeedbackClass(UNCERTAIN, None, EXCLUDED, "excluded_unclear")
+    if dismiss_reason in ("bad_image", "camera_problem"):
+        return FeedbackClass(UNCERTAIN, None, EXCLUDED, "excluded_bad_image")
+    kind = DISMISS_REASON_KIND.get(dismiss_reason or "")
     if kind == POLICY_ERROR:
         return FeedbackClass(POLICY_ERROR, None, EXCLUDED,
                              f"policy_error:{dismiss_reason}")
-    if kind == NEGATIVE:
-        if detection_type in PERSON_FAMILY_TYPES:
-            return FeedbackClass(NEGATIVE, "person", PENDING, "no_person_in_frame")
-        cls = OBJECT_CLASS_FOR_TYPE.get(detection_type)
-        if cls is None:
-            return FeedbackClass(UNCERTAIN, None, PENDING, "negative_without_class")
-        return FeedbackClass(NEGATIVE, cls, PENDING, "dismissed_by_operator")
-    # Dismissed with no usable reason: a reviewer decides what it is.
-    target = ("person" if detection_type in PERSON_FAMILY_TYPES
-              else OBJECT_CLASS_FOR_TYPE.get(detection_type))
-    return FeedbackClass(UNCERTAIN, target, PENDING, "dismissed_without_reason")
+    if detection_type in PERSON_FAMILY_TYPES:
+        # A plain False on a person-based alert may mean "it was our
+        # cleaner": it must never train as "no person". Only the explicit
+        # "No person there" choice does.
+        if kind == NEGATIVE:
+            return FeedbackClass(NEGATIVE, "person", PENDING,
+                                 "no_person_in_frame", gated=True)
+        return FeedbackClass(UNCERTAIN, "person", PENDING,
+                             "person_false_without_choice")
+    if target is None:
+        return FeedbackClass(NEGATIVE, None, EXCLUDED, "no_object_class")
+    return FeedbackClass(NEGATIVE, target, PENDING, "dismissed_by_operator",
+                         gated=True)
 
 
 class ReviewError(ValueError):
@@ -156,6 +189,15 @@ def review(db: Session, image: TrainingImage, decision: str, *,
     extra.update({"reviewed_by": reviewer_id, "review_decision": decision,
                   "reviewed_at": datetime.now(timezone.utc).isoformat()})
     image.source_extra = extra
+    # Leave the exceptions queue: an approved audit sample stays an
+    # auto-promoted label that held up; anything else is now reviewed.
+    was = getattr(image, "promotion_path", None)
+    if hasattr(image, "promotion_path"):
+        image.promotion_path = ("audited_ok"
+                                if decision == "approve" and was in
+                                ("auto_agreement", "auto_trusted")
+                                else "reviewed")
+        image.gate_json = {**(image.gate_json or {}), "reviewed_from": was}
     db.flush()
     return image
 

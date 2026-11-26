@@ -146,6 +146,10 @@ def record_verdict(
     if not a:
         raise HTTPException(404, "alert not found")
 
+    # A new mark replaces the previous one: let the training-sample task
+    # run again so it UPDATES the alert's single training row
+    # (TrainingImage.label_alert_id) to the new label.
+    a.feedback_used_for_training = False
     a.status          = "confirmed" if verdict == "confirm" else "dismissed"
     a.assigned_to     = user.id
     a.acknowledged_at = datetime.now(timezone.utc)

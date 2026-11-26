@@ -38,7 +38,9 @@ SWEEP_WINDOW = timedelta(days=7)
 SWEEP_MIN_AGE = timedelta(minutes=30)
 SWEEP_LIMIT = 200
 
-_EXPECTED_STATUS = {"confirm": "confirmed", "dismiss": "dismissed"}
+_EXPECTED_STATUS = {"confirm": "confirmed", "dismiss": "dismissed",
+                    # Unclear / Bad image: the alert is closed as resolved.
+                    "exclude": "resolved"}
 
 
 def retry_delay_seconds(retries_done: int) -> int:
@@ -51,12 +53,12 @@ def absorb_verdict_now(alert_id: int, verdict: str, session_factory=None) -> str
     absorbed | verdict_changed | already_done | not_eligible | missing.
     Raises on unexpected errors (the Celery task retries them)."""
     if verdict not in _EXPECTED_STATUS:
-        raise ValueError(f"verdict must be 'confirm' or 'dismiss', got {verdict!r}")
+        raise ValueError(f"verdict must be confirm / dismiss / exclude, got {verdict!r}")
     if session_factory is None:
         from app.database import SessionLocal
         session_factory = SessionLocal
     from app.models import Alert
-    from app.training.feedback_loop import absorb_confirmed, absorb_dismissed
+    from app.training.feedback_loop import absorb_label
 
     with session_factory() as db:
         # Row lock (Postgres) so two runs for one alert cannot both create
@@ -73,14 +75,13 @@ def absorb_verdict_now(alert_id: int, verdict: str, session_factory=None) -> str
             return "verdict_changed"
         if alert.feedback_used_for_training:
             return "already_done"
+        if verdict == "exclude" and alert.dismiss_reason not in ("unclear", "bad_image"):
+            return "verdict_changed"
         if not alert.training_eligible:
             log.info("feedback: training skipped for quality-controlled alert=%s", alert_id)
             return "not_eligible"
         try:
-            if verdict == "confirm":
-                absorb_confirmed(db, alert_id)
-            else:
-                absorb_dismissed(db, alert_id)
+            absorb_label(db, alert_id, verdict)
         except Exception:
             db.rollback()
             raise
