@@ -123,6 +123,13 @@ export const alerts = {
       method: 'POST',
       body: { reason: reason ?? null, comment: comment ?? null },
     }),
+  // "Unclear" / "Bad image": closes the alert (and its incident) and keeps
+  // the snapshot out of training. Not a True/False verdict.
+  excludeFromTraining: (id: number, reason: 'unclear' | 'bad_image', comment?: string) =>
+    api<{ id: number; status: string }>(`/alerts/${id}/exclude-from-training`, {
+      method: 'POST',
+      body: { reason, comment: comment ?? null },
+    }),
   // Mark as acknowledged — drives the Generated → Acknowledged →
   // Resolved progress bar on the alert card. Idempotent.
   acknowledge: (id: number) =>

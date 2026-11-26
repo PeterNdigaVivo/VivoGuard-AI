@@ -14,6 +14,8 @@ interface UserRow {
   full_name: string | null
   role: 'admin' | 'operator' | 'viewer'
   is_active: boolean
+  // Marks skip the model-agreement gate for training (never the burst guard).
+  trusted_labeller?: boolean
   created_at: string
   last_login_at: string | null
 }
@@ -75,6 +77,20 @@ export default function UsersPage() {
     try {
       await api(`/users/${u.id}`, { method: 'PATCH', body: { is_active: !u.is_active } })
       toast.push(`${u.email} ${u.is_active ? 'disabled' : 'enabled'}`)
+      reload()
+    } catch (e) { toast.push(String(e), 'err') }
+  }
+
+  async function toggleTrusted(u: UserRow) {
+    const next = !u.trusted_labeller
+    if (next && !confirm(`Make ${u.email} a trusted labeller?
+
+`
+        + 'Their True/False marks will train the AI even when the AI disagrees '
+        + '(the mass-marking guard still applies).')) return
+    try {
+      await api(`/users/${u.id}`, { method: 'PATCH', body: { trusted_labeller: next } })
+      toast.push(`${u.email}: trusted labeller ${next ? 'on' : 'off'}`)
       reload()
     } catch (e) { toast.push(String(e), 'err') }
   }
@@ -145,6 +161,7 @@ export default function UsersPage() {
               <th className="text-left p-3">Name</th>
               <th className="text-left p-3">Role</th>
               <th className="text-left p-3">Status</th>
+              <th className="text-left p-3" title="True/False marks skip the AI-agreement check when training">Trusted labeller</th>
               <th className="text-left p-3">Last login</th>
               <th></th>
             </tr>
@@ -167,6 +184,13 @@ export default function UsersPage() {
                   {u.is_active
                     ? <Badge color="green">active</Badge>
                     : <Badge color="slate">disabled</Badge>}
+                </td>
+                <td className="p-3">
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                    <input type="checkbox" checked={!!u.trusted_labeller}
+                           onChange={() => toggleTrusted(u)} />
+                    {u.trusted_labeller ? 'Trusted' : '—'}
+                  </label>
                 </td>
                 <td className="p-3 text-xs text-slate-500 dark:text-slate-300">
                   {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'never'}

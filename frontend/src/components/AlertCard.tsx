@@ -513,6 +513,19 @@ export interface AlertCardProps {
   onChanged?: () => void
 }
 
+// Person-based rules fire on a detected person. Their False must say
+// whether a person was actually there: "it was our cleaner" is a policy
+// error and must never train the model as "no person".
+const PERSON_RULE_TYPES = new Set([
+  'person', 'intrusion', 'trespass', 'staff_zone', 'loitering',
+  'live_activity', 'tailgating', 'stockroom_access',
+])
+
+const UNCLEAR_GUARD =
+  'Use "Unclear" only when the snapshot is too ambiguous to label for training.\n\n'
+  + 'If this might be a REAL incident, act on it instead - do not mark it Unclear.\n\n'
+  + 'Close this alert as Unclear?'
+
 export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresolvedCount,
   groupSiblings, highlightCount, onChanged }: AlertCardProps) {
   // Local copy of the alert so we can reflect a resolve / dismiss
@@ -525,6 +538,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // description of the frame; operators must read it at a glance.
   const isSceneReview = alert.detection_type === 'scene_review'
   const isCalibration = alert.review_only || alert.notification_suppressed
+  const isPersonRule = PERSON_RULE_TYPES.has(alert.detection_type ?? '')
   // "Resolved" covers the three terminal statuses the API can set:
   // resolved (everyday "I handled it") + confirmed (legacy alias the
   // /resolve endpoint still uses) + dismissed ("not a problem").
@@ -706,15 +720,17 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   // of it — "no snapshot captured, so cannot define the incident" tells
   // us more than any category could. Enter submits so it costs one
   // keystroke more than the old blind click.
-  async function submitFalse() {
+  async function submitFalse(reason?: 'not_a_person' | 'real_person_rule_wrong') {
     const comment = reasonComment.trim()
     if (!comment || savingRef.current) return
+    // Person-based alerts need the explicit choice (see PERSON_RULE_TYPES).
+    if (isPersonRule && !reason) return
     setAskReason(false)
     setReasonComment('')
     await saveOutcome({
       optimistic: { status: 'dismissed', resolved_at: null,
                     acknowledged_at: new Date().toISOString() },
-      request: () => alertsApi.dismiss(alert.id, undefined, comment),
+      request: () => alertsApi.dismiss(alert.id, reason, comment),
       action: 'dismiss',
       failure: 'Could not mark False.',
     })
@@ -723,6 +739,20 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
   function cancelFalse() {
     setAskReason(false)
     setReasonComment('')
+  }
+
+  // "Unclear" / "Bad image": close the alert and keep the snapshot out of
+  // training. Not a True/False verdict, so detector accuracy is untouched.
+  async function markExcluded(reason: 'unclear' | 'bad_image') {
+    if (savingRef.current) return
+    if (reason === 'unclear' && !window.confirm(UNCLEAR_GUARD)) return
+    const now = new Date().toISOString()
+    await saveOutcome({
+      optimistic: { status: 'resolved', resolved_at: now, acknowledged_at: now },
+      request: () => alertsApi.excludeFromTraining(alert.id, reason),
+      action: 'resolve',
+      failure: 'Could not save.',
+    })
   }
 
 
@@ -1065,7 +1095,8 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                       // from every chat box they use.
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault()
-                        void submitFalse()
+                        // Person-based alerts need an explicit choice.
+                        if (!isPersonRule) void submitFalse()
                       } else if (e.key === 'Escape') {
                         e.preventDefault()
                         cancelFalse()
@@ -1074,12 +1105,36 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                     disabled={busy}
                     rows={2}
                     maxLength={500}
-                    placeholder="What did you actually see? (Enter to save)"
+                    placeholder={isPersonRule
+                      ? 'What did you actually see? Then choose below.'
+                      : 'What did you actually see? (Enter to save)'}
                     className="w-full text-xs rounded border border-slate-300 px-2 py-1
                                focus:outline-none focus:ring-1 focus:ring-slate-400
                                disabled:opacity-50"
                   />
                   <div className="flex flex-wrap gap-2 items-center pt-0.5">
+                    {isPersonRule ? (<>
+                      <button
+                        onClick={() => void submitFalse('not_a_person')}
+                        disabled={busy || !reasonComment.trim()}
+                        title="Nobody was there (reflection, mannequin, poster, shadow). Teaches the AI what is NOT a person."
+                        className="px-3 py-1.5 rounded font-bold text-white bg-red-600
+                                   hover:bg-red-700 disabled:opacity-40
+                                   disabled:cursor-not-allowed"
+                      >
+                        🚫 No person there
+                      </button>
+                      <button
+                        onClick={() => void submitFalse('real_person_rule_wrong')}
+                        disabled={busy || !reasonComment.trim()}
+                        title="A real person was there but the alert should not have fired (staff, cleaner, expected visitor). Fixes the rule, never trains the AI."
+                        className="px-3 py-1.5 rounded font-bold text-white bg-amber-600
+                                   hover:bg-amber-700 disabled:opacity-40
+                                   disabled:cursor-not-allowed"
+                      >
+                        🧍 Real person — rule was wrong
+                      </button>
+                    </>) : (
                     <button
                       onClick={() => void submitFalse()}
                       disabled={busy || !reasonComment.trim()}
@@ -1088,7 +1143,7 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                                  disabled:cursor-not-allowed"
                     >
                       ❌ Mark False &amp; save
-                    </button>
+                    </button>)}
                     <button
                       onClick={cancelFalse}
                       disabled={busy}
@@ -1112,6 +1167,16 @@ export function AlertCard({ alert: incoming, groupCount, groupLast, groupUnresol
                 </FeedbackBtn>
                 <FeedbackBtn onClick={markFalse} tone="red" disabled={busy}>
                   ❌ False Alert
+                </FeedbackBtn>
+                <FeedbackBtn onClick={() => void markExcluded('unclear')} tone="slate"
+                             disabled={busy}
+                             title="Snapshot too ambiguous to label for training. If this might be a real incident, act on it instead.">
+                  ❔ Unclear
+                </FeedbackBtn>
+                <FeedbackBtn onClick={() => void markExcluded('bad_image')} tone="slate"
+                             disabled={busy}
+                             title="The picture is unusable (dark, blurred, blocked, wrong frame). Closes the alert; the image is never used for training.">
+                  🖼 Bad image
                 </FeedbackBtn>
               </>
               )
@@ -1362,19 +1427,22 @@ function ActionBtn({ onClick, tone, disabled, children }: {
 // Bold solid-colour variant for the two AI training-feedback buttons.
 // Visually dominates the auxiliary `ActionBtn` chips so operators
 // can't miss the primary call to action.
-function FeedbackBtn({ onClick, tone, disabled, children }: {
+function FeedbackBtn({ onClick, tone, disabled, title, children }: {
   onClick: () => void
-  tone: 'green' | 'red' | 'blue'
+  tone: 'green' | 'red' | 'blue' | 'slate'
   disabled?: boolean
+  title?: string
   children: React.ReactNode
 }) {
   const cls = tone === 'green'
     ? 'bg-green-600 hover:bg-green-700'
     : tone === 'blue'
       ? 'bg-blue-600 hover:bg-blue-700'
-      : 'bg-red-600 hover:bg-red-700'
+      : tone === 'slate'
+        ? 'bg-slate-500 hover:bg-slate-600'
+        : 'bg-red-600 hover:bg-red-700'
   return (
-    <button onClick={onClick} disabled={disabled}
+    <button onClick={onClick} disabled={disabled} title={title}
             className={'px-3 py-1.5 rounded text-white font-bold shadow-sm '
                        + cls + ' disabled:opacity-50'}>
       {children}

@@ -48,6 +48,10 @@ export interface Rollout {
 }
 
 export type ReviewState = 'pending_review' | 'approved' | 'rejected' | 'excluded'
+// Training Review is an exceptions queue (operator marks train directly).
+export type ReviewBucket =
+  | 'disagreement' | 'burst' | 'audit' | 'ambiguous'
+  | 'approved' | 'rejected' | 'excluded'
 export type ExampleKind = 'positive' | 'negative' | 'uncertain' | 'policy_error'
 
 export interface Evidence {
@@ -63,6 +67,11 @@ export interface Evidence {
   dismiss_reason: string | null
   box_count: number
   preview_url: string | null
+  promotion_path: string | null
+  audit_sample: boolean
+  labelled_by_user_id: number | null
+  labelled_at: string | null
+  gate: Record<string, any> | null
 }
 
 export interface Readiness {
@@ -92,8 +101,8 @@ export const modelRollouts = {
 }
 
 export const trainingEvidence = {
-  list: (state: ReviewState, kind?: string, limit = 50, offset = 0) => {
-    const q = new URLSearchParams({ state, limit: String(limit), offset: String(offset) })
+  list: (bucket: ReviewBucket, kind?: string, limit = 50, offset = 0) => {
+    const q = new URLSearchParams({ bucket, limit: String(limit), offset: String(offset) })
     if (kind) q.set('kind', kind)
     return api<{ total: number; items: Evidence[]; counts: Record<string, number> }>(
       `/training-evidence?${q}`)

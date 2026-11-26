@@ -12,6 +12,7 @@ import type { Alert } from '@/api/alerts'
 const api = vi.hoisted(() => ({
   confirm: vi.fn(async (id: number) => ({ id, status: 'confirmed' })),
   dismiss: vi.fn(async (id: number) => ({ id, status: 'dismissed' })),
+  excludeFromTraining: vi.fn(async (id: number) => ({ id, status: 'resolved' })),
   resolve: vi.fn(async (id: number) => ({ id, status: 'confirmed' })),
   acknowledge: vi.fn(async () => ({})),
   addNote: vi.fn(async () => ({})),
@@ -47,12 +48,13 @@ const shownAlertId = () => screen.getByTitle('Alert reference for investigation 
 
 // False Alert asks what the operator actually saw before it saves (the
 // sentence is required; there is no confirm popup). Opens the box, types
-// the reason and presses "Mark False & save".
+// the reason and presses "No person there" (these sample alerts are
+// person alerts, which need the explicit choice).
 async function markFalse(reason = 'mannequin by the door') {
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
   fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
                    { target: { value: reason } })
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Mark False & save/ })) })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /No person there/ })) })
 }
 
 beforeEach(() => {
@@ -76,7 +78,7 @@ describe('grouped AlertCard verdicts', () => {
     expect(shownAlertId()).toBe('Alert #1')
     await markFalse()
     expect(api.dismiss).toHaveBeenCalledTimes(1)
-    expect(api.dismiss).toHaveBeenCalledWith(1, undefined, 'mannequin by the door')
+    expect(api.dismiss).toHaveBeenCalledWith(1, 'not_a_person', 'mannequin by the door')
     expect(api.confirm).not.toHaveBeenCalled()
     expect(screen.getByText('✓ Marked False')).toBeTruthy()
     expect(screen.getByTestId('group-summary').textContent)
@@ -140,7 +142,7 @@ describe('verdict responsiveness', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
     fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
                      { target: { value: 'reflection' } })
-    const saveBtn = screen.getByRole('button', { name: /Mark False & save/ })
+    const saveBtn = screen.getByRole('button', { name: /No person there/ })
     await act(async () => { fireEvent.click(saveBtn); fireEvent.click(saveBtn) })
     expect(screen.getByText('✓ Marked False')).toBeTruthy()
     expect(screen.getByText(/saving…/)).toBeTruthy()
@@ -174,9 +176,63 @@ describe('verdict responsiveness', () => {
   it('False cannot be saved without saying what was seen', async () => {
     render(card(alert(1, '10:00'), []))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
-    const saveBtn = screen.getByRole('button', { name: /Mark False & save/ }) as HTMLButtonElement
+    const saveBtn = screen.getByRole('button', { name: /No person there/ }) as HTMLButtonElement
     expect(saveBtn.disabled).toBe(true)
     fireEvent.click(saveBtn)
     expect(api.dismiss).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('person-based False and the training buttons', () => {
+  it('a person alert offers "No person there" and "Real person - rule was wrong"', async () => {
+    render(card(alert(1, '10:00'), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    expect(screen.queryByRole('button', { name: /Mark False & save/ })).toBeNull()
+    fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
+                     { target: { value: 'our cleaner' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Real person/ }))
+    })
+    expect(api.dismiss).toHaveBeenCalledWith(1, 'real_person_rule_wrong', 'our cleaner')
+  })
+
+  it('Enter alone never saves a person-alert False (a choice is required)', async () => {
+    render(card(alert(1, '10:00'), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    const box = screen.getByPlaceholderText(/What did you actually see/)
+    fireEvent.change(box, { target: { value: 'something' } })
+    await act(async () => { fireEvent.keyDown(box, { key: 'Enter' }) })
+    expect(api.dismiss).not.toHaveBeenCalled()
+  })
+
+  it('other detectors keep the single "Mark False & save"', async () => {
+    render(card(alert(1, '10:00', { detection_type: 'fire' }), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /False Alert/ })) })
+    fireEvent.change(screen.getByPlaceholderText(/What did you actually see/),
+                     { target: { value: 'steam' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Mark False & save/ })) })
+    expect(api.dismiss).toHaveBeenCalledWith(1, undefined, 'steam')
+  })
+
+  it('Unclear asks first and closes the alert without a verdict', async () => {
+    render(card(alert(1, '10:00'), []))
+    const btn = screen.getByRole('button', { name: /Unclear/ })
+    expect(btn.getAttribute('title')).toMatch(/real incident, act on it/)
+    vi.mocked(window.confirm).mockReturnValueOnce(false)
+    await act(async () => { fireEvent.click(btn) })
+    expect(api.excludeFromTraining).not.toHaveBeenCalled()
+    await act(async () => { fireEvent.click(btn) })
+    expect(vi.mocked(window.confirm).mock.calls[vi.mocked(window.confirm).mock.calls.length - 1]?.[0]).toMatch(/REAL incident/)
+    expect(api.excludeFromTraining).toHaveBeenCalledWith(1, 'unclear')
+    expect(api.dismiss).not.toHaveBeenCalled()
+    expect(api.confirm).not.toHaveBeenCalled()
+  })
+
+  it('Bad image closes the alert and excludes the snapshot', async () => {
+    render(card(alert(1, '10:00'), []))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Bad image/ })) })
+    expect(api.excludeFromTraining).toHaveBeenCalledWith(1, 'bad_image')
+    expect(screen.getByText('✓ Resolved')).toBeTruthy()
   })
 })
