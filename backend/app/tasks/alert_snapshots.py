@@ -17,8 +17,9 @@ so the strip shows the person approaching, opening the door, and entering.
 
 Snapshot 1 (-10s): extracted from the camera's ACTIVE recording file at
 (alert_time - 10s), when footage is available.
-Snapshot 2 is the Redis frame at t=0; snapshots 3-6 are captured by
-`capture_filmstrip_frame` scheduled with Celery countdowns (30/60/90/120s).
+The event and post-event frames prefer recorded footage. Live frames must be
+near their targets. The post-event frames are collected by
+`capture_filmstrip_frame` scheduled from the event time (30/60/90/120s).
 
 Reuses Alert.snapshot_paths (a JSON list — the same column the checkout
 and after-hours filmstrips use), so no schema or UI change. Files land under
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -67,6 +69,7 @@ FILMSTRIP_TIMELINES: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {
     "shop_open_close": ((30, 15, 5), (5, 15)),
 }
 MAX_SNAPSHOTS  = 6
+FILMSTRIP_LIVE_TOLERANCE_SECONDS = 3.0
 
 # 48h retention for the on-disk filmstrips (mirrors prune_alert_clips).
 RETENTION_HOURS = int(getattr(settings, "alert_snapshot_retention_hours", 48))
@@ -130,11 +133,21 @@ def _append_path(alert_id: int, path: str) -> None:
 
 
 # ── frame sources ─────────────────────────────────────────────────────────
-def _redis_frame(camera_id: int) -> bytes | None:
-    """Most-recent JPEG the streamer published (raw pixels, no overlay)."""
+def _redis_frame(camera_id: int, target: datetime) -> bytes | None:
+    """Use a live JPEG only while the task and frame are near the target."""
+    target_ts = target.timestamp()
+    earliest = target_ts - FILMSTRIP_LIVE_TOLERANCE_SECONDS
+    latest = target_ts + FILMSTRIP_LIVE_TOLERANCE_SECONDS
+    if not earliest <= time.time() <= latest:
+        return None
     try:
         from app.stream.frame_buffer import FrameBuffer
-        return FrameBuffer().latest_jpeg(camera_id, prefer_overlay=False)
+        frames = FrameBuffer()
+        frame_at = float((frames.health(camera_id) or {}).get("last_frame_at"))
+        if not earliest <= frame_at <= time.time():
+            return None
+        jpeg = frames.latest_jpeg(camera_id, prefer_overlay=False)
+        return jpeg if time.time() <= latest else None
     except Exception:
         return None
 
@@ -178,10 +191,9 @@ def _extract_recording_frame(camera_id: int, target_dt: datetime) -> bytes | Non
 @celery_app.task(name="alerting.capture_filmstrip_frame", ignore_result=True)
 def capture_filmstrip_frame(alert_id: int, camera_id: int, store_id: int,
                             epoch_ts: int) -> None:
-    """Capture ONE filmstrip frame from the current Redis frame and append it
-    to the alert. Used for the +30/+60/+90/+120s snapshots (scheduled with a
-    countdown). Best-effort."""
-    jpeg = _redis_frame(camera_id)
+    """Collect recorded footage or a verified near-target live frame."""
+    target = datetime.fromtimestamp(epoch_ts, tz=timezone.utc)
+    jpeg = _extract_recording_frame(camera_id, target) or _redis_frame(camera_id, target)
     if not jpeg:
         return
     path = _save_jpeg(jpeg, store_id=store_id, alert_id=alert_id, epoch_ts=epoch_ts)
@@ -193,7 +205,7 @@ def capture_filmstrip_frame(alert_id: int, camera_id: int, store_id: int,
 def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
                              detection_type: str, alert_epoch: float) -> None:
     """Kick off the 6-frame filmstrip for a business-hours alert: capture the
-    pre-frames and t=0 frame now, then schedule the post-frames via countdown.
+    pre-frames and t=0 frame now, then schedule the post-frames from the alert timestamp.
     Timeline is per-type (FILMSTRIP_TIMELINES) — the default is -10s/t=0/
     +30/60/90/120s; shop_open_close uses -30/-15/-5/t=0/+5/+15 to capture the
     approach-to-door + door-opening motion. Gated on the alert type and the
@@ -220,20 +232,19 @@ def schedule_alert_filmstrip(alert_id: int, camera_id: int, store_id: int,
             if p:
                 _append_path(alert_id, p)
 
-    # t=0 frame — the alert moment (most-recent Redis frame).
-    now_jpeg = _redis_frame(camera_id)
+    now_jpeg = _extract_recording_frame(camera_id, alert_dt) or _redis_frame(camera_id, alert_dt)
     if now_jpeg:
         p = _save_jpeg(now_jpeg, store_id=store_id, alert_id=alert_id,
                        epoch_ts=int(alert_dt.timestamp()))
         if p:
             _append_path(alert_id, p)
 
-    # Post-frames via Celery countdown (grab the live Redis frame at +Ns).
+    # Keep post-event targets anchored to the alert timestamp.
     base = int(alert_dt.timestamp())
     for off in post_offsets:
         capture_filmstrip_frame.apply_async(
             args=[alert_id, camera_id, store_id, base + off],
-            countdown=off,
+            eta=datetime.fromtimestamp(base + off, tz=timezone.utc),
         )
 
 

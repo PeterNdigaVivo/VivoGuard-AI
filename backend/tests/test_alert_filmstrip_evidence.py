@@ -28,7 +28,7 @@ def test_pre_event_frame_requires_recorded_footage(monkeypatch, has_recorded_fra
 
     pre_at = when - timedelta(seconds=10)
     assert [call.args for call in pre.call_args_list if call.args[1] < when] == [(6, pre_at)]
-    redis_frame.assert_called_once_with(6)
+    redis_frame.assert_called_once_with(6, when)
     saved = [(call.args[0], call.kwargs["epoch_ts"]) for call in save.call_args_list]
     current = (live, int(when.timestamp()))
     if has_recorded_frame:
@@ -36,7 +36,9 @@ def test_pre_event_frame_requires_recorded_footage(monkeypatch, has_recorded_fra
     else:
         assert saved == [current]
     assert append.call_count == len(saved)
-    assert schedule.call_count == len(alert_snapshots.DEFAULT_POST_OFFSETS_S)
+    assert [call.kwargs["eta"] for call in schedule.call_args_list] == [
+        when + timedelta(seconds=off) for off in alert_snapshots.DEFAULT_POST_OFFSETS_S
+    ]
 
 
 @pytest.mark.parametrize(("exit_code", "output", "expected"), [
@@ -64,3 +66,52 @@ def test_pre_event_extractor_only_accepts_successful_ffmpeg_output(
     assert args[args.index("-ss") + 1] == "15"
     assert args[-1] == "pipe:1"
     assert encode.call_args.kwargs["stdout"] == alert_snapshots.subprocess.PIPE
+
+
+@pytest.mark.parametrize(
+    ("task_delay", "frame_delay", "expected"),
+    [
+        (1, -2, b"live JPEG"),
+        (1, -4, None),
+        (6, 5, None),
+        (1, 2, None),
+        (1, None, None),
+        (1, float("nan"), None),
+    ],
+)
+def test_live_frame_must_be_close_to_the_scheduled_time(monkeypatch, task_delay, frame_delay, expected):
+    target = datetime(2026, 8, 25, 9, tzinfo=timezone.utc)
+    timestamp = target.timestamp()
+    frames = Mock()
+    frames.health.return_value = {
+        "last_frame_at": timestamp + frame_delay if frame_delay is not None else None,
+    }
+    frames.latest_jpeg.return_value = b"live JPEG"
+    monkeypatch.setattr("app.stream.frame_buffer.FrameBuffer", lambda: frames)
+    monkeypatch.setattr(alert_snapshots.time, "time", lambda: timestamp + task_delay)
+
+    assert alert_snapshots._redis_frame(6, target) == expected
+
+    if expected:
+        frames.latest_jpeg.assert_called_once_with(6, prefer_overlay=False)
+    else:
+        frames.latest_jpeg.assert_not_called()
+
+
+def test_post_event_frame_prefers_recorded_footage(monkeypatch):
+    target = datetime(2026, 8, 25, 9, tzinfo=timezone.utc)
+    extract = Mock(return_value=b"recorded frame")
+    live = Mock()
+    save = Mock(return_value="stored")
+    append = Mock()
+    monkeypatch.setattr(alert_snapshots, "_extract_recording_frame", extract)
+    monkeypatch.setattr(alert_snapshots, "_redis_frame", live)
+    monkeypatch.setattr(alert_snapshots, "_save_jpeg", save)
+    monkeypatch.setattr(alert_snapshots, "_append_path", append)
+
+    alert_snapshots.capture_filmstrip_frame.run(5, 6, 7, int(target.timestamp()))
+
+    extract.assert_called_once_with(6, target)
+    live.assert_not_called()
+    save.assert_called_once_with(b"recorded frame", store_id=7, alert_id=5, epoch_ts=int(target.timestamp()))
+    append.assert_called_once_with(5, "stored")
