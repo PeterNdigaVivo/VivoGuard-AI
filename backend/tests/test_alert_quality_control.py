@@ -141,7 +141,9 @@ def test_resolve_all_never_closes_quarantined_review_evidence(db):
     db.refresh(operational)
     db.refresh(calibration)
     assert result == {"resolved": 1}
-    assert operational.status == "confirmed"
+    # "resolved", not "confirmed": clearing the feed is not a True Alert
+    # verdict (a34aef5 gave resolve its own status).
+    assert operational.status == "resolved"
     assert calibration.status == "new"
 
 
