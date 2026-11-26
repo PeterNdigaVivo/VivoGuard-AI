@@ -102,6 +102,7 @@ _OPTIONAL_ROUTERS = [
     ("app.api.incidents",          ["router"]),
     ("app.api.labels",             ["router"]),
     ("app.api.training",           ["router"]),
+    ("app.api.training_evidence",  ["router"]),
     ("app.api.system",             ["router"]),
     ("app.api.system_health",      ["router"]),
     ("app.api.websockets",         ["router"]),

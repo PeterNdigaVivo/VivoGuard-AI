@@ -480,6 +480,13 @@ def start_job(payload: TrainingJobIn, db: Session = Depends(get_db),
             f"dataset has {approved} approved images; at least {min_images} "
             "are required to produce five held-out validation images",
         )
+    # Balanced, reviewed evidence before any job (positives AND negatives).
+    from app.services.training_evidence import dataset_readiness
+    _neg_ids = list((payload.model_dump().get("extra_negative_dataset_ids") or []))
+    _ready = dataset_readiness(db, [ds.id, *_neg_ids])
+    if not _ready["ready"]:
+        raise HTTPException(409, "not enough reviewed, balanced evidence: "
+                            + "; ".join(_ready["reasons"]))
     from app.training.orchestrator import _priority_for
     job = TrainingJob(
         model_name=payload.model_name,
@@ -895,6 +902,11 @@ def start_finetune_job(
                 .filter(Dataset.name == f"feedback-negative-{detection_type}")
                 .first())
     extra_neg_ids = [neg_ds.id] if neg_ds else []
+    from app.services.training_evidence import dataset_readiness
+    _ready = dataset_readiness(db, [pos_ds.id, *extra_neg_ids])
+    if not _ready["ready"]:
+        raise HTTPException(409, "not enough reviewed, balanced evidence: "
+                            + "; ".join(_ready["reasons"]))
 
     cfg = {
         "incremental_finetune":       True,

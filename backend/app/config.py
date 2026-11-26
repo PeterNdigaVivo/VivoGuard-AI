@@ -151,6 +151,15 @@ class Settings(BaseSettings):
     # True once a second-reviewer workflow actually exists; migration
     # 0045 honours this env var when un-quarantining.
     training_require_dual_review: bool = False
+    # Training evidence review (app.services.training_evidence). Operator
+    # verdicts always enter the review queue as pending_review; a job for
+    # a class starts only with enough APPROVED, balanced examples.
+    training_min_approved_positives: int = 50
+    training_min_approved_negatives: int = 25
+    training_max_class_imbalance: float = 4.0
+    # When True the reviewer must be a different person from the operator
+    # who gave the verdict (off by default: single-operator workflow).
+    training_review_require_different_user: bool = False
     # Anti-catastrophic-forgetting replay: fraction of the parent model's
     # original dataset sampled into every fine-tune (train split only).
     # 0.18 sits inside the standard 15-20% replay band.

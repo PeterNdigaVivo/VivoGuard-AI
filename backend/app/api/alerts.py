@@ -1881,6 +1881,13 @@ def dismiss(alert_id: int, payload: DismissIn | None = None,
     # the job, the reason is the bonus.
     _close_owning_incident(db, alert_id, "dismiss", user,
                            (payload.reason if payload else None))
+    # The reason must be on the row BEFORE record_verdict commits and
+    # queues the training task: the task reads it to decide whether this
+    # is a negative example or a policy error (staff, normal activity).
+    if payload and payload.reason in DISMISS_REASONS:
+        _a = db.get(Alert, alert_id)
+        if _a is not None:
+            _a.dismiss_reason = payload.reason
     out = record_verdict(db, alert_id, "dismiss", user)
     reason = payload.reason if payload else None
     comment = (payload.comment or "").strip() if payload else ""

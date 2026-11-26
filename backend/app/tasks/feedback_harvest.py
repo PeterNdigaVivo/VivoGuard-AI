@@ -278,13 +278,20 @@ def run_store_specialist(store_name: str = "Vivo Yaya") -> None:
                     continue
                 if not os.path.exists(src_img.file_path):
                     continue
+                # Inherit the source's reviewed provenance: only approved
+                # evidence stays trainable in the specialist dataset.
                 clone = TrainingImage(
                     dataset_id=ds.id, camera_id=src_img.camera_id,
                     file_path=src_img.file_path, labeled=True,
                     source_extra={**(src_img.source_extra or {}),
                                   "harvest": "store_specialist",
                                   "source_pool": name},
-                    source_alert_id=src_img.source_alert_id)
+                    source_alert_id=src_img.source_alert_id,
+                    source_kind=src_img.source_kind,
+                    review_state=src_img.review_state,
+                    eligible_for_training=src_img.eligible_for_training,
+                    example_kind=src_img.example_kind,
+                    target_class=src_img.target_class)
                 db.add(clone); db.flush()
                 existing_paths.add(src_img.file_path)
                 if negative:
