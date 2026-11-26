@@ -208,6 +208,25 @@ class Settings(BaseSettings):
     # by default so deploying migration 0040 cannot change alert behaviour.
     incident_foundations_enabled: bool = False
     delivery_outbox_enabled: bool = False
+    # Authoritative incident lifecycle (migration 0050). When on, every
+    # promoted detection passes through app.services.alert_policy and is
+    # attached to ONE deduplicated incident; repeats append to its timeline
+    # instead of creating another actionable alert. Even when set, it only
+    # takes effect after app.services.incidents.lifecycle_ready() confirms
+    # the 0050 schema is present, so enabling it before migrating is safe.
+    incident_lifecycle_enabled: bool = False
+    # Repeated evidence within this many seconds of an incident's last
+    # evidence is the same continuing event. Per-type overrides take a
+    # JSON object, e.g. INCIDENT_DEDUP_WINDOW_OVERRIDES={"intrusion": 1800}.
+    incident_dedup_window_seconds: int = 900
+    incident_dedup_window_overrides: dict[str, int] = Field(default_factory=dict)
+    # Detectors that have met their validation bar and may leave the
+    # review-only default (scene_review, shelf, audio_distress, ...).
+    policy_validated_detectors: list[str] = Field(default_factory=list)
+    # Detections below this confidence are discarded by the policy.
+    policy_min_confidence: float = 0.25
+    # Fire / weapon / fight / fall need at least this to page anyone.
+    policy_safety_min_confidence: float = 0.5
     # Static-object (mannequin) filter for the activity feed: a tracked
     # person whose bbox centre moved less than this many pixels across
     # the last N frames is treated as a fixture and excluded from the

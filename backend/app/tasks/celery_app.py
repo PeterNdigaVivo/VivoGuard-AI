@@ -61,6 +61,7 @@ celery_app = Celery(
         "app.tasks.system_health_report",
         "app.tasks.feedback_absorb",
         "app.tasks.eval_tasks",
+        "app.tasks.incidents",
     ],
 )
 celery_app.conf.update(
@@ -253,6 +254,12 @@ celery_app.conf.update(
         "inference-capacity-watchdog-every-60s": {
             "task": "inference.health_watchdog",
             "schedule": 60.0,
+        },
+        # Incident lifecycle safety net: fold any alert whose incident
+        # attach failed. No-op while INCIDENT_LIFECYCLE_ENABLED is off.
+        "incidents-attach-orphans-every-5m": {
+            "task": "incidents.attach_orphans",
+            "schedule": 300.0,
         },
         # Alert history retention — prune alerts + snapshots older than
         # 90 days once a day (relative to worker boot).
