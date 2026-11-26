@@ -106,6 +106,38 @@ def test_unregistered_recorder_is_stopped_and_reaped(monkeypatch, tmp_path, capl
     assert "private tracking error" not in caplog.text
 
 
+def test_window_start_continues_when_one_store_output_path_is_blocked(
+    monkeypatch, tmp_path, caplog,
+) -> None:
+    blocked_dir = tmp_path / "window" / "3"
+    blocked_dir.parent.mkdir()
+    blocked_dir.write_text("existing data", encoding="utf-8")
+    cameras = [SimpleNamespace(id=7, store_id=3), SimpleNamespace(id=8, store_id=4)]
+    redis = Mock()
+    db = Mock()
+    proc = Mock(pid=321)
+    spawn = Mock(return_value=proc)
+    watcher = Mock()
+    monkeypatch.setattr(recorder, "_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder, "_key_cameras", lambda _db: cameras)
+    monkeypatch.setattr(recorder, "_substream_url", lambda _camera: "rtsp://redacted")
+    monkeypatch.setattr(recorder.subprocess, "Popen", spawn)
+    monkeypatch.setattr(recorder, "_start_exit_watcher", watcher)
+
+    assert recorder._start_window(db, redis, "window", 600) == 1
+
+    assert spawn.call_count == 1
+    assert spawn.call_args.args[0][-1] == str(tmp_path / "window" / "4" / "8.mp4")
+    watcher.assert_called_once_with(proc, 8, redis)
+    assert db.add.call_args.args[0].camera_id == 8
+    db.commit.assert_called_once_with()
+    assert redis.set.call_args_list[0].args == (
+        "vg:recording:failure:7", "output_path_unavailable",
+    )
+    assert blocked_dir.read_text(encoding="utf-8") == "existing data"
+    assert str(tmp_path) not in caplog.text
+
+
 def test_ffmpeg_exit_reason_never_contains_rtsp_credentials() -> None:
     stderr = (
         b"[rtsp] method DESCRIBE failed: 401 Unauthorized\n"
@@ -400,7 +432,7 @@ def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
         lambda path: path == "/clips/1.mp4",
     )
     redis = _RecorderHealthRedis()
-    redis.values["vg:recording:failure:2"] = "connection_timeout"
+    redis.values["vg:recording:failure:2"] = "output_path_unavailable"
     redis.values["vg:recording:failure:3"] = "rtsp://should-never-be-exposed"
 
     result = _recording_health_snapshot(
@@ -408,7 +440,7 @@ def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     )
 
     assert result["recorder_failure_reasons"] == {
-        "connection_timeout": 1,
+        "output_path_unavailable": 1,
         "unclassified": 1,
     }
     assert result["recorders_missing_without_failure_reason"] == 0

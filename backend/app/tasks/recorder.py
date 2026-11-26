@@ -67,7 +67,7 @@ _HEALTH_KEY = "vg:recording:health"
 _FAILURE_KEY_FMT = "vg:recording:failure:{cam}"
 _FAILURE_TTL_SECONDS = 24 * 3600
 _PROVEN_TTL_SECONDS = 24 * 3600
-_FFMPEG_FAILURE_REASONS = {
+_RECORDER_FAILURE_REASONS = {
     "authentication_failed",
     "access_forbidden",
     "connection_refused",
@@ -75,6 +75,7 @@ _FFMPEG_FAILURE_REASONS = {
     "connection_limit",
     "stream_not_found",
     "invalid_stream_data",
+    "output_path_unavailable",
     "unclassified",
 }
 _TRACKING_TTL_GRACE_SECONDS = 10 * 60
@@ -192,6 +193,15 @@ def _classify_ffmpeg_exit(stderr: bytes) -> str:
     return "unclassified"
 
 
+def _record_failure_reason(r, camera_id: int, reason: str) -> None:
+    try:
+        r.set(
+            _FAILURE_KEY_FMT.format(cam=camera_id), reason, ex=_FAILURE_TTL_SECONDS,
+        )
+    except Exception:
+        log.warning("recorder: could not persist failure reason cam=%s", camera_id)
+
+
 def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int, r=None) -> None:
     """Reap a recorder child and emit only credential-safe diagnostics."""
     try:
@@ -202,17 +212,7 @@ def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int, r=None) -> None
     if proc.returncode and proc.returncode > 0:
         reason = _classify_ffmpeg_exit(stderr or b"")
         if r is not None:
-            try:
-                r.set(
-                    _FAILURE_KEY_FMT.format(cam=camera_id),
-                    reason,
-                    ex=_FAILURE_TTL_SECONDS,
-                )
-            except Exception:
-                log.exception(
-                    "recorder: could not persist failure reason cam=%s",
-                    camera_id,
-                )
+            _record_failure_reason(r, camera_id, reason)
         log.warning(
             "recorder: ffmpeg exited cam=%s code=%s reason=%s",
             camera_id, proc.returncode, reason,
@@ -236,8 +236,13 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
     if not url:
         return False
     out_dir = _clips_root() / window_id / str(cam.store_id or 0)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = _recording_path(out_dir, cam.id)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = _recording_path(out_dir, cam.id)
+    except OSError:
+        log.warning("recorder: recording output unavailable cam=%s", cam.id)
+        _record_failure_reason(r, cam.id, "output_path_unavailable")
+        return False
     cmd = [
         "ffmpeg", "-nostdin", "-loglevel", "error",
         "-rtsp_transport", "tcp", "-i", url,
@@ -582,7 +587,7 @@ def _recording_health_snapshot(db, r, window_id: str | None, *,
             missing_without_failure_reason += 1
             continue
         safe_reason = (
-            str(reason) if str(reason) in _FFMPEG_FAILURE_REASONS
+            str(reason) if str(reason) in _RECORDER_FAILURE_REASONS
             else "unclassified"
         )
         failure_reasons[safe_reason] = failure_reasons.get(safe_reason, 0) + 1
