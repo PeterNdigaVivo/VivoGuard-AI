@@ -453,8 +453,11 @@ def stores_zone_health(db: Session = Depends(get_db),
         return []
     store_ids = [s.id for s in stores]
 
+    # Soft-deleted cameras are not part of the fleet (app.services.fleet);
+    # counting them cost every store 15 points per removed camera.
     cams = (db.query(Camera)
-              .filter(Camera.store_id.in_(store_ids))
+              .filter(Camera.store_id.in_(store_ids),
+                      Camera.is_deleted.is_(False))
               .all())
     cams_by_store: dict[int, list[dict]] = {}
     for c in cams:

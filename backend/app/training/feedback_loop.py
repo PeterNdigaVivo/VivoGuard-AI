@@ -55,7 +55,8 @@ def _persist_feedback_image(dataset_id: int, alert_id: int,
     return str(target)
 
 
-def _training_provenance(verdict: str) -> dict:
+def _training_provenance(verdict: str, detection_type: str = "",
+                         dismiss_reason: str | None = None) -> dict:
     """Provenance state for operator feedback.
 
     Policy switch (Aug 2026): the codex data-integrity work quarantined
@@ -67,17 +68,22 @@ def _training_provenance(verdict: str) -> dict:
       False → clicks are trainable immediately (pre-codex behaviour);
       True  → the codex quarantine applies unchanged.
     source_kind always records the truth either way.
+
+    Superseded (Nov 2026): a click is evidence, not a label. Every verdict
+    now enters the review queue (pending_review, or excluded when it can
+    never be trainable: behaviour rules, policy errors, camera problems)
+    and only a reviewer's approval makes it trainable. See
+    app.services.training_evidence.
     """
-    from app.config import settings
+    from app.services.training_evidence import classify_feedback
     kind = ("operator_dismissed" if verdict == "false"
             else "operator_confirmed")
-    if bool(getattr(settings, "training_require_dual_review", False)):
-        return {"source_kind": kind,
-                "eligible_for_training": False,
-                "review_state": "pending"}
+    fc = classify_feedback(verdict, detection_type, dismiss_reason)
     return {"source_kind": kind,
-            "eligible_for_training": True,
-            "review_state": "approved"}
+            "eligible_for_training": False,
+            "review_state": fc.review_state,
+            "example_kind": fc.kind,
+            "target_class": fc.target_class}
 
 
 def _build_source_extra(db: Session, ev: DetectionEvent,
@@ -324,7 +330,8 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
         return
     source_extra = _build_source_extra(db, ev, a, "correct")
     source_extra["source_thumbnail_path"] = ev.thumbnail_path
-    provenance = _training_provenance("correct")
+    source_extra["verdict_user_id"] = a.assigned_to
+    provenance = _training_provenance("correct", cls)
     img = TrainingImage(
         dataset_id=ds.id,
         camera_id=ev.camera_id,
@@ -352,8 +359,10 @@ def absorb_confirmed(db: Session, alert_id: int) -> None:
     # moment bbox above must never be copied onto frames where the
     # person has moved.
     _enqueue_temporal_harvest(alert_id)
-    _enqueue_if_trainable(db, cls, provenance)
-    log.info("feedback: confirmed alert %s → positive pool %s", alert_id, ds.id)
+    # No training trigger: a verdict is pending evidence. Jobs are
+    # considered only after review approval (training_evidence).
+    log.info("feedback: confirmed alert %s → positive pool %s (%s)",
+             alert_id, ds.id, provenance["review_state"])
 
 
 def absorb_dismissed(db: Session, alert_id: int) -> None:
@@ -384,8 +393,12 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     # source_extra hint for curators/future classifiers, NOT as an
     # Annotation class (that would make it a mannequin POSITIVE).
     import os as _os
+    provenance = _training_provenance("false", cls, a.dismiss_reason)
     file_path = ev.thumbnail_path
-    ds_name = f"feedback-negative-{cls}"
+    # Negatives go to the pool of the class they teach ("not a person" on
+    # an intrusion alert is a person-class negative), never to a pool
+    # named after a behaviour rule that a specialist would then learn.
+    ds_name = f"feedback-negative-{provenance['target_class'] or cls}"
     label_hint: str | None = None
     if cls == "live_activity":
         raw = (ev.extra or {}).get("raw_snapshot_path")
@@ -411,11 +424,11 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
         log.warning("feedback: dismissed alert %s source image is unavailable",
                     alert_id)
         return
-    provenance = _training_provenance("false")
     _src = _build_source_extra(db, ev, a, "false")
     _src["source_thumbnail_path"] = file_path
-    if not provenance["eligible_for_training"]:
-        _src["training_quarantined_reason"] = "single_reviewer_dismissal"
+    _src["verdict_user_id"] = a.assigned_to
+    _src["dismiss_reason"] = a.dismiss_reason
+    _src["training_quarantined_reason"] = "awaiting_review"
     if label_hint:
         _src["label_hint"] = label_hint
     neg_img = TrainingImage(
@@ -431,7 +444,6 @@ def absorb_dismissed(db: Session, alert_id: int) -> None:
     a.feedback_used_for_training = True
     db.commit()
     _enqueue_preview(neg_img.id)     # preview runs on the worker (opencv)
-    _enqueue_if_trainable(db, cls, provenance)
     log.info("feedback: dismissed alert %s → hard-negative pool %s",
              alert_id, ds.id)
 

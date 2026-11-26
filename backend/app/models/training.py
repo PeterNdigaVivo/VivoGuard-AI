@@ -56,14 +56,21 @@ class TrainingImage(Base):
         ForeignKey("alerts.id", ondelete="SET NULL"),
         nullable=True, index=True,
     )
-    # Provenance gate. Synthetic, simulation, mined and ambiguous-human
-    # evidence is quarantined until an explicit review makes it trainable.
+    # Provenance gate. Nothing is trainable until a review approves it
+    # (migration 0054 flipped the defaults from approved/true): rows that
+    # forget to set provenance land in the review queue, not in a model.
+    # States and kinds: app.services.training_evidence.
     source_kind: Mapped[str] = mapped_column(String(32), default="operator_verified",
                                               server_default="operator_verified", index=True)
-    eligible_for_training: Mapped[bool] = mapped_column(Boolean, default=True,
-                                                         server_default="true", index=True)
-    review_state: Mapped[str] = mapped_column(String(24), default="approved",
-                                               server_default="approved", index=True)
+    eligible_for_training: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                         server_default="false", index=True)
+    review_state: Mapped[str] = mapped_column(String(24), default="pending_review",
+                                               server_default="pending_review", index=True)
+    # positive | negative | uncertain | policy_error (NULL: not feedback)
+    example_kind: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    # The object class this example teaches (e.g. "person"); NULL when the
+    # evidence is not trainable as an object class.
+    target_class: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     simulation_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

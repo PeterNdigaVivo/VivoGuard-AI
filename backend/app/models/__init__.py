@@ -32,6 +32,7 @@ from app.models.odoo import (
 )
 from app.models.eval_sample import EvalSample
 from app.models.analytics import ZoneVisit, SalesAICorrelation
+from app.models.model_rollout import ModelEvaluation, ModelRollout
 
 __all__ = [
     "User",
@@ -58,4 +59,5 @@ __all__ = [
     "OdooPosActivityBucket", "OdooConversionMetric", "OdooSyncState",
     "EvalSample",
     "ZoneVisit", "SalesAICorrelation",
+    "ModelEvaluation", "ModelRollout",
 ]

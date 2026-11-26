@@ -10,7 +10,8 @@ from app.database import Base
 # confirmed — operator marked as true positive (feeds back to training)
 # dismissed — operator marked as false positive (ditto)
 # escalated — sent to higher tier / external system
-ALERT_STATUSES = ("new", "confirmed", "dismissed", "escalated")
+# resolved  — operator closed it (written by /resolve and incident actions)
+ALERT_STATUSES = ("new", "confirmed", "dismissed", "escalated", "resolved")
 
 
 class Alert(Base):
@@ -57,6 +58,12 @@ class Alert(Base):
     # (e.g. when the camera was offline mid-session). Pruned 24h
     # after `created_at` by alerting.prune_checkout_snapshots.
     snapshot_paths:   Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # The incident this alert is evidence for (migration 0053). NULL for
+    # alerts created before the incident lifecycle was enabled and for
+    # informational rows that are never incidents.
+    incident_id:      Mapped[int | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_alerts_incident_id"), nullable=True, index=True)
 
     # --- AI verification (annotate, never hide). The verifier writes a
     # verdict NEXT TO the alert; it never suppresses, reclassifies,

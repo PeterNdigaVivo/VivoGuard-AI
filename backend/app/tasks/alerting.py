@@ -852,10 +852,40 @@ def _create_info_alert(db, *, camera_id: int, zone_id: int | None,
         thumbnail_path=thumb_path,
     )
     db.add(rec); db.flush()
+    # Retail alert policy (incident lifecycle). Fails open to legacy.
+    decision = None
+    try:
+        from app.services import incidents as _inc
+        if _inc.lifecycle_ready(db):
+            from sqlalchemy.orm.attributes import flag_modified
+            from app.services.alert_policy import decide
+            decision = decide(_inc.build_policy_input(
+                db, detection_type=detection_type, confidence=1.0,
+                extra=extra, zone_id=zone_id, store_id=store_id))
+            rec.extra = {**(rec.extra or {}), "policy": decision.as_dict()}
+            flag_modified(rec, "extra")
+            if (detection_type == "shop_open_close"
+                    and str(extra.get("rule") or cls or "").startswith("shop_opened")):
+                with db.begin_nested():
+                    _inc.close_store_not_opened(db, store_id=store_id,
+                                                evidence_event_id=rec.id)
+    except Exception as e:
+        decision = None
+        log.warning("alert policy failed (info alert %s): %s; legacy path",
+                    detection_type, e)
+    if decision is not None and decision.decision == "discarded":
+        db.flush()
+        return rec
     alert = Alert(event_id=rec.id, status="new")
     db.add(alert); db.flush()
     from app.services.alert_quality import apply_quality_control
     apply_quality_control(db, alert, rec)
+    if decision is not None:
+        from app.services.incidents import promote
+        attach = promote(db, alert, rec, decision, store_id=store_id)
+        if attach is not None and not attach.notify:
+            # Repeat of a continuing incident: kept, not re-announced.
+            return rec
     # Business-hours filmstrip for BEAT-created alerts too (Issue 2, Aug
     # 2026): shop_opened_inferred / recovery / shop_not_opened previously
     # got a single thumbnail but never the 6-frame strip, because only

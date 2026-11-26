@@ -257,7 +257,9 @@ def store_live_dashboard(store_id: int,
     if not store:
         raise HTTPException(404, "store not found")
 
-    cams = db.query(Camera).filter(Camera.store_id == store_id).all()
+    cams = (db.query(Camera)
+              .filter(Camera.store_id == store_id,
+                      Camera.is_deleted.is_(False)).all())
     cam_ids = [c.id for c in cams]
     now = datetime.now(timezone.utc)
 

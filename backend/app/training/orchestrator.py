@@ -160,6 +160,20 @@ def _pick_parent_model(db: Session, detection_type: str) -> AIModel | None:
     return deployed[0] if deployed else None
 
 
+def _readiness_gate(db: Session, detection_type: str) -> dict | None:
+    """Refuse to queue a job without enough approved, balanced evidence.
+
+    Returns a "skipped" status dict when not ready, else None. Applies to
+    every automatic path (feedback, weekly fallback, independent review).
+    """
+    from app.services.training_evidence import readiness_for_detection_type
+    r = readiness_for_detection_type(db, detection_type)
+    if r["ready"]:
+        return None
+    return {"detection_type": detection_type, "status": "skipped",
+            "reason": "; ".join(r["reasons"]), "readiness": r}
+
+
 def _feedback_pools_exist(db: Session, detection_type: str) -> bool:
     return (db.query(Dataset)
               .filter(Dataset.name == f"feedback-{detection_type}")
@@ -184,6 +198,9 @@ def enqueue_fine_tune_if_due(db: Session, detection_type: str,
     if min_new  is None: min_new  = cfg_min
     if max_days is None: max_days = cfg_days
 
+    gate = _readiness_gate(db, detection_type)
+    if gate is not None:
+        return gate
     if not _feedback_pools_exist(db, detection_type):
         return {"detection_type": detection_type,
                 "status": "skipped",
@@ -367,6 +384,9 @@ def enqueue_full_retrain(db: Session, detection_type: str) -> dict:
     plumbing by building the same job shape with
     incremental_finetune=False; the trainer then starts from
     base_model instead of the parent weights."""
+    gate = _readiness_gate(db, detection_type)
+    if gate is not None:
+        return gate
     if not _feedback_pools_exist(db, detection_type):
         return {"detection_type": detection_type, "status": "skipped",
                 "reason": "no feedback dataset yet"}
@@ -467,7 +487,12 @@ def _cross_store_query(db: Session):
               .join(Store, Store.id == Camera.store_id)
               .filter(Store.name.in_(CROSS_STORE_STORES),
                       Alert.feedback_used_for_training.is_(True),
-                      TrainingImage.file_path.isnot(None))
+                      TrainingImage.file_path.isnot(None),
+                      # Reviewed object-class positives only (0054).
+                      TrainingImage.review_state == "approved",
+                      TrainingImage.eligible_for_training.is_(True),
+                      TrainingImage.example_kind == "positive",
+                      TrainingImage.target_class.isnot(None))
               .order_by(TrainingImage.created_at.desc())
               .all())
 
@@ -500,7 +525,9 @@ def build_cross_store_dataset(db: Session) -> dict:
     log.info("cross_store: %d confirmed images (%d passed quality filter) — "
              "using %d", len(rows), len(filtered), len(use))
 
-    classes = sorted({ev.detection_type for (_ti, ev, _s) in use if ev.detection_type})
+    # The object class each example teaches, never the behaviour rule
+    # that raised the alert (an "intrusion" class is not learnable).
+    classes = sorted({ti.target_class for (ti, _ev, _s) in use})
     ds = _ensure_dataset(db, CROSS_STORE_DATASET, classes,
                          description="auto: cross-store generalist (top-3 stores)")
     # Rebuild fresh each run so counts reflect the current confirmed
@@ -511,12 +538,8 @@ def build_cross_store_dataset(db: Session) -> dict:
     db.query(TrainingImage).filter(TrainingImage.dataset_id == ds.id).delete()
 
     from app.models import Annotation
-    from app.training.feedback_loop import _training_provenance
-    # Clones derive from operator-CONFIRMED alerts; stamp provenance
-    # explicitly (honours training_require_dual_review) instead of
-    # relying on column defaults — migration 0042 quarantined the
-    # default-stamped clones (source_alert_id IS NULL) wholesale.
-    prov = _training_provenance("correct")
+    # Clones inherit the reviewed provenance of their source image; the
+    # query above admits approved positives only.
     store_counts: dict[str, int] = {}
     for (ti, ev, sname) in use:
         # The training image is ALREADY a clean person crop (the alert
@@ -528,12 +551,15 @@ def build_cross_store_dataset(db: Session) -> dict:
             source_extra={"source": "cross_store", "origin_store": sname,
                           "origin_image_id": ti.id,
                           "detection_type": ev.detection_type},
-            **prov,
+            source_kind=ti.source_kind,
+            review_state=ti.review_state,
+            eligible_for_training=ti.eligible_for_training,
+            example_kind=ti.example_kind,
+            target_class=ti.target_class,
         )
         db.add(new); db.flush()
-        if ev.detection_type:
-            db.add(Annotation(image_id=new.id, class_label=ev.detection_type,
-                              bbox_json=[0.5, 0.5, 1.0, 1.0], verified=True))
+        db.add(Annotation(image_id=new.id, class_label=ti.target_class,
+                          bbox_json=[0.5, 0.5, 1.0, 1.0], verified=True))
         store_counts[sname] = store_counts.get(sname, 0) + 1
     db.commit()   # single commit — delete + re-add are all-or-nothing
 

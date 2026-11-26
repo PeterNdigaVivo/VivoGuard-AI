@@ -61,6 +61,7 @@ celery_app = Celery(
         "app.tasks.system_health_report",
         "app.tasks.feedback_absorb",
         "app.tasks.eval_tasks",
+        "app.tasks.incidents",
     ],
 )
 celery_app.conf.update(
@@ -254,6 +255,12 @@ celery_app.conf.update(
             "task": "inference.health_watchdog",
             "schedule": 60.0,
         },
+        # Incident lifecycle safety net: fold any alert whose incident
+        # attach failed. No-op while INCIDENT_LIFECYCLE_ENABLED is off.
+        "incidents-attach-orphans-every-5m": {
+            "task": "incidents.attach_orphans",
+            "schedule": 300.0,
+        },
         # Alert history retention — prune alerts + snapshots older than
         # 90 days once a day (relative to worker boot).
         "prune-alerts-daily": {
@@ -370,13 +377,8 @@ celery_app.conf.update(
             "task": "training.weekly_retrain_all",
             "schedule": timedelta(hours=6),
         },
-        # Hourly promotion gate. Walks every non-deployed candidate
-        # AIModel and flips deployment when its 7-day metrics beat
-        # the sibling production model on precision + fp_rate.
-        "evaluate-pending-promotions-hourly": {
-            "task": "training.evaluate_pending_promotions",
-            "schedule": timedelta(hours=1),
-        },
+        # evaluate-pending-promotions-hourly removed: promotion is manual
+        # after a canary (app.services.model_rollout).
         # The fix that completes the self-learning loop. Every 5 min,
         # picks up any TrainingJob rows sitting in status='queued',
         # marks them running, and dispatches them to the alerts
