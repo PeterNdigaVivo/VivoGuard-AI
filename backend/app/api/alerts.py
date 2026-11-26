@@ -1619,9 +1619,11 @@ def acknowledge_alert(alert_id: int, db: Session = Depends(get_db),
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "alert not found")
+    # "I'm on it" acknowledges the whole incident the alert belongs to.
+    _close_owning_incident(db, alert_id, "acknowledge", _u)
     if alert.acknowledged_at is None:
         alert.acknowledged_at = datetime.now(timezone.utc)
-        db.commit()
+    db.commit()
     return AlertActionOut(id=alert.id, status=alert.status)
 
 

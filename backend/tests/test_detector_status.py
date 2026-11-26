@@ -88,8 +88,7 @@ def test_states_reflect_real_configuration(env):
     assert cat["crowd"]["precision_30d"] == 0.95
     assert cat["crowd"]["next_action"] == "None"
     assert cat["loitering"]["state"] == "review_only"
-    assert cat["shelf_change"]["state"] == "review_only" or \
-        cat["shelf_change"]["state"] == "available"
+    assert cat["shelf_change"]["state"] == "available"   # not configured anywhere
 
 
 def test_requirements_and_next_actions(env):
