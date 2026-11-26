@@ -6,6 +6,7 @@ import signal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -54,6 +55,7 @@ def test_started_camera_pid_key_outlives_requested_runtime(
     class _Redis:
         def set(self, key, value, **kwargs):
             writes.append((key, json.loads(value), kwargs))
+            return True
 
     class _Db:
         def add(self, _row):
@@ -77,6 +79,31 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         {"pid": 321, "window_id": "window", "path": str(tmp_path / "window" / "3" / "7.mp4")},
         {"ex": seconds + 10 * 60},
     )]
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("private tracking error")])
+def test_unregistered_recorder_is_stopped_and_reaped(monkeypatch, tmp_path, caplog, failure):
+    redis = Mock()
+    if isinstance(failure, Exception):
+        redis.set.side_effect = failure
+    else:
+        redis.set.return_value = failure
+    db = Mock()
+    proc = Mock(pid=321)
+    watcher = Mock()
+    monkeypatch.setattr(recorder, "_substream_url", lambda _camera: "rtsp://camera.example/stream")
+    monkeypatch.setattr(recorder, "_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder.subprocess, "Popen", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(recorder, "_start_exit_watcher", watcher)
+
+    assert not _start_camera(db, redis, SimpleNamespace(id=7, store_id=3), "window", 600)
+
+    proc.kill.assert_called_once_with()
+    watcher.assert_called_once_with(proc, 7, None)
+    db.add.assert_not_called()
+    redis.delete.assert_not_called()
+    assert "could not register newly spawned source" in caplog.text
+    assert "private tracking error" not in caplog.text
 
 
 def test_ffmpeg_exit_reason_never_contains_rtsp_credentials() -> None:

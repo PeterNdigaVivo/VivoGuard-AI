@@ -256,14 +256,30 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
         log.warning("recorder: ffmpeg spawn failed cam=%s: %s", cam.id, e)
         return False
     try:
+        registered = r.set(
+            _PID_KEY_FMT.format(cam=cam.id),
+            json.dumps({"pid": proc.pid, "window_id": window_id, "path": str(out_path)}),
+            ex=_tracking_ttl(seconds),
+        )
+    except Exception:
+        registered = False
+    if not registered:
+        log.warning("recorder: could not register newly spawned source cam=%s", cam.id)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except OSError:
+            log.warning("recorder: could not stop unregistered source cam=%s", cam.id)
+        # Reap the owned child without overwriting another attempt's telemetry.
+        _start_exit_watcher(proc, cam.id, None)
+        return False
+
+    try:
         r.delete(_FAILURE_KEY_FMT.format(cam=cam.id))
     except Exception:
         log.exception("recorder: could not clear failure reason cam=%s", cam.id)
     _start_exit_watcher(proc, cam.id, r)
-    r.set(_PID_KEY_FMT.format(cam=cam.id),
-          json.dumps({"pid": proc.pid, "window_id": window_id,
-                      "path": str(out_path)}),
-          ex=_tracking_ttl(seconds))
     db.add(RecordingClip(camera_id=cam.id, store_id=cam.store_id,
                          window_id=window_id, file_path=str(out_path),
                          status="recording"))
