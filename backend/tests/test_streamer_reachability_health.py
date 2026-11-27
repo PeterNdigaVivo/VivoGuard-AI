@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import Mock
 
 import pytest
@@ -194,3 +195,34 @@ def test_preflight_preserves_existing_worker_only_for_unchanged_live_specs(
         assert len(health.updates) == 1
         assert original.camera_id not in manager.workers
         worker.stop.assert_called_once()
+
+
+def test_tcp_preflight_checks_each_unique_endpoint_once(monkeypatch):
+    spec = streamer_main.CameraSpec
+    cameras = [
+        spec(camera_id=1, rtsp_url="rtsp://nvr.example.invalid:554/channel/1"),
+        spec(camera_id=2, rtsp_url="rtsp://nvr.example.invalid:554/channel/2"),
+        spec(camera_id=3, rtsp_url="", transport="http_snapshot",
+             snapshot_url="http://nvr.example.invalid:8080/snapshot?channel=1"),
+        spec(camera_id=4, rtsp_url="rtsp://other.example.invalid:554/channel/1"),
+        spec(camera_id=5, rtsp_url=""),
+        spec(camera_id=6, rtsp_url="", transport="http_snapshot",
+             snapshot_url="http://nvr.example.invalid:8080/snapshot?channel=2"),
+    ]
+    attempts = []
+
+    async def check(host, port, timeout):
+        assert timeout == streamer_main.TCP_CHECK_TIMEOUT_SECONDS
+        attempts.append((host, port))
+        return port == 554
+
+    monkeypatch.setattr(streamer_main, "_tcp_open", check)
+
+    assert asyncio.run(streamer_main._async_check_all(cameras)) == {
+        1: True, 2: True, 3: False, 4: True, 5: False, 6: False,
+    }
+    assert sorted(attempts) == [
+        ("nvr.example.invalid", 554),
+        ("nvr.example.invalid", 8080),
+        ("other.example.invalid", 554),
+    ]

@@ -456,16 +456,20 @@ def _reachability_cache_ttl(was_reachable: bool) -> int:
 
 
 async def _async_check_all(specs: list[CameraSpec]) -> dict[int, bool]:
-    """TCP-probe every spec in parallel. Total wall time ≈ the
-    longest single timeout (2 s default), not N × 2 s."""
-    async def _one(spec: CameraSpec) -> tuple[int, bool]:
-        ep = _spec_probe_endpoint(spec)
-        if not ep:
-            return spec.camera_id, False
-        ok = await _tcp_open(ep[0], ep[1], TCP_CHECK_TIMEOUT_SECONDS)
-        return spec.camera_id, ok
-    results = await asyncio.gather(*(_one(s) for s in specs), return_exceptions=False)
-    return {cam_id: ok for cam_id, ok in results}
+    """Probe each socket once and share its result across camera channels."""
+    camera_endpoints = {spec.camera_id: _spec_probe_endpoint(spec) for spec in specs}
+    endpoints = list(dict.fromkeys(
+        endpoint for endpoint in camera_endpoints.values() if endpoint is not None
+    ))
+    outcomes = await asyncio.gather(*(
+        _tcp_open(host, port, TCP_CHECK_TIMEOUT_SECONDS) for host, port in endpoints
+    ))
+    reachable = dict(zip(endpoints, outcomes, strict=True))
+    log.info("TCP preflight checked %d endpoints for %d camera specs", len(endpoints), len(specs))
+    return {
+        camera_id: endpoint is not None and reachable[endpoint]
+        for camera_id, endpoint in camera_endpoints.items()
+    }
 
 
 def _report_tcp_preflight_failure(spec: CameraSpec) -> None:
