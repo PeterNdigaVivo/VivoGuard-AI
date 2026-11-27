@@ -28,6 +28,7 @@ RTSP URLs contain decrypted camera passwords — they are NEVER logged.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -75,6 +76,8 @@ _RECORDER_FAILURE_REASONS = {
     "connection_limit",
     "stream_not_found",
     "invalid_stream_data",
+    "unsupported_output_codec",
+    "ffmpeg_einval",
     "output_path_unavailable",
     "unclassified",
 }
@@ -169,7 +172,7 @@ def _substream_url(cam) -> str | None:
         return None
 
 
-def _classify_ffmpeg_exit(stderr: bytes) -> str:
+def _classify_ffmpeg_exit(stderr: bytes, *, returncode: int | None = None) -> str:
     """Return a credential-safe reason for a recorder ffmpeg failure.
 
     ffmpeg often repeats the full RTSP URL in stderr.  Never log or persist
@@ -190,6 +193,12 @@ def _classify_ffmpeg_exit(stderr: bytes) -> str:
         return "stream_not_found"
     if "invalid data found" in message:
         return "invalid_stream_data"
+    if "codec not currently supported in container" in message:
+        return "unsupported_output_codec"
+    # FFmpeg 7 returns negative AVERROR values. POSIX exposes the low byte.
+    # EINVAL alone cannot identify whether input, codec or output failed.
+    if message.rstrip().endswith("invalid argument") or returncode == (-errno.EINVAL & 0xFF):
+        return "ffmpeg_einval"
     return "unclassified"
 
 
@@ -210,7 +219,7 @@ def _watch_recorder_exit(proc: subprocess.Popen, camera_id: int, r=None) -> None
         log.exception("recorder: could not reap ffmpeg cam=%s", camera_id)
         return
     if proc.returncode and proc.returncode > 0:
-        reason = _classify_ffmpeg_exit(stderr or b"")
+        reason = _classify_ffmpeg_exit(stderr or b"", returncode=proc.returncode)
         if r is not None:
             _record_failure_reason(r, camera_id, reason)
         log.warning(

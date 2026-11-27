@@ -153,6 +153,42 @@ def test_ffmpeg_exit_reason_classifies_connection_limit() -> None:
     )
 
 
+@pytest.mark.parametrize(("stderr", "returncode", "reason"), [
+    (
+        b"[mp4] Could not find tag for codec pcm_mulaw in stream #1, "
+        b"codec not currently supported in container\n"
+        b"Could not write header: Invalid argument",
+        234,
+        "unsupported_output_codec",
+    ),
+    (b"", 234, "ffmpeg_einval"),
+    (b"Error opening output files: Invalid argument", 1, "ffmpeg_einval"),
+    (b"RTSP/1.0 401 Unauthorized", 234, "authentication_failed"),
+    (b"Unexpected failure", 1, "unclassified"),
+])
+def test_ffmpeg_exit_preserves_specific_reason_before_errno_fallback(
+    stderr, returncode, reason,
+):
+    assert _classify_ffmpeg_exit(stderr, returncode=returncode) == reason
+
+
+def test_recorder_watcher_reports_einval_without_persisting_stderr(caplog):
+    redis = Mock()
+    proc = SimpleNamespace(
+        returncode=234,
+        communicate=lambda: (b"", b"rtsp://operator:example-secret@camera.invalid/"),
+    )
+
+    _watch_recorder_exit(proc, camera_id=7, r=redis)
+
+    redis.set.assert_called_once_with(
+        "vg:recording:failure:7", "ffmpeg_einval", ex=24 * 3600,
+    )
+    assert "reason=ffmpeg_einval" in caplog.text
+    assert "example-secret" not in caplog.text
+    assert "camera.invalid" not in caplog.text
+
+
 def test_ffmpeg_exit_log_never_exposes_rtsp_credentials(caplog) -> None:
     proc = SimpleNamespace(
         returncode=1,
@@ -419,7 +455,7 @@ def test_stalled_recorder_is_terminated_before_repair(monkeypatch) -> None:
 
 def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     expected_cameras = [
-        SimpleNamespace(id=camera_id) for camera_id in range(1, 4)
+        SimpleNamespace(id=camera_id) for camera_id in range(1, 6)
     ]
     monkeypatch.setattr(
         "app.tasks.recorder._key_cameras", lambda _db: expected_cameras,
@@ -434,6 +470,8 @@ def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     redis = _RecorderHealthRedis()
     redis.values["vg:recording:failure:2"] = "output_path_unavailable"
     redis.values["vg:recording:failure:3"] = "rtsp://should-never-be-exposed"
+    redis.values["vg:recording:failure:4"] = "ffmpeg_einval"
+    redis.values["vg:recording:failure:5"] = "unsupported_output_codec"
 
     result = _recording_health_snapshot(
         object(), redis, "current", now=1_000.0,
@@ -442,6 +480,8 @@ def test_recording_health_aggregates_safe_failure_reasons(monkeypatch) -> None:
     assert result["recorder_failure_reasons"] == {
         "output_path_unavailable": 1,
         "unclassified": 1,
+        "ffmpeg_einval": 1,
+        "unsupported_output_codec": 1,
     }
     assert result["recorders_missing_without_failure_reason"] == 0
     assert "rtsp" not in json.dumps(result)
