@@ -31,6 +31,23 @@ from app.config import settings
 HEALTH_TTL_SECONDS = 86400
 
 
+_MERGE_HEALTH_LUA = """
+local current = {}
+local raw = redis.call('GET', KEYS[1])
+if raw and string.match(raw, '^%s*{') then
+    local ok, decoded = pcall(cjson.decode, raw)
+    if ok then
+        current = decoded
+    end
+end
+current.camera_id = tonumber(ARGV[1])
+for name, value in pairs(cjson.decode(ARGV[2])) do
+    current[name] = value
+end
+return redis.call('SET', KEYS[1], cjson.encode(current), 'EX', ARGV[3])
+"""
+
+
 def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url, decode_responses=False)
 
@@ -63,19 +80,11 @@ class FrameBuffer:
         })
 
     def _merge_health(self, camera_id: int, patch: dict) -> None:
-        """Read-modify-write so consecutive callers don't clobber each
-        other's fields (e.g., the heartbeat thread updating just the
-        status while a frame arrives elsewhere)."""
-        key = f"vg:health:{camera_id}"
-        raw = self.r.get(key)
-        current: dict = {"camera_id": camera_id}
-        if raw:
-            try:
-                current = json.loads(raw)
-            except Exception:
-                current = {"camera_id": camera_id}
-        current.update(patch)
-        self.r.set(key, json.dumps(current).encode(), ex=HEALTH_TTL_SECONDS)
+        """Atomically merge frame and status fields written by separate callers."""
+        self.r.eval(
+            _MERGE_HEALTH_LUA, 1, f"vg:health:{camera_id}",
+            camera_id, json.dumps(patch), HEALTH_TTL_SECONDS,
+        )
 
     # ----- read path (api / inference) -----
     def latest_jpeg(self, camera_id: int, *,
