@@ -22,7 +22,7 @@ from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import Alert, Camera, DetectionEvent, User, Zone
 from app.schemas.alert import AlertActionOut, AlertNoteIn, AlertOut
-from app.utils.evidence_files import alert_clip_file
+from app.utils.evidence_files import alert_clip_file, alert_snapshot_file
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -1631,7 +1631,6 @@ def alert_snapshot(alert_id: int, db: Session = Depends(get_db),
     evidence, and must never be presented under this endpoint.
     """
     from fastapi.responses import FileResponse
-    import os
 
     a = db.get(Alert, alert_id)
     if not a:
@@ -1641,8 +1640,9 @@ def alert_snapshot(alert_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "event not found")
 
     # Archived moment-of-detection thumbnail only.
-    if ev.thumbnail_path and os.path.exists(ev.thumbnail_path):
-        return FileResponse(ev.thumbnail_path, media_type="image/jpeg")
+    path = alert_snapshot_file(ev.thumbnail_path, recordings_dir=settings.recordings_dir)
+    if path is not None:
+        return FileResponse(str(path), media_type="image/jpeg")
 
     raise HTTPException(404, "incident snapshot unavailable")
 
@@ -1656,17 +1656,18 @@ def alert_snapshot_at(alert_id: int, idx: int,
     capture epoch). 404 on missing alert / out-of-range index / file
     pruned. Hidden filesystem path — operators only see indices."""
     from fastapi.responses import FileResponse
-    import os
     a = db.get(Alert, alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
     paths = list(a.snapshot_paths or [])
     if idx < 0 or idx >= len(paths):
         raise HTTPException(404, "snapshot index out of range")
-    target = paths[idx]
-    if not os.path.exists(target):
+    path = alert_snapshot_file(
+        paths[idx], recordings_dir=settings.recordings_dir, filmstrip_alert_id=alert_id,
+    )
+    if path is None:
         raise HTTPException(404, "snapshot file missing (pruned?)")
-    return FileResponse(target, media_type="image/jpeg")
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 @router.get("/{alert_id}/clip")
