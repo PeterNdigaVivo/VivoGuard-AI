@@ -843,13 +843,14 @@ def run_camera_inference(self, camera_id: int, *, max_seconds: int = RUN_SECONDS
                 camera_id, task_id,
             )
             return
-        processed_frames = run_for_camera(camera_id, max_seconds=max_seconds)
-        # Record only completed inference work. A task that merely started but
-        # found a stale/invalid frame must not make the coverage SLA look green.
-        if processed_frames > 0:
+        last_completed_at = run_for_camera(camera_id, max_seconds=max_seconds)
+        # A task can end long after its last completed frame. Preserve the
+        # work timestamp so an idle tail cannot reset the coverage gap.
+        work_timestamp = _valid_last_run_timestamp(last_completed_at, now=time.time())
+        if work_timestamp is not None:
             r.set(
                 LAST_RUN_KEY_FMT.format(camera_id=camera_id),
-                str(int(time.time())),
+                str(work_timestamp),
                 ex=24 * 60 * 60,
             )
     except Exception as e:
