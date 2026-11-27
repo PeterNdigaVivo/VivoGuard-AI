@@ -11,6 +11,10 @@ class FakeRedis:
     def __init__(self):
         self.values: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
+        self.queue_depths: dict[str, int] = {}
+
+    def llen(self, key: str) -> int:
+        return self.queue_depths.get(key, 0)
 
     def eval(self, script, _key_count, lock, heartbeat, task_id, *ttls):
         if script == inference._CLAIM_LUA:
@@ -188,11 +192,12 @@ def test_repairs_overdue_critical_pending_reservation_after_sla():
     r.values[lock] = "lost-task"
     r.ttls[lock] = (
         inference.PENDING_LOCK_TTL
-        - inference.PENDING_CRITICAL_STALE_SECONDS
+        - inference.CRITICAL_GAP_SLA_SECONDS
     )
 
-    assert inference._repair_stalled_critical_reservations(
-        r, [84], {84: 100.0}, now=1000.0,
+    assert inference._repair_stalled_pending_reservations(
+        r, [84], {84: 100.0},
+        gap_sla_seconds=inference.CRITICAL_GAP_SLA_SECONDS, now=1000.0,
     ) == 1
     assert lock not in r.values
 
@@ -203,12 +208,13 @@ def test_preserves_recent_or_started_critical_reservations():
     recent.values[lock] = "queued-task"
     recent.ttls[lock] = (
         inference.PENDING_LOCK_TTL
-        - inference.PENDING_CRITICAL_STALE_SECONDS
+        - inference.CRITICAL_GAP_SLA_SECONDS
         + 1
     )
 
-    assert inference._repair_stalled_critical_reservations(
-        recent, [84], {84: 100.0}, now=1000.0,
+    assert inference._repair_stalled_pending_reservations(
+        recent, [84], {84: 100.0},
+        gap_sla_seconds=inference.CRITICAL_GAP_SLA_SECONDS, now=1000.0,
     ) == 0
     assert recent.values[lock] == "queued-task"
 
@@ -217,11 +223,12 @@ def test_preserves_recent_or_started_critical_reservations():
     started.values.update({lock: "running-task", heartbeat: "running-task"})
     started.ttls[lock] = (
         inference.PENDING_LOCK_TTL
-        - inference.PENDING_CRITICAL_STALE_SECONDS
+        - inference.CRITICAL_GAP_SLA_SECONDS
     )
 
-    assert inference._repair_stalled_critical_reservations(
-        started, [84], {84: 100.0}, now=1000.0,
+    assert inference._repair_stalled_pending_reservations(
+        started, [84], {84: 100.0},
+        gap_sla_seconds=inference.CRITICAL_GAP_SLA_SECONDS, now=1000.0,
     ) == 0
     assert started.values[lock] == "running-task"
 
@@ -232,8 +239,9 @@ def test_preserves_pending_reservation_while_critical_camera_is_within_sla():
     r.values[lock] = "queued-task"
     r.ttls[lock] = 1
 
-    assert inference._repair_stalled_critical_reservations(
-        r, [84], {84: 950.0}, now=1000.0,
+    assert inference._repair_stalled_pending_reservations(
+        r, [84], {84: 950.0},
+        gap_sla_seconds=inference.CRITICAL_GAP_SLA_SECONDS, now=1000.0,
     ) == 0
     assert r.values[lock] == "queued-task"
 
@@ -355,10 +363,14 @@ def test_critical_requeue_budget_preserves_non_preemptive_sla_headroom():
 
 
 @pytest.mark.parametrize("publish_state", ["claimed", "finished", "failed", "claimed_then_failed"])
-def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_state):
+@pytest.mark.parametrize("lost_reservation", [False, True])
+def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_state, lost_reservation):
     redis = FakeRedis()
     lock = inference.LOCK_KEY_FMT.format(camera_id=7)
     heartbeat = inference.HB_KEY_FMT.format(camera_id=7)
+    if lost_reservation:
+        redis.values[lock] = "superseded-task"
+        redis.ttls[lock] = inference.PENDING_LOCK_TTL - inference.STANDARD_GAP_SLA_SECONDS
     camera = SimpleNamespace(id=7, detection_configs=[], zones=[])
     session = MagicMock()
     query = session.__enter__.return_value.query.return_value
@@ -371,7 +383,8 @@ def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_stat
     monkeypatch.setattr(inference, "_reservation_health", lambda *_: {})
     monkeypatch.setattr(inference, "_critical_gap_health", lambda *_: {})
     monkeypatch.setattr(inference, "_standard_gap_health", lambda *_: {})
-    monkeypatch.setattr(inference, "_write_health", lambda *_, **__: None)
+    write_health = MagicMock()
+    monkeypatch.setattr(inference, "_write_health", write_health)
 
     published: list[tuple[str, str | None]] = []
 
@@ -393,6 +406,10 @@ def test_supervisor_reserves_exact_task_before_publish(monkeypatch, publish_stat
     assert len(published) == 1
     task_id, reserved_id = published[0]
     assert task_id and task_id == reserved_id
+    assert task_id != "superseded-task"
+    assert write_health.call_args.kwargs["reservation_health"]["standard_reservations_repaired"] == int(
+        lost_reservation
+    )
     if publish_state in {"failed", "finished"}:
         assert lock not in redis.values
         assert heartbeat not in redis.values
@@ -531,3 +548,36 @@ def test_gap_health_rejects_invalid_and_future_completion_times(tier):
     assert report[f"{tier}_camera_ids_overdue"] == [2, 3, 4, 5, 6]
     assert report[f"{tier}_cameras_never_started"] == 5
     assert report[f"{tier}_max_gap_seconds"] == 100.0
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["recent_completion", "young_reservation", "active_heartbeat", "active_ttl", "broker_backlog"],
+)
+def test_standard_repair_preserves_live_or_recent_reservations(condition):
+    r = FakeRedis()
+    camera_id = 84
+    lock = inference.LOCK_KEY_FMT.format(camera_id=camera_id)
+    heartbeat = inference.HB_KEY_FMT.format(camera_id=camera_id)
+    sla = inference.STANDARD_GAP_SLA_SECONDS
+    now = 10_000.0
+    last_run = now - sla - 1
+    r.values[lock] = "current-task"
+    r.ttls[lock] = inference.PENDING_LOCK_TTL - sla
+    if condition == "recent_completion":
+        last_run = now - sla
+    elif condition == "young_reservation":
+        r.ttls[lock] += 1
+    elif condition == "active_heartbeat":
+        r.values[heartbeat] = "current-task"
+    elif condition == "active_ttl":
+        r.ttls[lock] = inference.LOCK_TTL
+    else:
+        queue = inference._inference_queue(camera_id)
+        r.queue_depths[f"{queue}{inference.REDIS_PRIORITY_SEP}9"] = 1
+
+    assert inference._repair_stalled_pending_reservations(
+        r, [camera_id], {camera_id: last_run}, gap_sla_seconds=sla, now=now,
+        require_empty_queue=True,
+    ) == 0
+    assert r.values[lock] == "current-task"
