@@ -1,5 +1,6 @@
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -7,16 +8,12 @@ from app.ai.detectors.base import DetectorContext
 from app.ai.detectors.retail_shelf import ShelfChangeDetector
 
 
-def test_shelf_change_event_payload_uses_native_json_scalars(monkeypatch) -> None:
+def test_shelf_change_serializes_after_accumulating_baseline(monkeypatch) -> None:
     detector = ShelfChangeDetector()
-    detector._baselines[7] = {
-        "hist": [0.0] * 15 + [1.0],
-        "count": 2,
-        "since": 0.0,
-        "locked": True,
-        "fired_at": 0.0,
-    }
-    monkeypatch.setattr("app.ai.detectors.retail_shelf.time.time", lambda: 1000.0)
+    ticks = iter((1000.0, 1002.0, 1003.0))
+    monkeypatch.setattr(
+        "app.ai.detectors.retail_shelf.time", SimpleNamespace(time=lambda: next(ticks)),
+    )
 
     context = DetectorContext(
         camera_id=1,
@@ -34,20 +31,23 @@ def test_shelf_change_event_payload_uses_native_json_scalars(monkeypatch) -> Non
             "shelf_change": {
                 "enabled": True,
                 "extra": {
+                    "baseline_seconds": 1,
                     "divergence_threshold": 0.1,
                     "reset_after_change": False,
                 },
             },
         },
         store_id=9,
-        frame_bgr=np.zeros((8, 8, 3), dtype=np.uint8),
+        frame_bgr=np.full((8, 8, 3), 255, dtype=np.uint8),
     )
 
-    events = detector.evaluate(context)
+    assert detector.evaluate(context) == []
+    assert detector.evaluate(replace(context, timestamp=1002.0)) == []
+    events = detector.evaluate(replace(
+        context, timestamp=1003.0, frame_bgr=np.zeros_like(context.frame_bgr),
+    ))
 
     assert len(events) == 1
-    event = events[0]
-    assert type(event.confidence) is float
-    assert type(event.extra["chi_square"]) is float
-    assert type(event.extra["threshold"]) is float
-    json.dumps(asdict(event))
+    payload = json.loads(json.dumps(asdict(events[0]), allow_nan=False))
+    assert payload["confidence"] == 1.0
+    assert payload["extra"] == {"chi_square": 1.0, "threshold": 0.1, "store_id": 9}
