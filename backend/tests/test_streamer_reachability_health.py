@@ -1,3 +1,7 @@
+from unittest.mock import Mock
+
+import pytest
+
 from streamer.streamer import main as streamer_main
 
 
@@ -137,3 +141,56 @@ def test_endpoint_change_invalidates_negative_reachability_cache(monkeypatch) ->
         [("camera.example.invalid", 554)],
         [("camera.example.invalid", 8080)],
     ]
+
+
+@pytest.mark.parametrize(("alive", "endpoint_changed", "retained"), [
+    (True, False, True),
+    (False, False, False),
+    (True, True, False),
+])
+def test_preflight_preserves_existing_worker_only_for_unchanged_live_specs(
+    monkeypatch, alive, endpoint_changed, retained,
+):
+    original = streamer_main.CameraSpec(
+        camera_id=42, rtsp_url="rtsp://camera.example.invalid:554/live",
+    )
+    desired = streamer_main.CameraSpec(
+        camera_id=42,
+        rtsp_url="rtsp://camera.example.invalid:8554/live" if endpoint_changed else original.rtsp_url,
+    )
+    manager = streamer_main.StreamManager(buffer=object())
+    worker = Mock()
+    worker.is_alive.return_value = alive
+
+    def stop():
+        worker.is_alive.return_value = False
+
+    worker.stop.side_effect = stop
+    manager.specs[original.camera_id] = original
+    manager.workers[original.camera_id] = worker
+    probed = []
+
+    async def failed_probe(specs):
+        probed.extend(specs)
+        return {spec.camera_id: False for spec in specs}
+
+    health = _HealthBuffer()
+    monkeypatch.setattr(streamer_main, "_health_buffer", health)
+    monkeypatch.setattr(streamer_main, "_reachable_cache", {})
+    monkeypatch.setattr(streamer_main, "_async_check_all", failed_probe)
+
+    eligible = streamer_main._filter_reachable([desired], manager=manager)
+    manager.reconcile(eligible)
+
+    if retained:
+        assert eligible == [original]
+        assert manager.workers[original.camera_id] is worker
+        assert probed == []
+        assert health.updates == []
+        worker.stop.assert_not_called()
+    else:
+        assert eligible == []
+        assert probed == [desired]
+        assert len(health.updates) == 1
+        assert original.camera_id not in manager.workers
+        worker.stop.assert_called_once()
