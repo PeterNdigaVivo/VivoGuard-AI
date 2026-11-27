@@ -671,8 +671,8 @@ def _make_tracker(camera_id: int):
 
 
 def run_for_camera(camera_id: int, *, max_seconds: int = 0,
-                   poll_interval: float = 0.1) -> int:
-    """Inference loop. `max_seconds=0` means run forever."""
+                   poll_interval: float = 0.1) -> float | None:
+    """Run inference and return the last completed frame time, if any."""
     registry = DetectorRegistry()
     tracker  = _make_tracker(camera_id)
     buffer   = FrameBuffer()
@@ -1147,4 +1147,4 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             perf.emit_final()
         except Exception:
             pass
-    return frame_idx
+    return perf.last_completed_at

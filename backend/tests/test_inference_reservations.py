@@ -593,8 +593,9 @@ def test_standard_coverage_does_not_clear_gaps_with_invalid_or_stale_frames(samp
     ("should_stop", 0),
     ("should_terminate", 1),
 ])
+@pytest.mark.parametrize("jpeg", [None, b"invalid jpeg"])
 def test_worker_shutdown_releases_camera_lease_after_current_poll(
-    monkeypatch, shutdown_flag, exit_code,
+    monkeypatch, shutdown_flag, exit_code, jpeg,
 ):
     from contextlib import nullcontext
 
@@ -624,7 +625,8 @@ def test_worker_shutdown_releases_camera_lease_after_current_poll(
         HardwareEnv, "detect", lambda: SimpleNamespace(backend="cpu", export_format="pytorch"),
     )
     monkeypatch.setattr(
-        inference_worker, "time", SimpleNamespace(time=lambda: 1.0, sleep=lambda _: None),
+        inference_worker, "time",
+        SimpleNamespace(time=lambda: 1.0, sleep=lambda _: None, perf_counter=lambda: 0.0),
     )
 
     # A second poll is a regression. Fail promptly on the unpatched loop.
@@ -634,10 +636,13 @@ def test_worker_shutdown_releases_camera_lease_after_current_poll(
             raise AssertionError("read another frame after worker shutdown")
         assert redis.get(lock) == redis.get(heartbeat) == owner
         setattr(state, shutdown_flag, exit_code)
-        return None
+        return jpeg
 
     poll = MagicMock(side_effect=poll_frame)
-    monkeypatch.setattr(inference_worker, "FrameBuffer", lambda: SimpleNamespace(latest_jpeg=poll))
+    monkeypatch.setattr(
+        inference_worker, "FrameBuffer",
+        lambda: SimpleNamespace(latest_jpeg=poll, health=lambda _id: {"last_frame_at": 1.0}),
+    )
 
     task = inference.run_camera_inference
     task.push_request(id=owner)
@@ -660,3 +665,52 @@ def test_compose_delivers_container_stop_signal_to_inference_worker():
     )
     section = compose.split("\n  worker-inference:\n", 1)[1].split("\n  worker-", 1)[0]
     assert '- "exec celery -A app.tasks.celery_app worker ' in section
+
+
+def test_camera_task_records_completed_frame_time_before_idle_tail(monkeypatch):
+    from app.ai import inference_worker
+
+    camera_id = 7
+    owner = "test-task"
+    redis = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=camera_id)
+    redis.values[lock] = owner
+    redis.ttls[lock] = inference.PENDING_LOCK_TTL
+    monkeypatch.setattr(inference, "_redis", lambda: redis)
+    monkeypatch.setattr(inference, "time", SimpleNamespace(time=lambda: 1_100.0))
+    monkeypatch.setattr(inference_worker, "run_for_camera", lambda *_args, **_kwargs: 50.25)
+
+    task = inference.run_camera_inference
+    task.push_request(id=owner)
+    try:
+        task.run(camera_id, max_seconds=3600)
+    finally:
+        task.pop_request()
+
+    completed = redis.get(inference.LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+    assert float(completed) == 50.25
+    health = inference._standard_gap_health(
+        FakeLastRunRedis({camera_id: completed}), [camera_id], now=1_100.0,
+    )
+    assert health["standard_camera_ids_overdue"] == [camera_id]
+
+
+def test_inference_perf_tail_retains_last_completed_frame_time(monkeypatch):
+    from contextlib import nullcontext
+
+    from app import database
+    from app.ai import perf_tracker
+
+    clock = SimpleNamespace(now=50.25)
+    redis = MagicMock()
+    monkeypatch.setattr(perf_tracker, "time", SimpleNamespace(time=lambda: clock.now))
+    monkeypatch.setattr(database, "SessionLocal", lambda: nullcontext(MagicMock()))
+    perf = perf_tracker.PerfTracker(7, redis_client=redis)
+    perf.record("total", 25.0)
+    perf.record_frame()
+    clock.now = 1_100.0
+    perf.emit_final()
+
+    payload = json.loads(redis.set.call_args.args[1])
+    assert payload["ts"] == 50.25
+    assert payload["window_n"] == 1

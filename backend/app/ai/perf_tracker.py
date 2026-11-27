@@ -70,6 +70,7 @@ class PerfTracker:
         self.fmt = fmt
         self._r = redis_client
         self.frame_count = 0
+        self.last_completed_at: float | None = None
         # Per-stage rolling window (cleared on every flush).
         self._stages: dict[str, list[float]] = {s: [] for s in STAGES}
 
@@ -84,6 +85,7 @@ class PerfTracker:
     def record_frame(self) -> None:
         """One frame processed. Flush every FLUSH_EVERY frames."""
         self.frame_count += 1
+        self.last_completed_at = time.time()
         if self.frame_count % FLUSH_EVERY == 0:
             self.emit_stats()
 
@@ -112,7 +114,7 @@ class PerfTracker:
                         "window_n":    window_n,
                         "backend":     self.backend,
                         "format":      self.fmt,
-                        "ts":          time.time(),
+                        "ts":          self.last_completed_at,
                         "stages":      per_stage,    # full breakdown
                         # headline total numbers hoisted for cheap reads
                         "p50_ms":      total["p50"],
