@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.utils.inference_recovery import inference_recovered
+from app.utils.inference_recovery import inference_recovered, read_release_sample
 
 
 NOW = 1_000.0
@@ -69,3 +69,66 @@ def test_recovery_summary_prints_only_known_aggregate_fields():
         "critical_cameras_overdue": 0,
         "inference_queue_depth": 3,
     }
+
+
+class _BrokerSample:
+    def __init__(self, inference, recording, queue_depths):
+        self.heartbeats = [json.dumps(recording), json.dumps(inference)]
+        self.queue_depths = queue_depths
+        self.keys = []
+
+    def pipeline(self, *, transaction):
+        assert transaction is True
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def mget(self, *keys):
+        assert keys == ("vg:recording:health", "vg:inference:health")
+
+    def llen(self, key):
+        self.keys.append(key)
+
+    def execute(self):
+        return [self.heartbeats, *(self.queue_depths.get(key, 0) for key in self.keys)]
+
+
+@pytest.mark.parametrize(
+    ("inf", "rec", "queue_depth", "expected"),
+    [
+        ({}, {}, 5, (980, 8, 6, 2, 5, 39)),
+        ({}, {}, 6, None),
+        ({"inference_queue_depth": 0}, {}, 8, None),
+        ({"inference_queue_depth": None}, {}, 0, None),
+        ({"critical_cameras_overdue": 1}, {}, 0, None),
+        ({"standard_cameras_overdue": 1}, {}, 0, None),
+        ({"standard_cameras_overdue": None}, {}, 0, None),
+        ({"cameras_fresh": 7}, {}, 0, None),
+        ({"last_run_ts": 970}, {}, 0, None),
+        ({}, {"last_run_ts": 969}, 0, None),
+        ({}, {"last_run_ts": NOW + 1}, 0, None),
+        ({}, {"cameras_recording": 5}, 0, None),
+        ({}, {"cameras_recording": 8}, 0, None),
+    ],
+)
+def test_release_sample_checks_live_priority_queues_and_current_coverage(
+    inf, rec, queue_depth, expected,
+):
+    broker = _BrokerSample(
+        {**HEALTH, "inference_queue_depth": 39, "standard_cameras_overdue": 0, **inf},
+        {"last_run_ts": 981.5, "cameras_recording": 6, "cameras_expected": 7, **rec},
+        {"inference.1\x06\x169": queue_depth},
+    )
+    assert read_release_sample(
+        broker, queue_names=["inference.0", "inference.1"], after=970,
+        min_fresh=8, min_recording=6, max_queue=5, now=NOW,
+    ) == expected
+    assert broker.keys == [
+        name if priority == 0 else f"{name}\x06\x16{priority}"
+        for name in ("inference.0", "inference.1")
+        for priority in range(10)
+    ]
