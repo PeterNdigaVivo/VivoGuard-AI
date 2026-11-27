@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import threading
 import time
+from collections import deque
 
 from app.stream.frame_buffer import FrameBuffer
 from app.stream.reconnect import Backoff
@@ -202,6 +203,15 @@ class FFmpegWorker(threading.Thread):
                 yield buf[start:end + 2]
                 buf = buf[end + 2:]
 
+    @staticmethod
+    def _drain_stderr(proc: subprocess.Popen, tail: deque[bytes]) -> None:
+        # Read while the child is running so a full pipe cannot block frames.
+        try:
+            while chunk := proc.stderr.read(8192):
+                tail.append(chunk)
+        except (OSError, ValueError):
+            pass
+
     def _hb_thread(self, proc: subprocess.Popen, started_at: float) -> None:
         """Heartbeat thread. While ffmpeg is alive AND no real frame has
         landed since `started_at`, push a 'Connecting to RTSP…' status
@@ -277,6 +287,12 @@ class FFmpegWorker(threading.Thread):
                                   daemon=True, name=f"hb-{self.camera_id}")
             hb.start()
 
+            stderr_tail: deque[bytes] = deque(maxlen=8)
+            drain = threading.Thread(
+                target=self._drain_stderr, args=(proc, stderr_tail),
+                daemon=True, name=f"err-{self.camera_id}",
+            )
+            drain.start()
             try:
                 for jpeg in self._iter_jpegs(proc.stdout):
                     if self._stop_event.is_set():
@@ -292,17 +308,13 @@ class FFmpegWorker(threading.Thread):
                         last_emit = now
                     self.backoff.succeed()
             finally:
-                err = ""
-                try:
-                    err = (proc.stderr.read() or b"").decode(errors="ignore")
-                except Exception:
-                    pass
                 try:
                     if proc.poll() is None:
                         proc.kill()
                     proc.wait(timeout=3)
                 finally:
                     self._release_proc(proc)
+                    drain.join(timeout=3)
 
             if self._stop_event.is_set():
                 return
@@ -323,6 +335,12 @@ class FFmpegWorker(threading.Thread):
             # FFmpeg repeats its input URL in many failures. Camera URLs carry
             # NVR credentials, so the raw stderr must never reach logs, Redis
             # health state, or the Live View UI.
+            chunks = stderr_tail.copy()
+            stderr = b"".join(chunks)
+            if len(chunks) == chunks.maxlen:
+                # The tail can start mid-URL. Drop its first line before redaction.
+                stderr = stderr.partition(b"\n")[2]
+            err = stderr.decode(errors="ignore")
             err_msg = redact_stream_credentials(err).strip()[:200] or "stream ended"
             log.warning("camera %s: ffmpeg exited (err=%s) — retry in %ds",
                         self.camera_id, err_msg[:120], wait)
