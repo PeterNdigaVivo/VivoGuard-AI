@@ -575,6 +575,8 @@ def _reconcile_batched(mgr: StreamManager, specs: list[CameraSpec]) -> None:
 
 
 def main() -> None:
+    # HTTPX logs full request URLs at INFO, including query strings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     log.info("VivoGuard streamer starting (shard %d of %d)", SHARD_INDEX, SHARD_COUNT)
     _run_migrations()
     log.info("streamer: migrations complete — entering reconcile loop")
