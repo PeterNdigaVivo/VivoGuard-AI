@@ -1,13 +1,22 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.api.labels import audit_queue, queue, today_counts
+from app.config import settings
 from app.database import Base
 from app.models import (
     Alert, AlertReviewDecision, Camera, DetectionEvent, Store, User,
 )
+
+
+@pytest.fixture(autouse=True)
+def _configure_evidence_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    (tmp_path / "snapshots").mkdir()
+    (tmp_path / "alert_clips").mkdir()
 
 
 def test_validation_queue_is_pinned_to_exact_camera_and_requires_retained_clip(tmp_path):
@@ -27,16 +36,18 @@ def test_validation_queue_is_pinned_to_exact_camera_and_requires_retained_clip(t
     db.add_all(cameras)
     db.flush()
     for camera in cameras:
-        clip_path = tmp_path / f"{camera.id}.mp4"
-        clip_path.write_bytes(b"playable evidence")
         event = DetectionEvent(
             camera_id=camera.id, detection_type="trespass", confidence=.8,
             bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
-            extra={"alert_clip_path": str(clip_path)},
         )
         db.add(event)
         db.flush()
-        db.add(Alert(event_id=event.id, status="new"))
+        alert = Alert(event_id=event.id, status="new")
+        db.add(alert)
+        db.flush()
+        clip_path = tmp_path / "alert_clips" / f"{alert.id}.mp4"
+        clip_path.write_bytes(b"playable evidence")
+        event.extra = {"alert_clip_path": str(clip_path)}
     db.commit()
 
     rows = queue(
@@ -96,7 +107,7 @@ def test_validation_queue_excludes_historical_and_informational_alerts(tmp_path)
         ("intrusion", datetime.now(timezone.utc) - timedelta(days=8)),
         ("system_health", datetime.now(timezone.utc)),
     ):
-        snapshot = tmp_path / f"{detection_type}-{created_at.timestamp()}.jpg"
+        snapshot = tmp_path / "snapshots" / f"{detection_type}-{created_at.timestamp()}.jpg"
         snapshot.write_bytes(b"evidence")
         event = DetectionEvent(
             camera_id=camera.id, detection_type=detection_type, confidence=.8,
@@ -139,7 +150,7 @@ def test_audit_queue_is_blind_and_excludes_the_same_reviewer(tmp_path):
     )
     db.add_all([primary, independent, camera])
     db.flush()
-    snapshot = tmp_path / "audit.jpg"
+    snapshot = tmp_path / "snapshots" / "audit.jpg"
     snapshot.write_bytes(b"jpeg evidence")
     event = DetectionEvent(
         camera_id=camera.id, detection_type="intrusion", confidence=.8,
@@ -180,7 +191,7 @@ def test_audit_queue_excludes_alert_after_independent_review(tmp_path):
     )
     db.add_all([primary, independent, third, camera])
     db.flush()
-    snapshot = tmp_path / "completed-audit.jpg"
+    snapshot = tmp_path / "snapshots" / "completed-audit.jpg"
     snapshot.write_bytes(b"jpeg evidence")
     event = DetectionEvent(
         camera_id=camera.id, detection_type="intrusion", confidence=.8,
@@ -205,3 +216,53 @@ def test_audit_queue_excludes_alert_after_independent_review(tmp_path):
 
     assert audit_queue(db=db, user=third, limit=20) == []
     db.close()
+
+
+@pytest.mark.parametrize("evidence", ["wrong_clip", "empty_thumbnail", "thumbnail_fallback"])
+def test_review_queues_follow_playback_evidence(tmp_path, evidence):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as db:
+        primary = User(email="primary@example.invalid", password_hash="x", role="operator")
+        independent = User(email="blind@example.invalid", password_hash="x", role="operator")
+        camera = Camera(name="Synthetic camera", brand="dahua",
+                        connection_type="nvr_dahua", host="127.0.0.1")
+        db.add_all([primary, independent, camera])
+        db.flush()
+        event = DetectionEvent(
+            camera_id=camera.id, detection_type="intrusion", confidence=.8,
+            bbox_json=[0, 0, 1, 1], timestamp=datetime.now(timezone.utc),
+        )
+        db.add(event)
+        db.flush()
+        alert = Alert(event_id=event.id, status="new")
+        db.add(alert)
+        db.flush()
+
+        if evidence != "empty_thumbnail":
+            other = tmp_path / "alert_clips" / f"{alert.id + 1}.mp4"
+            other.write_bytes(b"synthetic evidence for a different alert")
+            event.extra = {"alert_clip_path": str(other)}
+        if evidence != "wrong_clip":
+            snapshot = tmp_path / "snapshots" / "evidence.jpg"
+            snapshot.write_bytes(b"synthetic thumbnail" if evidence == "thumbnail_fallback" else b"")
+            event.thumbnail_path = str(snapshot)
+        db.commit()
+
+        primary_cards = queue(
+            db=db, _user=primary, limit=20,
+            detection_type=None, store_id=None, camera_id=None,
+        )
+        alert.status = "confirmed"
+        db.add(AlertReviewDecision(alert_id=alert.id, reviewer_id=primary.id, verdict="confirmed"))
+        db.commit()
+        blind_cards = audit_queue(db=db, user=independent, limit=20)
+
+        for cards in (primary_cards, blind_cards):
+            if evidence == "thumbnail_fallback":
+                assert len(cards) == 1
+                assert cards[0]["snapshot_url"] == f"/api/alerts/{alert.id}/snapshot"
+                assert cards[0]["clip_url"] is None
+                assert cards[0]["clip_available"] is False
+            else:
+                assert cards == []
