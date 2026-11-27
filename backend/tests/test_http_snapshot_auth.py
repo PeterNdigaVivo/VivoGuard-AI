@@ -108,3 +108,38 @@ def test_http_timeout_reports_phase_without_exception_details(timeout, caplog):
     assert f"HTTP snapshot failed: {error}" in caplog.text
     assert private_detail not in caplog.text
     buffer.update_health.assert_called_with(9, fps=0, error=f"HTTP snapshot: {error}")
+
+
+@pytest.mark.parametrize(("delay", "jitter", "extra"), [(5, 1.25, 1.25), (299, 2, 1), (300, 2, 0)])
+def test_snapshot_retries_are_spread_within_the_backoff_limit(monkeypatch, delay, jitter, extra):
+    clock = [100.0]
+    waits = []
+    worker = HttpSnapshotWorker(10, "https://camera.invalid/snapshot", buffer=Mock())
+    worker.backoff.current = delay
+    worker.backoff.maximum = 300
+    attempts = []
+
+    def get_jpeg():
+        attempts.append(clock[0])
+        if len(attempts) == 2:
+            worker.stop()
+        raise httpx.ReadTimeout("synthetic timeout")
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+        return worker._stop_event.is_set()
+
+    monkeypatch.setattr(
+        "app.stream.http_snapshot_worker.time",
+        Mock(time=lambda: clock[0], monotonic=lambda: clock[0]),
+    )
+    monkeypatch.setattr("random.uniform", lambda low, high: max(low, min(jitter, high)))
+    monkeypatch.setattr(worker, "_get_jpeg", get_jpeg)
+    monkeypatch.setattr(worker._stop_event, "wait", wait)
+
+    worker.run()
+
+    assert attempts == [100.0, 100.0 + delay + extra]
+    assert sum(waits) == delay + extra
+    assert all(0 < wait <= 5 for wait in waits)
