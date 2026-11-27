@@ -30,6 +30,7 @@ from uuid import uuid4
 
 import redis
 
+from app.ai.perf_tracker import REDIS_KEY_FMT as PERF_KEY_FMT
 from app.config import settings
 from app.tasks.celery_app import celery_app
 
@@ -394,13 +395,47 @@ def _critical_gap_health(
         }
 
 
+def _processed_frame_timestamp(value, *, now: float) -> float | None:
+    try:
+        sample = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(sample, dict):
+        return None
+    window_frames = sample.get("window_n")
+    if type(window_frames) is not int or window_frames <= 0:
+        return None
+    return _valid_last_run_timestamp(sample.get("ts"), now=now)
+
+
+def _standard_work_ages(
+    r: redis.Redis, camera_ids: list[int], *, now: float | None,
+) -> dict[int, float | None]:
+    pipe = r.pipeline(transaction=False)
+    for camera_id in camera_ids:
+        pipe.get(LAST_RUN_KEY_FMT.format(camera_id=camera_id))
+    for camera_id in camera_ids:
+        pipe.get(PERF_KEY_FMT.format(camera_id=camera_id))
+    values = pipe.execute()
+    observed_at = time.time() if now is None else now
+    count = len(camera_ids)
+    ages: dict[int, float | None] = dict.fromkeys(camera_ids)
+    for camera_id, completion, sample in zip(camera_ids, values[:count], values[count:]):
+        completed = _valid_last_run_timestamp(completion, now=observed_at)
+        processed = _processed_frame_timestamp(sample, now=observed_at)
+        latest_work = max(completed or 0.0, processed or 0.0)
+        if latest_work:
+            ages[camera_id] = observed_at - latest_work
+    return ages
+
+
 def _standard_gap_health(
     r: redis.Redis,
     camera_ids: list[int],
     *,
     now: float | None = None,
 ) -> dict:
-    """Measure ordinary-camera gaps from completed inference work.
+    """Measure ordinary-camera gaps from completed tasks and processed frames.
 
     Critical cameras have a separate, tighter SLA. Together these two
     measurements cover every fresh, schedulable camera instead of relying on
@@ -416,7 +451,7 @@ def _standard_gap_health(
             "standard_gap_sla_seconds": int(STANDARD_GAP_SLA_SECONDS),
         }
     try:
-        ages = _last_run_ages(r, camera_ids, now=now)
+        ages = _standard_work_ages(r, camera_ids, now=now)
         overdue = sorted(
             camera_id for camera_id, age in ages.items()
             if age is None or age > STANDARD_GAP_SLA_SECONDS

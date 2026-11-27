@@ -1,4 +1,5 @@
 """Regression tests for restart-safe, backlog-safe inference reservations."""
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -104,8 +105,9 @@ class FakeReservationRedis:
 
 
 class FakeLastRunRedis:
-    def __init__(self, values: dict[int, str | bytes | None]):
+    def __init__(self, values: dict[int, str | bytes | None], *, samples=None):
         self.values = values
+        self.samples = samples or {}
         self.keys: list[str] = []
 
     def pipeline(self, *, transaction: bool):
@@ -117,7 +119,12 @@ class FakeLastRunRedis:
         return self
 
     def execute(self):
-        return [self.values.get(int(key.rsplit(":", 1)[-1])) for key in self.keys]
+        keys = self.keys
+        self.keys = []
+        return [
+            (self.samples if key.startswith("vg:perf:") else self.values).get(int(key.rsplit(":", 1)[-1]))
+            for key in keys
+        ]
 
 
 def test_stale_lock_sweep_rechecks_heartbeat_and_ttl_at_deletion():
@@ -581,3 +588,43 @@ def test_standard_repair_preserves_live_or_recent_reservations(condition):
         require_empty_queue=True,
     ) == 0
     assert r.values[lock] == "current-task"
+
+
+def test_standard_coverage_uses_newer_processed_frames_during_long_tasks():
+    r = FakeLastRunRedis(
+        {1: "10", 2: None, 3: "950", 4: "10"},
+        samples={
+            1: json.dumps({"window_n": 100, "ts": 960}),
+            2: json.dumps({"window_n": 1, "ts": 955}),
+            3: json.dumps({"window_n": 100, "ts": 920}),
+        },
+    )
+
+    health = inference._standard_gap_health(r, [1, 2, 3, 4], now=1000)
+    assert health["standard_camera_ids_overdue"] == [4]
+    assert health["standard_cameras_never_started"] == 0
+    assert health["standard_max_gap_seconds"] == 990.0
+
+    health = inference._standard_gap_health(r, [1, 2, 3], now=1000)
+    assert health["standard_cameras_overdue"] == 0
+    assert health["standard_max_gap_seconds"] == 50.0
+
+
+@pytest.mark.parametrize("sample", [
+    b"\xff",
+    "malformed",
+    "[]",
+    '{"window_n": 0, "ts": 999}',
+    '{"window_n": true, "ts": 999}',
+    '{"window_n": 100, "ts": 1001}',
+    '{"window_n": 100, "ts": "NaN"}',
+    '{"window_n": 100, "ts": "Infinity"}',
+    '{"window_n": 100, "ts": 20}',
+])
+def test_standard_coverage_does_not_clear_gaps_with_invalid_or_stale_frames(sample):
+    r = FakeLastRunRedis({1: "30"}, samples={1: sample})
+
+    health = inference._standard_gap_health(r, [1], now=1000)
+
+    assert health["standard_camera_ids_overdue"] == [1]
+    assert health["standard_max_gap_seconds"] == 970.0
