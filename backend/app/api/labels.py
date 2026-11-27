@@ -15,7 +15,6 @@ training/feedback_loop. No duplication of the confirm/dismiss logic
 from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,12 +22,14 @@ from pydantic import BaseModel
 from sqlalchemy import and_, case, exists, func, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import (
     Alert, AlertReviewDecision, Camera, DetectionEvent, Store, User, Zone,
 )
 from app.schemas.alert import AlertActionOut, AlertOut
+from app.utils.evidence_files import alert_snapshot_file
 
 log = logging.getLogger(__name__)
 
@@ -120,26 +121,20 @@ def _serialise_queue_rows(
 
     out: list[dict] = []
     for alert, event, camera in rows:
-        clip_path = (event.extra or {}).get("alert_clip_path")
-        snapshot_exists = bool(
-            event.thumbnail_path and Path(event.thumbnail_path).is_file()
-        )
-        clip_exists = bool(clip_path and Path(str(clip_path)).is_file())
-        if not snapshot_exists and not clip_exists:
-            continue
+        snapshot_available = alert_snapshot_file(
+            event.thumbnail_path, recordings_dir=settings.recordings_dir,
+        ) is not None
         item: AlertOut = _to_alert_out(
             alert, event, camera,
             zones_by_id.get(event.zone_id) if event.zone_id else None,
             stores_by_id.get(camera.store_id)
             if (camera and camera.store_id) else None,
         )
+        # Preserve the clip URL already checked by the alert serializer.
+        if not snapshot_available and item.clip_url is None:
+            continue
         payload = item.model_dump()
-        payload["snapshot_url"] = (
-            f"/api/alerts/{alert.id}/snapshot" if snapshot_exists else None
-        )
-        payload["clip_url"] = (
-            f"/api/alerts/{alert.id}/clip" if clip_exists else None
-        )
+        payload["snapshot_url"] = item.snapshot_url if snapshot_available else None
         if blind:
             payload["status"] = "independent_review_pending"
         payload["dwell_seconds"] = _dwell_from_event(event)
@@ -148,7 +143,7 @@ def _serialise_queue_rows(
         payload["review_reason"] = (
             "blind independent review" if blind else reason
         )
-        payload["clip_available"] = clip_exists
+        payload["clip_available"] = item.clip_url is not None
         out.append(payload)
         if limit is not None and len(out) >= limit:
             break
@@ -201,7 +196,7 @@ def queue(
         q = q.filter(DetectionEvent.camera_id == camera_id)
     # Avoid scanning the entire historical queue. This database-level filter
     # is only a candidate filter; _serialise_queue_rows still checks that the
-    # retained file exists before exposing the card.
+    # playback can serve the retained evidence before exposing the card.
     q = q.filter(or_(
         DetectionEvent.thumbnail_path.is_not(None),
         DetectionEvent.extra["alert_clip_path"].as_string().is_not(None),
