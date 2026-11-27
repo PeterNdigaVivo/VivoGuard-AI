@@ -124,7 +124,10 @@ class HttpSnapshotWorker(threading.Thread):
                     last_emit = now
                 self.backoff.succeed()
             except Exception as e:
-                msg = redact_stream_credentials(str(e))[:200]
+                if isinstance(e, httpx.TimeoutException):
+                    msg = f"{type(e).__name__}: timed out"
+                else:
+                    msg = redact_stream_credentials(str(e))[:200]
                 log.warning("camera %s HTTP snapshot failed: %s", self.camera_id, msg)
                 self.buffer.update_health(self.camera_id, fps=0,
                                           error=f"HTTP snapshot: {msg}")

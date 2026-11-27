@@ -84,3 +84,27 @@ def test_http_error_body_stays_out_of_camera_diagnostics(status, caplog):
     assert f"HTTP snapshot failed: HTTP {status}" in caplog.text
     assert body not in caplog.text
     buffer.update_health.assert_called_with(9, fps=0, error=f"HTTP snapshot: HTTP {status}")
+
+
+@pytest.mark.parametrize("timeout", [httpx.ConnectTimeout, httpx.ReadTimeout])
+def test_http_timeout_reports_phase_without_exception_details(timeout, caplog):
+    buffer = Mock()
+    worker = HttpSnapshotWorker(9, "https://camera.invalid/snapshot", buffer=buffer)
+    private_detail = "synthetic-network-detail"
+
+    def stop_after_error(_camera_id, *, fps, error=None):
+        if error and error.startswith("HTTP snapshot:"):
+            worker._stop_event.set()
+
+    def endpoint(request):
+        raise timeout(private_detail, request=request)
+
+    buffer.update_health.side_effect = stop_after_error
+    with httpx.Client(transport=httpx.MockTransport(endpoint)) as client:
+        worker._client = client
+        worker.run()
+
+    error = f"{timeout.__name__}: timed out"
+    assert f"HTTP snapshot failed: {error}" in caplog.text
+    assert private_detail not in caplog.text
+    buffer.update_health.assert_called_with(9, fps=0, error=f"HTTP snapshot: {error}")
