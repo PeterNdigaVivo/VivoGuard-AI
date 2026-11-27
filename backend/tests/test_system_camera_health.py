@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from redis.exceptions import RedisError
 
 from app.api.system import (
     _current_recording_pipeline,
     _decode_inference_pipeline,
+    _inference_worker_backends,
     _proof_of_life_state,
     _runtime_camera_status,
     proof_of_life,
@@ -208,3 +210,39 @@ def test_proof_of_life_rejects_heartbeat_without_current_timestamp(monkeypatch, 
 
     assert payload["state"] == "offline"
     assert payload["pipeline_age_seconds"] is None
+
+
+def test_worker_backend_counts_only_current_processing_samples():
+    def sample(camera_id, backend, ts=995, frames=100):
+        return json.dumps({"camera_id": camera_id, "backend": backend, "ts": ts, "window_n": frames})
+
+    redis = Mock()
+    redis.mget.return_value = [
+        sample(1, "cuda"), sample(2, "cpu"), sample(3, "cuda", ts=820),
+        sample(4, "cuda", ts=1001), sample(5, "cuda", frames=0),
+        sample(6, "unknown"), sample(12, "cuda"), b"\xff", sample(9, "cuda", frames=True),
+    ]
+    pipeline = {"last_run_ts": 995, "fresh_camera_ids": [1, 1, True, *range(2, 10)]}
+
+    assert _inference_worker_backends(redis, pipeline, now=1000) == {"cuda": 1, "cpu": 1}
+    redis.mget.assert_called_once_with([f"vg:perf:{cid}" for cid in range(1, 10)])
+
+
+@pytest.mark.parametrize("pipeline", [
+    None, {"last_run_ts": 820, "fresh_camera_ids": [1]},
+    {"last_run_ts": 1001, "fresh_camera_ids": [1]},
+    {"last_run_ts": 995, "fresh_camera_ids": []},
+])
+def test_worker_backend_evidence_requires_current_supervisor_coverage(pipeline):
+    redis = Mock()
+
+    assert _inference_worker_backends(redis, pipeline, now=1000) == {}
+    redis.mget.assert_not_called()
+
+
+def test_worker_backend_evidence_is_empty_when_redis_read_fails():
+    redis = Mock()
+    redis.mget.side_effect = RedisError
+    pipeline = {"last_run_ts": 995, "fresh_camera_ids": [1]}
+
+    assert _inference_worker_backends(redis, pipeline, now=1000) == {}

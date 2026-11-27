@@ -6,9 +6,11 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from redis.exceptions import RedisError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.ai.perf_tracker import REDIS_KEY_FMT as PERF_KEY_FMT
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
@@ -20,11 +22,15 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 STREAM_FRESH_SECONDS = 10.0
 RECORDING_HEALTH_MAX_AGE_SECONDS = 180.0
+WORKER_BACKEND_MAX_AGE_SECONDS = 180.0
+INFERENCE_BACKENDS = {"cpu", "cuda", "rocm", "mps", "intel"}
 
 
-def _pipeline_age_seconds(pipeline: dict | None, *, now: float) -> float | None:
+def _pipeline_age_seconds(
+    pipeline: dict | None, *, now: float, timestamp_field: str = "last_run_ts",
+) -> float | None:
     """Return the age of a heartbeat with a usable timestamp."""
-    raw_timestamp = (pipeline or {}).get("last_run_ts")
+    raw_timestamp = (pipeline or {}).get(timestamp_field)
     if isinstance(raw_timestamp, bool):
         return None
     try:
@@ -102,6 +108,41 @@ def _decode_inference_pipeline(raw_pipeline) -> dict | None:
         return value if isinstance(value, dict) else None
     except (TypeError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _inference_worker_backends(r, pipeline: dict | None, *, now: float | None = None) -> dict[str, int]:
+    """Count recent processing reports by the backend detected in inference workers."""
+    age = _pipeline_age_seconds(pipeline, now=time.time() if now is None else now)
+    if pipeline is None or age is None or age >= WORKER_BACKEND_MAX_AGE_SECONDS:
+        return {}
+    fresh_ids = pipeline.get("fresh_camera_ids")
+    if not isinstance(fresh_ids, list):
+        return {}
+    ids = sorted({cid for cid in fresh_ids if type(cid) is int and cid > 0})
+    if not ids:
+        return {}
+
+    try:
+        reports = r.mget([PERF_KEY_FMT.format(camera_id=cid) for cid in ids])
+    except RedisError:
+        return {}
+
+    observed_at = time.time() if now is None else now
+    counts: dict[str, int] = {}
+    for cid, raw in zip(ids, reports):
+        sample = _decode_inference_pipeline(raw)
+        if sample is None or sample.get("camera_id") != cid:
+            continue
+        backend = sample.get("backend")
+        frames = sample.get("window_n")
+        if not isinstance(backend, str) or backend not in INFERENCE_BACKENDS:
+            continue
+        if type(frames) is not int or frames <= 0:
+            continue
+        sample_age = _pipeline_age_seconds(sample, now=observed_at, timestamp_field="ts")
+        if sample_age is not None and sample_age < WORKER_BACKEND_MAX_AGE_SECONDS:
+            counts[backend] = counts.get(backend, 0) + 1
+    return counts
 
 
 def _current_recording_pipeline(raw_pipeline, *, now: float) -> dict | None:
@@ -335,6 +376,7 @@ def system_health(db: Session = Depends(get_db), _u=Depends(get_current_user)):
         "disk_used_gb":   round(du.used  / (1024 ** 3), 1),
         "disk_free_gb":   round(du.free  / (1024 ** 3), 1),
         "gpus":           gpu_info,
+        "inference_worker_backends": _inference_worker_backends(fb.r, inference_pipeline),
         "alerts_today":   int(new_alerts_24h),
         "inference_pipeline": inference_pipeline,
         "inference_batch_shadow": inference_batch_shadow,

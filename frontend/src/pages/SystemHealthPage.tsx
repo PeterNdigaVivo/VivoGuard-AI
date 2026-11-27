@@ -16,6 +16,7 @@ interface SystemHealth {
   cameras: CamHealth[]
   disk_total_gb: number; disk_used_gb: number; disk_free_gb: number
   gpus: { index: number; name: string; total_mb: number; free_mb: number }[]
+  inference_worker_backends?: Record<string, number>
   alerts_today: number
   recording_pipeline?: {
     status: 'healthy' | 'degraded' | 'inactive'
@@ -117,6 +118,10 @@ export default function SystemHealthPage() {
     (data.inference_pipeline.standard_cameras_overdue ?? 0) > 0
   )
   const recording = data.recording_pipeline
+  const workerBackends = Object.entries(data.inference_worker_backends ?? {})
+  const backendLabels: Record<string, string> = {
+    cpu: 'CPU', cuda: 'CUDA', rocm: 'ROCm', mps: 'MPS', intel: 'OpenVINO',
+  }
 
   return (
     <div className="p-6">
@@ -133,8 +138,22 @@ export default function SystemHealthPage() {
         </Card>
 
         <Card className="p-4 dark:bg-slate-900 dark:border-slate-800">
-          <div className="text-sm text-slate-500 dark:text-slate-300">GPUs</div>
-          {data.gpus.length === 0 && <div className="text-slate-400 dark:text-slate-400">CPU-only mode</div>}
+          <div className="text-sm text-slate-500 dark:text-slate-300">Inference compute</div>
+          {workerBackends.length === 0 ? (
+            <div className="text-slate-500 dark:text-slate-400">No recent worker samples</div>
+          ) : (
+            <div className="mb-2">
+              <div className="text-xs text-slate-500 dark:text-slate-400">Recent camera samples</div>
+              {workerBackends.map(([backend, count]) => (
+                <div key={backend} className="text-sm font-medium">
+                  {backendLabels[backend] ?? backend} · {count} {count === 1 ? 'camera' : 'cameras'}
+                </div>
+              ))}
+            </div>
+          )}
+          {data.gpus.length > 0 && (
+            <div className="text-xs text-slate-500 dark:text-slate-400">GPUs visible to the API</div>
+          )}
           {data.gpus.map(g => (
             <div key={g.index} className="text-sm">
               <div className="font-medium">{g.name}</div>
