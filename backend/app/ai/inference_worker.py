@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 import redis
+from celery.exceptions import WorkerShutdown, WorkerTerminate
+from celery.worker.state import maybe_shutdown
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -500,6 +502,12 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
     # BOTH exit paths (max_seconds reached AND camera gone / no frame).
     try:
       while True:
+        # The threaded Celery pool observes shutdown at the frame boundary.
+        # Returning normally lets the task release its owned reservation.
+        try:
+            maybe_shutdown()
+        except (WorkerShutdown, WorkerTerminate):
+            break
         if max_seconds and time.time() - started >= max_seconds:
             break
 
