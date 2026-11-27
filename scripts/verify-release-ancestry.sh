@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep source builds from dropping released API or scheduler revisions.
+# Keep source builds from dropping revisions of running application services.
 set -euo pipefail
 
 release=$(git rev-parse --verify "$1^{commit}")

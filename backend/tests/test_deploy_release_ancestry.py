@@ -30,13 +30,16 @@ docker() {
       case "$6" in
         api) printf 'api-1\napi-2\n' ;;
         worker-alerts) [ "$SCENARIO" != list_error ] || return 1 ;;
+        streamer) printf 'streamer-1\n' ;;
+        worker-inference|worker-training|recorder|frontend) return 0 ;;
         *) return 2 ;;
       esac
       ;;
     container:inspect)
       case "$5:$SCENARIO" in
         api-1:*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
-        api-2:included|api-2:list_error) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+        api-2:included|api-2:list_error|api-2:streamer_missing) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+        streamer-1:streamer_missing) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
         api-2:legacy) printf '\n' ;;
         api-2:missing_release) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
         api-2:bad_label) printf 'invalid-label\n' ;;
@@ -48,7 +51,6 @@ docker() {
   esac
 }
 export -f docker git
-bash scripts/verify-release-ancestry.sh HEAD api worker-alerts
 """
 
 
@@ -68,7 +70,7 @@ def test_release_preflight_checks_live_revisions(scenario, success, diagnostic):
         pytest.skip("Bash is required by the Compose deployment scripts")
 
     result = subprocess.run(
-        [str(BASH), "-c", STUB],
+        [str(BASH), "-c", STUB + "bash scripts/verify-release-ancestry.sh HEAD api worker-alerts"],
         cwd=ROOT,
         env={**os.environ, "SCENARIO": scenario},
         capture_output=True,
@@ -83,11 +85,33 @@ def test_release_preflight_checks_live_revisions(scenario, success, diagnostic):
         assert diagnostic in result.stderr
 
 
+def test_deploy_preflight_blocks_a_streamer_release_missing_from_history():
+    if BASH is None or not Path(BASH).is_file():
+        pytest.skip("Bash is required by the Compose deployment scripts")
+
+    script = (ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    start = script.index("release_revision=$(git rev-parse")
+    end = script.index("bash scripts/pin-rollback-images.sh")
+    preflight = script[start:end]
+    result = subprocess.run(
+        [str(BASH), "-c", "set -euo pipefail\n" + STUB + preflight],
+        cwd=ROOT,
+        env={**os.environ, "SCENARIO": "streamer_missing"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "streamer revision " + "b" * 40 + " is absent" in result.stderr
+
+
 def test_deploy_checks_release_ancestry_before_building_or_migrating():
     script = (ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
     assert (
-        script.index('bash scripts/verify-release-ancestry.sh "$release_revision" api worker-alerts')
+        script.index('bash scripts/verify-release-ancestry.sh "$release_revision" "${app_services[@]}"')
         < script.index('bash scripts/pin-rollback-images.sh')
         < script.index("docker compose build api")
         < script.index("alembic upgrade head")

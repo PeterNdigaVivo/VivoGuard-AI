@@ -39,7 +39,7 @@ fi
 # queue/worker cannot be omitted from a release by an obsolete service alias.
 release_revision=$(git rev-parse --verify HEAD)
 app_services=(api streamer worker-inference worker-alerts worker-training recorder frontend)
-bash scripts/verify-release-ancestry.sh "$release_revision" api worker-alerts
+bash scripts/verify-release-ancestry.sh "$release_revision" "${app_services[@]}"
 bash scripts/pin-rollback-images.sh "${app_services[@]}"
 echo "→ building api image"
 docker compose build api
