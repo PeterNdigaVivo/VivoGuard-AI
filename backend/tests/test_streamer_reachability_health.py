@@ -1,9 +1,39 @@
 import asyncio
+import logging
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from streamer.streamer import main as streamer_main
+
+
+def test_streamer_suppresses_httpx_request_urls(monkeypatch, caplog) -> None:
+    client_log = logging.getLogger("httpx")
+    caplog.set_level(logging.INFO, logger="httpx")
+    caplog.set_level(logging.INFO)
+    manager = Mock()
+
+    def startup():
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        with httpx.Client(transport=transport) as client:
+            client.get("https://camera.invalid/snapshot?token=synthetic-query-marker")
+        client_log.warning("synthetic transport warning")
+        streamer_main.log.warning("synthetic camera diagnostic")
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(streamer_main, "_run_migrations", startup)
+    monkeypatch.setattr(streamer_main, "StreamManager", lambda: manager)
+    monkeypatch.setattr(streamer_main, "desired_specs", interrupt)
+
+    streamer_main.main()
+
+    assert "synthetic-query-marker" not in caplog.text
+    assert "synthetic transport warning" in caplog.text
+    assert "synthetic camera diagnostic" in caplog.text
+    manager.stop_all.assert_called_once()
 
 
 def test_snapshot_url_keeps_credentials_out_of_httpx_request_url():
