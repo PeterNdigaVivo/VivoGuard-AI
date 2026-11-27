@@ -95,7 +95,9 @@ class HttpSnapshotWorker(threading.Thread):
             auth = (self.username, self.password)
             r = self._client.get(self.snapshot_url, auth=auth)
         if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:120]}")
+            # Upstream response bodies can contain sensitive data and
+            # this error is copied to logs and the camera health record.
+            raise RuntimeError(f"HTTP {r.status_code}")
         if not r.content or r.content[:3] != b"\xff\xd8\xff":
             raise RuntimeError("response not a JPEG (got HTML / wrong endpoint?)")
         self._auth = auth
