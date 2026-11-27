@@ -16,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
 from app.database import Base
-from app.models import DetectionEvent, RecordingClip
+from app.models import Camera, DetectionEvent, RecordingClip, Zone
 from app.services.incident_foundations import clip_eligibility
 from app.tasks import recorder
 from app.tasks.recorder import (
@@ -327,6 +327,42 @@ def _session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)()
+
+
+def test_window_start_skips_removed_cameras_until_restored(monkeypatch) -> None:
+    started = Mock(return_value=True)
+    monkeypatch.setattr(recorder, "_start_camera", started)
+    queue = Mock()
+
+    with _session() as db:
+        retained = Camera(
+            name="Retained", brand="generic", connection_type="nvr_channel",
+            host="retained.invalid", ai_enabled=False,
+        )
+        removed = Camera(
+            name="Removed", brand="generic", connection_type="nvr_channel",
+            host="removed.invalid", ai_enabled=False, is_deleted=True,
+        )
+        db.add_all([retained, removed])
+        db.flush()
+        db.add_all([
+            Zone(
+                camera_id=camera.id, name="Synthetic entrance",
+                polygon_coords_json=[], detection_types_json=["entry_exit"],
+            )
+            for camera in (retained, removed)
+        ])
+        db.commit()
+
+        assert recorder._start_window(db, queue, "current", 600) == 1
+        started.assert_called_once_with(db, queue, retained, "current", 600)
+
+        removed.is_deleted = False
+        db.commit()
+        started.reset_mock()
+
+        assert recorder._start_window(db, queue, "next", 600) == 2
+        assert {call.args[2].id for call in started.call_args_list} == {retained.id, removed.id}
 
 
 class _RecorderHealthRedis:

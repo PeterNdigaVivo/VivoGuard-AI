@@ -150,7 +150,9 @@ def _key_cameras(db):
     }
     if not cam_ids:
         return []
-    return db.query(Camera).filter(Camera.id.in_(cam_ids)).all()
+    return db.query(Camera).filter(
+        Camera.id.in_(cam_ids), Camera.is_deleted.is_(False),
+    ).all()
 
 
 def _substream_url(cam) -> str | None:
