@@ -109,34 +109,44 @@ def test_alert_without_video_surfaces_snapshot_timeline_fallback(db):
 
 
 @pytest.mark.parametrize(
-    "storage", ["valid", "missing", "empty", "directory", "outside", "outside_link"],
+    "storage",
+    ["valid", "missing", "empty", "directory", "outside", "outside_link",
+     "other_alert", "other_alert_link"],
 )
 def test_alert_feed_and_playback_agree_on_clip_availability(db, tmp_path, monkeypatch, storage):
     monkeypatch.setattr(settings, "recordings_dir", str(tmp_path))
+    cam = _camera(db)
+    alert, event = _alert(db, cam, age_minutes=10)
     directory = tmp_path / "alert_clips"
     directory.mkdir()
-    clip = directory / "incident.mp4"
+    clip = directory / f"{alert.id}.mp4"
     if storage == "valid":
         clip.write_bytes(b"test evidence")
     elif storage == "empty":
         clip.touch()
     elif storage == "directory":
         clip.mkdir()
-    elif storage in {"outside", "outside_link"}:
-        outside = tmp_path / "alert_clips_sibling" / "incident.mp4"
-        outside.parent.mkdir()
-        outside.write_bytes(b"unrelated test file")
-        if storage == "outside":
-            clip = outside
+    else:
+        if storage in {"other_alert", "other_alert_link"}:
+            other_alert, _ = _alert(db, cam, age_minutes=9)
+            unrelated = directory / f"{other_alert.id}.mp4"
+        elif storage in {"outside", "outside_link"}:
+            unrelated = tmp_path / "alert_clips_sibling" / f"{alert.id}.mp4"
+            unrelated.parent.mkdir()
         else:
-            try:
-                clip.symlink_to(outside)
-            except OSError as exc:
-                if getattr(exc, "winerror", None) == 1314:
-                    pytest.skip("Windows denied symbolic-link creation")
-                raise
-    cam = _camera(db)
-    alert, event = _alert(db, cam, age_minutes=10)
+            assert storage == "missing"
+            unrelated = None
+        if unrelated is not None:
+            unrelated.write_bytes(b"unrelated test file")
+            if storage.endswith("_link"):
+                try:
+                    clip.symlink_to(unrelated)
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) == 1314:
+                        pytest.skip("Windows denied symbolic-link creation")
+                    raise
+            else:
+                clip = unrelated
     event.extra = {"alert_clip_path": str(clip)}
 
     item = _to_alert_out(alert, event, cam, None, None)

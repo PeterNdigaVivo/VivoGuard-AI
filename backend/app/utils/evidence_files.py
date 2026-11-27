@@ -13,8 +13,10 @@ def evidence_file_available(path: object) -> bool:
     return S_ISREG(info.st_mode) and info.st_size > 0
 
 
-def alert_clip_file(path: object, *, recordings_dir: str) -> Path | None:
-    """Resolve a playable alert clip within the recorder's evidence directory."""
+def alert_clip_file(
+    path: object, *, alert_id: int, recordings_dir: str,
+) -> Path | None:
+    """Resolve the clip written by the recorder for this alert ID."""
     if not isinstance(path, str) or not path:
         return None
     try:
@@ -22,6 +24,6 @@ def alert_clip_file(path: object, *, recordings_dir: str) -> Path | None:
         resolved = Path(path).resolve(strict=True)
     except (OSError, ValueError, RuntimeError):
         return None
-    if resolved.is_relative_to(directory) and evidence_file_available(str(resolved)):
+    if resolved == directory / f"{alert_id}.mp4" and evidence_file_available(str(resolved)):
         return resolved
     return None
