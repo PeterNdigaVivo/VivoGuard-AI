@@ -197,10 +197,17 @@ def apply_quality_control(db: Session, alert: Alert,
     return state
 
 
-def alert_is_suppressed(db: Session, alert_id: int) -> bool:
-    value = (db.query(Alert.notification_suppressed)
-               .filter(Alert.id == alert_id).scalar())
-    return bool(value)
+def alert_is_publishable(db: Session, *, alert_id: int, event_id: int) -> bool:
+    """Check the alert and its evidence binding after the frame transaction commits."""
+    return (
+        db.query(Alert.id)
+        .filter(
+            Alert.id == alert_id,
+            Alert.event_id == event_id,
+            Alert.notification_suppressed.is_(False),
+        )
+        .scalar() is not None
+    )
 
 
 def quality_scorecards(db: Session, *, days: int = 7) -> list[dict]:

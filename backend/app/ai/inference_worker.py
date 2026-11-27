@@ -909,10 +909,13 @@ def run_for_camera(camera_id: int, *, max_seconds: int = 0,
             for ev in events_emitted:
                 if ev.get("detection_type") in _SKIP_ALERT_TYPES:
                     continue
-                # Review-only/quarantined alerts remain on the Alerts page but
-                # must not trigger the audible/browser real-time channel.
-                from app.services.alert_quality import alert_is_suppressed
-                if alert_is_suppressed(db, int(ev["alert_id"])):
+                # A detector rollback can invalidate earlier payloads
+                # from this frame. Publish only a matching committed alert
+                # with notifications enabled.
+                from app.services.alert_quality import alert_is_publishable
+                if not alert_is_publishable(
+                    db, alert_id=int(ev["alert_id"]), event_id=int(ev["event_id"]),
+                ):
                     continue
                 try:
                     pub.publish("vg:pub:alerts", json.dumps(ev))

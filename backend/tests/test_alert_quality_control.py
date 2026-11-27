@@ -479,3 +479,31 @@ def test_direct_task_notification_obeys_persisted_quality_decision():
         extra = {"quality_control": {"notification_suppressed": True}}
 
     assert _info_notification_allowed(Event()) is False
+
+
+def test_live_publish_gate_rejects_a_rolled_back_alert(db):
+    from app.services.alert_quality import alert_is_publishable
+
+    camera = _camera(db)
+    db.commit()
+    alert, event = _alert(db, camera)
+    alert_id, event_id = alert.id, event.id
+    db.rollback()
+
+    assert not alert_is_publishable(db, alert_id=alert_id, event_id=event_id)
+
+
+def test_live_publish_gate_requires_matching_evidence_and_unsuppressed_notification(db):
+    from app.services.alert_quality import alert_is_publishable
+
+    camera = _camera(db)
+    alert, event = _alert(db, camera)
+    _, other_event = _alert(db, camera)
+    db.commit()
+
+    assert alert_is_publishable(db, alert_id=alert.id, event_id=event.id)
+    assert not alert_is_publishable(db, alert_id=alert.id, event_id=other_event.id)
+
+    alert.notification_suppressed = True
+    db.commit()
+    assert not alert_is_publishable(db, alert_id=alert.id, event_id=event.id)
