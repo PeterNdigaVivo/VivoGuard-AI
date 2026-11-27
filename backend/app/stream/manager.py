@@ -87,6 +87,11 @@ class StreamManager:
             buffer=self.buffer,
         )
 
+    def has_running_worker(self, spec: CameraSpec) -> bool:
+        """Return whether this exact configuration already has a live worker."""
+        worker = self.workers.get(spec.camera_id)
+        return self.specs.get(spec.camera_id) == spec and worker is not None and worker.is_alive()
+
     def reconcile(self, desired: list[CameraSpec]) -> None:
         desired_by_id = {d.camera_id: d for d in desired}
         log.info("reconcile: %d desired cameras, %d running workers",
@@ -103,10 +108,7 @@ class StreamManager:
 
         # Start or restart changed cameras.
         for cam_id, spec in desired_by_id.items():
-            existing = self.specs.get(cam_id)
-            if (existing == spec
-                    and self.workers.get(cam_id)
-                    and self.workers[cam_id].is_alive()):
+            if self.has_running_worker(spec):
                 continue
             if cam_id in self.workers:
                 self._retire(cam_id, self.workers[cam_id])

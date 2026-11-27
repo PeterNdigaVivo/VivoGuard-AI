@@ -489,21 +489,21 @@ def _report_tcp_preflight_failure(spec: CameraSpec) -> None:
                     spec.camera_id, exc)
 
 
-def _filter_reachable(specs: list[CameraSpec]) -> list[CameraSpec]:
-    """Drop specs whose camera failed a recent TCP probe. Cameras
-    that haven't been probed (or whose cache entry expired) get
-    probed now — in parallel via asyncio.
-
-    Returns the reachable subset. Unreachable cameras are written
-    back into _reachable_cache with the current timestamp so we
-    don't re-probe them until RETRY_UNREACHABLE_SECONDS has passed.
-    """
+def _filter_reachable(
+    specs: list[CameraSpec], *, manager: StreamManager | None = None,
+) -> list[CameraSpec]:
+    """Keep live workers and use TCP preflight before starting replacements."""
     if not specs:
         return []
     now = time.time()
     need_check: list[CameraSpec] = []
     reachable: list[CameraSpec] = []
     for spec in specs:
+        # A second TCP connection can fail while an existing stream still works.
+        # Its worker already owns retries and publishes frame health.
+        if manager is not None and manager.has_running_worker(spec):
+            reachable.append(spec)
+            continue
         entry = _reachable_cache.get(spec.camera_id)
         if entry is not None:
             checked_at, was_reachable, cached_endpoint = entry
@@ -587,11 +587,9 @@ def main() -> None:
                 if first_pass:
                     log.info("VivoGuard streamer: %d cameras configured", total)
 
-                # TCP pre-filter — drops unreachable cameras before
-                # we burn FFmpeg subprocesses on them. Cached for
-                # RETRY_UNREACHABLE_SECONDS so the next pass is
-                # essentially free.
-                reachable = _filter_reachable(specs)
+                # TCP preflight is for worker starts. Existing workers
+                # keep their frame-health and retry loops.
+                reachable = _filter_reachable(specs, manager=mgr)
                 offline = total - len(reachable)
                 if first_pass:
                     log.info("Health check: %d reachable, %d offline (skipped)",
@@ -602,9 +600,7 @@ def main() -> None:
                     log.info("All reachable cameras streaming")
                     first_pass = False
                 else:
-                    # Subsequent passes: reconcile is idempotent and
-                    # cheap — just stream whatever's reachable now.
-                    log.info("streamer: %d/%d cameras reachable (probe cost %.2fs)",
+                    log.info("streamer: %d/%d cameras eligible to stream (spec load %.2fs)",
                              len(reachable), total, spec_elapsed)
                     mgr.reconcile(reachable)
             except Exception as e:
