@@ -552,6 +552,49 @@ def _release_pending_task(
     ))
 
 
+def _repair_stalled_pending_reservations(
+    r: redis.Redis,
+    camera_ids: list[int],
+    last_run_by_camera: dict[int, float | None],
+    *,
+    gap_sla_seconds: int,
+    now: float,
+    require_empty_queue: bool = False,
+) -> int:
+    """Requeue overdue cameras after their unclaimed reservation has aged past the SLA."""
+    max_ttl = PENDING_LOCK_TTL - gap_sla_seconds
+    if max_ttl <= LOCK_TTL:
+        return 0
+
+    repaired = 0
+    empty_queues: dict[str, bool] = {}
+    for camera_id in camera_ids:
+        last_run = last_run_by_camera.get(camera_id)
+        if last_run is not None and now - last_run <= gap_sla_seconds:
+            continue
+        lock = LOCK_KEY_FMT.format(camera_id=camera_id)
+        heartbeat = HB_KEY_FMT.format(camera_id=camera_id)
+        try:
+            task_id = r.get(lock)
+            if task_id is None:
+                continue
+            if isinstance(task_id, bytes):
+                task_id = task_id.decode()
+            if require_empty_queue:
+                queue = _inference_queue(camera_id)
+                if queue not in empty_queues:
+                    empty_queues[queue] = _inference_queue_depth(r, queue) == 0
+                if not empty_queues[queue]:
+                    continue
+            # Lua checks the owner, remaining TTL and heartbeat together.
+            repaired += _release_pending_task(
+                r, lock=lock, heartbeat=heartbeat, task_id=task_id, max_ttl=max_ttl,
+            )
+        except Exception as exc:
+            log.warning("supervise_all: pending reservation repair failed: %s", type(exc).__name__)
+    return repaired
+
+
 def _sweep_stale_locks(r: redis.Redis) -> int:
     """Clear expiring leases only while no worker heartbeat exists.
 
@@ -580,6 +623,14 @@ def _sweep_stale_locks(r: redis.Redis) -> int:
         # SET NX still works when the sweep is temporarily unavailable.
         log.warning("supervise_all: stale-lock sweep failed: %s", type(exc).__name__)
     return cleared
+
+
+def _inference_queue_depth(r: redis.Redis, queue: str) -> int:
+    """Count all Redis priority lists for one inference shard."""
+    return sum(
+        int(r.llen(queue if priority == 0 else f"{queue}{REDIS_PRIORITY_SEP}{priority}"))
+        for priority in range(10)
+    )
 
 
 def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
@@ -616,16 +667,7 @@ def _reservation_health(r: redis.Redis, camera_ids: list[int]) -> dict:
         # Kombu's Redis priority emulation stores priority 0 in the base list
         # and priorities 1..9 in suffixed lists. Counting only the base queue
         # hides ordinary pending tasks as soon as the fast lane is enabled.
-        queue_depths = {
-            queue: sum(
-                int(r.llen(
-                    queue if priority == 0
-                    else f"{queue}{REDIS_PRIORITY_SEP}{priority}"
-                ))
-                for priority in range(10)
-            )
-            for queue in queues
-        }
+        queue_depths = {queue: _inference_queue_depth(r, queue) for queue in queues}
         shard_health = {
             queue: {
                 "cameras": 0,
@@ -740,6 +782,10 @@ def supervise_all() -> None:
         r, [int(cam.id) for cam in schedulable],
     )
     schedule_now = time.time()
+    standard_reservations_repaired = _repair_stalled_pending_reservations(
+        r, standard_ids, last_runs, gap_sla_seconds=STANDARD_GAP_SLA_SECONDS,
+        now=schedule_now, require_empty_queue=True,
+    )
     # Workers may be idle while this loop publishes. Priority only reorders
     # messages already in Redis, so publishing ordinary tasks first can let
     # them start before a later critical message exists. Critical-first
@@ -783,14 +829,15 @@ def supervise_all() -> None:
             skipped.append(cam.id)
     log.info("inference.supervise_all: total=%d, fresh=%d, enqueued=%s, "
              "already_running=%s, critical_cooldown=%s, "
-             "stale_locks_cleared=%d",
+             "stale_locks_cleared=%d, standard_reservations_repaired=%d",
              len(cams), len(schedulable), enqueued, skipped, cooling_down,
-             stale_cleared)
+             stale_cleared, standard_reservations_repaired)
     reservation_health = _reservation_health(
         r, [int(cam.id) for cam in schedulable],
     )
     reservation_health.update(_critical_gap_health(r, critical_ids))
     reservation_health.update(_standard_gap_health(r, standard_ids))
+    reservation_health["standard_reservations_repaired"] = standard_reservations_repaired
     _write_health(r,
                   cameras_total=len(cams),
                   cameras_fresh=len(schedulable),
