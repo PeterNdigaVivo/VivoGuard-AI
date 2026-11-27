@@ -587,3 +587,76 @@ def test_standard_coverage_does_not_clear_gaps_with_invalid_or_stale_frames(samp
 
     assert health["standard_camera_ids_overdue"] == [1]
     assert health["standard_max_gap_seconds"] == 970.0
+
+
+@pytest.mark.parametrize(("shutdown_flag", "exit_code"), [
+    ("should_stop", 0),
+    ("should_terminate", 1),
+])
+def test_worker_shutdown_releases_camera_lease_after_current_poll(
+    monkeypatch, shutdown_flag, exit_code,
+):
+    from contextlib import nullcontext
+
+    from celery.worker import state
+
+    from app.ai import inference_worker
+    from app.ai.env_config import HardwareEnv
+
+    camera_id = 7
+    owner = "inference-task"
+    redis = FakeRedis()
+    lock = inference.LOCK_KEY_FMT.format(camera_id=camera_id)
+    heartbeat = inference.HB_KEY_FMT.format(camera_id=camera_id)
+    redis.values[lock] = owner
+    redis.ttls[lock] = inference.PENDING_LOCK_TTL
+    monkeypatch.setattr(state, "should_stop", None)
+    monkeypatch.setattr(state, "should_terminate", None)
+    monkeypatch.setattr(inference, "_redis", lambda: redis)
+    monkeypatch.setattr(inference_worker.redis, "from_url", lambda _url: redis)
+    monkeypatch.setattr(inference_worker, "_make_tracker", lambda _id: object())
+    monkeypatch.setattr(inference_worker, "SessionLocal", lambda: nullcontext(None))
+    monkeypatch.setattr(
+        inference_worker, "_load_camera_state", lambda *_args: (object(), [], {}, ""),
+    )
+    monkeypatch.setattr(inference_worker.settings, "reid_enabled", False)
+    monkeypatch.setattr(
+        HardwareEnv, "detect", lambda: SimpleNamespace(backend="cpu", export_format="pytorch"),
+    )
+    monkeypatch.setattr(
+        inference_worker, "time", SimpleNamespace(time=lambda: 1.0, sleep=lambda _: None),
+    )
+
+    # A second poll is a regression. Fail promptly on the unpatched loop.
+    def poll_frame(_camera_id, *, prefer_overlay):
+        assert not prefer_overlay
+        if getattr(state, shutdown_flag) is not None:
+            raise AssertionError("read another frame after worker shutdown")
+        assert redis.get(lock) == redis.get(heartbeat) == owner
+        setattr(state, shutdown_flag, exit_code)
+        return None
+
+    poll = MagicMock(side_effect=poll_frame)
+    monkeypatch.setattr(inference_worker, "FrameBuffer", lambda: SimpleNamespace(latest_jpeg=poll))
+
+    task = inference.run_camera_inference
+    task.push_request(id=owner)
+    try:
+        task.run(camera_id, max_seconds=3600)
+    finally:
+        task.pop_request()
+
+    poll.assert_called_once_with(camera_id, prefer_overlay=False)
+    assert lock not in redis.values
+    assert heartbeat not in redis.values
+    assert inference.LAST_RUN_KEY_FMT.format(camera_id=camera_id) not in redis.values
+
+
+def test_compose_delivers_container_stop_signal_to_inference_worker():
+    from pathlib import Path
+
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(
+        encoding="utf-8",
+    )
+    section = compose.split("\n  worker-inference:\n", 1)[1].split("\n  worker-", 1)[0]
+    assert '- "exec celery -A app.tasks.celery_app worker ' in section
