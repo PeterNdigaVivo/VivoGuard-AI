@@ -87,15 +87,18 @@ class HttpSnapshotWorker(threading.Thread):
             # snapshot URL; the JPEG-magic check below stays the gate.
             self._client = httpx.Client(timeout=10.0, verify=False,
                                         follow_redirects=True)
-        r = self._client.get(self.snapshot_url, auth=self._auth)
-        if r.status_code == 401 and self.username and isinstance(self._auth, httpx.DigestAuth):
-            # Some old firmware uses Basic; retry once and remember.
-            self._auth = (self.username, self.password)
-            r = self._client.get(self.snapshot_url, auth=self._auth)
+        auth = self._auth
+        r = self._client.get(self.snapshot_url, auth=auth)
+        if r.status_code == 401 and self.username and isinstance(auth, httpx.DigestAuth):
+            # Some old firmware uses Basic. Keep Digest available until a
+            # Basic-auth request actually returns a usable snapshot.
+            auth = (self.username, self.password)
+            r = self._client.get(self.snapshot_url, auth=auth)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:120]}")
         if not r.content or r.content[:3] != b"\xff\xd8\xff":
             raise RuntimeError("response not a JPEG (got HTML / wrong endpoint?)")
+        self._auth = auth
         return r.content
 
     def run(self) -> None:
