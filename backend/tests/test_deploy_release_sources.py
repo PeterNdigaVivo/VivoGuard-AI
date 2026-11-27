@@ -19,6 +19,8 @@ docker() {
       if [ "$6" = "recorder" ]; then
         [ "$VERIFY_SCENARIO" != "missing" ] || return 0
         printf '%s\n' recorder-1 recorder-2
+      elif [ "$6" = "streamer" ]; then
+        printf '%s\n' streamer-1 streamer-2
       else
         printf '%s\n' "$6-1"
       fi
@@ -28,6 +30,10 @@ docker() {
         printf '%s\n' stale-image
       elif [ "$2" = recorder-2 ] && [ "$VERIFY_SCENARIO" = "unreadable" ]; then
         return 1
+      elif [ "$2" = streamer-2 ] && [ "$7" = "$STALE_STREAMER_SOURCE" ]; then
+        printf '%s\n' stale-streamer
+      elif [[ "$7" == /app/streamer/* ]]; then
+        git show "HEAD:streamer/streamer/${7#/app/streamer/}" | sha256sum
       else
         git show "HEAD:backend/${7#/app/}" | sha256sum
       fi
@@ -43,7 +49,7 @@ bash scripts/verify-release-sources.sh
 @pytest.mark.parametrize(
     ("scenario", "message"),
     [
-        ("match", "Verified API, inference and recorder source checks"),
+        ("match", "Verified API, inference, recorder and streamer source checks"),
         ("missing", "no running container for recorder"),
         ("mismatch", "recorder source mismatch"),
         ("unreadable", "recorder source mismatch"),
@@ -56,7 +62,7 @@ def test_verify_running_release_sources(scenario, message):
     result = subprocess.run(
         [str(BASH), "-c", DOCKER_STUB],
         cwd=ROOT,
-        env={**os.environ, "VERIFY_SCENARIO": scenario},
+        env={**os.environ, "VERIFY_SCENARIO": scenario, "STALE_STREAMER_SOURCE": ""},
         capture_output=True,
         text=True,
         timeout=20,
@@ -65,6 +71,29 @@ def test_verify_running_release_sources(scenario, message):
 
     assert (result.returncode == 0) == (scenario == "match"), result.stderr
     assert message in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("source", [
+    "/app/streamer/main.py",
+    "/app/app/stream/ffmpeg_worker.py",
+    "/app/app/stream/http_snapshot_worker.py",
+])
+def test_verify_running_release_rejects_stale_source_on_second_streamer(source):
+    if BASH is None or not Path(BASH).is_file():
+        pytest.skip("Bash is required by the Compose deployment scripts")
+
+    result = subprocess.run(
+        [str(BASH), "-c", DOCKER_STUB],
+        cwd=ROOT,
+        env={**os.environ, "VERIFY_SCENARIO": "match", "STALE_STREAMER_SOURCE": source},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"streamer source mismatch ({source})" in result.stderr
 
 
 def test_deploy_verifies_running_sources_after_container_replacement():
