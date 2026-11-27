@@ -70,6 +70,8 @@ docker compose run --rm --no-deps api alembic upgrade head
 # container replacement to avoid a stale upstream address and public 502s.
 echo "→ starting application services"
 docker compose up -d
+# An old supervisor heartbeat can survive recreation in Redis.
+INFERENCE_RECOVERY_AFTER=$(date +%s)
 docker compose restart nginx
 
 bash scripts/verify-release-sources.sh "$release_revision"
@@ -123,7 +125,7 @@ while true; do
       2>/dev/null || true
   )
   if [ -n "$INFERENCE_HEALTH_JSON" ] && printf '%s' "$INFERENCE_HEALTH_JSON" \
-      | docker compose exec -T api python -m app.utils.inference_recovery; then
+      | docker compose exec -T api python -m app.utils.inference_recovery --after "$INFERENCE_RECOVERY_AFTER"; then
     break
   fi
   if [ "$SECONDS" -ge "$INFERENCE_RECOVERY_DEADLINE" ]; then

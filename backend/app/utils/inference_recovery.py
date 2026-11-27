@@ -16,13 +16,16 @@ def _heartbeat_age(health: dict, now: float) -> float | None:
     return age if math.isfinite(age) else None
 
 
-def inference_recovered(health: object, *, now: float) -> bool:
+def inference_recovered(health: object, *, now: float, after: int | None = None) -> bool:
     if not isinstance(health, dict):
         return False
     age = _heartbeat_age(health, now)
     if age is None or not 0 <= age <= 120:
         return False
 
+    # The deployment cutoff has whole-second precision. Wait for the next second.
+    if after is not None and int(float(health["last_run_ts"])) <= after:
+        return False
     total = health.get("cameras_total")
     fresh = health.get("cameras_fresh")
     active = health.get("cameras_actively_inferencing")
@@ -134,6 +137,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--summary", action="store_true")
+    mode.add_argument("--after", type=int, metavar="UNIX_SECONDS",
+                      help="require a heartbeat written after service recreation")
     mode.add_argument(
         "--release-sample", nargs=4, type=int,
         metavar=("AFTER", "MIN_FRESH", "MIN_RECORDING", "MAX_QUEUE"),
@@ -155,4 +160,4 @@ if __name__ == "__main__":
             sys.exit(1)
         print("latest inference health: " + json.dumps(recovery_summary(heartbeat, now=now)))
     else:
-        sys.exit(0 if inference_recovered(heartbeat, now=now) else 1)
+        sys.exit(0 if inference_recovered(heartbeat, now=now, after=args.after) else 1)

@@ -50,6 +50,22 @@ def test_recovery_command_exit_code(fresh):
     assert result.returncode == (0 if fresh else 1)
 
 
+@pytest.mark.parametrize(("offset", "expected"), [(-1, 1), (0, 1), (0.5, 1), (1.25, 0)])
+def test_recovery_command_requires_heartbeat_after_service_recreation(offset, expected):
+    cutoff = int(time.time()) - 5
+    heartbeat = {**HEALTH, "last_run_ts": cutoff + offset}
+    command = [
+        sys.executable, "-B", "-m", "app.utils.inference_recovery", "--after", str(cutoff),
+    ]
+    result = subprocess.run(
+        command, input=json.dumps(heartbeat), text=True, capture_output=True,
+        cwd=Path(__file__).resolve().parents[1], timeout=10, check=False,
+    )
+
+    assert result.returncode == expected, result.stderr
+    assert result.stderr == ""
+
+
 def test_recovery_summary_prints_only_known_aggregate_fields():
     heartbeat = {
         **HEALTH, "last_run_ts": "invalid-timestamp", "cameras_fresh": "opaque-value",

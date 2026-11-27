@@ -30,6 +30,16 @@ def test_deploy_gate_waits_for_inference_coverage_recovery():
     assert "inference coverage failed to recover after deploy" in deploy
 
 
+def test_deploy_gate_uses_a_cutoff_after_application_recreation():
+    root = Path(__file__).resolve().parents[2]
+    deploy = (root / "scripts" / "deploy.sh").read_text()
+    start = deploy.index("docker compose up -d\n")
+    cutoff = deploy.index("INFERENCE_RECOVERY_AFTER=$(date +%s)")
+    gate = deploy.index('app.utils.inference_recovery --after "$INFERENCE_RECOVERY_AFTER"')
+
+    assert start < cutoff < gate
+
+
 def test_deploy_inference_timeout_uses_aggregate_diagnostics():
     root = Path(__file__).resolve().parents[2]
     deploy = (root / "scripts" / "deploy.sh").read_text()
