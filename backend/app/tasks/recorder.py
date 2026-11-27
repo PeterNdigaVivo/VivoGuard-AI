@@ -38,7 +38,7 @@ import signal
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from stat import S_ISREG
 from tempfile import TemporaryDirectory
@@ -68,6 +68,7 @@ _HEALTH_KEY = "vg:recording:health"
 _FAILURE_KEY_FMT = "vg:recording:failure:{cam}"
 _FAILURE_TTL_SECONDS = 24 * 3600
 _PROVEN_TTL_SECONDS = 24 * 3600
+_ROLLOVER_PROOF_GRACE_SECONDS = 10 * 60
 _RECORDER_FAILURE_REASONS = {
     "authentication_failed",
     "access_forbidden",
@@ -742,8 +743,9 @@ def _close_stale_camera_recordings(
     return len(rows)
 
 
-def _repair_missing_recordings(db, r, window_id: str,
-                               seconds: int) -> int:
+def _repair_missing_recordings(
+    db, r, window_id: str, seconds: int, *, previous_window_id: str | None = None,
+) -> int:
     """Restart only missing live-camera recorders, with bounded retries."""
     cameras = {int(camera.id): camera for camera in _key_cameras(db)}
     active_ids, _ = _recording_coverage_ids(r, window_id, set(cameras))
@@ -752,9 +754,20 @@ def _repair_missing_recordings(db, r, window_id: str,
         # Do not create futile rows for an offline feed, and do not retry a
         # camera more than once per five minutes when a second RTSP connection
         # is refused. The authoritative streamer remains untouched.
-        recorder_was_proven = (
-            r.get(_PROVEN_KEY_FMT.format(cam=camera_id)) == window_id
-        )
+        proof_key = _PROVEN_KEY_FMT.format(cam=camera_id)
+        proof_window = r.get(proof_key)
+        recorder_was_proven = proof_window == window_id
+        if (
+            not recorder_was_proven and previous_window_id is not None
+            and proof_window == previous_window_id
+        ):
+            # The health tick refreshes this expiry only after observing a
+            # live recorder writing evidence. Ignore old or non-expiring proof.
+            proof_ttl = r.ttl(proof_key)
+            recorder_was_proven = (
+                _PROVEN_TTL_SECONDS - _ROLLOVER_PROOF_GRACE_SECONDS
+                <= proof_ttl <= _PROVEN_TTL_SECONDS
+            )
         if (not r.exists(f"vg:frame:{camera_id}")
                 and not recorder_was_proven):
             continue
@@ -860,8 +873,17 @@ def tick() -> None:
         else:
             remaining = int((wstart.timestamp() + seconds) - now_eat.timestamp())
             if remaining > 30:
+                # During rollover, recently proven RTSP output is still
+                # useful even when the independent streamer has no fresh frame.
+                previous_window_id = None
+                window_age = now_eat.timestamp() - wstart.timestamp()
+                if 0 <= window_age < _ROLLOVER_PROOF_GRACE_SECONDS:
+                    previous = _current_window(wstart - timedelta(seconds=1))
+                    previous_window_id = previous[0] if previous is not None else None
                 with SessionLocal() as db:
-                    _repair_missing_recordings(db, r, window_id, remaining)
+                    _repair_missing_recordings(
+                        db, r, window_id, remaining, previous_window_id=previous_window_id,
+                    )
         with SessionLocal() as db:
             _publish_recording_health(db, r, window_id)
         return

@@ -3,6 +3,7 @@ import io
 import json
 import os
 import signal
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -592,13 +593,25 @@ def test_repair_keeps_tracking_when_source_remains_alive(monkeypatch, caplog, fa
     assert "private diagnostic" not in caplog.text
 
 
-def test_repairs_proven_recorder_without_streamer_frame(monkeypatch) -> None:
+@pytest.mark.parametrize(("proof", "ttl", "prior_window", "expected"), [
+    ("current", 600, None, 1),
+    ("previous", 86_340, "previous", 1),
+    ("previous", 85_799, "previous", 0),
+    ("previous", -1, "previous", 0),
+    ("previous", 86_340, None, 0),
+    ("older", 86_340, "previous", 0),
+])
+def test_repairs_proven_recorder_without_streamer_frame(
+    monkeypatch, proof, ttl, prior_window, expected,
+) -> None:
     cameras = [
         SimpleNamespace(id=camera_id, store_id=1) for camera_id in range(1, 4)
     ]
     redis = _RepairRedis()
     redis.live_frames = set()
-    redis.values["vg:recording:proven:2"] = "current"
+    proof_key = "vg:recording:proven:2"
+    redis.values[proof_key] = proof
+    redis.ttl = Mock(return_value=ttl)
     started = []
 
     class _Db:
@@ -627,8 +640,43 @@ def test_repairs_proven_recorder_without_streamer_frame(monkeypatch) -> None:
     )
     monkeypatch.setattr("app.tasks.recorder.time.sleep", lambda _seconds: None)
 
-    assert _repair_missing_recordings(_Db(), redis, "current", 600) == 1
-    assert started == [(2, "current", 600)]
+    assert _repair_missing_recordings(
+        _Db(), redis, "current", 600, previous_window_id=prior_window,
+    ) == expected
+    assert started == ([(2, "current", 600)] if expected else [])
+    if prior_window is not None and proof == prior_window:
+        redis.ttl.assert_called_once_with(proof_key)
+    else:
+        redis.ttl.assert_not_called()
+    assert _repair_missing_recordings(
+        _Db(), redis, "current", 600, previous_window_id=prior_window,
+    ) == 0
+
+
+@pytest.mark.parametrize(("now", "proof_window"), [
+    (_at(0, 5), "20260820_2000"),
+    (_at(0, 10), None),
+    (_at(14), "20260821_0700"),
+])
+def test_tick_limits_prior_window_proof_to_rollover(monkeypatch, now, proof_window):
+    current, _, _ = _current_window(now)
+    broker = Mock()
+    broker.get.return_value = current
+    db = Mock()
+    repair = Mock()
+    monkeypatch.setattr(recorder.settings, "recording_enabled", True)
+    monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(recorder, "_redis", lambda: broker)
+    monkeypatch.setattr(recorder, "_eat_now", lambda: now)
+    monkeypatch.setattr(recorder, "_any_recording_alive", lambda _broker: True)
+    monkeypatch.setattr(recorder, "_repair_missing_recordings", repair)
+    monkeypatch.setattr(recorder, "_publish_recording_health", Mock())
+
+    recorder.tick.run()
+
+    repair.assert_called_once()
+    assert repair.call_args.args[:3] == (db, broker, current)
+    assert repair.call_args.kwargs == {"previous_window_id": proof_window}
 
 
 def test_dead_recorder_row_ends_at_last_provable_file_write(tmp_path) -> None:
