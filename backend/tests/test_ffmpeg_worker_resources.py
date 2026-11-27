@@ -54,7 +54,7 @@ def test_stop_kills_active_ffmpeg_to_unblock_worker() -> None:
     worker.stop()
 
     proc.kill.assert_called_once_with()
-    assert worker._stop.is_set()
+    assert worker._stop_event.is_set()
 
 
 def test_proc_spawned_after_stop_is_killed_immediately() -> None:
