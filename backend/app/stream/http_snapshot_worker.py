@@ -20,8 +20,10 @@ Tradeoffs vs RTSP:
 """
 from __future__ import annotations
 import logging
+import random
 import threading
 import time
+from math import ceil
 
 import httpx
 
@@ -131,17 +133,20 @@ class HttpSnapshotWorker(threading.Thread):
                 log.warning("camera %s HTTP snapshot failed: %s", self.camera_id, msg)
                 self.buffer.update_health(self.camera_id, fps=0,
                                           error=f"HTTP snapshot: {msg}")
-                wait = self.backoff.fail()
-                # Refresh the health row every 5s during backoff so the
-                # UI tile counts down instead of going silent.
-                deadline = time.time() + wait
-                while not self._stop_event.is_set() and time.time() < deadline:
-                    remaining = max(0, int(deadline - time.time()))
+                wait = min(self.backoff.fail(), self.backoff.maximum)
+                # Channels on the same NVR can time out together. Spread retries
+                # without exceeding the configured backoff ceiling.
+                wait += random.uniform(0, min(2.0, self.backoff.maximum - wait))
+                deadline = time.monotonic() + wait
+                while not self._stop_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
                     self.buffer.update_health(
                         self.camera_id, fps=0,
-                        error=f"Retrying in {remaining}s (last: {msg[:140]})",
+                        error=f"Retrying in {ceil(remaining)}s (last: {msg[:140]})",
                     )
-                    if self._stop_event.wait(min(5, remaining + 0.1)):
+                    if self._stop_event.wait(min(5, remaining)):
                         return
                 continue
             if self._stop_event.wait(sleep_s):
