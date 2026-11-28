@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import Alert, Camera, DetectionEvent, RecordingClip
+from app.models import Alert, Camera, DetectionEvent, RecordingClip, Zone
 from app.models.incident import (
     DeliveryOutbox, EvidenceManifest, Incident, IncidentMember,
     IncidentTransition,
@@ -59,6 +59,17 @@ def _severity(event: DetectionEvent) -> str:
     return "info"
 
 
+def entrance_camera_ids(db: Session, store_id: int) -> set[int]:
+    """Return cameras configured with an entry/exit zone in this store."""
+    zones = (
+        db.query(Zone.camera_id, Zone.detection_types_json)
+        .join(Camera, Camera.id == Zone.camera_id)
+        .filter(Camera.store_id == store_id)
+        .all()
+    )
+    return {camera_id for camera_id, tags in zones if "entry_exit" in (tags or [])}
+
+
 def clip_eligibility(
     db: Session, event: DetectionEvent, *, store_id: int | None = None,
 ) -> tuple[bool, str | None]:
@@ -82,13 +93,17 @@ def clip_eligibility(
         or_(RecordingClip.ended_at.is_(None),
             RecordingClip.ended_at >= event.timestamp),
     )
-    if event.detection_type == "shop_open_close" and store_id is not None:
-        q = q.filter(or_(RecordingClip.camera_id == event.camera_id,
-                         RecordingClip.store_id == store_id))
-    else:
-        q = q.filter(RecordingClip.camera_id == event.camera_id)
-    if q.first() is not None:
+    if q.filter(RecordingClip.camera_id == event.camera_id).first() is not None:
         return True, None
+    if event.detection_type == "shop_open_close" and store_id is not None:
+        entrances = entrance_camera_ids(db, store_id)
+        if entrances and event.camera_id not in entrances:
+            alternate = q.filter(
+                RecordingClip.camera_id.in_(entrances),
+                or_(RecordingClip.store_id == store_id, RecordingClip.store_id.is_(None)),
+            ).first()
+            if alternate is not None:
+                return True, None
     return False, "no_recording_coverage"
 
 

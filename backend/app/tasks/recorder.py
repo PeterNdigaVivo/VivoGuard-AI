@@ -322,20 +322,16 @@ def _entrance_clip_for(db, ev, ev_ts):
     one of the store's entry_exit-tagged cameras covering the event
     time, or None (caller keeps the event camera's clip). No-op when
     the event camera already IS an entrance camera."""
-    from app.models import Camera, RecordingClip, Zone
+    from app.models import Camera, RecordingClip
+    from app.services.incident_foundations import entrance_camera_ids
+
     store_id = (ev.extra or {}).get("store_id")
     if store_id is None and ev.camera_id:
         cam = db.get(Camera, ev.camera_id)
         store_id = cam.store_id if cam else None
     if store_id is None:
         return None
-    cam_ids = [c for (c,) in db.query(Camera.id)
-                 .filter(Camera.store_id == int(store_id)).all()]
-    if not cam_ids:
-        return None
-    zs = (db.query(Zone.camera_id, Zone.detection_types_json)
-            .filter(Zone.camera_id.in_(cam_ids)).all())
-    entrance = {cid for cid, types in zs if "entry_exit" in (types or [])}
+    entrance = entrance_camera_ids(db, int(store_id))
     if not entrance or ev.camera_id in entrance:
         return None
     # No status filter: window files are deleted at rollover anyway, so

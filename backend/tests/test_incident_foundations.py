@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import (
     Alert, Camera, DeliveryOutbox, DetectionEvent, EvidenceManifest, Incident,
-    IncidentMember, IncidentTransition, RecordingClip, Store,
+    IncidentMember, IncidentTransition, RecordingClip, Store, Zone,
 )
 from app.services.incident_foundations import (
     acknowledge_incident, backfill_evidence_hashes, event_idempotency_key,
@@ -207,6 +207,44 @@ def test_recording_window_sets_honest_clip_eligibility_before_extraction():
     assert manifest.clip_eligible is True
     assert manifest.clip_available is False
     assert manifest.ineligible_reason is None
+
+
+@pytest.mark.parametrize(("zone_tag", "store_offset", "expected"), [
+    ("counter", 0, False),
+    ("entry_exit", 0, True),
+    ("entry_exit", None, True),
+    ("entry_exit", 1, False),
+])
+def test_store_open_eligibility_requires_a_same_store_entrance_for_alternate_camera(
+    zone_tag, store_offset, expected,
+):
+    with _session() as db:
+        store, alert, event = _alert(db)
+        event.detection_type = "shop_open_close"
+        source = Camera(
+            name="Synthetic source", brand="generic", connection_type="lan_rtsp",
+            host="camera.invalid", store_id=store.id,
+        )
+        db.add(source)
+        db.flush()
+        db.add_all([
+            Zone(
+                camera_id=source.id, name="Synthetic zone",
+                polygon_coords_json=[], detection_types_json=[zone_tag],
+            ),
+            RecordingClip(
+                camera_id=source.id, window_id="retained-window",
+                store_id=None if store_offset is None else store.id + store_offset,
+                started_at=event.timestamp, ended_at=event.timestamp, status="deleted",
+            ),
+        ])
+        db.flush()
+
+        record_alert_foundations(db, alert, event, store_id=store.id)
+        manifest = db.query(EvidenceManifest).one()
+        assert manifest.clip_eligible is expected
+        assert manifest.clip_available is False
+        assert manifest.ineligible_reason == (None if expected else "no_recording_coverage")
 
 
 def test_alert_without_recording_is_excluded_from_clip_sla_denominator():
