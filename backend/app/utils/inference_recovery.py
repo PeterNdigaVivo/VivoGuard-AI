@@ -6,6 +6,7 @@ import json
 import math
 import sys
 import time
+from collections.abc import Callable
 
 
 def _heartbeat_age(health: dict, now: float) -> float | None:
@@ -55,12 +56,17 @@ def recovery_summary(health: dict, *, now: float) -> dict:
 def read_release_sample(
     broker, *, queue_names: list[str], after: int, min_fresh: int,
     min_recording: int, max_queue: int, now: float | None = None,
+    on_rejection: Callable[[str], None] | None = None,
 ) -> tuple[float, int, int, int, int, int] | None:
     """Check current broker depth alongside fresh, authoritative coverage."""
     from app.tasks.inference import REDIS_PRIORITY_SEP
 
+    def reject(reason: str) -> None:
+        if on_rejection is not None:
+            on_rejection(reason)
+
     if not queue_names:
-        return None
+        return reject("no inference queues configured")
     # Read all priority lists and both heartbeats in one Redis transaction.
     # The heartbeat's queue count was taken during batch dispatch and can
     # outlive the work it measured. Retain it beside the live count for logs.
@@ -76,18 +82,20 @@ def read_release_sample(
     try:
         recording, inference = (json.loads(raw) for raw in heartbeats)
     except (TypeError, ValueError):
-        return None
-    if not inference_recovered(inference, now=observed_at) or not isinstance(recording, dict):
-        return None
+        return reject("recording or inference heartbeat unavailable or unreadable")
+    if not inference_recovered(inference, now=observed_at):
+        return reject("inference heartbeat invalid or critical coverage overdue")
+    if not isinstance(recording, dict):
+        return reject("recording heartbeat invalid")
     inference_age = _heartbeat_age(inference, observed_at)
     recording_age = _heartbeat_age(recording, observed_at)
     if inference_age is None or not 0 <= inference_age < 90:
-        return None
+        return reject("inference heartbeat expired")
     if recording_age is None or not 0 <= recording_age < 120:
-        return None
+        return reject("recording heartbeat expired or has an invalid timestamp")
     stamp = float(inference["last_run_ts"])
     if min(stamp, float(recording["last_run_ts"])) <= after:
-        return None
+        return reject("inference or recording heartbeat predates the release cutoff")
 
     fresh = inference["cameras_fresh"]
     active = inference["cameras_actively_inferencing"]
@@ -99,19 +107,26 @@ def read_release_sample(
     if len(depths) != 10 * len(queue_names) or any(
         type(count) is not int or count < 0 for count in counts
     ):
-        return None
+        return reject("invalid recording, scheduling or broker counts")
     live_depth = sum(depths)
-    if (
-        fresh < min_fresh or not 0 < active <= fresh
-        or not min_recording <= recording_count <= expected_recording
-        or standard_overdue != 0 or live_depth > max_queue
-    ):
-        return None
+    if fresh < min_fresh:
+        return reject(f"fresh camera coverage {fresh} is below {min_fresh}")
+    if not 0 < active <= fresh:
+        return reject("active inference count is inconsistent with fresh camera coverage")
+    if not min_recording <= recording_count <= expected_recording:
+        return reject(
+            f"recording coverage {recording_count}/{expected_recording} "
+            f"is outside the required range ({min_recording} to {expected_recording})"
+        )
+    if standard_overdue != 0:
+        return reject(f"standard cameras overdue: {standard_overdue}")
+    if live_depth > max_queue:
+        return reject(f"live inference broker depth {live_depth} exceeds {max_queue}")
     return stamp, fresh, recording_count, active, live_depth, dispatch_depth
 
 
 def _read_configured_release_sample(
-    limits: list[int],
+    limits: list[int], *, on_rejection: Callable[[str], None] | None = None,
 ) -> tuple[float, int, int, int, int, int] | None:
     import redis
 
@@ -120,6 +135,8 @@ def _read_configured_release_sample(
 
     after, min_fresh, min_recording, max_queue = limits
     if min(limits) < 0:
+        if on_rejection is not None:
+            on_rejection("release thresholds must be nonnegative")
         return None
     try:
         with redis.Redis.from_url(
@@ -128,8 +145,11 @@ def _read_configured_release_sample(
             return read_release_sample(
                 broker, queue_names=_inference_queue_names(), after=after,
                 min_fresh=min_fresh, min_recording=min_recording, max_queue=max_queue,
+                on_rejection=on_rejection,
             )
     except redis.RedisError:
+        if on_rejection is not None:
+            on_rejection("could not read release data from Redis")
         return None
 
 
@@ -143,9 +163,18 @@ if __name__ == "__main__":
         "--release-sample", nargs=4, type=int,
         metavar=("AFTER", "MIN_FRESH", "MIN_RECORDING", "MAX_QUEUE"),
     )
+    parser.add_argument("--explain", action="store_true",
+                        help="print the rejection reason for --release-sample")
     args = parser.parse_args()
+    if args.explain and args.release_sample is None:
+        parser.error("--explain requires --release-sample")
     if args.release_sample is not None:
-        sample = _read_configured_release_sample(args.release_sample)
+        def report_rejection(reason: str) -> None:
+            print(reason, file=sys.stderr)
+
+        sample = _read_configured_release_sample(
+            args.release_sample, on_rejection=report_rejection if args.explain else None,
+        )
         if sample is None:
             sys.exit(1)
         print(*sample)

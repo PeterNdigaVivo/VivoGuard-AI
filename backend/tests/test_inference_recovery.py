@@ -148,3 +148,52 @@ def test_release_sample_checks_live_priority_queues_and_current_coverage(
         for name in ("inference.0", "inference.1")
         for priority in range(10)
     ]
+
+
+@pytest.mark.parametrize(("overrides", "queue_depth", "expected"), [
+    ({"cameras_fresh": 7}, 0, "fresh camera coverage 7 is below 8"),
+    ({"standard_cameras_overdue": 1}, 0, "standard cameras overdue: 1"),
+    ({}, 6, "live inference broker depth 6 exceeds 5"),
+    ({}, 5, None),
+])
+def test_release_sample_reports_only_the_failed_check(overrides, queue_depth, expected):
+    broker = _BrokerSample(
+        {
+            **HEALTH, "inference_queue_depth": 39, "standard_cameras_overdue": 0,
+            "private_message": "synthetic sensitive text", **overrides,
+        },
+        {"last_run_ts": 981.5, "cameras_recording": 6, "cameras_expected": 7},
+        {"inference.1\x06\x169": queue_depth},
+    )
+    reasons: list[str] = []
+
+    sample = read_release_sample(
+        broker, queue_names=["inference.0", "inference.1"], after=970,
+        min_fresh=8, min_recording=6, max_queue=5, now=NOW,
+        on_rejection=reasons.append,
+    )
+
+    if expected is None:
+        assert sample == (980, 8, 6, 2, 5, 39)
+        assert reasons == []
+    else:
+        assert sample is None
+        assert reasons == [expected]
+
+
+@pytest.mark.parametrize("explain", [False, True])
+def test_release_sample_cli_prints_failure_only_when_requested(explain):
+    command = [
+        sys.executable, "-B", "-m", "app.utils.inference_recovery",
+        "--release-sample", "-1", "92", "51", "5",
+    ]
+    if explain:
+        command.append("--explain")
+    result = subprocess.run(
+        command, text=True, capture_output=True,
+        cwd=Path(__file__).resolve().parents[1], timeout=20, check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == ("release thresholds must be nonnegative\n" if explain else "")
