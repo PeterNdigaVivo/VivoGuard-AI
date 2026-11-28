@@ -3,6 +3,11 @@ from __future__ import annotations
 from urllib.parse import quote
 
 
+def normalize_rtsp_transport(transport: str | None) -> str:
+    """Return an FFmpeg transport flag, defaulting legacy values to TCP."""
+    return transport if transport in ("tcp", "http", "udp") else "tcp"
+
+
 def build_rtsp_url(
     *,
     brand: str,

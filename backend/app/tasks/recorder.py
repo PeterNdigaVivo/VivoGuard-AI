@@ -17,7 +17,7 @@ At each transition the PREVIOUS window is finalised. A separate hourly task
 deletes source windows after the configured retention period. Recording is
 substream, stream-copy (no re-encode), fragmented-mp4 so an in-progress file
 stays seekable for alert-clip extraction:
-    ffmpeg -rtsp_transport tcp -i <sub_url> -t <secs> -c copy \
+    ffmpeg -rtsp_transport <saved_mode> -i <sub_url> -t <secs> -c copy \
            -movflags +frag_keyframe+empty_moov -y out.mp4
 
 Scheduling uses an interval TICK + EAT-clock gate (NOT crontab): the beat
@@ -48,6 +48,7 @@ from sqlalchemy import or_
 
 from app.config import settings
 from app.tasks.celery_app import celery_app
+from app.utils.network import normalize_rtsp_transport
 
 log = logging.getLogger(__name__)
 
@@ -255,9 +256,10 @@ def _start_camera(db, r, cam, window_id: str, seconds: int) -> bool:
         log.warning("recorder: recording output unavailable cam=%s", cam.id)
         _record_failure_reason(r, cam.id, "output_path_unavailable")
         return False
+    transport = normalize_rtsp_transport(getattr(cam, "rtsp_transport", None))
     cmd = [
         "ffmpeg", "-nostdin", "-loglevel", "error",
-        "-rtsp_transport", "tcp", "-i", url,
+        "-rtsp_transport", transport, "-i", url,
         "-t", str(seconds), "-c", "copy",
         "-movflags", "+frag_keyframe+empty_moov",
         "-y", str(out_path),

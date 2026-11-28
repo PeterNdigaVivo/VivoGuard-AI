@@ -48,8 +48,12 @@ def test_tracking_ttl_outlives_longest_recording_window() -> None:
     assert _tracking_ttl(seven_hours) > 6 * 60 * 60
 
 
-def test_started_camera_pid_key_outlives_requested_runtime(
-    monkeypatch, tmp_path,
+@pytest.mark.parametrize(("saved_transport", "expected_flag"), [
+    ("tcp", "tcp"), ("http", "http"), ("udp", "udp"),
+    (None, "tcp"), ("legacy-invalid", "tcp"),
+])
+def test_started_camera_uses_saved_transport_and_tracks_full_runtime(
+    monkeypatch, tmp_path, saved_transport, expected_flag,
 ) -> None:
     writes = []
 
@@ -57,6 +61,9 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         def set(self, key, value, **kwargs):
             writes.append((key, json.loads(value), kwargs))
             return True
+
+        def delete(self, _key):
+            pass
 
     class _Db:
         def add(self, _row):
@@ -66,15 +73,15 @@ def test_started_camera_pid_key_outlives_requested_runtime(
         "app.tasks.recorder._substream_url", lambda _cam: "rtsp://redacted",
     )
     monkeypatch.setattr("app.tasks.recorder._clips_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        "app.tasks.recorder.subprocess.Popen",
-        lambda *_args, **_kwargs: SimpleNamespace(pid=321),
-    )
+    spawn = Mock(return_value=SimpleNamespace(pid=321))
+    monkeypatch.setattr("app.tasks.recorder.subprocess.Popen", spawn)
     monkeypatch.setattr("app.tasks.recorder._start_exit_watcher", lambda *_args: None)
 
     seconds = 7 * 60 * 60
-    camera = SimpleNamespace(id=7, store_id=3)
+    camera = SimpleNamespace(id=7, store_id=3, rtsp_transport=saved_transport)
     assert _start_camera(_Db(), _Redis(), camera, "window", seconds)
+    args = spawn.call_args.args[0]
+    assert args[args.index("-rtsp_transport") + 1] == expected_flag
     assert writes == [(
         "vg:recording:pid:7",
         {"pid": 321, "window_id": "window", "path": str(tmp_path / "window" / "3" / "7.mp4")},

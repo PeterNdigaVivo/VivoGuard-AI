@@ -29,6 +29,7 @@ from collections import deque
 
 from app.stream.frame_buffer import FrameBuffer
 from app.stream.reconnect import Backoff
+from app.utils.network import normalize_rtsp_transport
 from app.utils.stream_secrets import redact_stream_credentials
 
 log = logging.getLogger(__name__)
@@ -53,8 +54,7 @@ def _build_cmd(rtsp_url: str, *, fps: int, width: int = 640,
       'udp'  — lower latency on clean networks; not for the open
                internet.
     """
-    if rtsp_transport not in ("tcp", "http", "udp"):
-        rtsp_transport = "tcp"
+    rtsp_transport = normalize_rtsp_transport(rtsp_transport)
     threads = max(1, int(threads))
     return (
         "ffmpeg -hide_banner -loglevel warning "
