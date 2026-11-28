@@ -266,6 +266,50 @@ def test_clip_extractor_retries_one_distinct_overlapping_source(
     assert attempted == expected_attempts
 
 
+@pytest.mark.parametrize("backfill", [False, True])
+@pytest.mark.parametrize("entrance_succeeds", [False, True])
+def test_open_clip_falls_back_to_event_recording_after_entrance_failure(
+    monkeypatch, tmp_path, backfill, entrance_succeeds,
+):
+    event_ts = datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+    alert = SimpleNamespace(id=1)
+    event = SimpleNamespace(
+        camera_id=1, timestamp=event_ts, detection_type="shop_open_close", extra={},
+    )
+    entrance, own, unused = [
+        SimpleNamespace(
+            id=source_id, file_path=str(tmp_path / f"{source_id}.mp4"),
+            started_at=event_ts - timedelta(minutes=10),
+            ended_at=event_ts + timedelta(minutes=1),
+        )
+        for source_id in (2, 1, 3)
+    ]
+    for source in (entrance, own, unused):
+        Path(source.file_path).write_bytes(b"synthetic source")
+    db = Mock()
+    query = db.query.return_value.filter.return_value.order_by.return_value.limit.return_value
+    query.all.return_value = [own, unused]
+    attempted = []
+
+    def extract(_db, _alert, _event, source, _timestamp):
+        attempted.append(source.id)
+        return source.id == entrance.id and entrance_succeeds
+
+    rows = [] if backfill else [(alert, event, own), (alert, event, unused)]
+    pending = [(alert, event)] if backfill else []
+    monkeypatch.setattr(recorder.settings, "recording_enabled", True)
+    monkeypatch.setattr("app.database.SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(recorder, "_alert_clips_root", lambda: tmp_path)
+    monkeypatch.setattr(recorder, "_pending_alert_clip_rows", lambda *_args: rows)
+    monkeypatch.setattr(recorder, "_pending_open_close_clip_rows", lambda *_args: pending)
+    monkeypatch.setattr(recorder, "_entrance_clip_for", lambda *_args: entrance)
+    monkeypatch.setattr(recorder, "_extract_one", extract)
+
+    recorder.extract_pending_clips.run()
+
+    assert attempted == ([entrance.id] if entrance_succeeds else [entrance.id, own.id])
+
+
 @pytest.mark.parametrize(
     "failure", [None, "ffmpeg", "timeout", "checksum", "audio_only", "zero_frames"],
 )

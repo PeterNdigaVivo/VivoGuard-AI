@@ -1071,21 +1071,24 @@ def extract_pending_clips() -> None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
             if not _recording_covers_event(clip, ev_ts):
                 continue
-            # Store-open clips must show the DOOR: prefer an entrance
-            # camera's recording over the (possibly occupancy) camera
-            # that anchored the event.
+            # Prefer doorway footage for opening and closing events.
+            # A failed entrance extraction still leaves the event camera available.
+            sources = (clip,)
             if (ev.detection_type or "") == "shop_open_close":
-                alt = _entrance_clip_for(db, ev, ev_ts)
-                if (alt is not None and alt.file_path
-                        and Path(alt.file_path).exists()):
-                    clip = alt
-            # Try one distinct overlapping source after an extraction failure.
+                entrance = _entrance_clip_for(db, ev, ev_ts)
+                if (entrance is not None and entrance.file_path
+                        and Path(entrance.file_path).exists()):
+                    sources = (entrance, clip)
             tried = attempted_sources.setdefault(alert.id, set())
-            if clip.id in tried:
-                continue
-            tried.add(clip.id)
-            if _extract_one(db, alert, ev, clip, ev_ts):
-                seen.add(alert.id)
+            for source in sources:
+                if len(tried) >= 2:
+                    break
+                if source.id in tried:
+                    continue
+                tried.add(source.id)
+                if _extract_one(db, alert, ev, source, ev_ts):
+                    seen.add(alert.id)
+                    break
 
         # ── PASS 2: shop_open_close backfill (last 24h) ─────────────────
         # THE FIX (Aug 2026) for beat-created store-open alerts with no
@@ -1110,20 +1113,22 @@ def extract_pending_clips() -> None:
                 continue
             if ev_ts.tzinfo is None:
                 ev_ts = ev_ts.replace(tzinfo=timezone.utc)
-            clip = _entrance_clip_for(db, ev, ev_ts)
-            if clip is None and ev.camera_id:
-                candidates = (db.query(RecordingClip)
-                                .filter(RecordingClip.camera_id == ev.camera_id,
-                                        RecordingClip.started_at <= ev_ts)
-                                .order_by(RecordingClip.started_at.desc())
-                                .limit(20)
-                                .all())
-                clip = next((row for row in candidates
-                             if _recording_covers_event(row, ev_ts)), None)
-            if (clip is None or not clip.file_path
-                    or not _recording_covers_event(clip, ev_ts)):
+            entrance = _entrance_clip_for(db, ev, ev_ts)
+            if (_recording_covers_event(entrance, ev_ts)
+                    and _extract_one(db, alert, ev, entrance, ev_ts)):
                 continue
-            _extract_one(db, alert, ev, clip, ev_ts)
+            if not ev.camera_id:
+                continue
+            candidates = (db.query(RecordingClip)
+                            .filter(RecordingClip.camera_id == ev.camera_id,
+                                    RecordingClip.started_at <= ev_ts)
+                            .order_by(RecordingClip.started_at.desc())
+                            .limit(20)
+                            .all())
+            clip = next((row for row in candidates
+                         if _recording_covers_event(row, ev_ts)), None)
+            if clip is not None:
+                _extract_one(db, alert, ev, clip, ev_ts)
 
 
 @celery_app.task(name="recorder.prune_source_recordings", ignore_result=True)
